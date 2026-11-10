@@ -192,7 +192,9 @@ end
 - `ssh.pending_trust()` accepts the first host key presented to it and is then
   held to it: a rekey is pinned as on every connection, and the object vouches
   for no second server - a second `connect` with it fails `already_used`, and
-  `accept_host(pending, ...)` fails `not_a_store`. Nothing reaches a store.
+  `accept_host(pending, ...)` fails `not_a_store`. Nothing reaches a store. A
+  `connect` refused for its own arguments (a bad port, timeout, tunnel or
+  software string) dials nothing and leaves it unused.
 - `conn:host_key()` and `conn:session_id()` are on **every** connection.
   `blob` is the key's SSH wire encoding, what `accept_host` takes; `type` the
   key type it declares (`ssh-ed25519`, `ssh-rsa`); `algorithm` the signature
@@ -314,6 +316,11 @@ origin-form path (`/ssh`, `/ssh?x=1`): an absolute-form target such as
 `http://other/` is routed by its own authority rather than `Host` (RFC 9112
 section 3.2.2), so it would reach a host the grant never named.
 
+The `tunnel` table is read once, when `connect` is called: its own fields (in
+Lua with `rawget`, so a metatable is not consulted; in JS each property once),
+with `headers` copied as a list of strings. What is checked is what is dialled
+and what the upgrade sends.
+
 `tls = true` verifies the relay's certificate against Hull's trust anchor (the
 embedded Mozilla bundle, or `--ca-bundle PATH` for an internal CA; see
 [`../CLAUDE.md`](../CLAUDE.md) "HTTPS / CA bundle"). A relay that refuses the
@@ -353,7 +360,8 @@ conn:exec("journalctl -fu app", {
 
 A stream with a callback is not also accumulated, so its field comes back
 empty. Without callbacks, `opts.max_output` (default 8 MiB) bounds what is
-held.
+held; it must be a non-negative integer (`bad_argument` otherwise, before
+anything is sent).
 
 `opts.stdin` feeds the command data without a shell redirect, then closes
 its input. Two forms:
@@ -471,6 +479,7 @@ text to match:
 ```lua
 local data, err = sftp:read("/etc/app/config.toml", 1024 * 1024)  -- max; default 16 MiB
 if not data and err.code == "no_such_file" then ... end   -- `max` passed: "too_large"
+-- `max` is a non-negative integer up to 2^53 - 1; anything else is "bad_argument"
 local names, refused = sftp:list("/var/log/app")          -- refused: unsafe names, and why
 ```
 
@@ -705,7 +714,8 @@ app.main(async (ctx) => {
 - Errors: `e.code`, `e.detail`, and the host-key fields `e.fingerprint`,
   `e.storedFingerprint`, `e.keyBlob`; `auth_failed` / `partial_success` carry
   `e.methods`. A runtime refusal (`wait_refused` inside a transaction, `busy`)
-  and an error your own callback throws come through unchanged.
+  and an error your own callback throws (`onBanner` included) come through
+  unchanged.
 - Peer text handed to the app - an `onBanner` banner, an exit-signal message,
   the names inside error details - is decoded text with controls stripped (Lua
   hands back the UTF-8 bytes). An SFTP `size` past 2^53 - 1 reads as `null`.

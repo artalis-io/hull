@@ -141,5 +141,12 @@ await test("a sequence number is required", () => {
     assertRaises(() => chacha.new(KEY, TOY).seal(null, "x", zeros, null), "sequence number");
 });
 
+await test("ssh_audit44.empty_payload_refused", () => {
+    // An authenticated packet with an empty payload is malformed (every SSH
+    // message has a type byte).
+    const frame = chacha.new(KEY, TOY).seal(null, "", zeros, 2);
+    assertRaises(() => chacha.new(KEY, TOY).open(null, frame, 2), "payload");
+});
+
 globalThis.__test_pass = pass;
 globalThis.__test_fail = fail;

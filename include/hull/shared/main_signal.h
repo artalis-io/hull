@@ -12,7 +12,10 @@
  *
  *   1. The handler is async-signal-safe: it records the signal and writes one
  *      byte to a self-pipe. It chains to a previously installed sa_handler
- *      (the TUI's, which restores the terminal) rather than replacing it.
+ *      (the TUI's, which restores the terminal) rather than replacing it. A
+ *      signal the process ignores (an inherited SIG_IGN) is left ignored.
+ *      The self-pipe is made once and kept open for the process lifetime, so
+ *      a handler on another thread never writes to a reused descriptor.
  *   2. The pipe's read end is a watcher on the event loop, so the signal is
  *      DELIVERED on the loop thread, as a new run, whichever thread the kernel
  *      handed it to: the runtime's main_interrupt hook runs the app's handler
@@ -30,6 +33,12 @@
  *      A second signal BEFORE the first was delivered (main in a synchronous
  *      stretch the loop never gets to) resets the default action and
  *      re-raises, so a stuck tool still dies on the second Ctrl-C.
+ *
+ *   6. main-then-serve (serve.c, main AND handlers): a signal that arrived
+ *      while main ran is a stop request, so the runner does not enter the
+ *      serve loop even when main returned 0 - it tears down and exits
+ *      128 + the signal (main's non-zero code still wins). Before audit 44
+ *      the request was lost and the process served until SIGKILL.
  *
  * The main window only: once a full build enters the serve loop, Keel's own
  * handler and drain apply as before.
@@ -51,8 +60,16 @@ int  hl_main_signal_install(HlAsyncBackendCtx *loop, HlRuntime *rt, int grace_ms
 
 /* Restore the previous handlers, drop the watcher and the grace timer. Safe
  * when nothing is installed. Call right after run_main returns, before the
- * loop is used for anything else (serve.c's main-then-serve). */
+ * loop is used for anything else (serve.c's main-then-serve). A handler is
+ * restored only while ours is still the current one: one installed after it
+ * (the TUI's, still acquired) is left in place, and ours, still in its chain,
+ * then only passes signals on to what it replaced (audit 44). */
 void hl_main_signal_remove(void);
+
+/* The signal (SIGINT / SIGTERM) that arrived while the last installation was
+ * active - delivered to the app or not - else 0. Read after remove: serve.c
+ * does not enter the serve loop after main when it is set. */
+int  hl_main_signal_received(void);
 
 /* After the loop stopped: the signal that ENDED main - the grace expired, a
  * second signal arrived, or the app had no handler - else 0. The runner's

@@ -662,6 +662,14 @@ static int lua_app_manifest(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
 
+    /* Only the top level declares the manifest: a call from app.main or a
+     * handler would install decorations and report a manifest the runner
+     * never extracted, resolved or verified (audit 44). */
+    HlLua *lua = get_hl_lua(L);
+    if (lua && lua->base.manifest_closed)
+        return luaL_error(L, "app.manifest() can only be called at the app's "
+                             "top level, before it finishes loading");
+
     /* Reject second call - manifest is immutable once declared */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
     if (!lua_isnil(L, -1))

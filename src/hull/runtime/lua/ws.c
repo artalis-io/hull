@@ -346,3 +346,16 @@ static void hl_lua_ws_on_close_impl(KlWsServerConn *ws_conn, uint16_t code,
     hl_lua_ws_invalidate_conn(lua->L, conn);
     hl_ws_registry_remove(lua->base.ws_registry, conn);
 }
+
+void hl_lua_ws_conns_release(HlLua *lua)
+{
+    HlWsRegistry *reg = lua ? lua->base.ws_registry : NULL;
+    if (!reg || !lua->L) return;
+    for (HlWsEndpoint *ep = reg->endpoints; ep; ep = ep->next)
+        for (HlWsConn *conn = ep->conns; conn; conn = conn->next)
+            if (conn->user_data) {
+                log_warn("[hull:lua] ws conn %llu still held at teardown",
+                         (unsigned long long)conn->id);
+                hl_lua_ws_invalidate_conn(lua->L, conn);
+            }
+}

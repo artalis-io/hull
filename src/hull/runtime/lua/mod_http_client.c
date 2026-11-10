@@ -357,6 +357,19 @@ static int lua_http_get(lua_State *L)
 }
 
 /* Helper for POST/PUT/PATCH: (url, body, opts?) */
+/* The second argument of post / put / patch (sync and async) is the BODY:
+ * a string (a number converts), or nil / absent for none. An opts table
+ * there was dropped without a word - its headers and timeout_ms never
+ * applied - so anything else raises, as JS throws for a body that is not a
+ * string or bytes (audit 44). Opts go third: post(url, nil, opts). */
+static void lua_http_check_body_arg(lua_State *L, const char *fn)
+{
+    int t = lua_type(L, 2);
+    if (t != LUA_TNONE && t != LUA_TNIL && !lua_isstring(L, 2))
+        luaL_error(L, "%s: body must be a string or nil, got a %s (opts go "
+                      "third: %s(url, nil, opts))", fn, luaL_typename(L, 2), fn);
+}
+
 static int lua_http_body_method(lua_State *L, const char *method)
 {
     HlLua *lua = get_hl_lua(L);
@@ -364,6 +377,8 @@ static int lua_http_body_method(lua_State *L, const char *method)
         return luaL_error(L, "http not configured (no hosts in manifest)");
 
     const char *url = luaL_checkstring(L, 1);
+    lua_http_check_body_arg(L, method[1] == 'O' ? "http.post"
+                             : method[1] == 'U' ? "http.put" : "http.patch");
     size_t body_len = 0;
     const char *body = NULL;
     if (lua_isstring(L, 2))
@@ -630,6 +645,9 @@ static int lua_http_async_with_body(lua_State *L, const char *method)
 {
     /* Snapshot the URL + body + caller-opts before we rearrange. */
     const char *url = luaL_checkstring(L, 1);
+    lua_http_check_body_arg(L, method[1] == 'O' ? "http.async.post"
+                             : method[1] == 'U' ? "http.async.put"
+                                                : "http.async.patch");
     int has_body = lua_isstring(L, 2);
     int has_user_opts = lua_istable(L, 3);
 

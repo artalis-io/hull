@@ -149,6 +149,10 @@ class Cipher {
         if (pad < packet.MIN_PADDING || pad + 1 > plain.length) {
             throw new Error("ssh.cipher: padding of " + String(pad) + " is not usable");
         }
+        if (pad + 2 > plain.length) {
+            // Every message carries its type byte (audit 44).
+            throw new Error("ssh.cipher: the packet has no payload");
+        }
         return [plain.slice(1, plain.length - pad), total];
     }
 }

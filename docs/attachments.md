@@ -95,7 +95,7 @@ previously-set values. Pass the full config in a single call.
 | `attachment.store(part, opts)` | `attachment.store(part, opts)` | Stream a multipart `Part` into storage. Returns attachment id. |
 | `attachment.metadata(id)` | `attachment.metadata(id)` | Returns the metadata row, or `nil`/`null` if missing. |
 | `attachment.read(id)` | `attachment.read(id)` | Materialise full bytes in memory. Returns `nil`/`null` if missing. |
-| `attachment.read_to_file(id, dst)` | `attachment.readToFile(id, dst)` | Stream to a file path under `fs.write`. |
+| `attachment.read_to_file(id, dst)` | `attachment.readToFile(id, dst)` | Stream to a file path under `fs.write`. The bytes must hash to the blob id, as `read` checks; a blob changed on disk returns nil / null and writes nothing (audit 44). |
 | `attachment.delete(id)` | `attachment.delete(id)` | Decrement refcount; queue the blob for unlink if last reference. |
 | `attachment.sweep(opts)` | `attachment.sweep(opts)` | Unlink queued blobs older than `grace` (default `orphan_grace`) that no row references. Returns the count. |
 

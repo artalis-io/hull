@@ -10,31 +10,188 @@ release-artifact layout).
 
 ### Fixed
 
+- **WAMR app-heap allocator bounds: rated and tested** (audit 44). The round-42 question - whether
+  WAMR's `ems` allocator checked a whole heap node or only its start - is closed: only the start,
+  so a guest module could corrupt its own app-heap metadata and make the host allocator read or
+  write a node's fields past the end of linear memory (no guard region). Rated A3 / Medium, A2 for
+  a planted `.wasm` in development; fixed by WAMR patch 0009 (#1022), which landed without a test.
+  New regression test `wamr_audit44.ems_node_past_heap_end_is_corruption`
+  (`tests/hull/cap/test_wamr_ems.c`) faults with 0009 reverted and reports heap corruption with it.
+  The Postgres raw-text session-SQL residual (a comment between keywords) is recorded as an
+  accepted residual in `docs/design/audit_convergence.md` §11a. Test-only:
+  `js_audit11.rsa_verify_is_charged_by_the_key` runs 100 oversized-signature verifies, not 1000,
+  under its 1M budget (1000 used ~67% of it and tripped on a slow macOS runner).
+
 <!-- audit44:ws-close -->
+
+- **A WebSocket the app closes itself runs its `on_close` again** (audit 44 M5, a
+  regression from #1007): `conn:close()` / `conn.close()` set the node's `closed`
+  flag, and the registry lookup skipped closed nodes, so when Keel delivered the
+  close the runtime found no node - the app's `on_close` never ran, and the node,
+  its conn object and the endpoint's count leaked (`ws.connections()` over-reported
+  for good, `ws.broadcast` was over-charged). The lookup now skips only nodes whose
+  `on_close` ran (their Keel pointer is cleared), so a reused address still never
+  resolves to a stale node. Also: Lua's teardown invalidates every conn still
+  registered before the registry is freed, so a `__gc` that `lua_close` runs reads
+  the conn as closed instead of a freed node (as JS already did); and the JS
+  `ws.connect` client finalizer cancels its connect / close deadline whenever the
+  loop is reachable, shutting down or not (the Lua twin since audit 38). Tests:
+  `ws_audit44.*` (`tests/e2e_ws_close.sh`, `make e2e-ws-close`; test_ws, test_lua),
+  `js_ws_client_audit44.finalizer_disarms_while_shutting_down`.
 
 
 
 <!-- audit44:main-signal -->
 
+- **app.main's interrupt handling (audit 44, `src/hull/shared/main_signal.c`).** An app with
+  `app.main` AND handlers whose main handled SIGTERM / SIGINT and returned 0 fell through into
+  the serve loop, so the stop request was lost and the process served until SIGKILL: a signal
+  that arrived while main ran now ends the process before the server starts (exit 128 + the
+  signal; main's non-zero code still wins). An inherited SIG_IGN is left ignored; removing the
+  handler no longer clobbers one installed after it (the TUI's) and a handler left in that
+  chain passes signals on; the self-pipe's write end stays open for the process lifetime, so a
+  handler on another thread never writes to a reused descriptor; the signal counter is an
+  atomic. JS: main's own code after `await ctx.signal.promise` may read `ctx.stdin` again.
+  Tests: `main_signal_audit44.*`, `cli_interrupt_audit44.main_then_serve_sigterm`,
+  `{js,lua}_main_signal_audit44.stdin_after_signal_await`.
+
 
 
 <!-- audit44:state-db -->
+
+- **The `@state/` default database (v0.19.0, gap 3) is now seamless for the app's top level,
+  `hull migrate` and the agent** (audit 44). When `databases.named.default` replaces the
+  implicit default: the old connection is closed in place, so a `db.default()` object captured
+  at the top level is the new default (the registry compacted its slots, and that object then
+  drove another connection, typically the internal database); an internal connection a
+  top-level `session.init()` / `rbac.init()` opened is reopened on the new internal database,
+  with the `_hull_*` tables it made carried over; `worker.dispatch`'s `db` follows the new
+  default on the server path (it kept the removed `<app>/data.db`). `hull migrate` moves the
+  stdlib's tables into `<state>/.hull/internal.db`, the file the runner reads - it used
+  `<state>/data.db.hull-internal`, and a later `--no-migrate` start passed its check with an
+  empty internal database (no TOTP rows: a 2FA user signed in with a password). A network /
+  `"$VAR"` manifest default clears the internal database worked out from the implicit one, so
+  `_hull_*` no longer stay in a per-instance local file and the `databases.internal` WARN is
+  given. Tables a top-level `init()` made on the implicit default itself (`jobs`, outbox,
+  inbox, the kv SQL store, search, and the `_hull_*` tables under `--keep-internal-in-app-db`)
+  are carried into the new default when the implicit one was created by this run - a top-level
+  `jobs.init()` app failed with "no such table" against its `@state/` default; a table that
+  cannot be carried (a view, a virtual table, a default that is not SQLite) is named in a WARN. `hull agent db` / `sql` no longer create the state database and directory (the MCP
+  reload no longer opens the state database at all), and `blob.init` on an `@state/` root
+  checks for symbolic links from the state directory, not the app directory's length.
 
 
 
 <!-- audit44:ssh -->
 
+- **`hull/ssh` audit 44: the Lua and JS clients brought back into line, and their edges
+  closed.** Lua `Sftp:send` now marks the session broken when a multi-chunk request is cut
+  short between chunks (a refusal, a closed channel), as JS did, so the next request cannot
+  continue a cut-off frame. Lua reads every `tunnel` option once (`rawget`, headers copied as
+  strings), so a table answering differently on a later read cannot hand the dial and the
+  upgrade's `Host` / path something other than what was checked. A runtime refusal raised by
+  the relay stream's write (`wait_refused`, `busy`) reaches the caller unchanged instead of
+  as `io_error`, and a refusal during the upgrade closes the relay stream at once. Both
+  runtimes now refuse an RSA host key whose `e` or `n` is not minimally encoded (one key,
+  one blob, as trust and `@revoked` compare them), a packet with an empty payload in all
+  three framings, a second CHANNEL_OPEN_CONFIRMATION, and an exec `max_output` / SFTP read
+  `max` that is not a non-negative integer (`bad_argument`); an `on_banner` / `onBanner`
+  error is re-raised as is (and Lua closes the transport, as JS); a `connect` refused for its
+  own arguments no longer spends a `pending_trust()`. JS `read` on the byte stream charges
+  the most it can take before reading, so a trip no longer discards bytes already taken.
+  Tests `ssh_audit44.*`, `ssh_sftp_audit44.*`, `ssh_tunnel_audit44.*`,
+  `js_ssh_audit44.read_trip_consumes_nothing`.
+
 
 
 <!-- audit44:stdlib-data -->
+
+- **stdlib data layer (audit 44).** A typed `jobs.subscribe` (`types = {...}`)
+  now moves its cursor past the events it does not take when a drain's batch
+  is not full (bounded by the commit-order horizon); its cursor stayed at the
+  last matching event, so `jobs.cleanup` kept the whole event log and
+  `jobs.metrics` lag grew without bound (M10). The idempotency in-flight lease
+  is 660 s (the 10 min `http.fetch` ceiling plus a minute, as the outbox's
+  claim lease) whatever the key's TTL; at 300 s a retry while the handler was
+  still parked on a fetch ran it again (M11). `jobs.cleanup` never deletes the
+  newest event or job row (MySQL before 8.0 resets AUTO_INCREMENT to
+  `MAX(id)+1` on restart, so an emptied table reused ids below subscription
+  cursors). `attachment.read_to_file` / `readToFile` checks the blob's
+  SHA-256 against its id, as `read` does. `idempotency.respond` encodes once
+  inside the store's guard and sends that string; an encode error marks the
+  key unstored. `kv.open` at its 16-connection cap is a coded `busy` refusal.
+  `retry.backoff` / `retry.run` require a finite `factor >= 1`. Search parity:
+  `snippet` / `highlight` default to column 1 in JS too and may be combined in
+  Lua; `search.index` takes at least one column of strings / numbers in both
+  (JS no longer `String()`s values); JS `maxQueryLen` counts UTF-8 bytes. Lua
+  `jobs.events` / `subscribe` copy their type lists checked (no comma, at most
+  32 bytes, the list at most 255 bytes joined), and `jobs.dead` / `stats` /
+  `metrics` check their `queue` scope, in both runtimes. Lua inbox treats `""`
+  as the default source and stores an empty outbox idempotency key as NULL, as
+  JS does; Lua `outbox.cleanup` takes `also_failed`, and both check `max_age`.
+  Timestamp and size columns of the jobs, attachment, session, totp, inbox,
+  outbox, idempotency, auth-flows and audit-log tables are now `BIGINT` (32-bit `INTEGER` on
+  PostgreSQL / MySQL ended in 2038). **Existing PostgreSQL / MySQL deployments:
+  migrate by hand** - `CREATE TABLE IF NOT EXISTS` leaves existing tables as
+  they are. On PostgreSQL, `ALTER TABLE <t> ALTER COLUMN <c> TYPE BIGINT` for
+  each column below; on MySQL, `ALTER TABLE <t> MODIFY <c> BIGINT` keeping the
+  column's `NOT NULL` / `DEFAULT` (e.g. `ALTER TABLE _hull_jobs MODIFY run_at
+  BIGINT NOT NULL DEFAULT 0, MODIFY claimed_at BIGINT, MODIFY created_at BIGINT
+  NOT NULL, ...`):
+  `_hull_jobs` (run_at, claimed_at, created_at, updated_at, claim_started_at),
+  `_hull_cron` (next_run_at, last_run_at, updated_at), `_hull_ratelimit`
+  (window_start), `_hull_workflow_steps` (created_at), `_hull_workflow_signals`
+  (created_at, consumed_at), `_hull_job_events` (ts), `_hull_job_subscriptions`
+  (lease_until, updated_at), `_hull_attachments` (size, uploaded_at),
+  `_hull_attachment_orphans` (queued_at), `_hull_sessions` (created_at,
+  last_accessed, expires_at), `_hull_totp` (created_at, updated_at),
+  `_hull_totp_recovery` (used_at), `_hull_totp_pending` (created_at),
+  `_hull_totp_attempts` / `_hull_totp_attempts_by_ip` (last_failed_at,
+  locked_until), `_hull_totp_attempts_by_ip_user` (last_failed_at),
+  `_hull_inbox_processed` (processed_at, expires_at), `_hull_outbox`
+  (next_attempt_at, created_at, delivered_at), `_hull_idempotency_keys`
+  (created_at, expires_at), `_hull_auth_used_tokens` (used_at, expires_at),
+  `_hull_auth_pending_email_changes` (created_at, expires_at, confirmed_at),
+  `_hull_auth_login_attempts` (last_failed_at, locked_until), `_hull_audit_log`
+  (event_at). Tests: `jobs_audit44.*`, `idempotency_audit44.*`,
+  `attachment_audit44.*`, `kv_audit44.*`, `retry_audit44.*`, `search_audit44.*`, `authflows_audit44.*`,
+  `inbox_audit44.*`, `outbox_audit44.*` (test_lua and test_js).
 
 
 
 <!-- audit44:gpu-compute -->
 
+- **GPU / compute / TUI (audit 44).** A synchronous `gpu.*` call no longer
+  blocks the event loop behind `gpu.async` jobs holding the device: it waits
+  in short slices that ask the run and is refused `gpu_busy` once the run's
+  deadline or budget stops it (M7). `gpu.async.dispatch` refuses a shader name
+  of `HL_GPU_NAME_MAX` bytes or more instead of cutting it to a prefix that
+  could name another compiled shader (Lua and JS). A per-invocation WASM span
+  set whose teardown fails is kept on the cache and retried at runtime
+  teardown, so its mmap borrows are released (it was lost in a dead stack
+  variable). The TUI input parser drops a partial UTF-8 sequence at ESC and
+  re-reads a lead byte that arrives mid-sequence instead of dropping it.
+
 
 
 <!-- audit44:auth -->
+
+- **Auth stdlib Lows from audit 44, both runtimes.** `oauth.init` refuses a `state_ttl` /
+  `jwks_ttl` (`stateTtl` / `jwksTtl`) that is not a positive number of seconds (a string one
+  made every JS callback "expired", a negative one expired every state); a failed JWKS fetch is
+  throttled for `JWKS_MIN_REFRESH` like an unknown kid (each callback fetched again, twice in
+  JS); a Lua token reply that is not JSON answers 502 instead of raising. The
+  `session.login_handler` audit-metadata scrub compares keys lower-cased with `_` / `-` dropped
+  (`idToken`, `accessToken`) and reaches nested tables up to 8 levels (`{ oauth = ctx }` stored
+  the IdP tokens); Lua `session.load` destroys a row whose data cannot be decoded instead of
+  raising. auth-flows matches the request Host to `trusted_hosts` without case (a mixed-case
+  Host passed the cross-site check but its mails were dropped) and prunes its expired rows
+  daily from `init` (`cleanup` / `cleanup_at`, exported as `cleanup()`), so the lockout rows of
+  unknown addresses no longer accumulate. `rbac.require_role` / `require_permission` answer
+  401 for a session user id they cannot key (it was a 500) and refuse a missing or malformed
+  role / permission argument when the middleware is made. Lua `auth.session_middleware` /
+  `jwt_middleware` take only the literal `optional = true`. Tests:
+  `stdlib/{lua,js}/hull/tests/test_auth_audit44.*`.
 
 
 
@@ -63,6 +220,20 @@ release-artifact layout).
 
 
 <!-- audit44:tooling -->
+
+- **Audit 44, tooling and runtime edges (all Low).** `--verbose` CLI logging (and the
+  `-DDEBUG` line callback) printed a log record's source field - a script's module name,
+  so a cloned tree's file name - raw; it is escaped like the message. `hull agent` results
+  and every `hull mcp` message are written with DEL, C1 controls and stray 0x80-0x9F bytes
+  escaped (`include/hull/shared/json_term_safe.h`, now shared with agent eval / inspect):
+  a `data.db` value or column name reached the terminal raw. `app.manifest()` is refused
+  once the app's top level has run (both runtimes): a later call from `app.main` or a
+  handler installed decorations and reported a manifest the runner never extracted,
+  resolved or verified. Lua `http.post` / `put` / `patch` and their `http.async` twins
+  raise on a second argument that is not a string or nil (an opts table there was dropped
+  silently; opts go third, as in JS). A read-only stdlib module view's `pairs` hands out
+  table keys as views too. JS `compute.buffer`'s error message no longer lists WasmBuffer /
+  MappedBuffer, which it does not take.
 
 
 

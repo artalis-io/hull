@@ -1324,21 +1324,40 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.thread_pool)
-        return JS_ThrowInternalError(ctx, "gpu.async not available (no thread pool)");
-    if (!js->base.async_ctx)
-        return JS_ThrowInternalError(ctx, "gpu.async requires an active event loop");
-    if (hl_js_async_gate(ctx, js, "gpu.async.dispatch") != 0)
-        return JS_EXCEPTION;
-    if (hl_js_db_refuse_wait(ctx, "gpu.async")) return JS_EXCEPTION;
-    if (!js->base.gpu_ctx)
-        return JS_ThrowInternalError(ctx, "gpu.async.dispatch: GPU not initialized");
-
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "gpu.async.dispatch requires name and opts");
 
-    const char *name = JS_ToCString(ctx, argv[0]);
+    /* The name is copied into a fixed HL_GPU_NAME_MAX slot: a longer one was
+     * cut to a prefix that could name ANOTHER compiled shader, and that one
+     * ran (audit 44). Converted first - a toString is app code, so it runs
+     * before the wait checks below - and refused as hl_cap_gpu_compile
+     * refuses it. */
+    size_t name_len = 0;
+    const char *name = JS_ToCStringLen(ctx, &name_len, argv[0]);
     if (!name) return JS_EXCEPTION;
+    if (name_len >= HL_GPU_NAME_MAX) {
+        JS_FreeCString(ctx, name);
+        return JS_ThrowRangeError(ctx, "gpu.async.dispatch: shader name too "
+                                  "long (max %d bytes)", HL_GPU_NAME_MAX - 1);
+    }
+    const char *pre_err = NULL;
+    if (!js || !js->base.thread_pool)
+        pre_err = "gpu.async not available (no thread pool)";
+    else if (!js->base.async_ctx)
+        pre_err = "gpu.async requires an active event loop";
+    if (pre_err) {
+        JS_FreeCString(ctx, name);
+        return JS_ThrowInternalError(ctx, "%s", pre_err);
+    }
+    if (hl_js_async_gate(ctx, js, "gpu.async.dispatch") != 0 ||
+        hl_js_db_refuse_wait(ctx, "gpu.async")) {
+        JS_FreeCString(ctx, name);
+        return JS_EXCEPTION;
+    }
+    if (!js->base.gpu_ctx) {
+        JS_FreeCString(ctx, name);
+        return JS_ThrowInternalError(ctx, "gpu.async.dispatch: GPU not initialized");
+    }
 
     /* Parse opts */
     HlGpuDispatchOpts opts;

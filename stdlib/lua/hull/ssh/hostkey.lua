@@ -154,8 +154,8 @@ function M.parse_key(blob)
                   .. a.curve .. " point")
         end
     elseif t == "ssh-rsa" then
-        out.e = r:mpint()
-        out.n = r:mpint()
+        out.e = r:mpint_canonical()   -- one encoding per key (audit 44)
+        out.n = r:mpint_canonical()
         if out.n == "" then error("ssh.hostkey: RSA modulus is zero") end
         out.bits = rsa_bits(out.n)
         if out.bits < M.RSA_MIN_BITS then

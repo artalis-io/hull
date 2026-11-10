@@ -297,6 +297,12 @@ class Sftp {
     // Read a whole file -> [bytes] | [null, reason]. `max` (default 16 MiB).
     async read(path, max) {
         if (max === undefined || max === null) max = 16 * 1024 * 1024;
+        // A non-negative safe integer: a NaN or infinite limit bounded
+        // nothing (audit 44, as the Lua twin).
+        if (!Number.isSafeInteger(max) || max < 0) {
+            return [null, { code: "bad_argument",
+                            detail: "max must be a non-negative integer" }];
+        }
         const [f, err] = await this.open(path, "r");
         if (!f) return [null, err];
         const parts = [];

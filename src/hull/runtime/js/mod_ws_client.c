@@ -93,10 +93,20 @@ static void js_ws_client_conn_finalizer(JSRuntime *rt, JSValue val)
     /* A deadline still armed holds ud raw: cancelled here, or it fired into
      * freed memory (audit 30 - a close timer conn.close() armed from onClose,
      * after the connection was over). At teardown the loop goes first and
-     * teardown_stop already disarmed it; the Lua finalizer does the same. */
-    if (ud->js && !ud->js->base.shutting_down)
+     * teardown_stop disarms it for a client still on the teardown list, but
+     * not for one already off it: cancelled whenever the loop is still
+     * reachable, shutting down or not (audit 44; the Lua finalizer since
+     * audit 38). The entry points clear async_ctx before the loop goes, and
+     * the backend wraps are no-ops once it is orphaned. */
+    if (ud->js && ud->js->base.async_ctx) {
         js_ws_client_disarm_connect(ud, ud->js->base.async_ctx);
+        if (ud->release_timer) {
+            const HlAsyncBackend *be = hl_async_backend();
+            if (be) be->timer_cancel(ud->js->base.async_ctx, ud->release_timer);
+        }
+    }
     ud->connect_timer = 0;
+    ud->release_timer = 0;
     js_ws_client_free_conn(ud);
 
     /* Mirror the gc_mark guards: callbacks may have been cleared to

@@ -110,8 +110,8 @@ function init(opts) {
         "CREATE TABLE IF NOT EXISTS _hull_inbox_processed (" +
         "  message_id   VARCHAR(255) NOT NULL," +
         "  source       VARCHAR(255) NOT NULL," +
-        "  processed_at INTEGER NOT NULL," +
-        "  expires_at   INTEGER NOT NULL," +
+        "  processed_at BIGINT NOT NULL," +
+        "  expires_at   BIGINT NOT NULL," +
         "  PRIMARY KEY (source, message_id)" +
         ")"
     );

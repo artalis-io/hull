@@ -600,6 +600,72 @@ void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
     wasm_runtime_deinstantiate(inst);
 }
 
+/* ── Retained span sets (audit 44) ─────────────────────────────────── */
+
+/* A span set whose teardown returned -1 still holds heaps WAMR may reference
+ * and the mmap borrows under them (cap/wasm_spans.h). call_buf_impl and
+ * instance_call_buf_run kept it in a stack variable that died at return, so
+ * neither could ever be released. It now moves here, and runtime teardown
+ * retries it. */
+struct HlWasmRetainedSpans {
+    struct HlWasmRetainedSpans *next;
+    HlWasmSpanSet set;
+};
+
+static void span_set_finish(HlWasmCache *cache, HlWasmSpanSet *set)
+{
+    if (hl_wasm_span_set_teardown(set) == 0)
+        return;
+    struct HlWasmRetainedSpans *r = malloc(sizeof(*r));
+    if (!r) {
+        log_error("[wasm] out of memory keeping a span set whose teardown "
+                  "failed: its mappings stay pinned");
+        return;
+    }
+    r->set = *set;
+    memset(set, 0, sizeof(*set));
+    pthread_mutex_lock(&cache->pool_mutex);
+    r->next = cache->retained_spans;
+    cache->retained_spans = r;
+    pthread_mutex_unlock(&cache->pool_mutex);
+    log_warn("[wasm] span set kept for a teardown retry at shutdown");
+}
+
+/* Called by hl_cap_wasm_destroy with every instance gone: retry each retained
+ * set; one that still fails is returned for release after WAMR is gone. */
+static struct HlWasmRetainedSpans *retained_spans_retry(HlWasmCache *cache)
+{
+    struct HlWasmRetainedSpans *left = NULL;
+    struct HlWasmRetainedSpans *r = cache->retained_spans;
+    cache->retained_spans = NULL;
+    while (r) {
+        struct HlWasmRetainedSpans *next = r->next;
+        if (hl_wasm_span_set_teardown(&r->set) == 0) {
+            free(r);
+        } else {
+            r->next = left;
+            left = r;
+        }
+        r = next;
+    }
+    return left;
+}
+
+/* After wasm_runtime_destroy nothing references a span heap any more: the
+ * borrows can go (the mapping is unmapped once its owner closed it). */
+static void retained_spans_release(struct HlWasmRetainedSpans *r)
+{
+    while (r) {
+        struct HlWasmRetainedSpans *next = r->next;
+        for (int i = 0; i < r->set.count; i++) {
+            if (r->set.spans[i].buf)
+                hl_cap_fs_mmap_release(r->set.spans[i].buf);
+        }
+        free(r);
+        r = next;
+    }
+}
+
 /* ── Init / Destroy ────────────────────────────────────────────────── */
 
 int hl_cap_wasm_init(HlWasmCache *cache)
@@ -718,10 +784,12 @@ void hl_cap_wasm_destroy(HlWasmCache *cache)
     }
     cache->count = 0;
     cache->initialized = 0;
+    struct HlWasmRetainedSpans *left = retained_spans_retry(cache);
     pthread_mutex_unlock(&cache->pool_mutex);
 
     pthread_mutex_destroy(&cache->pool_mutex);
     wasm_runtime_destroy();
+    retained_spans_release(left);
     /* Destroy the seal arena AFTER wasm_runtime_destroy so WAMR
      * can no longer dereference its node->native_symbols pointer
      * (g_native_symbols_list cleanup happens inside
@@ -1479,7 +1547,7 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
         if (!failed && hl_wasm_span_set_attach(&span_set, inst, &span_err) != 0)
             failed = 1;
         if (failed) {
-            hl_wasm_span_set_teardown(&span_set);
+            span_set_finish(cache, &span_set);
             if (err_msg) *err_msg = span_err ? span_err : "span_attach_failed";
             hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
                                  heap_size, stack_size, 0, chain);
@@ -1507,7 +1575,7 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
             !range_in_linear_memory(inst, wasm_in_ptr, (uint64_t)input_len)) {
             log_error("[wasm] failed to allocate input buffer (%zu bytes)", input_len);
             if (err_msg) *err_msg = err_internal;
-            if (spans_active) hl_wasm_span_set_teardown(&span_set);
+            if (spans_active) span_set_finish(cache, &span_set);
             hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
                          heap_size, stack_size, 0, chain);
             return HL_WASM_ERR_INTERNAL;
@@ -1525,7 +1593,7 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
             log_error("[wasm] failed to allocate output buffer (%" PRIu64 " bytes)", max_output);
             if (err_msg) *err_msg = err_internal;
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
-            if (spans_active) hl_wasm_span_set_teardown(&span_set);
+            if (spans_active) span_set_finish(cache, &span_set);
             hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
                          heap_size, stack_size, 0, chain);
             return HL_WASM_ERR_INTERNAL;
@@ -1655,7 +1723,7 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
      * on the zero-copy path) or releasing the instance -- teardown precedes any
      * ownership transfer or pool release. Covers the zero-copy, copied, and
      * zero-length output paths that all follow. */
-    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
+    if (spans_active) span_set_finish(cache, &span_set); /* terminal: no re-read */
 
     /* Create output buffer */
     if (result > 0) {
@@ -1700,7 +1768,7 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
 
 cleanup_bufs_err:
     host_ctx_restore(&saved_ctx);   /* restores (clears) tl_host_ctx.spans before teardown */
-    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
+    if (spans_active) span_set_finish(cache, &span_set); /* terminal: no re-read */
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
     hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
@@ -2107,7 +2175,7 @@ static int instance_call_buf_run(HlWasmInstance *pi,
         if (!failed && hl_wasm_span_set_attach(&span_set, inst, &span_err) != 0)
             failed = 1;
         if (failed) {
-            hl_wasm_span_set_teardown(&span_set);
+            span_set_finish(pi->cache, &span_set);
             if (err_msg) *err_msg = span_err ? span_err : "span_attach_failed";
             return HL_WASM_ERR_INTERNAL;
         }
@@ -2124,7 +2192,7 @@ static int instance_call_buf_run(HlWasmInstance *pi,
         if (!wasm_in_ptr || !native_in ||
             !range_in_linear_memory(inst, wasm_in_ptr, (uint64_t)input_len)) {
             if (err_msg) *err_msg = err_internal;
-            if (spans_active) hl_wasm_span_set_teardown(&span_set);
+            if (spans_active) span_set_finish(pi->cache, &span_set);
             return HL_WASM_ERR_INTERNAL;
         }
         memcpy(native_in, input, input_len);
@@ -2138,7 +2206,7 @@ static int instance_call_buf_run(HlWasmInstance *pi,
             !range_in_linear_memory(inst, wasm_out_ptr, max_output)) {
             if (err_msg) *err_msg = err_internal;
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
-            if (spans_active) hl_wasm_span_set_teardown(&span_set);
+            if (spans_active) span_set_finish(pi->cache, &span_set);
             return HL_WASM_ERR_INTERNAL;
         }
     }
@@ -2270,7 +2338,7 @@ static int instance_call_buf_run(HlWasmInstance *pi,
     /* Spans back the INPUT (now consumed): detach + tear the set down so the
      * persistent instance is chain-free for the next call. Output is always
      * copied (create_owned), so no instance-checked-out ordering concern. */
-    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
+    if (spans_active) span_set_finish(pi->cache, &span_set); /* terminal: no re-read */
 
     if (result > 0) {
         *output_buf = hl_wasm_buffer_create_owned(native_out, (size_t)result, alloc);
@@ -2284,7 +2352,7 @@ static int instance_call_buf_run(HlWasmInstance *pi,
 
 cleanup_bufs_err:
     host_ctx_restore(&saved_ctx);   /* restores (clears) tl_host_ctx.spans before teardown */
-    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
+    if (spans_active) span_set_finish(pi->cache, &span_set); /* terminal: no re-read */
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
     return ret;

@@ -915,6 +915,7 @@ UTEST(hull_cap_gpu, tex_binding_bounds_checked)
  * allocation) exercises it on every CI runner. */
 
 #include <pthread.h>
+#include <stdatomic.h>
 
 static int mock_buf_creates, mock_tex_creates, mock_reads, mock_fail_create;
 
@@ -4817,6 +4818,102 @@ UTEST(gpu_convergence_policy, worker_peak_measured)
     free(ctx);
 }
 #endif /* HL_ENABLE_GPU */
+
+/* ── Audit 44 M7: a sync call behind an async job holding the device ── */
+
+#ifdef HL_ENABLE_DB
+/* A gpu.async dispatch holds the device mutex on a pool thread across the
+ * backend's wait (up to its timeout). A synchronous gpu.* call on the event
+ * loop blocked in pthread_mutex_lock behind it, past the run's deadline,
+ * with nothing polled. It now waits in slices that ask the run, and is
+ * refused busy once the run has stopped. */
+static atomic_int a44_in_dispatch;
+static double a44_stop_at;
+
+static int a44_slow_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
+                             const HlGpuDispatchOpts *opts,
+                             const HlGpuBuffer *pb, int pc,
+                             const HlGpuTexture *pt, int ptc,
+                             void **output, size_t *output_len,
+                             const char **err_msg)
+{
+    (void)dev; (void)pipeline; (void)opts; (void)pb; (void)pc; (void)pt;
+    (void)ptc; (void)output; (void)output_len; (void)err_msg;
+    atomic_store(&a44_in_dispatch, 1);
+    a40_sleep_ms(2500);   /* the device's wait, on the pool thread */
+    return HL_GPU_OK;
+}
+
+static void *a44_async_job(void *ud)
+{
+    HlGpuCtx *ctx = ud;
+    HlGpuDispatchOpts o;
+    memset(&o, 0, sizeof o);
+    o.device = -1;
+    o.workgroups.x = o.workgroups.y = o.workgroups.z = 1;
+    const char *err = NULL;
+    (void)hl_cap_gpu_dispatch(ctx, "s", &o, NULL, NULL, &err);
+    return NULL;
+}
+
+/* The run stops 200 ms after it is bound (its deadline, as the watchdog's
+ * stop flag makes every 0-unit charge refuse). */
+static int a44_budget(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return a40_now() >= a44_stop_at;
+}
+
+UTEST(gpu_audit44, sync_call_while_async_holds_device)
+{
+    HlGpuBackend be = MOCK_BACKEND;
+    be.dispatch = a44_slow_dispatch;
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ctx->backend = &be;
+    mock_add_shader(ctx, "s");
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", 64,
+                                                  HL_GPU_USAGE_READWRITE));
+    atomic_store(&a44_in_dispatch, 0);
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, a44_async_job, ctx));
+    for (int k = 0; k < 500 && !atomic_load(&a44_in_dispatch); k++)
+        a40_sleep_ms(2);
+    ASSERT_TRUE(atomic_load(&a44_in_dispatch));
+
+    a44_stop_at = a40_now() + 0.2;
+    HlDbBudgetBinding prev = hl_db_budget_swap(a44_budget, NULL);
+    void *data = NULL;
+    size_t len = 0;
+    double t0 = a40_now();
+    int rc = hl_cap_gpu_buffer_read(ctx, -1, "b", 0, &data, &len);
+    double dt = a40_now() - t0;
+    HlGpuDispatchOpts o;
+    memset(&o, 0, sizeof o);
+    o.device = -1;
+    o.workgroups.x = o.workgroups.y = o.workgroups.z = 1;
+    const char *err = NULL;
+    double t1 = a40_now();
+    int drc = hl_cap_gpu_dispatch(ctx, "s", &o, NULL, NULL, &err);
+    double dt2 = a40_now() - t1;
+    hl_db_budget_restore(prev);
+
+    EXPECT_EQ(HL_GPU_ERR_BUSY, rc);
+    EXPECT_TRUE(dt < 1.0);
+    EXPECT_TRUE(data == NULL);
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, drc);
+    EXPECT_TRUE(err != NULL && strcmp(err, "gpu_busy") == 0);
+    EXPECT_TRUE(dt2 < 1.0);
+    free(data);
+
+    pthread_join(th, NULL);
+    /* The device is free again: an unbound call takes it. */
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_read(ctx, -1, "b", 0, &data, &len));
+    free(data);
+    hl_cap_gpu_buffer_destroy(ctx, -1, "b");
+    mock_free(ctx);
+}
+#endif /* HL_ENABLE_DB */
 
 /* The test binary is also the compile helper: hl_gpu_helper_start(NULL)
  * spawns this executable with HL_GPU_HELPER_ARGV1, as a built binary

@@ -6196,6 +6196,24 @@ UTEST(js_stdlib, auth_audit12_suite)
 }
 #endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* Auth stdlib regressions from audit 44 (the JS twin of
+ * lua_stdlib.auth_audit44_suite). */
+UTEST(js_stdlib, auth_audit44_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_auth_audit44.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+#endif
+
 /* The _hull_jobs / _hull_cron tables as a database from before jobs.init's
  * additive columns has them (progress .. claim_started_at, tz_offset,
  * last_error). Created by the harness: app code may not touch _hull_*. */
@@ -12002,6 +12020,55 @@ UTEST(js_audit14, ws_client_sends_are_charged)
     ud->closed = 1;
     cleanup_js_caps();
 }
+
+/* Audit 44 (Low): the client finalizer left the connect / close deadline
+ * armed whenever the runtime was shutting down, so a GC at teardown freed ud
+ * with a backend timer still holding it. The Lua twin cancels it whenever
+ * the loop is reachable (audit 38); so does this one now. The timer here is
+ * a stand-in callback: it must never fire once the object is collected. */
+static int a44_client_timer_fired;
+static void a44_client_timer_cb(void *user)
+{
+    (void)user;
+    a44_client_timer_fired++;
+}
+
+UTEST(js_ws_client_audit44, finalizer_disarms_while_shutting_down)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *loop = NULL;
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    js.base.async_ctx = loop;
+
+    JSValue o = JS_NewObjectClass(js.ctx, (int)js_ws_client_conn_class_id);
+    ASSERT_FALSE(JS_IsException(o));
+    HlJSWsClientUD *ud = js_mallocz(js.ctx, sizeof *ud);
+    ASSERT_TRUE(ud != NULL);
+    ud->on_open = ud->on_message = JS_UNDEFINED;
+    ud->on_close = ud->on_error = JS_UNDEFINED;
+    ud->self_ref = JS_UNDEFINED;
+    ud->closed = 1;
+    ud->ctx = js.ctx;
+    ud->js = &js;
+    a44_client_timer_fired = 0;
+    ud->connect_timer = be->timer_add(loop, 1, a44_client_timer_cb, NULL);
+    ASSERT_NE(ud->connect_timer, (uint64_t)0);
+    JS_SetOpaque(o, ud);
+
+    js.base.shutting_down = 1;
+    JS_FreeValue(js.ctx, o);   /* finalized here */
+    JS_RunGC(js.rt);
+    js.base.shutting_down = 0;
+
+    for (int i = 0; i < 5; i++) be->tick(loop, 10);
+    EXPECT_EQ(a44_client_timer_fired, 0);
+
+    be->free(loop);
+    js.base.async_ctx = NULL;
+    cleanup_js_caps();
+}
 #endif /* HL_ENABLE_HTTP_SERVER */
 
 #ifdef HL_ENABLE_HTTP_CLIENT
@@ -12617,12 +12684,16 @@ UTEST(js_audit11, rsa_verify_is_charged_by_the_key)
         "   if (crypto.verify('RS256', pem, 'm', sig)) return 2;"
         " return 1; })()"), 1);
     EXPECT_EQ(js.budget_tripped, 0);
-    /* An oversized signature is false and costs nothing beyond its data. */
+    /* An oversized signature is false and costs nothing beyond its data.
+     * 1000 calls used ~67% of the 1M budget here (the binding meter charges
+     * each call's measured time) and tripped on a slow macOS runner; 100
+     * keep the contrast - one call charged by the 20000-byte key would be
+     * ~67M - without riding the limit (as #1020 / #1039 did). */
     js.max_instructions = 1000000;
     hl_js_reset_request(&js);
     EXPECT_EQ(eval_int(
         "(() => { const pem = 'A'.repeat(20000), sig = 's'.repeat(4096);"
-        " for (let i = 0; i < 1000; i++)"
+        " for (let i = 0; i < 100; i++)"
         "   if (crypto.verify('PS256', pem, 'm', sig)) return 2;"
         " return 1; })()"), 1);
     EXPECT_EQ(js.budget_tripped, 0);
@@ -13469,6 +13540,28 @@ static int a17_load(const char *dir, const char *entry, int built, HlVfs *vfs)
     char path[HL_TEST_PATH_MAX + 64];
     snprintf(path, sizeof path, "%s/%s", dir, entry);
     return hl_js_load_app(&js, path);
+}
+
+/* Audit 44: app.manifest() had no phase gate (the twin of the Lua case):
+ * called after the top level ran, it installed decorations and made
+ * __hull_manifest report a manifest the runner never extracted, resolved or
+ * verified. Refused once the top level has run. */
+UTEST(app_audit44, manifest_after_load_refused_js)
+{
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(dir, sizeof dir, "hull_a44m"), NULL);
+    a17_write(dir, "planted.js",
+              "import { app } from \"hull:app\";\n"
+              "globalThis.__a44app = app;\n");
+    HlVfs vfs;
+    ASSERT_EQ(a17_load(dir, "planted.js", 0, &vfs), 0);
+    EXPECT_EQ(eval_int("(() => { try { globalThis.__a44app.manifest("
+                       "{ modules: ['hull/timers@1'] }); return 0; } "
+                       "catch (e) { return String(e).includes('top level') "
+                       "? 1 : 0; } })()"), 1);
+    EXPECT_EQ(eval_int("globalThis.__a44app.every === undefined ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int("globalThis.__hull_manifest == null ? 1 : 0"), 1);
+    a17_cleanup(dir);
 }
 
 UTEST(js_audit17, imports_and_templates_read_disk_only_in_development)
@@ -15606,6 +15699,22 @@ UTEST(js_gpu, devices_are_listed)
                 "return gpu.available() + ' ' + d.length + ' ' +"
                 "  d[0].id + d[0].name + ' ' + d[1].id + d[1].name;",
                 "true 2 0mock0 1mock1");
+    jgpu_cleanup();
+}
+
+/* Audit 44: gpu.async.dispatch copied the shader name into a fixed
+ * HL_GPU_NAME_MAX slot, cutting a longer one to a prefix that could name
+ * another compiled shader. It is refused before anything else. */
+UTEST(gpu_audit44, async_dispatch_long_name)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    JGPU_EXPECT("try { gpu.async.dispatch('s'.repeat(300), {}); return 'ran'; }"
+                " catch (e) { return (e instanceof RangeError ? 'range ' : 'other ') +"
+                " (e.message.includes('name too long') ? 'long' : e.message); }",
+                "range long");
+    JGPU_EXPECT("try { gpu.async.dispatch('s'.repeat(255), {}); return 'ran'; }"
+                " catch (e) { return e.message.includes('name too long') ? 'long' : 'other'; }",
+                "other");
     jgpu_cleanup();
 }
 
@@ -18705,6 +18814,52 @@ UTEST(js_ssh_bridge, app_code_holding_a_stream_is_refused)
     js_ssh_close_fix(&f);
 }
 
+/* Audit 44: a read whose charge trips the run must leave the bytes in the
+ * stream. The charge came after the read, so a run that ran out on it
+ * consumed up to 64 KiB and threw them away with the trip; the next read on
+ * the same stream started mid-message. Charged before the read, as Lua's
+ * buffer is allocated (and charged) before it. */
+UTEST(js_ssh_audit44, read_trip_consumes_nothing)
+{
+    JsSshFix f;
+    ASSERT_EQ(js_ssh_open(&f), 0);
+    /* "x" then 4096 bytes in one send: the first read (one byte) waits for
+     * them, and the rest stays in the stream's buffer for the next read to
+     * take at once. */
+    char big[4097];
+    big[0] = 'x';
+    memset(big + 1, 'a', sizeof big - 1);
+    ASSERT_EQ(send(f.peer, big, sizeof big, 0), (ssize_t)sizeof big);
+    char out[256];
+    js_ssh_run(&f, "const [d] = await H.read(1); return d;\n", out, sizeof out);
+    ASSERT_STREQ(out, "x");
+
+    /* A run with less budget left than the read's charge (4096 bytes = 512
+     * units), but enough for everything around it: what the same call costs
+     * when it is refused before any charge (a read of 0), plus 300. */
+    int64_t saved = js.max_instructions;
+    js.budget_tripped = 0;
+    js.max_instructions = 0;
+    int64_t before = js.instruction_count;
+    js_ssh_eval_as("globalThis.H.read(0);\n", 1);
+    int64_t around = js.instruction_count - before;
+    js.max_instructions = js.instruction_count + around + 300;
+    js_ssh_eval_as("globalThis.H.read(65536);\n", 1);
+    EXPECT_EQ(js.budget_tripped, 1);
+    js.budget_tripped = 0;
+    js.budget_timed_out = 0;
+    js.max_instructions = saved;
+    js.instruction_count = 0;
+
+    ASSERT_EQ(send(f.peer, "Z", 1, 0), (ssize_t)1);
+    for (int i = 0; i < 5; i++) f.be->tick(f.actx, 10);
+    js_ssh_run(&f, "const [d] = await H.read(65536);\n"
+                   "return d.length >= 4096 && d[0] === 'a' ? 'kept' : 'lost:' + d.length;\n",
+               out, sizeof out);
+    EXPECT_STREQ(out, "kept");
+    js_ssh_close_fix(&f);
+}
+
 UTEST(js_ssh_bridge, a_bounded_wait_comes_back_coded_and_the_stream_lives)
 {
     JsSshFix f;
@@ -18947,5 +19102,201 @@ UTEST(template_audit44, dot_path_empty_segment_refused)
         "globalThis.__a44_d = r;\n", "globalThis.__a44_d"), 0);
     cleanup_js_caps();
 }
+
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* ── Audit 44: stdlib data-layer findings ─────────────────────────────
+ * stdlib/js/hull/tests/test_stdlib_data_audit44.js (the Lua twin's runner
+ * is in test_lua.c): jobs subscription cursors (M10), the idempotency
+ * in-flight lease (M11), cleanup high-water rows, BIGINT timestamps, type /
+ * queue checks, respond's single encode, attachment.readToFile's hash check,
+ * the kv.open cap refusal, retry's factor, search / inbox / outbox parity.
+ * Each case runs the script in a fresh context and a fresh :memory:
+ * database, named in globalThis.__data44_case. One UTEST per case, written
+ * out, so scripts/check_regression_test.sh sees each. */
+#include "hull/cap/kv_backend.h"
+
+#ifndef HL_ENABLE_VALKEY
+/* A KV backend that opens without dialing, so kv.open's live-connection cap
+ * can be reached from a binding (a base build composes no KV backend). Off
+ * unless a case turns it on: the strong hook returns the weak default's
+ * empty set otherwise. */
+static int data44_kv_on;
+static const char *const DATA44_SCHEMES[] = { "redis", NULL };
+static int data44_kv_open(HlKvHandle **out, const char *dsn, int timeout_ms,
+                          HlAllocator *alloc, char *errbuf, size_t errlen)
+{
+    (void)dsn; (void)timeout_ms; (void)alloc; (void)errbuf; (void)errlen;
+    static int token;
+    *out = (HlKvHandle *)&token;
+    return 0;
+}
+static void data44_kv_close(HlKvHandle *h) { (void)h; }
+static const HlKvBackend DATA44_KV = {
+    .name = "data44", .schemes = DATA44_SCHEMES,
+    .open = data44_kv_open, .close = data44_kv_close,
+};
+const HlKvBackend *const *hl_kv_feature_backends(size_t *count)
+{
+    static const HlKvBackend *const arr[] = { &DATA44_KV };
+    if (!data44_kv_on) { if (count) *count = 0; return NULL; }
+    if (count) *count = 1;
+    return arr;
+}
+#endif
+
+enum { DATA44_FS = 1, DATA44_KV_ON = 2 };
+
+static int run_data44_case(const char *name, int flags, int *pass, int *fail)
+{
+    init_js_with_caps();
+    if (!js_initialized) return -1;
+    A15Fs f;
+    int have_fs = 0;
+    if (flags & DATA44_FS) {
+        if (a15_fs_open(&f) != 0) { cleanup_js_caps(); return -1; }
+        have_fs = 1;
+    }
+    static HlManifestKvDynamic pol = {
+        .hosts = { "127.0.0.1" }, .host_count = 1,
+        .schemes = { "redis" }, .scheme_count = 1, .declared = 1,
+    };
+    if (flags & DATA44_KV_ON) {
+#ifndef HL_ENABLE_VALKEY
+        data44_kv_on = 1;
+#endif
+        js.base.kv_policy = &pol;
+        /* Only a hull: module may import the internal kv binding: the
+         * harness evaluates its own, from C. */
+        static const char *KV =
+            "import { open } from 'hull:kv:_native';\n"
+            "globalThis.__kvn = open;\n";
+        JSValue m = JS_Eval(js.ctx, KV, strlen(KV), "hull:__d44_kv", JS_EVAL_TYPE_MODULE);
+        JS_FreeValue(js.ctx, m);
+        hl_js_run_jobs(&js);
+    }
+    char set[128];
+    snprintf(set, sizeof set, "globalThis.__data44_case = '%s';", name);
+    JSValue v = JS_Eval(js.ctx, set, strlen(set), "<data44-case>", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, v);
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_data_audit44.js", pass, fail);
+    if (flags & DATA44_KV_ON) {
+        JS_RunGC(js.rt);   /* any connection the script left open */
+        js.base.kv_policy = NULL;
+#ifndef HL_ENABLE_VALKEY
+        data44_kv_on = 0;
+#endif
+    }
+    cleanup_js_caps();
+    if (have_fs) a15_fs_close(&f);
+    return rc;
+}
+
+UTEST(jobs_audit44, typed_subscription_cursor_advances_past_unmatched)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_typed_cursor", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, cleanup_keeps_high_water_row)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_high_water", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, schedule_past_int32_stored)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_schedule_bigint", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, events_types_caller_strings_parity)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_types_queue", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(idempotency_audit44, inflight_lease_outlives_parked_handler)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("idem_inflight_lease", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(idempotency_audit44, respond_encode_error_marks_unstored)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("idem_respond_encode", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(attachment_audit44, read_to_file_refuses_tampered_blob)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("attachment_tamper", DATA44_FS, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+#ifndef HL_ENABLE_VALKEY
+UTEST(kv_audit44, open_cap_is_busy_refusal)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("kv_open_busy", DATA44_KV_ON, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+#endif
+
+UTEST(retry_audit44, factor_validated)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("retry_factor", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(search_audit44, snippet_default_column_parity)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("search_parity", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(authflows_audit44, timestamp_columns_bigint)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("authflows_timestamps", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(inbox_audit44, empty_source_is_default)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("inbox_source", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(outbox_audit44, cleanup_parity)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("outbox_cleanup", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+#endif /* HL_ENABLE_HTTP_CLIENT && HL_ENABLE_HTTP_SERVER */
+
 
 UTEST_MAIN();

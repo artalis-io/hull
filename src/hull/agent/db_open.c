@@ -78,8 +78,11 @@ sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path)
      * none and no such manifest, is read as before, without running its top
      * level. A file one is opened read-only below. */
     if (!db_path) {
+        /* Peek: the default is resolved, not opened - a read-only command
+         * must not create the state database or directory (audit 44). */
         HlAppContextOpts opts = {
             .app_dir = app_dir, .no_migrate = 1, .gate_modules = 1, .manifest_default_db = 1,
+            .manifest_default_db_peek = 1,
         };
         HlAppContext *actx = NULL;
         if (hl_app_context_init(&actx, &opts) == 0) {

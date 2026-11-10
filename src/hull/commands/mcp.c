@@ -11,6 +11,7 @@
 #include "hull/commands/mcp.h"
 #include "hull/agent_lib.h"
 #include "hull/app_context.h"
+#include "hull/shared/json_term_safe.h"   /* audit 44 */
 
 #include <sh_json.h>
 #include <sh_arena.h>
@@ -279,7 +280,7 @@ static void send_error(FILE *fp, const ShJsonValue *id, int code,
     sh_json_write_object_end(&w);
 
     if (buf.buf) {
-        fputs(buf.buf, fp);
+        hl_json_fwrite_terminal_safe(fp, buf.buf, buf.len);
         fputc('\n', fp);
         fflush(fp);
     }
@@ -316,7 +317,7 @@ static void send_tool_result(FILE *fp, const ShJsonValue *id,
     sh_json_write_object_end(&w);
 
     if (buf.buf) {
-        fputs(buf.buf, fp);
+        hl_json_fwrite_terminal_safe(fp, buf.buf, buf.len);
         fputc('\n', fp);
         fflush(fp);
     }
@@ -356,7 +357,7 @@ static void handle_initialize(FILE *fp, const ShJsonValue *id)
     sh_json_write_object_end(&w);
 
     if (buf.buf) {
-        fputs(buf.buf, fp);
+        hl_json_fwrite_terminal_safe(fp, buf.buf, buf.len);
         fputc('\n', fp);
         fflush(fp);
     }
@@ -391,7 +392,7 @@ static void handle_tools_list(FILE *fp, const ShJsonValue *id)
     sh_json_write_object_end(&w);
 
     if (buf.buf) {
-        fputs(buf.buf, fp);
+        hl_json_fwrite_terminal_safe(fp, buf.buf, buf.len);
         fputc('\n', fp);
         fflush(fp);
     }
@@ -481,8 +482,12 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
                 hl_app_context_free(*warm_ctx_ptr);
                 *warm_ctx_ptr = NULL;
             }
-            HlAppContextOpts opts = { .app_dir = app_dir, .gate_modules = 1,
-                                      .manifest_default_db = 1 };
+            /* As the warm context was made at startup: its database is the
+             * context's own :memory: one (the db tools take a db_path for a
+             * file). With manifest_default_db the reload opened the app's
+             * "@state/" default read-write - creating it, migrating it, and
+             * handing it to hull_eval / hull_request code (audit 44). */
+            HlAppContextOpts opts = { .app_dir = app_dir, .gate_modules = 1 };
             if (hl_app_context_init(warm_ctx_ptr, &opts) != 0)
                 *warm_ctx_ptr = NULL;
         }

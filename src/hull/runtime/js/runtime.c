@@ -1457,7 +1457,7 @@ static void js_toplevel_begin(HlJS *js)
     }
 }
 
-int hl_js_load_app(HlJS *js, const char *filename)
+static int js_load_app_impl(HlJS *js, const char *filename)
 {
     if (!js || !js->ctx || !filename)
         return -1;
@@ -1623,6 +1623,15 @@ int hl_js_load_app(HlJS *js, const char *filename)
     sh_arena_reset(js->scratch);
 
     return 0;
+}
+
+int hl_js_load_app(HlJS *js, const char *filename)
+{
+    int rc = js_load_app_impl(js, filename);
+    /* The top level has run (code after a top-level await included, which
+     * runs past the extraction): app.manifest() is closed (audit 44). */
+    if (js) js->base.manifest_closed = 1;
+    return rc;
 }
 
 int hl_js_run_jobs(HlJS *js)
@@ -2350,9 +2359,16 @@ static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
      * holds nothing else up, but a ctx kept past main and read from a
      * request handler, a timer or a callback held the event loop until the
      * terminal or the pipe answered (audit 41). Only app.main's own code
-     * may read. */
+     * may read. That includes main's code run as a promise job under main's
+     * own tag while main is still pending - after `await ctx.signal.promise`
+     * it runs in the interrupt's drain, where active_cli_main is 0 (audit
+     * 44); QuickJS gives a job the tag of the code that awaited it (HULL
+     * PATCH 0008), so no other run's code carries it. */
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->active_cli_main)
+    int mains = js && (js->active_cli_main ||
+                       (js->cli_main_active && js->cli_main_tag != 0 &&
+                        JS_GetJobTag(js->rt) == js->cli_main_tag));
+    if (!mains)
         return JS_ThrowTypeError(ctx, "ctx.stdin.read() is only available in "
                                       "app.main's own code (it blocks the event loop)");
     if (hl_js_budget_charge(ctx, HL_WORK_CLI_FLUSH_UNITS) < 0) return JS_EXCEPTION;

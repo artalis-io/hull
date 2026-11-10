@@ -211,6 +211,19 @@ jobs.subscribe("fulfillment", (ev) => { if (ev.type === "completed") webhook.not
   finite, non-negative number (NaN and infinity are refused).
 - **Retention is subscription-aware**: `jobs.cleanup` never truncates the log past
   the slowest subscription's cursor, so a lagging consumer keeps its unseen events.
+  A **typed** subscription (`types = {...}`) moves its cursor past the events it
+  does not take too: when a drain's batch is not full, the cursor goes to the
+  newest event it scanned (below the commit-order horizon), so an idle typed
+  subscription no longer pins the log (audit 44: its cursor stayed at the last
+  MATCHING event, and the log grew without bound). `types` is an array of
+  non-empty type names of at most 32 bytes without a comma, at most 255 bytes
+  comma-joined; anything else raises (`jobs.events` checks its `types` the same
+  way).
+- **High-water rows.** `jobs.cleanup` never deletes the newest event or the
+  newest job row, whatever their age: MySQL before 8.0 resets a table's
+  AUTO_INCREMENT to `MAX(id)+1` when the server restarts, so an emptied table
+  handed out ids again - at or below a subscription's cursor (those events were
+  skipped) or naming a deleted job (audit 44).
 - **Poison events don't wedge a subscription.** By default a handler that keeps
   throwing on one event blocks there (retried each drain). Pass
   `max_failures = N` (`maxFailures` in JS) to **skip** that event after `N`
@@ -782,7 +795,16 @@ Declare the modules (`hull/compute` + ship `compute/*.wasm`; `hull/gpu` +
 `manifest.gpu = true` for the sandbox grants), and `require`/`import` them -
 `compute` and `gpu` are modules, not globals.
 Run `jobs.cleanup` from `app.daily` to bound table growth; it only touches
-terminal rows, so it never races a live job. JS: `jobs.cleanup({ olderThan: ... })`.
+terminal rows, so it never races a live job (and keeps the newest job row as a
+high-water mark). `jobs.dead` / `jobs.stats` / `jobs.metrics` take an optional
+`queue` scope: unset or `""` is every queue, anything else a queue name (a
+string of at most 255 bytes; a number or a table raises).
+
+**Timestamp columns are BIGINT** (audit 44): every `_hull_jobs` / `_hull_cron` /
+event-log / subscription / workflow timestamp is `BIGINT`, so a schedule past
+2038 (or `at` up to 2^52) is stored on PostgreSQL / MySQL, where `INTEGER` is 32
+bits. `CREATE TABLE IF NOT EXISTS` leaves existing tables as they are; see the
+CHANGELOG entry for the `ALTER TABLE` statements an existing deployment runs once. JS: `jobs.cleanup({ olderThan: ... })`.
 
 ## Semantics
 

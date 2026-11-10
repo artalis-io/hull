@@ -524,7 +524,7 @@ static int lua_load_entry_checked(lua_State *L, const char *load_name,
     return rc;
 }
 
-int hl_lua_load_app(HlLua *lua, const char *filename)
+static int lua_load_app_impl(HlLua *lua, const char *filename)
 {
     if (!lua || !lua->L || !filename)
         return -1;
@@ -638,6 +638,14 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
     return 0;
 }
 
+int hl_lua_load_app(HlLua *lua, const char *filename)
+{
+    int rc = lua_load_app_impl(lua, filename);
+    /* The top level has run: app.manifest() is closed (audit 44). */
+    if (lua) lua->base.manifest_closed = 1;
+    return rc;
+}
+
 /* Free an HlLuaRoute and everything it owns. Lives here, not in
  * routes.c: routes.c is in the composed HTTP bridge archive, while
  * the teardown that calls this is in the always-linked runtime. */
@@ -744,6 +752,9 @@ void hl_lua_free(HlLua *lua)
     /* Free WebSocket registry - HTTP-only; CLI builds never create one. */
 #ifdef HL_ENABLE_HTTP_SERVER
     if (lua->base.ws_registry) {
+        /* The finalizers lua_close runs below may still hold a conn: it
+         * must read as closed, not reach the node freed here (audit 44). */
+        hl_lua_ws_conns_release(lua);
         hl_http_ws_registry_free(lua->base.ws_registry);
         hl_alloc_free(lua->base.alloc, lua->base.ws_registry,
                       sizeof(HlWsRegistry));

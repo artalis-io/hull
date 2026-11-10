@@ -1842,6 +1842,75 @@ UTEST(lua_audit40, entry_reads_disk_only_in_development)
     rm_rf(tmpdir);
 }
 
+/* Audit 44: app.manifest() had no phase gate. An app that declared none at
+ * top level could call it later (from app.main or a handler), installing
+ * the hull/timers decoration and making app.get_manifest() report a
+ * manifest the runner never extracted, resolved or verified. It is refused
+ * once the top level has run. */
+UTEST(app_audit44, manifest_after_load_refused)
+{
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_a44m"), NULL);
+    char path[HL_TEST_PATH_MAX + 32];
+    snprintf(path, sizeof path, "%s/app.lua", tmpdir);
+    write_file(path, "__a44app = app\n");
+
+    init_lua_with_appdir(NULL);
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(hl_lua_load_app(&lua_rt, path), 0);
+    EXPECT_EQ(eval_int("(function() local ok, e = pcall(__a44app.manifest, "
+                       "{ modules = { 'hull/timers@1' } }) "
+                       "return (not ok and tostring(e):find('top level', 1, "
+                       "true)) and 1 or 0 end)()"), 1);
+    EXPECT_EQ(eval_int("__a44app.every == nil and 1 or 0"), 1);
+    EXPECT_EQ(eval_int("__a44app.get_manifest() == nil and 1 or 0"), 1);
+
+    cleanup_lua();
+    unlink(path);
+    rmdir(tmpdir);
+}
+
+/* Audit 44: a read-only view's `pairs` wrapped table VALUES as views but
+ * returned table KEYS raw, so a stdlib module table keyed by a table handed
+ * app code the real key table, writable. Keys are views now (one per table,
+ * so the same key compares equal), and the iteration still walks every
+ * entry. */
+UTEST(lua_readonly_audit44, next_wraps_table_keys)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "__a44k = { secret = 1 } "
+        "__a44real = { [__a44k] = 'v', plain = 2, [3] = 'three' } "), LUA_OK);
+    lua_getglobal(L, "__a44real");
+    hl_lua_push_readonly(L, -1);
+    lua_setglobal(L, "__a44view");
+    lua_settop(L, 0);
+    char *got = eval_str(
+        "(function() "
+        "  local n, raw, readable, wrote, same = 0, false, false, false, false "
+        "  for k, v in pairs(__a44view) do "
+        "    n = n + 1 "
+        "    if type(k) == 'table' then "
+        "      raw = rawequal(k, __a44k) "
+        "      readable = (k.secret == 1) "
+        "      wrote = pcall(function() k.secret = 2 end) "
+        "      for k2 in pairs(__a44view) do "
+        "        if type(k2) == 'table' then same = (k2 == k) end "
+        "      end "
+        "    end "
+        "  end "
+        "  return table.concat({ n, tostring(raw), tostring(readable), "
+        "                        tostring(wrote), tostring(same), "
+        "                        __a44k.secret }, ' ') "
+        "end)()");
+    ASSERT_NE(got, NULL);
+    EXPECT_STREQ(got, "3 false true false true 1");
+    free(got);
+    cleanup_lua_caps();
+}
+
 /* ── Crypto tests ──────────────────────────────────────────────────── */
 
 UTEST(lua_cap, crypto_sha256)
@@ -5362,6 +5431,27 @@ UTEST(lua_stdlib, auth_audit12_suite)
 }
 #endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* Auth stdlib regressions from audit 44 (oauth ttl types, the JWKS failure
+ * throttle and a non-JSON token reply; the nested / camelCase audit-metadata
+ * scrub and undecodable session data; the trusted-host match without case
+ * and auth-flows cleanup(); rbac's 401 for a malformed user id and its
+ * factory checks; auth's literal `optional = true`). */
+UTEST(lua_stdlib, auth_audit44_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_auth_audit44.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+
+    cleanup_lua_caps();
+}
+#endif
+
 /* The _hull_jobs / _hull_cron tables as a database from before jobs.init's
  * additive columns has them (progress .. claim_started_at, tz_offset,
  * last_error). Created by the harness: app code may not touch _hull_*. */
@@ -6191,7 +6281,7 @@ UTEST(lua_stdlib, ssh_sftp_suite)
 }
 
 /* chacha20-poly1305@openssh.com. Vanilla: the framing under stand-in
- * primitives (10). With the capability layer the same file runs again over
+ * primitives (11). With the capability layer the same file runs again over
  * hull.crypto's real ChaCha20 / Poly1305 (7 more). */
 UTEST(lua_stdlib, ssh_chacha_suite)
 {
@@ -6199,7 +6289,7 @@ UTEST(lua_stdlib, ssh_chacha_suite)
     int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_chacha.lua", &pass, &fail);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(fail, 0LL);
-    EXPECT_EQ(pass, 10LL);
+    EXPECT_EQ(pass, 11LL);
 }
 
 #ifdef HL_LINK_TLS
@@ -6213,7 +6303,7 @@ UTEST(lua_stdlib, ssh_chacha_real_crypto)
                                      &pass, &fail);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(fail, 0LL);
-    EXPECT_EQ(pass, 17LL);
+    EXPECT_EQ(pass, 18LL);
 
     cleanup_lua_caps();
 }
@@ -12220,6 +12310,53 @@ UTEST(lua_http_timeout, per_call_option_is_validated)
     lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();
 }
+
+/* Audit 44: http.post / put / patch and their http.async twins take
+ * (url, body, opts). An opts TABLE given as the second argument (no body)
+ * was dropped without a word - its headers and timeout_ms never applied.
+ * The second argument is the body, as in JS (where a plain object there is
+ * a TypeError): anything but a string / number / nil raises now. */
+UTEST(lua_http_audit44, async_post_opts_without_body)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlHttpConfig cfg = {0};          /* no hosts: every request is refused */
+    lua_rt.base.http_cfg = &cfg;
+    char err[512];
+    static const char *const bad[] = {
+        "http.async.post('http://x.invalid/', { headers = { ['X-A'] = '1' } })",
+        "http.async.put('http://x.invalid/', { timeout_ms = 5 })",
+        "http.async.patch('http://x.invalid/', true)",
+        "http.post('http://x.invalid/', { headers = { ['X-A'] = '1' } })",
+        "http.put('http://x.invalid/', { timeout_ms = 5 })",
+        "http.patch('http://x.invalid/', function() end)",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code,
+                 "local http = require('hull.http-client') %s", bad[i]);
+        EXPECT_NE_MSG(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err),
+                      LUA_OK, bad[i]);
+        EXPECT_NE_MSG(strstr(err, "body must be a string"), NULL, bad[i]);
+    }
+    /* A string or nil body (opts third) is unchanged: it reaches the host
+     * check (sync) or the wait gate (async). */
+    static const char *const good[] = {
+        "http.post('http://x.invalid/', nil, { headers = {} })",
+        "http.post('http://x.invalid/', 'b')",
+        "http.put('http://x.invalid/')",
+        "http.async.post('http://x.invalid/', nil, { headers = {} })",
+    };
+    for (size_t i = 0; i < sizeof good / sizeof good[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code,
+                 "local http = require('hull.http-client') %s", good[i]);
+        audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err);
+        EXPECT_EQ_MSG(strstr(err, "body must be"), NULL, good[i]);
+    }
+    lua_rt.base.http_cfg = NULL;
+    cleanup_lua_caps();
+}
 #endif
 
 #ifdef HL_ENABLE_HTTP_SERVER
@@ -13603,6 +13740,48 @@ UTEST(lua_audit17, ws_conn_data_after_close_is_collected)
     hl_ws_registry_free(&reg);
     cleanup_lua_caps();
 }
+
+/* Audit 44 (Low, teardown): hl_lua_free freed the ws registry before
+ * lua_close, so a __gc that lua_close ran and that used a conn whose node was
+ * still registered read a freed node. The conns still registered are
+ * invalidated first now (as JS's hl_js_ws_conns_release): the conn reads as
+ * closed. */
+static int a44_gc_note;
+static int a44_note(lua_State *L)
+{
+    a44_gc_note = (int)luaL_checkinteger(L, 1);
+    return 0;
+}
+
+UTEST(ws_audit44, teardown_gc_conn_access)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    char err[512];
+
+    HlWsRegistry *reg = hl_alloc_malloc(lua_rt.base.alloc, sizeof *reg);
+    ASSERT_TRUE(reg != NULL);
+    hl_ws_registry_init(reg, lua_rt.base.alloc);
+    lua_rt.base.ws_registry = reg;   /* owned by the runtime, as routes.c does */
+    ASSERT_EQ(audit10_run("ws = require('hull.web.ws-server') return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    HlWsConn *c = hl_ws_registry_add(reg, "/t", NULL);
+    ASSERT_NE(c, NULL);
+    hl_lua_ws_push_conn(L, c);
+    lua_setglobal(L, "C");
+    lua_pushcfunction(L, a44_note);
+    lua_setglobal(L, "__a44_note");
+    EXPECT_EQ_MSG(audit10_run(
+        "KEEP = setmetatable({}, { __gc = function() "
+        "  local ok = pcall(function() return C:id() end) "
+        "  __a44_note(ok and 1 or 2) end }) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK, err);
+
+    a44_gc_note = 0;
+    cleanup_lua_caps();   /* hl_lua_free: registry, then lua_close */
+    EXPECT_EQ(a44_gc_note, 2);   /* the conn reads as closed */
+}
 #endif /* HL_ENABLE_HTTP_SERVER */
 
 #ifdef HL_ENABLE_IMAGE
@@ -14902,6 +15081,24 @@ UTEST(lua_gpu, devices_are_listed)
                 "R = tostring(gpu.available()) .. ' ' .. #d .. ' ' .. "
                 "d[1].id .. d[1].name .. ' ' .. d[2].id .. d[2].name",
                 "true 2 0mock0 1mock1");
+    lgpu_cleanup();
+}
+
+/* Audit 44: gpu.async.dispatch copied the shader name into a fixed
+ * HL_GPU_NAME_MAX slot, cutting a longer one to a prefix that could name
+ * another compiled shader. It is refused before anything else. */
+UTEST(gpu_audit44, async_dispatch_long_name)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.dispatch, string.rep('s', 300), {}) "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('name too long', 1, true) and 'long' or tostring(e))",
+                "false long");
+    /* A name that fits is not refused for its length. */
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.dispatch, string.rep('s', 255), {}) "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('name too long', 1, true) and 'long' or 'other')",
+                "false other");
     lgpu_cleanup();
 }
 
@@ -17180,5 +17377,199 @@ UTEST(tui_audit44, input_max_len_codepoints_lua)
     EXPECT_EQ(v, 0);
     cleanup_lua_caps();
 }
+
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* ── Audit 44: stdlib data-layer findings ─────────────────────────────
+ * stdlib/lua/hull/tests/test_stdlib_data_audit44.lua: jobs subscription
+ * cursors (M10), the idempotency in-flight lease (M11), cleanup high-water
+ * rows, BIGINT timestamps, type-list / queue-scope checks, respond's single
+ * encode, attachment.read_to_file's hash check, the kv.open cap refusal,
+ * retry's factor, search / inbox / outbox parity. Each case runs the script
+ * in a fresh state and a fresh :memory: database, named in the global
+ * __data44_case. One UTEST per case, written out, so
+ * scripts/check_regression_test.sh sees each. */
+#include "hull/cap/kv_backend.h"
+
+#ifndef HL_ENABLE_VALKEY
+/* A KV backend that opens without dialing, so kv.open's live-connection cap
+ * can be reached from a binding (a base build composes no KV backend). Off
+ * unless a case turns it on: the strong hook returns the weak default's
+ * empty set otherwise. */
+static int data44_kv_on;
+static const char *const DATA44_SCHEMES[] = { "redis", NULL };
+static int data44_kv_open(HlKvHandle **out, const char *dsn, int timeout_ms,
+                          HlAllocator *alloc, char *errbuf, size_t errlen)
+{
+    (void)dsn; (void)timeout_ms; (void)alloc; (void)errbuf; (void)errlen;
+    static int token;
+    *out = (HlKvHandle *)&token;
+    return 0;
+}
+static void data44_kv_close(HlKvHandle *h) { (void)h; }
+static const HlKvBackend DATA44_KV = {
+    .name = "data44", .schemes = DATA44_SCHEMES,
+    .open = data44_kv_open, .close = data44_kv_close,
+};
+const HlKvBackend *const *hl_kv_feature_backends(size_t *count)
+{
+    static const HlKvBackend *const arr[] = { &DATA44_KV };
+    if (!data44_kv_on) { if (count) *count = 0; return NULL; }
+    if (count) *count = 1;
+    return arr;
+}
+#endif
+
+enum { DATA44_FS = 1, DATA44_KV_ON = 2 };
+
+static int run_data44_case(const char *name, int flags, long long *pass, long long *fail)
+{
+    init_lua_with_caps();
+    if (!lua_initialized) return -1;
+    A15Fs f;
+    int have_fs = 0;
+    if (flags & DATA44_FS) {
+        if (a15_fs_open(&f) != 0) { cleanup_lua_caps(); return -1; }
+        have_fs = 1;
+    }
+    static HlManifestKvDynamic pol = {
+        .hosts = { "127.0.0.1" }, .host_count = 1,
+        .schemes = { "redis" }, .scheme_count = 1, .declared = 1,
+    };
+    if (flags & DATA44_KV_ON) {
+#ifndef HL_ENABLE_VALKEY
+        data44_kv_on = 1;
+#endif
+        lua_rt.base.kv_policy = &pol;
+        lua_State *L = lua_rt.L;
+        lua_pushcfunction(L, hl_lua_require_trusted);
+        lua_pushstring(L, "hull.kv._native");
+        if (lua_pcall(L, 1, 1, 0) != LUA_OK) { lua_pop(L, 1); return -1; }
+        lua_getfield(L, -1, "open");
+        lua_setglobal(L, "__kvn");
+        lua_pop(L, 1);
+    }
+    lua_pushstring(lua_rt.L, name);
+    lua_setglobal(lua_rt.L, "__data44_case");
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_data_audit44.lua",
+                                     pass, fail);
+    if (flags & DATA44_KV_ON) {
+        lua_gc(lua_rt.L, LUA_GCCOLLECT);
+        lua_rt.base.kv_policy = NULL;
+#ifndef HL_ENABLE_VALKEY
+        data44_kv_on = 0;
+#endif
+    }
+    cleanup_lua_caps();
+    if (have_fs) a15_fs_close(&f);
+    return rc;
+}
+
+UTEST(jobs_audit44, typed_subscription_cursor_advances_past_unmatched)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_typed_cursor", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, cleanup_keeps_high_water_row)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_high_water", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, schedule_past_int32_stored)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_schedule_bigint", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, events_types_caller_strings_parity)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_types_queue", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(idempotency_audit44, inflight_lease_outlives_parked_handler)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("idem_inflight_lease", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(idempotency_audit44, respond_encode_error_marks_unstored)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("idem_respond_encode", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(attachment_audit44, read_to_file_refuses_tampered_blob)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("attachment_tamper", DATA44_FS, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+#ifndef HL_ENABLE_VALKEY
+UTEST(kv_audit44, open_cap_is_busy_refusal)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("kv_open_busy", DATA44_KV_ON, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+#endif
+
+UTEST(retry_audit44, factor_validated)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("retry_factor", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(search_audit44, snippet_default_column_parity)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("search_parity", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(authflows_audit44, timestamp_columns_bigint)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("authflows_timestamps", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(inbox_audit44, empty_source_is_default)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("inbox_source", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(outbox_audit44, cleanup_parity)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("outbox_cleanup", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+#endif /* HL_ENABLE_HTTP_CLIENT && HL_ENABLE_HTTP_SERVER */
+
 
 UTEST_MAIN();

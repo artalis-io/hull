@@ -87,6 +87,8 @@ await test("jobs.cleanup: fractional before / olderThan are accepted", async () 
     const id = jobs.enqueue("a27clean", {}, { queue: "a27clean" });
     await jobs.work({ queue: "a27clean", batch: 1 });
     assertEq(jobs.get(id).status, "done", "ran");
+    // A later job: cleanup keeps the newest row as a high-water mark (audit 44).
+    jobs.enqueue("a27clean", {}, { queue: "a27later" });
     assertEq(jobs.cleanup({ queue: "a27clean", olderThan: 0.5 }), 0, "young row kept");
     assertEq(jobs.cleanup({ queue: "a27clean", olderThan: 0 }), 0, "olderThan 0 accepted");
     assertEq(jobs.cleanup({ queue: "a27clean", before: time.now() - 0.5 }), 0,

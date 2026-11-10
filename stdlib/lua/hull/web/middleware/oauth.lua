@@ -116,6 +116,9 @@ local json        = require("hull.json")
 local jwt         = require("hull.jwt")
 local time        = require("hull.time")
 local http_client = require("hull.http-client")
+
+local DEFAULT_STATE_TTL = 600
+local DEFAULT_JWKS_TTL  = 3600
 local _request    = require("hull.web._request")
 local log         = require("hull.log")
 
@@ -165,6 +168,9 @@ local _state = {
     logout_path      = "/auth/logout",
     -- JWKS cache: provider_name -> { fetched_at, by_kid = { kid -> pem } }
     _jwks_cache      = {},
+    -- provider_name -> time of the last failed JWKS fetch (throttled as
+    -- JWKS_MIN_REFRESH throttles an unknown kid).
+    _jwks_failed_at  = {},
     -- TTL on cached JWKS in seconds (forces a refresh past this age
     -- even if the kid is still present). Default 1 hour. IdPs may
     -- rotate a key while reusing the same kid for emergency
@@ -386,12 +392,14 @@ local function refresh_jwks(provider_name)
     if not cfg then return nil, "unknown provider" end
     local resp = http_client.async.get(cfg.jwks_uri)
     if not resp or resp.status ~= 200 or not resp.body then
+        _state._jwks_failed_at[provider_name] = time.now()
         return nil, "jwks fetch failed: " .. tostring(resp and resp.status)
     end
     -- A body that is not JSON is a failed fetch, as in the JS twin (audit
     -- 41): the decode error escaped into the token verification.
     local dok, doc = pcall(json.decode, resp.body)
     if not dok or type(doc) ~= "table" or type(doc.keys) ~= "table" then
+        _state._jwks_failed_at[provider_name] = time.now()
         return nil, "jwks: malformed response"
     end
     local by_kid = {}
@@ -412,6 +420,7 @@ local function refresh_jwks(provider_name)
         fetched_at = time.now(),
         by_kid = by_kid,
     }
+    _state._jwks_failed_at[provider_name] = nil
     return by_kid
 end
 
@@ -433,6 +442,13 @@ local function jwks_resolver(provider_name)
         -- request.
         if cache and not cache.by_kid[kid]
            and (time.now() - (cache.fetched_at or 0)) < JWKS_MIN_REFRESH then
+            return nil
+        end
+        -- Nor is a FAILED fetch retried within the minute (audit 44): a
+        -- failure wrote no cache entry, so every callback past the token
+        -- exchange fetched the IdP's JWKS again, with no back-off.
+        local failed_at = _state._jwks_failed_at[provider_name]
+        if failed_at and (time.now() - failed_at) < JWKS_MIN_REFRESH then
             return nil
         end
         -- Stale OR unknown kid: refresh once. A still-unknown kid
@@ -588,8 +604,10 @@ local function handle_callback(req, res)
                  tostring(resp and resp.status))
         return res:status(502):html("auth failed")
     end
-    local tokens = json.decode(resp.body)
-    if type(tokens) ~= "table" or type(tokens.id_token) ~= "string" then
+    -- A reply that is not JSON is the IdP's failure, 502 as in the JS twin
+    -- (audit 44): the decode error raised out of the handler as a 500.
+    local tok_ok, tokens = pcall(json.decode, resp.body)
+    if not tok_ok or type(tokens) ~= "table" or type(tokens.id_token) ~= "string" then
         return res:status(502):html("auth failed")
     end
 
@@ -740,8 +758,18 @@ function oauth.init(opts)
     if opts.state_cookie_secure ~= nil then
         _state.state_cookie_secure = opts.state_cookie_secure == true
     end
-    _state.state_ttl    = opts.state_ttl or _state.state_ttl
-    _state.jwks_ttl     = opts.jwks_ttl  or _state.jwks_ttl
+    -- A ttl is a positive, finite NUMBER of seconds (audit 44), the rule
+    -- session.init applies: a string one was coerced here while the JS twin
+    -- concatenated it onto every state's expiry (every callback "expired"),
+    -- and a negative one expired every state at once.
+    for _, k in ipairs({ "state_ttl", "jwks_ttl" }) do
+        local v = opts[k]
+        if v ~= nil and not (type(v) == "number" and v > 0 and v < math.huge) then
+            error("oauth.init: " .. k .. " must be a positive number of seconds")
+        end
+    end
+    _state.state_ttl    = opts.state_ttl or DEFAULT_STATE_TTL
+    _state.jwks_ttl     = opts.jwks_ttl  or DEFAULT_JWKS_TTL
     if opts.on_login ~= nil and type(opts.find_user) ~= "function" then
         error("oauth.init: find_user(provider, claims) -> user is "
               .. "required when on_login is set. See module docs.")
@@ -834,6 +862,9 @@ require("hull._test_hooks").register("hull.web.middleware.oauth", {
         _state.on_login         = nil
         _state.on_logout        = nil
         _state._jwks_cache      = {}
+        _state._jwks_failed_at  = {}
+        _state.state_ttl        = DEFAULT_STATE_TTL
+        _state.jwks_ttl         = DEFAULT_JWKS_TTL
     end,
 })
 

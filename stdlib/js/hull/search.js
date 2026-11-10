@@ -190,12 +190,23 @@ function index(name, id, fields) {
     if (!fields || typeof fields !== "object")
         throw new Error("fields must be an object");
 
-    let keys = Object.keys(fields);
+    // A null / undefined value is no column, as a nil field is absent in
+    // the Lua twin; every other value must be a string or a number, bound as
+    // given (audit 44: String() ran an object's toString in this stdlib
+    // frame and stored "[object Object]"; Lua bound the raw value). At least
+    // one column remains, in both.
+    const allKeys = Object.keys(fields);
+    const keys = [];
+    for (let i = 0; i < allKeys.length; i++) {
+        validateIdent(allKeys[i], "field name");
+        const v = fields[allKeys[i]];
+        if (v === null || v === undefined) continue;
+        if (typeof v !== "string" && typeof v !== "number")
+            throw new Error("search.index: field values must be strings or numbers");
+        keys.push(allKeys[i]);
+    }
     if (keys.length === 0)
         throw new Error("fields must have at least one column");
-
-    for (let i = 0; i < keys.length; i++)
-        validateIdent(keys[i], "field name");
 
     const table = ftsTable(name);
 
@@ -207,7 +218,7 @@ function index(name, id, fields) {
     for (let j = 0; j < keys.length; j++) {
         colList += ", " + keys[j];
         placeholders += ", ?";
-        values.push(fields[keys[j]] != null ? String(fields[keys[j]]) : "");
+        values.push(fields[keys[j]]);
     }
 
     // Delete existing row with same id first (FTS5 doesn't support OR REPLACE)
@@ -320,6 +331,26 @@ const SEARCH_MAX_LIMIT = 1000;
 const SNIPPET_MAX_COLUMN = 32767;
 const SEARCH_MAX_OFFSET = 2147483647;
 
+function utf8Bytes(s) {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c < 0x80) n += 1;
+        else if (c < 0x800) n += 2;
+        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length &&
+                 (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { n += 4; i++; }
+        else n += 3;
+    }
+    return n;
+}
+
+// The caller's marker (before / after / ellipsis), or the default when it
+// is unset - as the Lua twin's `x or default`: "" is a marker ("" fell back
+// to the default here, `||`).
+function marker(v, def) {
+    return v === undefined || v === null ? def : String(v);
+}
+
 function query(name, q, opts) {
     requireSqlite();
     validateIdent(name, "index name");
@@ -337,8 +368,12 @@ function query(name, q, opts) {
     const maxTerms = intOpt(o, "maxQueryTerms", 64, 1, 65536);
     const limit = countOpt(o.limit, 20, 1, SEARCH_MAX_LIMIT);
     const offset = countOpt(o.offset, 0, 0, SEARCH_MAX_OFFSET);
-    if (q.length > maxLen)
-        throw new Error("query too long (" + q.length + " > " + maxLen + ")");
+    // In UTF-8 bytes, as the Lua twin counts (audit 44: UTF-16 units here
+    // let a non-ASCII query through at up to three times the bound). A lone
+    // surrogate counts as the three bytes of the U+FFFD it becomes.
+    const qBytes = utf8Bytes(q);
+    if (qBytes > maxLen)
+        throw new Error("query too long (" + qBytes + " > " + maxLen + ")");
     // Every word is a term (implicit AND costs as much as OR), every prefix
     // `*` widens one, and parentheses group: count all three. Counting only
     // OR / NEAR / parens let "a b c d ..." or "a* b* c* ..." through.
@@ -363,10 +398,12 @@ function query(name, q, opts) {
         // Integers, as the paging options are (audit 44): tokens was bound
         // unchecked (NaN / a string / 1e300 reached FTS5), and column took
         // Number("1") / Number(true).
-        const sCol = intOpt(s, "column", 0, 0, SNIPPET_MAX_COLUMN);
-        const sBefore = String(s.before || "<b>");
-        const sAfter = String(s.after || "</b>");
-        const sEllipsis = String(s.ellipsis || "...");
+        // Column 1 by default, the first indexed column (0 is the id), as
+        // the Lua twin (audit 44: the default here was the id).
+        const sCol = intOpt(s, "column", 1, 0, SNIPPET_MAX_COLUMN);
+        const sBefore = marker(s.before, "<b>");
+        const sAfter = marker(s.after, "</b>");
+        const sEllipsis = marker(s.ellipsis, "...");
         const sTokens = intOpt(s, "tokens", 32, 1, 64);
         selectCols += ", snippet(" + table + ", " + sCol +
             ", ?, ?, ?, ?) AS snippet";
@@ -376,9 +413,9 @@ function query(name, q, opts) {
 
     if (o.highlight) {
         const h = o.highlight;
-        const hCol = intOpt(h, "column", 0, 0, SNIPPET_MAX_COLUMN);
-        const hBefore = String(h.before || "<b>");
-        const hAfter = String(h.after || "</b>");
+        const hCol = intOpt(h, "column", 1, 0, SNIPPET_MAX_COLUMN);
+        const hBefore = marker(h.before, "<b>");
+        const hAfter = marker(h.after, "</b>");
         selectCols += ", highlight(" + table + ", " + hCol +
             ", ?, ?) AS highlight";
         highlightParams = [MARK_BEFORE, MARK_AFTER];

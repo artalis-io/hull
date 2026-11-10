@@ -46,18 +46,30 @@ function msOpt(v, name, def) {
     return v || def;
 }
 
+// factor: undefined / null takes the default, anything else must be a finite
+// number >= 1 (audit 44: a negative factor made the delay alternate in sign,
+// a fraction shrank it to nothing, NaN made it NaN, and `||` turned 0 into
+// 2 - hull.sleep then took no time and the retries ran back to back). The
+// Lua twin applies the same rule.
+function factorOpt(v) {
+    if (v === undefined || v === null) return DEFAULTS.factor;
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 1)
+        throw new RangeError("retry: factor must be a finite number >= 1");
+    return v;
+}
+
 /**
  * Backoff delay (ms) for a 1-based attempt: `base * factor^(n-1)`, clamped to
  * `cap`, with optional full jitter (uniform in `[0, delay)`).
  * @param {number} attempt  1-based attempt number.
- * @param {Object} [opts]  `baseMs` (100), `factor` (2), `capMs` (30000),
- *   `jitter` (boolean, default false).
+ * @param {Object} [opts]  `baseMs` (100), `factor` (2; a finite number >= 1,
+ *   else it throws), `capMs` (30000), `jitter` (boolean, default false).
  * @returns {number} Delay in milliseconds.
  */
 retry.backoff = function(attempt, opts) {
     opts = opts || {};
     const base = msOpt(opts.baseMs, "baseMs", DEFAULTS.baseMs);
-    const factor = opts.factor || DEFAULTS.factor;
+    const factor = factorOpt(opts.factor);
     const cap = msOpt(opts.capMs, "capMs", DEFAULTS.capMs);
     let d = base * Math.pow(factor, attempt - 1);
     if (d > cap) d = cap;
@@ -105,6 +117,7 @@ retry.run = async function(fn, opts) {
     max = Math.floor(max);
     msOpt(opts.baseMs, "baseMs", 0);   // refused up front, before fn runs
     msOpt(opts.capMs, "capMs", 0);
+    factorOpt(opts.factor);
     let lastOk = false, lastVal;
     for (let attempt = 1; attempt <= max; attempt++) {
         let ok, val;

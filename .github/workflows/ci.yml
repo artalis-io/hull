@@ -528,6 +528,9 @@ jobs:
       - name: Shutdown-with-work-in-flight E2E tests
         timeout-minutes: 3
         run: make e2e-teardown
+      - name: App-closed WebSocket runs on_close E2E tests
+        timeout-minutes: 3
+        run: make e2e-ws-close
       - name: VM thread (--vm-thread) E2E tests
         timeout-minutes: 4
         run: make e2e-vm-thread
