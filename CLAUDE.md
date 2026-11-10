@@ -706,7 +706,13 @@ A file DSN in `databases.named` / `databases.internal` (scheme-less, `sqlite://`
 app directory (`hl_db_registry_set_app_dir`, set by `app_context.c` for every entry point),
 not the working directory, and `..`, a path outside the app directory, a symbolic link below
 it, or a leaf / `-wal` / `-shm` / `-journal` that is a link or not a regular file are refused
-(`hl_db_path_has_symlink`, shared with `db.open`). `:memory:`, network DSNs and `-d` pass. The
+(`hl_db_path_has_symlink`, shared with `db.open`). On Windows (a cosmo APE, which has no kernel sandbox there) the app-supplied part is also
+refused when it holds a backslash or a `:` (a separator and a drive there, so `data\..\..\x.db` had no
+`..` for the `/`-split checks) or a component ending in a dot or space or holding `~<digit>` - the fs
+policy's rule, one predicate (`hl_host_path_unsafe_on_windows`, `shared/host.c`) shared by `split_caller`,
+the fs resolver and `hl_cap_fs_validate` (`db.open`, blob roots); a new check of an app path joined with
+a root on Windows calls it (INV-11; audit 44). Tests force the host with `hl_host_test_force_windows`
+(test builds only: `host_th.o`). `:memory:`, network DSNs and `-d` pass. The
 worker pool gets the checked absolute path from `hl_db_registry_dsn_for`, which answers a DSN
 no backend takes (never NULL, which would mean the default database) once a connection's DSN
 no longer passes.

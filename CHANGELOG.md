@@ -10,6 +10,17 @@ release-artifact layout).
 
 ### Fixed
 
+- **Windows: a manifest file DSN with a backslash or a drive could leave the app tree** (audit 44,
+  A2 / A3, Medium on Windows). `databases.named` / `databases.internal` file DSNs (`@state/` ones too)
+  were confined with checks that split only on `/`, so on Windows - a cosmo APE, with no kernel sandbox
+  there - `data\..\..\x.db` or `@state/a\..\b.db` had no `..` component for them and opened outside
+  the root, and `C:x.db`, a trailing dot or space and an 8.3 short name were read differently by the OS.
+  The app-supplied part of such a DSN is now refused with the fs policy's rule, which is one predicate
+  (`hl_host_path_unsafe_on_windows`) shared by the fs policy, the fs resolver and `hl_cap_fs_validate`
+  (`db.open`, blob roots). New lint rule INV-11. Tests:
+  `db_registry_audit44.windows_backslash_dsn_refused`, `db_dynamic_audit44.windows_backslash_refused`,
+  `fs_policy_audit44.windows_rule_is_shared`.
+
 - **`hull/ssh`: the crypto test seam is a test hook, not a public option** (audit 44, Low, both
   runtimes). `ssh.connect`, `ssh.fingerprint`, `ssh.load_key` and `ssh.file_store` (JS
   `connect`, `fingerprint`, `loadKey`, `fileStore`) took an `opts.crypto` table meant for the

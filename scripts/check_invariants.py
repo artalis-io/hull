@@ -933,6 +933,41 @@ def inv10(tree, ctx):
     return findings
 
 
+# INV-11 ------------------------------------------------------------------
+# How it decides (audit 44): an app-supplied path that Hull checks lexically
+# and then joins with a root must be checked against what Windows reads
+# differently (a backslash separator, a "C:" drive, a trailing dot / space,
+# an 8.3 short name) by the ONE predicate, hl_host_path_unsafe_on_windows
+# (src/hull/shared/host.c). In src/hull/cap/, src/hull/runtime/ and
+# src/hull/shared/ (host.c excepted), a function that calls
+# hl_host_is_windows and ALSO inspects path bytes itself - a strpbrk call,
+# or a '\\' / '~' / ':' character literal - is a private copy of the rule
+# (confine_manifest_dsn had none, the fs policy its own; a DSN spelled with
+# backslashes left the root). Tool-mode paths (the operator's) are
+# allowlisted with their reason.
+
+INV11_BYTES = re.compile(r"\bstrpbrk\s*\(|'\\\\'|'~'|':'")
+
+
+@rule("INV-11", "a Windows app-path check uses hl_host_path_unsafe_on_windows")
+def inv11(tree, ctx):
+    findings = []
+    for p in tree.files("src/hull/cap", "src/hull/runtime", "src/hull/shared",
+                        exts=(".c",)):
+        if p == "src/hull/shared/host.c":
+            continue
+        cf = tree.cfile(p)
+        for fn in cf.funcs:
+            if "hl_host_is_windows" not in fn.calls:
+                continue
+            m = INV11_BYTES.search(fn.body)
+            if m:
+                findings.append((f"{p}:{fn.name}",
+                                 f"line {fn.line}: a private Windows path "
+                                 "check - call hl_host_path_unsafe_on_windows"))
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------

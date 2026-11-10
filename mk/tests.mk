@@ -140,9 +140,15 @@ TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
 # drive), so the hull binary and the platform library keep a build without
 # them (audit convergence §7.3).
 GPU_HELPER_TH_OBJ := $(BUILDDIR)/cap_gpu_helper_th.o
-TEST_CAP_OBJS := $(filter-out $(BUILDDIR)/cap_gpu_helper.o,$(CAP_OBJS)) $(GPU_HELPER_TH_OBJ)
+# shared/host.c likewise: the tests link host_th.o, built with
+# -DHL_HOST_TEST_HOOKS (hl_host_test_force_windows, so the Windows-only path
+# checks run on every CI host - audit 44).
+HOST_TH_OBJ := $(BUILDDIR)/host_th.o
+TEST_CAP_OBJS := $(filter-out $(BUILDDIR)/cap_gpu_helper.o $(HOST_OBJ),$(CAP_OBJS)) $(GPU_HELPER_TH_OBJ) $(HOST_TH_OBJ)
 $(GPU_HELPER_TH_OBJ): $(SRCDIR)/hull/cap/gpu_helper.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_GPU_HELPER_TEST_HOOKS $(INCLUDES) -c -o $@ $<
+$(HOST_TH_OBJ): $(SRCDIR)/hull/shared/host.c $(INCDIR)/hull/shared/host.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_HOST_TEST_HOOKS $(INCLUDES) -c -o $@ $<
 
 # `hull doctor --fix` calls hl_cmd_tools (commands/tools.c) to run the
 # ordinary `hull tools install` path.  The base filters that source out of

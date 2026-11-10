@@ -17,6 +17,7 @@
 #include "hull/shared/state_dir.h"
 #include "hull/cap/fs_resolve.h"
 #include "hull/utils/alloc.h"
+#include "hull/shared/host.h"   /* hl_host_test_force_windows */
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
@@ -849,6 +850,40 @@ UTEST(fs_policy, hull_dir_unreachable_through_a_symlink)
     EXPECT_EQ(-1, rc2);
     EXPECT_STREQ("reserved_path", err);
 
+    hl_fs_policy_free(&p);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+    teardown();
+}
+
+/* ── audit 44: the Windows path rule is one predicate ─────────────────────── */
+/* split_caller now takes the Windows refusals from the shared
+ * hl_host_path_unsafe_on_windows (the rule file DSNs use too): forced-Windows,
+ * a backslash, a drive, a trailing dot / space and an 8.3 short name are all
+ * "invalid_path" under a root grant, and ordinary names still select. */
+UTEST(fs_policy_audit44, windows_rule_is_shared)
+{
+    setup(); build_tree();
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *rd[] = { "." };
+    ASSERT_EQ(0, build_policy(&a, rd, 1, NULL, 0, &p, &err));
+    hl_host_test_force_windows(1);
+    static const char *const bad[] = { "data\\..\\..\\x", "C:x", "data.bin.",
+                                       "data.bin ", "DATA~1.BIN", "a/b~2/c" };
+    char sc[256];
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        HlFsSelection s = hl_fs_policy_select(&p, bad[i], HL_FS_OPEN_READ, sc, sizeof(sc));
+        EXPECT_TRUE(s.entry == NULL);
+        EXPECT_TRUE(s.err && strcmp(s.err, "invalid_path") == 0);
+        EXPECT_EQ(1, hl_host_path_unsafe_on_windows(bad[i]));
+    }
+    HlFsSelection s = hl_fs_policy_select(&p, "./data.bin", HL_FS_OPEN_READ, sc, sizeof(sc));
+    EXPECT_TRUE(s.entry != NULL);
+    EXPECT_EQ(0, hl_host_path_unsafe_on_windows("./data/a..b/c.db"));
+    hl_host_test_force_windows(0);
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        EXPECT_EQ(0, hl_host_path_unsafe_on_windows(bad[i]));   /* POSIX: name bytes */
+    hl_host_test_force_windows(-1);
     hl_fs_policy_free(&p);
     ASSERT_EQ((size_t)0, hl_alloc_used(&a));
     teardown();
