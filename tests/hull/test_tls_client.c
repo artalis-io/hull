@@ -209,4 +209,38 @@ UTEST(tls_handshake, verify_without_a_host_is_refused)
     close(sv[0]); close(sv[1]);
 }
 
+/* Audit 44: the caller-config path (hl_tls_client_handshake_cfg) gets the
+ * same refusal. Its ctx is the caller's and may verify; with no server name
+ * set_hostname was skipped and a verifying ctx checked the chain only. No
+ * session is made and no handshake step runs. */
+static int g_cfg_factory_calls;
+static KlTls g_cfg_tls;
+static KlTls *counting_factory(KlTlsCtx *ctx, KlAllocator *alloc)
+{
+    (void)ctx; (void)alloc;
+    g_cfg_factory_calls++;
+    g_cfg_tls = make_fake_tls();
+    g_cfg_tls.destroy = fake_destroy;
+    return &g_cfg_tls;
+}
+UTEST(tls_client_audit44, cfg_verify_without_host_refused)
+{
+    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    seam_reset();
+    g_hs_seq[0] = KL_TLS_OK; g_hs_n = 1;        /* would succeed if reached */
+    g_cfg_factory_calls = 0;
+    KlTlsConfig cfg; memset(&cfg, 0, sizeof cfg);
+    cfg.factory = counting_factory;
+    HlTlsClient *c = hl_tls_client_handshake_cfg(sv[0], NULL, &cfg, 100);
+    if (c) { free(c); }
+    ASSERT_TRUE(c == NULL);
+    c = hl_tls_client_handshake_cfg(sv[0], "", &cfg, 100);
+    if (c) { free(c); }
+    ASSERT_TRUE(c == NULL);
+    ASSERT_EQ(g_cfg_factory_calls, 0);
+    ASSERT_EQ(g_hs_calls, 0);
+    tls_test_fcntl = NULL;
+    close(sv[0]); close(sv[1]);
+}
+
 UTEST_MAIN()

@@ -8,6 +8,20 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Audit 44 Lows: a TLS handshake through a caller's config with no server name, and JS
+  `hull:fs` errors with no code.** `hl_tls_client_handshake_cfg` (the caller-owned TLS config
+  path) now refuses a NULL or empty host before it makes a session, as the CA-bundle path has
+  since audit 29: the caller's context may verify, and with no name set the handshake checked
+  the certificate chain but not the name. JS `fs.read` / `write` / `stat` / `list` / `mmap`
+  errors now carry an own `code` (`not_found`, `invalid_path`, ...; the message is unchanged,
+  except an unnamed `fs.mmap` failure now reads `fs.mmap: mmap_failed`), and `ssh.fileStore`
+  recognises a missing known_hosts file by `e.code`, no longer by matching the message text.
+  (The third finding of the batch, a manifest `limits.route_concurrency` prefix sidestepped by
+  another spelling of the path, was checked and not reproducible: Keel's router normalises no
+  path, so only a path that starts with the prefix reaches a route under it.)
+
 ## [0.20.0] - 2026-11-10
 
 Audit round 44 over v0.19.0 (C, JS and Lua), with every finding fixed: no High, 13 Medium and

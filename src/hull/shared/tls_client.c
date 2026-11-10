@@ -257,14 +257,20 @@ HlTlsClient *hl_tls_client_handshake_cfg(int fd, const char *host,
     KlTlsConfig *cfg = (KlTlsConfig *)tls_cfg;
     if (!cfg || !cfg->factory)
         return NULL;
+    /* No server name, no session: the caller's ctx may verify, and a skipped
+     * set_hostname checks the chain but not the name (audit 44; the twin of
+     * the refusal in hl_tls_client_handshake_stop, audit 29). */
+    if (!host || !host[0]) {
+        log_error("[hull:tls] a TLS connection needs a server name; connection refused");
+        return NULL;
+    }
 
     KlTls *tls = cfg->factory(cfg->ctx, default_alloc());
     if (!tls)
         return NULL;
     /* The caller's config may verify: a name that did not take must not
      * leave the handshake to accept any certificate the anchor signed. */
-    if (host && host[0] && tls->set_hostname &&
-        tls->set_hostname(tls, host) != 0) {
+    if (tls->set_hostname && tls->set_hostname(tls, host) != 0) {
         log_error("[hull:tls] could not set the server name '%s' for "
                   "certificate verification; connection refused", host);
         tls->destroy(tls);

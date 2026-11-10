@@ -48,7 +48,9 @@ HlTlsClient *hl_tls_client_handshake_stop(int fd, const char *host,
  * SMTP, which owns its TLS config (verify policy lives in the ctx the caller
  * builds). The returned session does NOT own the ctx: hl_tls_client_free tears
  * down only the KlTls, leaving the caller's KlTlsCtx intact. Runs the same
- * blocking handshake loop. @p host is used for SNI. Returns NULL on failure.
+ * blocking handshake loop. @p host is used for SNI and the certificate name
+ * check, and is required: a NULL or empty host is refused before any session
+ * is made (the caller's ctx may verify; audit 44). Returns NULL on failure.
  */
 HlTlsClient *hl_tls_client_handshake_cfg(int fd, const char *host,
                                          void *tls_cfg, int timeout_ms);
