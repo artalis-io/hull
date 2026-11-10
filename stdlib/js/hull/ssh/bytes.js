@@ -10,8 +10,9 @@
 // hull:crypto takes bytes as BUFFERS (a string argument is UTF-8 text there),
 // so this module is the one place the two meet: `crypto` below is hull:crypto
 // with the Lua shapes - byte strings in and out, multiple returns as arrays -
-// which is what every hull:ssh:* module calls through (`opts.crypto` is the
-// seam a test replaces it at, as in Lua).
+// which is what every hull:ssh:* module calls through (a test replaces it
+// through hull:_test_hooks' "hull:ssh" setCrypto, as in Lua; a `crypto`
+// option on a public hull:ssh entry point is refused - audit 44).
 //
 //   bytes.toU8(s)      byte string -> Uint8Array (throws on a code unit > 255)
 //   bytes.fromBuf(b)   ArrayBuffer / typed array -> byte string

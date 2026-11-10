@@ -7929,6 +7929,54 @@ UTEST(lua_ssh_bridge, a_trust_store_over_the_real_hull_kv)
     cleanup_lua();
 }
 
+/* audit 44: `crypto` was a test seam on the public entry points, reachable by
+ * app code - the transport draws randomness, key exchange, ciphers and
+ * host-key verification from it, so an app's own table chose every byte sent
+ * to the granted host and could make every host key verify. Each public entry
+ * point now refuses the option before it dials or computes anything; the
+ * suites swap the crypto through hull._test_hooks instead. App code here (a
+ * non-stdlib chunk name), as an application would call it. */
+UTEST(ssh_audit44, public_crypto_option_refused)
+{
+    init_lua();
+    ASSERT_EQ(ssh_declare("app.manifest({ modules = { 'hull/ssh@1' } })"), 0);
+    int rc = luaL_dostring(lua_rt.L,
+        "local ssh = require('hull.ssh')\n"
+        "local used = 0\n"
+        "local c = setmetatable({}, { __index = function()\n"
+        "    used = used + 1\n"
+        "    return function() return string.rep('A', 32) end\n"
+        "end })\n"
+        "local out = {}\n"
+        "local function try(name, f)\n"
+        "    local ok, e = pcall(f)\n"
+        "    out[#out + 1] = name .. '=' .. (ok and 'accepted'\n"
+        "        or (tostring(e):find('crypto option is not accepted', 1, true)\n"
+        "            and 'refused' or 'other'))\n"
+        "end\n"
+        "local dialled = false\n"
+        "try('connect', function() return ssh.connect{ host = 'spark.local',\n"
+        "    user = 'operator', key = {}, crypto = c,\n"
+        "    open_stream = function() dialled = true\n"
+        "        return nil, 'no route', 'connect_failed' end } end)\n"
+        "local blob = string.pack('>s4s4', 'ssh-ed25519', string.rep('k', 32))\n"
+        "try('fingerprint', function() return ssh.fingerprint(blob, { crypto = c }) end)\n"
+        "try('file_store', function() return ssh.file_store('kh', { crypto = c,\n"
+        "    fs = { read = function() return '' end,\n"
+        "           write = function() return true end } }) end)\n"
+        "try('load_key', function() return ssh.load_key('x', { crypto = c }) end)\n"
+        "return table.concat(out, ',') .. ';dialled=' .. tostring(dialled)\n"
+        "    .. ';used=' .. used\n");
+    if (rc != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(lua_rt.L, -1));
+    ASSERT_EQ(rc, LUA_OK);
+    EXPECT_STREQ(lua_tostring(lua_rt.L, -1),
+                 "connect=refused,fingerprint=refused,file_store=refused,"
+                 "load_key=refused;dialled=false;used=0");
+    lua_settop(lua_rt.L, 0);
+    ssh_undeclare();
+    cleanup_lua();
+}
+
 UTEST(lua_ssh_bridge, a_manifest_denial_carries_its_code)
 {
     /* So the SSH layer reports `denied` for the manifest and only for it. */

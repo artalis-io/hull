@@ -8,6 +8,19 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`hull/ssh`: the crypto test seam is a test hook, not a public option** (audit 44, Low, both
+  runtimes). `ssh.connect`, `ssh.fingerprint`, `ssh.load_key` and `ssh.file_store` (JS
+  `connect`, `fingerprint`, `loadKey`, `fileStore`) took an `opts.crypto` table meant for the
+  unit tests. App code could pass one, and the transport draws its randomness, key exchange,
+  ciphers and host-key verification from it: the app chose every byte written to the granted
+  host after the identification line and could make any host key verify. Each entry point now
+  refuses a `crypto` option with an error naming it, before it dials or computes anything; the
+  suites swap the crypto through `hull._test_hooks` / `hull:_test_hooks` (`set_crypto` /
+  `setCrypto`). An app that passed `crypto` gets the error; drop the option.
+  (`ssh_audit44.public_crypto_option_refused`, test_lua / test_js.)
+
 ## [0.20.0] - 2026-11-10
 
 Audit round 44 over v0.19.0 (C, JS and Lua), with every finding fixed: no High, 13 Medium and

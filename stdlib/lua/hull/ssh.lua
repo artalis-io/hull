@@ -60,12 +60,39 @@ local hostkey    = require('hull.ssh.hostkey')
 
 local M = {}
 
+-- The hull.crypto the whole stack runs on. Only a unit test may swap it, and
+-- only through hull._test_hooks ("hull.ssh" -> set_crypto(tbl), nil puts the
+-- real one back), never through an option (audit 44): the transport draws its
+-- randomness, key exchange, ciphers and host-key verification from it, so a
+-- `crypto` table on a public entry point chose every byte written to the
+-- granted host and could make every host key verify. A public entry point
+-- given one refuses it.
+local crypto_override = nil
+local function crypto_lib()
+    return crypto_override or require('hull.crypto')
+end
+local function refuse_crypto_option(where, opts)
+    if type(opts) == "table" and opts.crypto ~= nil then
+        error(where .. ": the crypto option is not accepted (hull.ssh always "
+              .. "uses hull.crypto)", 3)
+    end
+end
+require("hull._test_hooks").register("hull.ssh", {
+    set_crypto = function(t) crypto_override = t end,
+})
+
 --- Load a key from the contents of a key file.
 ---
 --- `opts.passphrase_env` names an environment variable holding the passphrase
 --- (read and scrubbed in C, never a Lua string - prefer this);
 --- `opts.passphrase` passes the bytes directly.
 function M.load_key(text, opts)
+    refuse_crypto_option("ssh.load_key", opts)
+    if crypto_override ~= nil then
+        opts = { passphrase = opts and opts.passphrase,
+                 passphrase_env = opts and opts.passphrase_env,
+                 crypto = crypto_override }
+    end
     return privatekey.load(text, opts)
 end
 
@@ -126,9 +153,10 @@ end
 --- host as unknown, and the next accept would rewrite the file from nothing.
 --- @revoked lines are honoured (see hull.ssh.known_hosts).
 function M.file_store(path, opts)
+    refuse_crypto_option("ssh.file_store", opts)
     opts = opts or {}
     local fs     = opts.fs or require('hull.fs')
-    local crypto = opts.crypto or require('hull.crypto')
+    local crypto = crypto_lib()
     local kh     = require('hull.ssh.known_hosts')
 
     local function hmac(key, msg) return crypto.hmac_sha1(msg, key) end
@@ -773,6 +801,7 @@ function M.connect(opts)
     if type(opts) ~= "table" then
         error("ssh.connect: expected an options table", 2)
     end
+    refuse_crypto_option("ssh.connect", opts)
     for _, req in ipairs({ "host", "user" }) do
         if opts[req] == nil then
             error("ssh.connect: " .. req .. " is required", 2)
@@ -787,7 +816,7 @@ function M.connect(opts)
     local offer_ok, offer_why = require('hull.ssh.kexinit').validate_offer(opts.offer)
     if not offer_ok then error("ssh.connect: " .. offer_why, 2) end
 
-    local crypto = opts.crypto or require('hull.crypto')
+    local crypto = crypto_lib()
     -- A passphrase-protected key needs to say where its passphrase comes from.
     -- `passphrase_env` names an environment variable and is preferred: the
     -- value is read, used and scrubbed in C, so it never becomes a Lua string
@@ -976,10 +1005,11 @@ function M.forget_host(trust, host, port)
 end
 
 --- Fingerprint a key blob, for showing one to an operator: SHA256:<base64>,
---- exactly what `ssh-keygen -l` prints. `opts.crypto` is the test seam every
---- other entry point has; callers leave it out.
+--- exactly what `ssh-keygen -l` prints. `opts` takes nothing today; a
+--- `crypto` option is refused (audit 44: the seam is a test hook).
 function M.fingerprint(key_blob, opts)
-    local crypto = (opts and opts.crypto) or require("hull.crypto")
+    refuse_crypto_option("ssh.fingerprint", opts)
+    local crypto = crypto_lib()
     return hostkey.fingerprint(crypto.sha256, key_blob)
 end
 

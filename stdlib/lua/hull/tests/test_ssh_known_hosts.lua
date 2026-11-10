@@ -137,10 +137,18 @@ local fake_crypto = {
     random = function(n) return string.rep("r", n) end,
 }
 
+-- The crypto under test goes in through hull._test_hooks ("hull.ssh"):
+-- a `crypto` option on a public hull.ssh entry point is refused (audit 44).
+-- A store takes the crypto it is made with, so each store() sets it.
+local ssh_hooks = require('hull._test_hooks').get('hull.ssh')
+
 local function store(fs, opts)
     opts = opts or {}
-    opts.fs, opts.crypto = fs, fake_crypto
-    return ssh.file_store("kh", opts)
+    opts.fs = fs
+    ssh_hooks.set_crypto(fake_crypto)
+    local st = ssh.file_store("kh", opts)
+    ssh_hooks.set_crypto(nil)
+    return st
 end
 
 test("a missing file is an empty store, created by the first accept", function()
@@ -354,8 +362,11 @@ test("ssh.fingerprint takes just the key blob", function()
     local key = wire.writer():string("ssh-ed25519"):string(string.rep("A", 32)):build()
     local crypto = { sha256 = function() return string.rep("\0", 32) end }
     -- 32 zero bytes, unpadded standard base64: what ssh-keygen -l prints.
-    assert_eq(ssh.fingerprint(key, { crypto = crypto }),
-              "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    ssh_hooks.set_crypto(crypto)
+    local ok, fp = pcall(ssh.fingerprint, key)
+    ssh_hooks.set_crypto(nil)
+    assert_eq(ok, true, tostring(fp))
+    assert_eq(fp, "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 end)
 
 return {pass = pass, fail = fail}
