@@ -1480,6 +1480,25 @@ int hl_cap_crypto_ed25519_seed_keypair(const uint8_t seed[32],
     return crypto_sign_ed25519_seed_keypair(out_pk, out_sk, seed) == 0 ? 0 : -1;
 }
 
+int hl_cap_crypto_ed25519_password_sign(const void *password, size_t pw_len,
+                                        const uint8_t *msg, size_t msg_len,
+                                        uint8_t out_sig[64])
+{
+    if ((!password && pw_len) || (!msg && msg_len) || !out_sig ||
+        msg_len > HL_CRYPTO_ED25519_PASSWORD_MSG_MAX)
+        return -1;
+    /* The expanded key is SHA-512 of the password itself, of any length -
+     * where RFC 8032 hashes a 32-byte seed (MariaDB auth_ed25519). */
+    uint8_t az[64];
+    static const uint8_t empty[1] = { 0 };
+    crypto_hash_sha512(az, password ? (const unsigned char *)password : empty,
+                       (unsigned long long)pw_len);
+    int rc = crypto_sign_ed25519_tweet_sign_expanded(
+        out_sig, msg ? msg : empty, (unsigned long long)msg_len, az);
+    hull_secure_zero(az, sizeof az);
+    return rc == 0 ? 0 : -1;
+}
+
 /* ── SHA-512 (via TweetNaCl) ────────────────────────────────────────── */
 
 int hl_cap_crypto_sha512(const void *data, size_t len, uint8_t out[64])

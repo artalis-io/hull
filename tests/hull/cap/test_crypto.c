@@ -599,6 +599,75 @@ UTEST(hl_cap_crypto, ed25519_seed_keypair_rejects_null)
     ASSERT_EQ(hl_cap_crypto_ed25519_seed_keypair(seed, pk, NULL), -1);
 }
 
+/* MariaDB client_ed25519: the expanded key is SHA-512 of the password, so a
+ * 32-byte password is an RFC 8032 seed and signs as one (TEST 1 / TEST 2). */
+UTEST(hl_cap_crypto, ed25519_password_sign_matches_rfc8032_for_a_seed)
+{
+    uint8_t seed[32], sig[64], want[64];
+    unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+          seed, 32);
+    unhex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+          "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+          want, 64);
+    ASSERT_EQ(hl_cap_crypto_ed25519_password_sign(seed, 32, NULL, 0, sig), 0);
+    ASSERT_EQ(memcmp(sig, want, 64), 0);
+
+    const uint8_t m = 0x72;
+    unhex("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+          seed, 32);
+    unhex("92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
+          "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+          want, 64);
+    ASSERT_EQ(hl_cap_crypto_ed25519_password_sign(seed, 32, &m, 1, sig), 0);
+    ASSERT_EQ(memcmp(sig, want, 64), 0);
+}
+
+/* Passwords of other lengths, against an independent pure-Python model of
+ * MariaDB's plugin/auth_ed25519/ref10/sign.c; the signature verifies under
+ * the public key the server stores (PASSWORD('secret')'s point). */
+UTEST(hl_cap_crypto, ed25519_password_sign_known_answers)
+{
+    static const char *const v[][2] = {
+        { "secret",
+          "86721b479a775d0f2570c4c2f41b8488d7727719881b5854ae4e979411a9c40c"
+          "12a39ee0c41b0a374ef14408c88f72a210320f6f35344a838ec72ea6d708ae07" },
+        { "",
+          "bdeafdd8db5c41a63d0a761ba3abac6212e58fd8df96c7d71a03f13a5658d976"
+          "cb44118a2886ae7c9f6d11d39eca9b14a580bf75c9f50b899cdb503383daa307" },
+        { "a much longer password than thirty-two bytes, really",
+          "04d03eb67c1f32cc5cc506f10fa41fcc77ee36c5a4c9fd032a7001790fa93c5f"
+          "6d5735cbab263631b07c8ecccd04f0db5e6a839229b2d619fcce0bf4fba44507" },
+    };
+    uint8_t nonce[32];
+    for (int i = 0; i < 32; i++) nonce[i] = (uint8_t)(0x20 + i);
+    for (size_t i = 0; i < sizeof v / sizeof v[0]; i++) {
+        uint8_t sig[64], want[64];
+        unhex(v[i][1], want, 64);
+        ASSERT_EQ(hl_cap_crypto_ed25519_password_sign(
+                      v[i][0], strlen(v[i][0]), nonce, 32, sig), 0);
+        ASSERT_EQ(memcmp(sig, want, 64), 0);
+    }
+    uint8_t pk[32], sig[64];
+    unhex("648814444520e4f56043a2ec9215e63be7992d2d270bc6dee873e36164786096",
+          pk, 32);
+    ASSERT_EQ(hl_cap_crypto_ed25519_password_sign("secret", 6, nonce, 32, sig), 0);
+    ASSERT_EQ(hl_cap_crypto_ed25519_verify(nonce, 32, sig, pk), 0);
+    nonce[0] ^= 1;
+    ASSERT_EQ(hl_cap_crypto_ed25519_verify(nonce, 32, sig, pk), -1);
+}
+
+UTEST(hl_cap_crypto, ed25519_password_sign_rejects_bad_args)
+{
+    uint8_t msg[HL_CRYPTO_ED25519_PASSWORD_MSG_MAX + 1] = {0}, sig[64];
+    ASSERT_EQ(hl_cap_crypto_ed25519_password_sign("pw", 2, msg,
+                  sizeof msg, sig), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_password_sign("pw", 2, msg,
+                  HL_CRYPTO_ED25519_PASSWORD_MSG_MAX, sig), 0);
+    ASSERT_EQ(hl_cap_crypto_ed25519_password_sign(NULL, 2, msg, 1, sig), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_password_sign("pw", 2, NULL, 1, sig), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_password_sign("pw", 2, msg, 1, NULL), -1);
+}
+
 /* A failed random source fails the keypair with -1 and a zeroed secret key;
  * it used to abort() the process inside TweetNaCl's randombytes(). */
 UTEST(hl_cap_crypto, ed25519_keypair_fails_gracefully_when_random_fails)

@@ -1118,6 +1118,62 @@ else
     exit 1
 fi
 
+# ── client_ed25519 (MariaDB auth_ed25519) ──────────────────────────────
+# A MariaDB server greets with mysql_native_password and moves an ed25519
+# account over with an AuthSwitchRequest carrying a 32-byte nonce; Hull signs
+# it with the Ed25519 key derived from SHA-512(password). The empty password
+# signs too, a wrong one is refused by the server. MariaDB only (MySQL has no
+# such plugin).
+case "$IMG" in
+mariadb*)
+    echo "=== client_ed25519: an ed25519 account logs in (MariaDB) ==="
+    docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e "
+        INSTALL SONAME 'auth_ed25519';
+        CREATE USER 'hull_ed'@'%' IDENTIFIED VIA ed25519 USING PASSWORD('ed-s3cret pw');
+        CREATE USER 'hull_ed0'@'%' IDENTIFIED VIA ed25519 USING PASSWORD('');
+        GRANT SELECT ON hulldb.* TO 'hull_ed'@'%';
+        GRANT SELECT ON hulldb.* TO 'hull_ed0'@'%';" >/dev/null 2>&1 || {
+        echo "::error ed25519: could not install auth_ed25519 / create the users"; exit 1; }
+    EDDIR=$(mktemp -d)
+    cat > "$EDDIR/app.lua" <<'LUA'
+app.manifest({
+    modules = { "hull/db@1" },
+    databases = { dynamic = { schemes = { "mysql", "mariadb" }, hosts = { "127.0.0.0/8" } } },
+})
+local db = require("hull.db")
+app.main(function(ctx)
+    for i, dsn in ipairs(ctx.args) do
+        local ok, res = pcall(function()
+            local conn = db.open(dsn)
+            local u = conn.query("SELECT CURRENT_USER() AS u")[1].u
+            local c = conn.query("SELECT count(*) AS c FROM e2e")[1].c
+            conn.close()
+            return u .. "/" .. tostring(c)
+        end)
+        print("ed" .. i .. "=" .. (ok and res or ("ERR:" .. tostring(res))))
+    end
+    return 0
+end)
+LUA
+    EDB="127.0.0.1:${MYPORT}/hulldb"
+    ED_OUT=$(./build/hull "$EDDIR/app.lua" -- \
+        "mariadb://hull_ed:ed-s3cret%20pw@${EDB}?sslmode=disable" \
+        "mariadb://hull_ed0@${EDB}?sslmode=disable" \
+        "mariadb://hull_ed:wrong@${EDB}?sslmode=disable" \
+        "mariadb://hull_ed:ed-s3cret%20pw@${EDB}" 2>&1 || true)
+    echo "$ED_OUT" | grep -qE "ed1=hull_ed@%/3" || {
+        echo "::error ed25519: the account did not log in"; echo "$ED_OUT"; exit 1; }
+    echo "$ED_OUT" | grep -qE "ed2=hull_ed0@%/3" || {
+        echo "::error ed25519: the empty-password account did not log in"; echo "$ED_OUT"; exit 1; }
+    echo "$ED_OUT" | grep -qE "ed3=ERR:" || {
+        echo "::error ed25519: a wrong password logged in"; echo "$ED_OUT"; exit 1; }
+    echo "$ED_OUT" | grep -qE "ed4=hull_ed@%/3" || {
+        echo "::error ed25519: the account did not log in under the default sslmode"; echo "$ED_OUT"; exit 1; }
+    echo "PASS: client_ed25519 accounts log in (empty password included); a wrong password is refused"
+    rm -rf "$EDDIR"
+    ;;
+esac
+
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
 # full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the
 # plaintext MariaDB run (MariaDB defaults to mysql_native_password; its TLS matrix
