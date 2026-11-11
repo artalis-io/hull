@@ -1617,6 +1617,11 @@ static int lua_db_open(lua_State *L)
      * kv.open retry for theirs. */
     if (hl_db_dynamic_full())
         lua_gc(L, LUA_GCCOLLECT);
+    /* Still at the cap: an admission cap, coded "busy" like kv.open's (a
+     * plain error read as a backend failure). */
+    if (hl_db_dynamic_full())
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "db.open: too many open "
+                             "dynamic connections (close some first)");
     HlLuaOwnedConn *o = push_owned_box(L);
     /* Nothing allocates on the Lua heap between the open and o->h. The
      * path checks and the open's fixed work are charged to the run as they

@@ -1795,6 +1795,13 @@ static JSValue js_db_open(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, dsn);
         return JS_EXCEPTION;
     }
+    /* Still at the cap: an admission cap, coded "busy" like kv.open's (a
+     * plain error read as a backend failure). */
+    if (hl_db_dynamic_full()) {
+        JS_FreeCString(ctx, dsn);
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx,
+            "db.open: too many open dynamic connections (close some first)"));
+    }
     /* The path checks and the open's fixed work are charged to the run as
      * they go (audit 39); a trip there, or in SQLite's allocator during the
      * open (the budget bound on this thread), throws the run's limit

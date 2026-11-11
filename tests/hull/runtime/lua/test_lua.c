@@ -17890,6 +17890,33 @@ UTEST(lua_db_open_udf, a_udf_capturing_its_connection_does_not_pin_it)
     cleanup_lua_caps();
     EXPECT_EQ(hl_db_dynamic_open_count(), 0);
 }
+/* The cap of 16 dynamic connections is an admission cap: past it, with
+ * every handle still referenced (the one collection frees none), db.open
+ * refuses coded busy, as kv.open does. */
+UTEST(lua_db_open_udf, cap_refusal_is_busy)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "local held = {} "
+        "for i = 1, 16 do held[i] = dbm.open(':memory:') end "
+        "local ok, e = pcall(dbm.open, ':memory:') "
+        "assert(not ok and tostring(e):sub(1, 12) == '[hull:busy] ', tostring(e)) "
+        "held[1].close() "
+        "local c = dbm.open(':memory:') "
+        "assert(c.query('SELECT 1 AS v')[1].v == 1) c.close() "
+        "for i = 2, 16 do held[i].close() end "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+}
+
 #endif /* HL_ENABLE_DB && HL_ENABLE_SQLITE */
 
 UTEST_MAIN();

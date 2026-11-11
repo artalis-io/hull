@@ -19738,6 +19738,37 @@ UTEST(js_db_open_udf, a_udf_capturing_its_connection_does_not_pin_it)
     cleanup_js_caps();   /* the finalizers close what is left */
     EXPECT_EQ(hl_db_dynamic_open_count(), 0);
 }
+/* The cap of 16 dynamic connections is an admission cap: past it, with
+ * every handle still referenced (the one collection frees none), db.open
+ * refuses coded busy, as kv.open does. */
+UTEST(js_db_open_udf, cap_refusal_is_busy)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static HlManifest m;
+    HlDbRegistry *reg = db_open_udf_registry(&m);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const held = [];\n"
+        "for (let i = 0; i < 16; i++) held.push(dbMod.open(':memory:'));\n"
+        "let code = 'none';\n"
+        "try { dbMod.open(':memory:'); } catch (e) { code = String(e.code); }\n"
+        "held[0].close();\n"
+        "const c = dbMod.open(':memory:');\n"
+        "const v = c.query('SELECT 1 AS v')[0].v; c.close();\n"
+        "for (const h of held) h.close();\n"
+        "globalThis.__dou = code + '|' + v;\n"), 0);
+    char *s = eval_str("globalThis.__dou");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "busy|1");
+    free(s);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    db_open_udf_done(reg);
+    cleanup_js_caps();
+}
+
 #endif /* HL_ENABLE_DB && HL_ENABLE_SQLITE */
 
 UTEST_MAIN();
