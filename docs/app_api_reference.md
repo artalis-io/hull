@@ -2510,6 +2510,8 @@ gpu.dispatch(name, opts)               -- run shader, return output (string)
 gpu.dispatch(name, { output = false }) -- fire-and-forget (no readback, returns true)
 gpu.pipeline(stages, opts)             -- multi-stage dispatch, single submission
 gpu.pipeline(stages, { output = false }) -- fire-and-forget pipeline
+gpu.async.compile(name, wgsl, {device=N}) -- gpu.compile, the run parks while it compiles: true / nil, err
+gpu.async.load(name, {device=N})       -- gpu.load, parked the same way
 gpu.async.dispatch(name, opts)         -- async dispatch (yields to event loop)
 gpu.async.pipeline(stages, opts)       -- async pipeline
 gpu.buffer(name, data)                 -- create/write persistent buffer (string or MappedBuffer)
@@ -2529,6 +2531,8 @@ gpu.dispatch(name, opts)               // ArrayBuffer output
 gpu.dispatch(name, { output: false })  // fire-and-forget (returns true)
 gpu.pipeline(stages, opts)             // multi-stage, ArrayBuffer or Array<ArrayBuffer>
 gpu.pipeline(stages, { output: false })// fire-and-forget pipeline
+gpu.async.compile(name, wgsl, {device: N}) // Promise<true>; rejects as gpu.compile throws
+gpu.async.load(name, {device: N})      // Promise<true>
 gpu.async.dispatch(name, opts)         // Promise<ArrayBuffer>
 gpu.async.pipeline(stages, opts)       // Promise
 gpu.buffer(name, data)                 // create/write (ArrayBuffer, MappedBuffer, or string)
@@ -2706,6 +2710,8 @@ local out = gpu.dispatch("search", {
 **Binding layout:** Uniforms at binding 0 (if present), storage buffers at binding 1..N. WGSL shader `@binding()` annotations must match this auto-layout.
 
 **Async dispatch:** `gpu.async.dispatch()` and `gpu.async.pipeline()` submit GPU work to the thread pool and yield to the event loop (Lua coroutine / JS Promise). Other requests are served while the GPU is working. Deep-copies all buffer data for thread safety.
+
+**Async compile:** `gpu.async.compile(name, wgsl, opts?)` / `gpu.async.load(name, opts?)` are `gpu.compile` / `gpu.load` without the event loop waiting for the shader compiler. Everything before the compile is the synchronous call's - the same charge, shader source policy, WGSL pre-checks and (for runtime source a built binary opted into) the compile helper's verdict, with the same results - then the compile runs on its own thread while the calling run parks (Lua: the coroutine yields and gets `true` or `nil, err`; JS: the Promise resolves `true` or rejects with `gpu.async.compile failed: <err>` / `gpu.async.load: <err>`). A shader compiled already answers at once. The compile keeps its deadline (`compile_timeout` past it, the device `gpu_busy` until the compiler finishes), and while it runs the device takes no other compile and no GPU work (`gpu_busy`) - the synchronous compile held the device for the same time. Like every async op it can only wait in a handler, a task or `app.main` (`wait_refused` at a module's top level, inside middleware or with a transaction open), and needs the thread pool. The compile-helper round trip, when there is one, still runs before the call parks.
 
 **Sandbox:** When `manifest.gpu` is set:
 - macOS: allows `iokit-open` and `com.apple.MTLCompilerService` mach-lookup

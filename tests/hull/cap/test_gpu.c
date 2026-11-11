@@ -4915,6 +4915,232 @@ UTEST(gpu_audit44, sync_call_while_async_holds_device)
 }
 #endif /* HL_ENABLE_DB */
 
+/* ── gpu.async.compile (hl_cap_gpu_compile_async_*) ──────────────────
+ * The event loop begins the compile and does not wait for it; a pool
+ * thread finishes it (here: the test thread). Everything before the
+ * backend compile is the synchronous compile's; the deadline, abandonment
+ * and the busy device behave as for it. */
+
+static HlGpuCtx *aac_ctx(HlGpuBackend *be)
+{
+    *be = MOCK_BACKEND;
+    be->compile = a40_slow_compile;
+    be->pipeline_destroy = a40_pipeline_destroy;
+    HlGpuCtx *ctx = mock_ctx();
+    if (ctx) ctx->backend = be;
+    a40_reset();
+    return ctx;
+}
+
+static int aac_destroyed(void)
+{
+    pthread_mutex_lock(&a40_mu);
+    int d = a40_destroyed;
+    pthread_mutex_unlock(&a40_mu);
+    return d;
+}
+
+/* The device's compile reference goes once the compile thread is done. */
+static int aac_device_free(HlGpuCtx *ctx)
+{
+    unsigned char data[16] = { 0 };
+    for (int k = 0; k < 300; k++) {
+        if (hl_cap_gpu_buffer_write(ctx, -1, "b", data, 16, 0) == HL_GPU_OK &&
+            ctx->devices[0].compile_job == NULL)
+            return 1;
+        a40_sleep_ms(10);
+    }
+    return 0;
+}
+
+UTEST(hull_cap_gpu_async_compile, begin_does_not_wait_and_finish_installs)
+{
+    HlGpuBackend be;
+    HlGpuCtx *ctx = aac_ctx(&be);
+    ASSERT_TRUE(ctx != NULL);
+    hl_gpu_test_set_compile_timeout_ms(0);
+    const char *src = "@group(0) @binding(0) var<storage, read_write> a: array<u32>;"
+                      "@compute @workgroup_size(1) fn main() {}";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", 16, HL_GPU_USAGE_READWRITE));
+    HlGpuCompileAsync *a = NULL;
+    double t0 = a40_now();
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "slow", src,
+                                                        strlen(src), 0, &a));
+    /* Returned while the backend compile still blocks. */
+    EXPECT_TRUE(a40_now() - t0 < 0.5);
+    ASSERT_TRUE(a != NULL);
+    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+    /* Not settled: the device takes no other compile and no GPU work. */
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_compile(ctx, -1, "next", src, strlen(src)));
+    HlGpuCompileAsync *b = NULL;
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_compile_async_begin(ctx, -1, "next", src,
+                                                              strlen(src), 0, &b));
+    EXPECT_TRUE(b == NULL);
+    unsigned char data[16] = { 0 };
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_buffer_write(ctx, -1, "b", data, 16, 0));
+    /* Even with the compile thread done, until the finisher settles it. */
+    a40_release_now();
+    EXPECT_TRUE(a40_wait_settled(ctx));
+    a40_sleep_ms(20);
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_buffer_write(ctx, -1, "b", data, 16, 0));
+    atomic_int cancelled = 0;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_finish(a, &cancelled));
+    EXPECT_EQ(1, ctx->devices[0].pipeline_count);
+    EXPECT_STREQ("slow", ctx->devices[0].pipelines[0].name);
+    /* Its bindings were read from the source, as the sync compile's. */
+    EXPECT_EQ(1, ctx->devices[0].pipelines[0].layout_known);
+    EXPECT_TRUE(ctx->devices[0].compile_job == NULL);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_write(ctx, -1, "b", data, 16, 0));
+    hl_cap_gpu_compile_async_free(a);
+    EXPECT_EQ(0, aac_destroyed());
+    /* Compiled already: begin answers at once, nothing started. */
+    a = NULL;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "slow", src,
+                                                        strlen(src), 0, &a));
+    EXPECT_TRUE(a == NULL);
+    hl_cap_gpu_buffer_destroy(ctx, -1, "b");
+    hl_cap_gpu_destroy(ctx);
+    EXPECT_EQ(1, aac_destroyed());
+    free(ctx);
+}
+
+UTEST(hull_cap_gpu_async_compile, deadline_abandons_and_device_recovers)
+{
+    HlGpuBackend be;
+    HlGpuCtx *ctx = aac_ctx(&be);
+    ASSERT_TRUE(ctx != NULL);
+    hl_gpu_test_set_compile_timeout_ms(100);
+    const char *src = "@compute @workgroup_size(1) fn main() {}";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", 16, HL_GPU_USAGE_READWRITE));
+    HlGpuCompileAsync *a = NULL;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "slow", src,
+                                                        strlen(src), 0, &a));
+    hl_gpu_test_set_compile_timeout_ms(0);   /* the deadline was taken at begin */
+    double t0 = a40_now();
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_compile_async_finish(a, NULL));
+    EXPECT_TRUE(a40_now() - t0 < 1.0);
+    EXPECT_STREQ("compile_timeout", hl_gpu_compile_errstr(HL_GPU_ERR_TIMEOUT));
+    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+    /* Busy until the abandoned compile is done; its pipeline is released
+     * by its thread, never installed. */
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_compile(ctx, -1, "next", src, strlen(src)));
+    hl_cap_gpu_compile_async_free(a);
+    a40_release_now();
+    EXPECT_TRUE(a40_wait_settled(ctx));
+    EXPECT_TRUE(aac_device_free(ctx));
+    EXPECT_EQ(1, aac_destroyed());
+    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+    hl_cap_gpu_buffer_destroy(ctx, -1, "b");
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_async_compile, cancel_abandons_at_once)
+{
+    HlGpuBackend be;
+    HlGpuCtx *ctx = aac_ctx(&be);
+    ASSERT_TRUE(ctx != NULL);
+    hl_gpu_test_set_compile_timeout_ms(0);
+    const char *src = "@compute @workgroup_size(1) fn main() {}";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", 16, HL_GPU_USAGE_READWRITE));
+    HlGpuCompileAsync *a = NULL;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "slow", src,
+                                                        strlen(src), 0, &a));
+    atomic_int cancelled = 1;
+    double t0 = a40_now();
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_compile_async_finish(a, &cancelled));
+    EXPECT_TRUE(a40_now() - t0 < 0.5);
+    hl_cap_gpu_compile_async_free(a);
+    a40_release_now();
+    EXPECT_TRUE(a40_wait_settled(ctx));
+    EXPECT_TRUE(aac_device_free(ctx));
+    EXPECT_EQ(1, aac_destroyed());
+    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+    hl_cap_gpu_buffer_destroy(ctx, -1, "b");
+    mock_free(ctx);
+}
+
+/* A finisher that never ran (cancelled in the pool's queue, or the binding
+ * failed after begin): free abandons the job, touching only the job, and
+ * releases a pipeline the thread had already made. */
+UTEST(hull_cap_gpu_async_compile, free_without_finish_abandons)
+{
+    HlGpuBackend be;
+    HlGpuCtx *ctx = aac_ctx(&be);
+    ASSERT_TRUE(ctx != NULL);
+    hl_gpu_test_set_compile_timeout_ms(0);
+    const char *src = "@compute @workgroup_size(1) fn main() {}";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", 16, HL_GPU_USAGE_READWRITE));
+    /* Thread done first: free releases its pipeline. */
+    HlGpuCompileAsync *a = NULL;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "one", src,
+                                                        strlen(src), 0, &a));
+    a40_release_now();
+    EXPECT_TRUE(a40_wait_settled(ctx));
+    hl_cap_gpu_compile_async_free(a);
+    EXPECT_TRUE(aac_device_free(ctx));
+    EXPECT_EQ(1, aac_destroyed());
+    /* Thread still running: it releases its own pipeline when done. */
+    a40_reset();
+    a = NULL;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "two", src,
+                                                        strlen(src), 0, &a));
+    hl_cap_gpu_compile_async_free(a);
+    a40_release_now();
+    EXPECT_TRUE(a40_wait_settled(ctx));
+    EXPECT_TRUE(aac_device_free(ctx));
+    EXPECT_EQ(1, aac_destroyed());
+    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+    hl_cap_gpu_buffer_destroy(ctx, -1, "b");
+    mock_free(ctx);
+}
+
+/* begin refuses exactly what the synchronous compile refuses, before the
+ * backend: the WGSL pre-checks, the name, the device, the shader policy. */
+UTEST(hull_cap_gpu_async_compile, begin_refuses_as_sync)
+{
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = ac_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    HlGpuCompileAsync *a = NULL;
+    /* A source the pre-checks refuse (unreadable byte). */
+    const char *bad = "fn main() { let q = \"x\"; }";
+    EXPECT_EQ(hl_cap_gpu_compile(ctx, -1, "q", bad, strlen(bad)),
+              hl_cap_gpu_compile_async_begin(ctx, -1, "q", bad, strlen(bad), 0, &a));
+    EXPECT_TRUE(a == NULL);
+    char longname[HL_GPU_NAME_MAX + 8];
+    memset(longname, 'n', sizeof longname - 1);
+    longname[sizeof longname - 1] = '\0';
+    EXPECT_EQ(HL_GPU_ERR_INTERNAL,
+              hl_cap_gpu_compile_async_begin(ctx, -1, longname, AC_OTHER,
+                                             strlen(AC_OTHER), 0, &a));
+    EXPECT_EQ(HL_GPU_ERR_DEVICE,
+              hl_cap_gpu_compile_async_begin(ctx, 7, "d", AC_OTHER,
+                                             strlen(AC_OTHER), 0, &a));
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 0, &vfs);
+    EXPECT_EQ(HL_GPU_ERR_POLICY,
+              hl_cap_gpu_compile_async_begin(ctx, -1, "other", AC_OTHER,
+                                             strlen(AC_OTHER), 0, &a));
+    /* Opted in with no helper running: fails closed, as the sync call. */
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
+    hl_gpu_helper_stop();
+    EXPECT_EQ(HL_GPU_ERR_HELPER,
+              hl_cap_gpu_compile_async_begin(ctx, -1, "other", AC_OTHER,
+                                             strlen(AC_OTHER), 0, &a));
+    EXPECT_TRUE(a == NULL);
+    EXPECT_EQ(0, mock_compiles);
+    /* An embedded source is admitted and compiled (mock: at once). */
+    ASSERT_EQ(HL_GPU_OK,
+              hl_cap_gpu_compile_async_begin(ctx, -1, "dbl", AC_EMBEDDED,
+                                             strlen(AC_EMBEDDED), 0, &a));
+    ASSERT_TRUE(a != NULL);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_finish(a, NULL));
+    hl_cap_gpu_compile_async_free(a);
+    EXPECT_EQ(1, mock_compiles);
+    EXPECT_EQ(1, ctx->devices[0].pipeline_count);
+    mock_free(ctx);
+}
+
 /* The test binary is also the compile helper: hl_gpu_helper_start(NULL)
  * spawns this executable with HL_GPU_HELPER_ARGV1, as a built binary
  * spawns itself. */

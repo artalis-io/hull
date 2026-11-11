@@ -15430,6 +15430,199 @@ UTEST(lua_gpu_audit_convergence, manifest_dynamic_shaders)
     }
 }
 
+/* ── gpu.async.compile / gpu.async.load ─────────────────────────────────
+ * The compile is begun on the loop and the run parks until a pool thread
+ * has installed it. Over the mock backend with a real async backend and
+ * pool; the code runs in a detached coroutine, as under app.main. */
+
+typedef struct {
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx    *actx;
+    HlAsyncBackendPool   *pool;
+} LgpuLoop;
+
+static int lgpu_loop_open(LgpuLoop *l)
+{
+    memset(l, 0, sizeof *l);
+    l->be = hl_async_backend();
+    if (!l->be || l->be->init(&l->actx, NULL) != 0) return -1;
+    if (l->be->pool_create(&l->pool, l->actx, 1, 8) != 0) return -1;
+    lua_rt.base.async_ctx = l->actx;
+    lua_rt.base.thread_pool = l->pool;
+    return 0;
+}
+
+static void lgpu_loop_close(LgpuLoop *l)
+{
+    if (l->be && l->actx) {
+        l->be->tick(l->actx, 0);
+        if (l->pool) l->be->pool_free(l->pool);
+        l->be->free(l->actx);
+    }
+    lua_rt.base.async_ctx = NULL;
+    lua_rt.base.thread_pool = NULL;
+}
+
+/* Run `src` (which returns one string) in a fresh coroutine, driving the
+ * loop until it finishes. *parked says whether it yielded. Caller frees. */
+static char *lgpu_co_run(LgpuLoop *l, const char *src, int *parked)
+{
+    lua_State *L = lua_rt.L;
+    lua_State *co = lua_newthread(L);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    if (luaL_loadbuffer(co, src, strlen(src), "=app") != LUA_OK) {
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        return strdup("(load error)");
+    }
+    HL_LUA_ARM(&lua_rt, co);
+    lua_rt.active_co = co;
+    lua_rt.active_conn = NULL;
+    lua_rt.active_thread_ref = ref;
+    int nres = 0;
+    int st = lua_resume(co, L, 0, &nres);
+    *parked = st == LUA_YIELD;
+    if (st != LUA_YIELD) {
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        lua_rt.active_co = NULL;
+        lua_rt.active_thread_ref = LUA_NOREF;
+    }
+    for (int i = 0; i < 250 && lua_status(co) == LUA_YIELD; i++)
+        l->be->tick(l->actx, 20);
+    char *out;
+    if (lua_status(co) == LUA_OK && lua_gettop(co) > 0) {
+        const char *r = lua_tostring(co, -1);
+        out = strdup(r ? r : "(nil)");
+    } else if (lua_status(co) == LUA_YIELD) {
+        out = strdup("(still parked)");
+    } else {
+        const char *e = lua_tostring(co, -1);
+        out = strdup(e ? e : "(error)");
+    }
+    lua_settop(L, 0);
+    return out;
+}
+
+UTEST(lua_gpu_async_compile, parks_and_installs)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    LgpuLoop l;
+    ASSERT_EQ(lgpu_loop_open(&l), 0);
+    gpu_mock_compiles = 0;
+    int parked = 0;
+    char *got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.compile('s', '" HL_TEST_GPU_WGSL "') "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "true nil");
+    free(got);
+    EXPECT_TRUE(parked);
+    EXPECT_EQ(gpu_mock_compiles, 1);
+    EXPECT_EQ(lgpu->devices[0].pipeline_count, 1);
+    EXPECT_TRUE(lgpu->devices[0].compile_job == NULL);
+    /* Compiled already: answered at once, no park. */
+    got = lgpu_co_run(&l, "return tostring(gpu.async.compile('s', 'x'))", &parked);
+    EXPECT_STREQ(got, "true");
+    free(got);
+    EXPECT_FALSE(parked);
+    /* The installed pipeline dispatches. */
+    got = lgpu_co_run(&l,
+        "return gpu.dispatch('s', { buffers = { { data = 'abcd' } } })", &parked);
+    EXPECT_STREQ(got, "abcd");
+    free(got);
+    /* A backend error comes back as gpu.compile's: nil + its string. */
+    got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.compile('empty', '') "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "nil shader_error");
+    free(got);
+    EXPECT_TRUE(parked);
+    EXPECT_EQ(lgpu->devices[0].pipeline_count, 1);
+    lgpu_loop_close(&l);
+    lgpu_cleanup();
+}
+
+UTEST(lua_gpu_async_compile, refusals_before_anything_starts)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    gpu_mock_compiles = 0;
+    /* No pool: the same error as gpu.async.dispatch. */
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.compile, 's', 'fn main() {}') "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('no thread pool', 1, true) and 'nopool' or tostring(e))",
+                "false nopool");
+    LgpuLoop l;
+    ASSERT_EQ(lgpu_loop_open(&l), 0);
+    /* Not in a handler / task / app.main (here: a plain chunk): the wait
+     * gate refuses with the wait_refused code. */
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.compile, 's', 'fn main() {}') "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('[hull:wait_refused]', 1, true) and 'refused' or tostring(e))",
+                "false refused");
+    /* Argument errors and the size cap raise, as gpu.compile's. */
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.compile, 's') "
+                "R = tostring(ok)", "false");
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.compile, 's', string.rep(' ', (1 << 20) + 1)) "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('too large', 1, true) and 'large' or tostring(e))",
+                "false large");
+    /* A source the pre-checks refuse: nil + shader_error at once, no park,
+     * nothing compiled. */
+    int parked = 1;
+    char *got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.compile('q', 'fn main() { let q = \"x\"; }') "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "nil shader_error");
+    free(got);
+    EXPECT_FALSE(parked);
+    EXPECT_EQ(gpu_mock_compiles, 0);
+    lgpu_loop_close(&l);
+    lgpu_cleanup();
+}
+
+/* The shader policy and gpu.async.load: the same results as the
+ * synchronous calls. */
+UTEST(lua_gpu_async_compile, policy_and_load)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, lgpu_shader_entries, NULL);
+    lua_rt.base.app_vfs = &vfs;
+    hl_cap_gpu_set_shader_policy(lgpu, HL_GPU_SHADERS_EMBEDDED, 0, &vfs);
+    lua_pushstring(lua_rt.L, lgpu_other_wgsl);
+    lua_setglobal(lua_rt.L, "OTHER");
+    LgpuLoop l;
+    ASSERT_EQ(lgpu_loop_open(&l), 0);
+    gpu_mock_compiles = 0;
+    /* The wait gate refuses outside a handler / task / app.main. */
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.load, 'id') "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('[hull:wait_refused]', 1, true) and 'refused' or tostring(e))",
+                "false refused");
+    int parked = 1;
+    char *got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.compile('other', OTHER) "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "nil dynamic_shader_refused");
+    free(got);
+    EXPECT_FALSE(parked);
+    got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.load('missing') "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "nil shader 'missing' not found in shaders/");
+    free(got);
+    EXPECT_FALSE(parked);
+    got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.load('id') "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "true nil");
+    free(got);
+    EXPECT_TRUE(parked);
+    EXPECT_EQ(gpu_mock_compiles, 1);
+    EXPECT_EQ(lgpu->devices[0].pipeline_count, 1);
+    lgpu_loop_close(&l);
+    lua_rt.base.app_vfs = NULL;
+    lgpu_cleanup();
+}
+
 /* ── Audit 37: fs.list, fs.stat and small fs / blob writes are charged ─
  *
  * fs.list read a whole directory (every entry, matching the grant's pattern

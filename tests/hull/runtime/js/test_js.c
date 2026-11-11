@@ -16104,6 +16104,156 @@ UTEST(js_gpu_audit_convergence, manifest_dynamic_shaders)
     }
 }
 
+/* ── gpu.async.compile / gpu.async.load ─────────────────────────────────
+ * The twins of lua_gpu_async_compile: the compile is begun on the loop and
+ * the Promise settles once a pool thread has installed it. */
+
+typedef struct {
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx    *actx;
+    HlAsyncBackendPool   *pool;
+} JgpuLoop;
+
+static int jgpu_loop_open(JgpuLoop *l)
+{
+    memset(l, 0, sizeof *l);
+    l->be = hl_async_backend();
+    if (!l->be || l->be->init(&l->actx, NULL) != 0) return -1;
+    if (l->be->pool_create(&l->pool, l->actx, 1, 8) != 0) return -1;
+    js.base.async_ctx = l->actx;
+    js.base.thread_pool = l->pool;
+    return 0;
+}
+
+static void jgpu_loop_close(JgpuLoop *l)
+{
+    if (l->be && l->actx) {
+        l->be->tick(l->actx, 0);
+        if (l->pool) l->be->pool_free(l->pool);
+        l->be->free(l->actx);
+    }
+    js.base.async_ctx = NULL;
+    js.base.thread_pool = NULL;
+}
+
+/* Evaluate `call` (an expression giving a Promise) and drive the loop until
+ * it settles: "ok: <value>", "rej: <message>", "throw: <message>" when the
+ * call itself threw. *settled_sync says whether it had settled before the
+ * loop ran. Caller frees. */
+static char *jgpu_async_run(JgpuLoop *l, const char *call, int *settled_sync)
+{
+    char src[4096];
+    snprintf(src, sizeof src,
+        "globalThis.__r = 'pending';"
+        "try { (%s).then((v) => { globalThis.__r = 'ok: ' + String(v); },"
+        "                (e) => { globalThis.__r = 'rej: ' + e.message; }); }"
+        "catch (e) { globalThis.__r = 'throw: ' + e.message; }"
+        "'x'", call);
+    char *x = eval_str(src);
+    free(x);
+    hl_js_run_jobs(&js);
+    char *r = eval_str("globalThis.__r");
+    *settled_sync = r && strcmp(r, "pending") != 0;
+    for (int i = 0; i < 250 && r && strcmp(r, "pending") == 0; i++) {
+        free(r);
+        l->be->tick(l->actx, 20);
+        hl_js_run_jobs(&js);
+        r = eval_str("globalThis.__r");
+    }
+    return r ? r : strdup("(null)");
+}
+
+UTEST(js_gpu_async_compile, settles_and_installs)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    JgpuLoop l;
+    ASSERT_EQ(jgpu_loop_open(&l), 0);
+    gpu_mock_compiles = 0;
+    int sync = 1;
+    char *got = jgpu_async_run(&l, "gpu.async.compile('s', '" HL_TEST_GPU_WGSL "')", &sync);
+    EXPECT_STREQ(got, "ok: true");
+    free(got);
+    EXPECT_FALSE(sync);
+    EXPECT_EQ(gpu_mock_compiles, 1);
+    EXPECT_EQ(jgpu->devices[0].pipeline_count, 1);
+    EXPECT_TRUE(jgpu->devices[0].compile_job == NULL);
+    /* Compiled already: a Promise that is resolved, nothing started. */
+    got = jgpu_async_run(&l, "gpu.async.compile('s', 'x')", &sync);
+    EXPECT_STREQ(got, "ok: true");
+    free(got);
+    EXPECT_TRUE(sync);
+    EXPECT_EQ(gpu_mock_compiles, 1);
+    JGPU_EXPECT("return s(gpu.dispatch('s', { buffers: [{ data: u('abcd') }] }));",
+                "abcd");
+    /* A backend error rejects with gpu.compile's message. */
+    got = jgpu_async_run(&l, "gpu.async.compile('empty', '')", &sync);
+    EXPECT_STREQ(got, "rej: gpu.async.compile failed: shader_error");
+    free(got);
+    EXPECT_EQ(jgpu->devices[0].pipeline_count, 1);
+    jgpu_loop_close(&l);
+    jgpu_cleanup();
+}
+
+UTEST(js_gpu_async_compile, refusals_before_anything_starts)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    gpu_mock_compiles = 0;
+    /* No pool: the same error as gpu.async.dispatch. */
+    JGPU_EXPECT("gpu.async.compile('s', 'fn main() {}'); return 'ran';",
+                "throw: gpu.async not available (no thread pool)");
+    JgpuLoop l;
+    ASSERT_EQ(jgpu_loop_open(&l), 0);
+    /* While the app's module top level runs, the async gate refuses with
+     * the wait_refused code (C audit L4). */
+    js.in_load = 1;
+    JGPU_EXPECT("try { gpu.async.compile('s', 'fn main() {}'); return 'ran'; }"
+                "catch (e) { return String(e.code); }",
+                "wait_refused");
+    js.in_load = 0;
+    /* Argument errors and the size cap throw, as gpu.compile's. */
+    JGPU_EXPECT("gpu.async.compile('s'); return 'ran';",
+                "throw: gpu.async.compile requires name and wgsl");
+    JGPU_EXPECT("gpu.async.compile('s', ' '.repeat((1 << 20) + 1)); return 'ran';",
+                "throw: gpu.async.compile: WGSL source too large");
+    /* A source the pre-checks refuse: thrown at once, nothing compiled. */
+    JGPU_EXPECT("gpu.async.compile('q', 'fn main() { let q = \"x\"; }'); return 'ran';",
+                "throw: gpu.async.compile failed: shader_error");
+    EXPECT_EQ(gpu_mock_compiles, 0);
+    jgpu_loop_close(&l);
+    jgpu_cleanup();
+}
+
+UTEST(js_gpu_async_compile, policy_and_load)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, jgpu_shader_entries, NULL);
+    js.base.app_vfs = &vfs;
+    hl_cap_gpu_set_shader_policy(jgpu, HL_GPU_SHADERS_EMBEDDED, 0, &vfs);
+    JgpuLoop l;
+    ASSERT_EQ(jgpu_loop_open(&l), 0);
+    gpu_mock_compiles = 0;
+    js.in_load = 1;
+    JGPU_EXPECT("try { gpu.async.load('id'); return 'ran'; }"
+                "catch (e) { return String(e.code); }",
+                "wait_refused");
+    js.in_load = 0;
+    JGPU_EXPECT("gpu.async.compile('other', '" JGPU_OTHER_WGSL "'); return 'ran';",
+                "throw: gpu.async.compile failed: dynamic_shader_refused");
+    JGPU_EXPECT("gpu.async.load('missing'); return 'ran';",
+                "throw: gpu.async.load: shader 'missing' not found in shaders/");
+    int sync = 1;
+    char *got = jgpu_async_run(&l, "gpu.async.load('id')", &sync);
+    EXPECT_STREQ(got, "ok: true");
+    free(got);
+    EXPECT_FALSE(sync);
+    EXPECT_EQ(gpu_mock_compiles, 1);
+    EXPECT_EQ(jgpu->devices[0].pipeline_count, 1);
+    jgpu_loop_close(&l);
+    js.base.app_vfs = NULL;
+    jgpu_cleanup();
+}
+
 /* ── Audit 37: fs.list, fs.stat and small fs / blob writes are charged ─
  *
  * The twins of lua_audit37: fs.list read a whole directory, matching or

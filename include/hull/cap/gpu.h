@@ -42,6 +42,7 @@
 #include "hull/shared/offheap.h"  /* HlOffheapShared (audit 29) */
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -626,6 +627,36 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
  * embedded shaders/ set. */
 int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
                           const char *wgsl, size_t wgsl_len, int flags);
+
+/* gpu.async.compile / gpu.async.load: the same compile without the event
+ * loop waiting for it.
+ *
+ * begin (event loop) runs every check hl_cap_gpu_compile_ex runs, in the
+ * same order and with the same results - the shader policy, the WGSL
+ * pre-checks, the compile helper's verdict, the device lock, the cache -
+ * then starts the backend compile on its large-stack thread and returns
+ * HL_GPU_OK with *out set. HL_GPU_OK with *out NULL: @p name is compiled
+ * already. Any other result: refused, nothing started. While the compile
+ * is not settled the device refuses other compiles and GPU work
+ * ("gpu_busy"), as while an abandoned compile runs.
+ *
+ * finish (a pool thread) waits for the compile - until it is done,
+ * HL_GPU_COMPILE_TIMEOUT_MS after begin, or *cancelled - and installs the
+ * pipeline under the device mutex: HL_GPU_OK, the backend's error, or
+ * HL_GPU_ERR_TIMEOUT when abandoned (the device stays busy until the
+ * compile thread is done, as for the synchronous compile).
+ *
+ * free (event loop) releases the handle; one whose finish never ran is
+ * abandoned, touching only the job. The thread pool must be freed before
+ * the GPU context. */
+typedef struct HlGpuCompileAsync HlGpuCompileAsync;
+int  hl_cap_gpu_compile_async_begin(HlGpuCtx *ctx, int device,
+                                    const char *name, const char *wgsl,
+                                    size_t wgsl_len, int flags,
+                                    HlGpuCompileAsync **out);
+int  hl_cap_gpu_compile_async_finish(HlGpuCompileAsync *a,
+                                     const atomic_int *cancelled);
+void hl_cap_gpu_compile_async_free(HlGpuCompileAsync *a);
 
 /* Set the shader policy (audit convergence §7.3; cap/gpu_shader_policy.c).
  * serve.c calls it before it seals the context: HL_GPU_SHADERS_EMBEDDED

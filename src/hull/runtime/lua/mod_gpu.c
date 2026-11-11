@@ -187,6 +187,8 @@ static void gpu_pin_view(lua_State *L, int anchor, int idx, HlBufferView *bv)
  * gpu.compile(name, wgsl, opts?) -> true, err
  * gpu.load(name, opts?) -> true, err   (shaders/<name>.wgsl; opts.device)
  * gpu.dispatch(name, opts) -> output, err
+ * gpu.async.compile(name, wgsl, opts?) -> true, err   (parks the run)
+ * gpu.async.load(name, opts?) -> true, err           (parks the run)
  * gpu.async.dispatch(name, opts) -> {result=..., error=...}
  * gpu.buffer(name, data, opts?) -> true, err
  * gpu.buffer(name, nil) -> destroy
@@ -242,9 +244,6 @@ static int l_gpu_devices(lua_State *L)
     return 1;
 }
 
-/* Load WGSL shader from shaders/<name>.wgsl (VFS or disk), compiled on
- * opts.device as gpu.compile is (it compiled on the default device only, so a
- * loaded shader could not be dispatched on another). */
 /* Charge a compile of @p wgsl to the run's budget, with the work the run
  * has queued but not yet had counted (lua_hltakeowed), WITHOUT raising:
  * 1 once the run is over its budget or past its deadline, so the binding
@@ -258,20 +257,17 @@ static int gpu_compile_charge(lua_State *L, const char *wgsl, size_t len)
                                    ? INT64_MAX : (int64_t)units);
 }
 
-static int l_gpu_load(lua_State *L)
+/* gpu.load's source: shaders/<name>.wgsl from the VFS, or (development
+ * only) the disk. 0 with *wgsl / *len set (*file_buf the caller frees, or
+ * NULL for a VFS entry), or the number of results pushed (nil, err) for
+ * the binding to return. Raises only before anything is allocated. */
+static int gpu_load_source(lua_State *L, HlLua *lua, const char *name,
+                           const char **wgsl_out, size_t *len_out,
+                           char **file_buf_out)
 {
-    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
-    const char *name = luaL_checkstring(L, 1);
-    HlLua *lua = get_hl_lua(L);
-
-    /* Read before file_buf exists: an __index here may raise. */
-    int device = -1;
-    if (lua_istable(L, 2)) {
-        lua_getfield(L, 2, "device");
-        if (!lua_isnil(L, -1))
-            device = (int)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-    }
+    *wgsl_out = NULL;
+    *len_out = 0;
+    *file_buf_out = NULL;
 
     /* Validate shader name: reject path traversal */
     if (!name[0] || name[0] == '/' || strstr(name, "..") || strchr(name, '\\'))
@@ -355,6 +351,43 @@ static int l_gpu_load(lua_State *L)
         lua_pushfstring(L, "shader '%s' not found in shaders/", name);
         return 2;
     }
+    *wgsl_out = wgsl;
+    *len_out = wgsl_len;
+    *file_buf_out = file_buf;
+    return 0;
+}
+
+/* opts.device of gpu.compile / gpu.load and their async forms (-1 = the
+ * default device). Read before anything is allocated: an __index may
+ * raise. */
+static int gpu_device_opt(lua_State *L, int idx)
+{
+    int device = -1;
+    if (lua_istable(L, idx)) {
+        lua_getfield(L, idx, "device");
+        if (!lua_isnil(L, -1))
+            device = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    return device;
+}
+
+/* Load WGSL shader from shaders/<name>.wgsl (VFS or disk), compiled on
+ * opts.device as gpu.compile is (it compiled on the default device only, so a
+ * loaded shader could not be dispatched on another). */
+static int l_gpu_load(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    const char *name = luaL_checkstring(L, 1);
+    HlLua *lua = get_hl_lua(L);
+    int device = gpu_device_opt(L, 2);
+
+    const char *wgsl;
+    size_t wgsl_len;
+    char *file_buf;
+    int nret = gpu_load_source(L, lua, name, &wgsl, &wgsl_len, &file_buf);
+    if (nret)
+        return nret;
 
     /* Charged before the compile, which runs on the event loop in this one
      * call (audit 24), its expansion too (audit 39). Non-raising: file_buf
@@ -382,14 +415,7 @@ static int l_gpu_compile(lua_State *L)
     const char *name = luaL_checkstring(L, 1);
     size_t wgsl_len;
     const char *wgsl = luaL_checklstring(L, 2, &wgsl_len);
-
-    int device = -1;
-    if (lua_istable(L, 3)) {
-        lua_getfield(L, 3, "device");
-        if (!lua_isnil(L, -1))
-            device = (int)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-    }
+    int device = gpu_device_opt(L, 3);
 
     /* Capped as gpu.load's read is (audit 36): naga's passes recurse over
      * the source's expressions, and nothing real comes near 1 MiB. */
@@ -413,6 +439,177 @@ static int l_gpu_compile(lua_State *L)
     }
     lua_pushboolean(L, 1);
     return 1;
+}
+
+/* ── gpu.async.compile / gpu.async.load ─────────────────────────────
+ *
+ * The same compile as gpu.compile / gpu.load - the same charge, shader
+ * policy, pre-checks and compile-helper verdict, in the same order and with
+ * the same results (true, or nil + the same error string) - but the backend
+ * compile is not waited for on the event loop: the run parks until a pool
+ * thread has seen the compile finish (or abandoned it at its deadline) and
+ * installed the pipeline. The compile helper's round trip, for runtime
+ * source a built binary opted into, still runs before the park. */
+
+/* push_result: a placeholder; gpu_async_compile_k makes the results (an
+ * error must not be raised from push_result - see lua_db_async_k). */
+static void lua_push_worker_gpu_compile_result(lua_State *L, void *driver)
+{
+    (void)driver;
+    lua_pushnil(L);
+}
+
+static int gpu_async_compile_k(lua_State *L, int status, lua_KContext kctx)
+{
+    (void)status;
+    if (!hl_lua_async_k_ok(L))   /* audit 33: kctx may be freed */
+        return luaL_error(L, "%s: this wait was abandoned", "gpu.async.compile");
+    HlWorkerGpuOp *op = (HlWorkerGpuOp *)kctx;
+    lua_pop(L, 1);               /* the placeholder */
+    if (op && op->error) {
+        lua_pushnil(L);
+        lua_pushstring(L, op->error_msg);
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+/* Begin the compile of @p wgsl and park the run until it is installed.
+ * @p file_buf (gpu.async.load's disk read, or NULL) is freed on every
+ * path, before any raise. The wait gate runs first: no app code runs
+ * between it and the yield. */
+static int gpu_async_compile_common(lua_State *L, HlLua *lua, int device,
+                                    const char *name, const char *wgsl,
+                                    size_t wgsl_len, char *file_buf,
+                                    int kind, const char *what)
+{
+    const char *pre = NULL;
+    if (!lua || !lua->base.thread_pool)
+        pre = "gpu.async not available (no thread pool)";
+    else if (!lua->base.async_ctx)
+        pre = "gpu.async requires an active event loop";
+    if (pre) {
+        free(file_buf);
+        return luaL_error(L, "%s", pre);
+    }
+    if (!hl_lua_can_wait(L)) {
+        free(file_buf);
+        return hl_lua_check_can_wait(L, what);   /* raises the refusal */
+    }
+    /* Charged before the compile starts, as gpu.compile's. */
+    if (gpu_compile_charge(L, wgsl, wgsl_len)) {
+        free(file_buf);
+        return hl_lua_budget_raise(L);
+    }
+    HlGpuCompileAsync *ca = NULL;
+    int rc = hl_cap_gpu_compile_async_begin(
+        lua->base.gpu_ctx, device, name, wgsl, wgsl_len,
+        kind == HL_WORKER_GPU_LOAD ? HL_GPU_COMPILE_FROM_SHADERS : 0, &ca);
+    free(file_buf);
+    if (rc != HL_GPU_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, hl_gpu_compile_errstr(rc));
+        return 2;
+    }
+    if (!ca) {                   /* compiled already */
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    /* From here every failure frees `ca` (abandoning the compile) before
+     * it raises. */
+    HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
+    if (!op) {
+        hl_cap_gpu_compile_async_free(ca);
+        return luaL_error(L, "%s: out of memory", what);
+    }
+    op->server = lua->server;
+    op->gpu_ctx = lua->base.gpu_ctx;
+    op->is_compile = kind;
+    op->compile = ca;
+    snprintf(op->shader_name, sizeof(op->shader_name), "%s", name);
+
+    HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.net_ctx,
+                                           lua->base.alloc);
+    if (!actx) {
+        hl_worker_gpu_op_free_all(op);
+        return luaL_error(L, "%s: out of memory", what);
+    }
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *, HlAllocator *,
+                                                   HlLuaPushResultFn);
+    HlAsyncCont *cont = hl_lua_async_cont_create(
+        lua, lua->base.alloc, lua_push_worker_gpu_compile_result);
+    if (!cont) {
+        hl_worker_gpu_op_free_all(op);
+        hl_async_ctx_free(actx);
+        return luaL_error(L, "%s: out of memory", what);
+    }
+    actx->cont = cont;
+    actx->driver = op;
+    actx->free_driver = hl_worker_gpu_op_free_all;
+    actx->op.on_cancel = hl_worker_gpu_async_cancel;
+    actx->detached = (lua->active_conn == NULL);
+
+    op->async_ctx = actx;
+    atomic_store(&op->cancelled, 0);
+
+    if (hl_worker_gpu_submit(lua->base.thread_pool, op) != 0) {
+        actx->cont->destroy(actx->cont);
+        hl_worker_gpu_op_free_all(op);
+        hl_async_ctx_free(actx);
+        return luaL_error(L, "%s: thread pool full", what);
+    }
+
+    if (!actx->detached &&
+        hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn,
+                          (HlSuspendOp *)&actx->op) < 0) {
+        /* The worker sees the cancel, abandons the compile and done_fn
+         * frees the op. No cancel(): see l_gpu_async_dispatch. */
+        atomic_store(&op->cancelled, 1);
+        actx->cont->destroy(actx->cont);
+        actx->cont = NULL;
+        return luaL_error(L, "%s: failed to suspend connection", what);
+    }
+
+    return lua_yieldk(L, 0, (lua_KContext)op, gpu_async_compile_k);
+}
+
+/* gpu.async.compile(name, wgsl, opts?) -> true | nil, err */
+static int l_gpu_async_compile(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    size_t wgsl_len;
+    const char *wgsl = luaL_checklstring(L, 2, &wgsl_len);
+    int device = gpu_device_opt(L, 3);
+    if (wgsl_len > HL_GPU_WGSL_MAX_BYTES)
+        return luaL_error(L, "gpu.async.compile: WGSL source too large "
+                          "(at most %d bytes)", (int)HL_GPU_WGSL_MAX_BYTES);
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.gpu_ctx)
+        return luaL_error(L, "gpu.async.compile: GPU not initialized");
+    return gpu_async_compile_common(L, lua, device, name, wgsl, wgsl_len,
+                                    NULL, HL_WORKER_GPU_COMPILE,
+                                    "gpu.async.compile()");
+}
+
+/* gpu.async.load(name, opts?) -> true | nil, err */
+static int l_gpu_async_load(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    int device = gpu_device_opt(L, 2);
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.gpu_ctx)
+        return luaL_error(L, "gpu.async.load: GPU not initialized");
+    const char *wgsl;
+    size_t wgsl_len;
+    char *file_buf;
+    int nret = gpu_load_source(L, lua, name, &wgsl, &wgsl_len, &file_buf);
+    if (nret)
+        return nret;
+    return gpu_async_compile_common(L, lua, device, name, wgsl, wgsl_len,
+                                    file_buf, HL_WORKER_GPU_LOAD,
+                                    "gpu.async.load()");
 }
 
 static int l_gpu_dispatch(lua_State *L)
@@ -1943,6 +2140,8 @@ static const luaL_Reg gpu_funcs[] = {
 };
 
 static const luaL_Reg gpu_async_funcs[] = {
+    {"compile",   l_gpu_async_compile},
+    {"load",      l_gpu_async_load},
     {"dispatch",  l_gpu_async_dispatch},
     {"pipeline",  l_gpu_async_pipeline},
     {NULL, NULL}
