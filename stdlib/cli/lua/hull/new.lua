@@ -126,13 +126,18 @@ app.main(function(ctx)
 end)
 ]]
 
-templates.lua_cli_test = [[-- CLI tests use test.run_main to synthesize argv/stdin/env and capture
--- the exit code + stdout/stderr. Available once CLI test integration
--- lands; for now invoke main directly via `hull run`.
+templates.lua_cli_test = [[-- test.run_main(args, opts) runs app.main once with ctx.args = args and
+-- returns { code, stdout, stderr } (ctx.stdout / ctx.stderr captured).
+-- opts: stdin (string), env (names from manifest.env), timeout_ms.
 
 test("greets the named arg", function()
-    -- Placeholder - full CLI test harness lands separately.
-    test.eq(1, 1)
+    local r = test.run_main({ "alice" })
+    test.eq(r.code, 0)
+    test.eq(r.stdout, "hello alice\n")
+end)
+
+test("greets the world by default", function()
+    test.eq(test.run_main({}).stdout, "hello world\n")
 end)
 ]]
 
@@ -161,12 +166,18 @@ app.main(async (ctx) => {
 });
 ]]
 
-templates.js_cli_test = [[// CLI tests use test.runMain to synthesize argv/stdin/env and capture
-// the exit code + stdout/stderr. Available once CLI test integration
-// lands; for now invoke main directly via `hull run`.
+templates.js_cli_test = [[// test.runMain(args, opts) runs app.main once with ctx.args = args and
+// returns { code, stdout, stderr } (ctx.stdout / ctx.stderr captured).
+// opts: stdin (string or bytes), env (names from manifest.env), timeoutMs.
 
 test("greets the named arg", () => {
-    test.eq(1, 1);
+    const r = test.runMain(["alice"]);
+    test.eq(r.code, 0);
+    test.eq(r.stdout, "hello alice\n");
+});
+
+test("greets the world by default", () => {
+    test.eq(test.runMain([]).stdout, "hello world\n");
 });
 ]]
 

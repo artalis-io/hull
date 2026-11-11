@@ -557,6 +557,8 @@ void hl_js_test_register(JSContext *ctx, KlHttpRouter *router, HlJS *js)
                       JS_NewCFunction(ctx, js_test_ok, "ok", 2));
     JS_SetPropertyStr(ctx, test_fn, "err",
                       JS_NewCFunction(ctx, js_test_err, "err", 2));
+    JS_SetPropertyStr(ctx, test_fn, "runMain",
+                      JS_NewCFunction(ctx, js_test_run_main, "runMain", 2));
 
     JS_SetPropertyStr(ctx, global, "test", test_fn);
     JS_FreeValue(ctx, global);

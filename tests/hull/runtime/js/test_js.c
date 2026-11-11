@@ -19538,4 +19538,239 @@ UTEST(js_fs_audit44, error_carries_code)
     a15_fs_close(&f);
 }
 
+/* ── test.runMain: hull test for CLI apps ──────────────────────────────
+ * The JS twin of test_lua.c's lua_test_run_main suite. */
+#ifdef HL_ENABLE_HTTP_SERVER
+
+typedef struct {
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx    *loop;
+    KlHttpRouter          router;
+    KlAllocator           kalloc;
+} JsRunMainFix;
+
+static int js_run_main_open(JsRunMainFix *f, const char *app_src)
+{
+    f->be = hl_async_backend();
+    f->loop = NULL;
+    if (f->be->init(&f->loop, NULL) != 0) return -1;
+    pending_async_ctx = f->loop;
+    init_js_with_caps();
+    if (!js_initialized) return -1;
+    JSValue v = JS_Eval(js.ctx, app_src, strlen(app_src), "<app>",
+                        JS_EVAL_TYPE_MODULE);
+    int ok = !JS_IsException(v);
+    if (!ok) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+    if (!ok) return -1;
+    f->kalloc = kl_allocator_default();
+    kl_http_router_init(&f->router, &f->kalloc);
+    hl_js_test_register(js.ctx, &f->router, &js);
+    return 0;
+}
+
+static void js_run_main_close(JsRunMainFix *f)
+{
+    js.base.test_env_allow = NULL;
+    hl_js_vtable.stop_async(&js.base);
+    kl_http_router_free(&f->router);
+    cleanup_js_caps();
+    if (f->loop) {
+        (void)f->be->tick(f->loop, 0);
+        f->be->free(f->loop);
+    }
+}
+
+static int js_run_main_cases(const char *cases, HlTestCaseResult *r, int *passed)
+{
+    JSValue v = JS_Eval(js.ctx, cases, strlen(cases), "<cases>", JS_EVAL_TYPE_GLOBAL);
+    int ok = !JS_IsException(v);
+    if (!ok) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    if (!ok) return -1;
+    int total = 0, failed = 0;
+    *passed = 0;
+    memset(r, 0, 4 * sizeof *r);
+    hl_js_test_run(js.ctx, &total, passed, &failed, NULL, r, 4);
+    return total;
+}
+
+static const char *const JS_RUN_MAIN_APP =
+    "import { app } from 'hull:app';\n"
+    "app.manifest({ env: ['GREETING'] });\n"
+    "app.main(async (ctx) => {\n"
+    "  const cmd = ctx.args[0];\n"
+    "  if (cmd === 'echo') {\n"
+    "    ctx.stdout.write(ctx.args.slice(1).join(','));\n"
+    "    ctx.stderr.write(new Uint8Array([0x65]));\n"
+    "    return ctx.args.length;\n"
+    "  } else if (cmd === 'sleep') { await hull.sleep(5); ctx.stdout.write('slept'); return 0; }\n"
+    "  else if (cmd === 'hang') { await hull.sleep(60000); return 0; }\n"
+    "  else if (cmd === 'nap') { await hull.sleep(Number(ctx.args[1])); ctx.stdout.write('napped'); return 5; }\n"
+    "  else if (cmd === 'cat') {\n"
+    "    ctx.stdout.write(String(ctx.stdin.read('l')) + '|' + ctx.stdin.read('a'));\n"
+    "    return 0;\n"
+    "  } else if (cmd === 'env') { ctx.stdout.write(String(ctx.env.GREETING)); return 0; }\n"
+    "  else if (cmd === 'boom') { throw new Error('kaboom'); }\n"
+    "  else if (cmd === 'spin') { for (let i = 0; i < 30000; i++) {} return 0; }\n"
+    "  else if (cmd === 'write') { db.exec('INSERT INTO rm_t VALUES (2)'); return 0; }\n"
+    "  return 0;\n"
+    "});\n";
+
+UTEST(js_test_run_main, captures_args_exit_code_and_streams)
+{
+    JsRunMainFix f;
+    ASSERT_EQ(js_run_main_open(&f, JS_RUN_MAIN_APP), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(js_run_main_cases(
+        "test('echo', () => {\n"
+        "  const x = test.runMain(['echo', 'a', 'b']);\n"
+        "  if (x.code !== 3) throw new Error('code ' + x.code);\n"
+        "  if (x.stdout !== 'a,b') throw new Error(x.stdout);\n"
+        "  if (x.stderr !== 'e') throw new Error(x.stderr);\n"
+        "  const y = test.runMain(['echo']);\n"
+        "  if (y.code !== 1 || y.stdout !== '') throw new Error('second run');\n"
+        "});\n"
+        "test('stdin', () => {\n"
+        "  const x = test.runMain(['cat'], { stdin: 'l1\\nrest' });\n"
+        "  if (x.stdout !== 'l1|rest') throw new Error(x.stdout);\n"
+        "  if (test.runMain(['cat']).stdout !== 'null|') throw new Error('empty stdin');\n"
+        "});\n"
+        "test('error', () => {\n"
+        "  const x = test.runMain(['boom']);\n"
+        "  if (x.code !== 1 || !x.stderr.includes('kaboom')) throw new Error(x.stderr);\n"
+        "});\n", r, &passed), 3);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    EXPECT_TRUE_MSG(r[1].passed, r[1].error);
+    EXPECT_TRUE_MSG(r[2].passed, r[2].error);
+    EXPECT_EQ(js.cli_main_active, 0);
+    EXPECT_TRUE(js.main_signal == NULL);
+    js_run_main_close(&f);
+}
+
+UTEST(js_test_run_main, drives_waits_and_bounds_them)
+{
+    JsRunMainFix f;
+    ASSERT_EQ(js_run_main_open(&f, JS_RUN_MAIN_APP), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(js_run_main_cases(
+        "test('sleep', () => {\n"
+        "  const x = test.runMain(['sleep']);\n"
+        "  if (x.code !== 0 || x.stdout !== 'slept') throw new Error(x.stdout);\n"
+        "});\n"
+        "test('hang', () => {\n"
+        "  let msg = '';\n"
+        "  try { test.runMain(['hang'], { timeoutMs: 30 }); } catch (e) { msg = String(e); }\n"
+        "  if (!msg.includes('did not finish')) throw new Error('no timeout: ' + msg);\n"
+        "});\n"
+        "test('after hang', async () => {\n"
+        "  if (test.runMain(['sleep']).stdout !== 'slept') throw new Error('next run');\n"
+        "  await hull.sleep(1);\n"
+        "});\n", r, &passed), 3);
+    EXPECT_EQ(passed, 3);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    EXPECT_TRUE_MSG(r[1].passed, r[1].error);
+    EXPECT_TRUE_MSG(r[2].passed, r[2].error);
+    EXPECT_EQ(js.cli_main_active, 0);
+    js_run_main_close(&f);
+}
+
+/* A main given up on whose wait completes during the next invocation does
+ * not end that one: it is a different run (cli_main_tag). */
+UTEST(js_test_run_main, abandoned_main_does_not_end_the_next)
+{
+    JsRunMainFix f;
+    ASSERT_EQ(js_run_main_open(&f, JS_RUN_MAIN_APP), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(js_run_main_cases(
+        "test('overlap', () => {\n"
+        "  let msg = '';\n"
+        "  try { test.runMain(['nap', '300'], { timeoutMs: 10 }); } catch (e) { msg = String(e); }\n"
+        "  if (!msg.includes('did not finish')) throw new Error('no timeout: ' + msg);\n"
+        "  const x = test.runMain(['nap', '700']);\n"
+        "  if (x.code !== 5 || x.stdout !== 'napped') throw new Error(x.code + ' ' + x.stdout + ' ' + x.stderr);\n"
+        "});\n", r, &passed), 1);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    js_run_main_close(&f);
+}
+
+UTEST(js_test_run_main, env_takes_only_manifest_names)
+{
+    JsRunMainFix f;
+    ASSERT_EQ(js_run_main_open(&f, JS_RUN_MAIN_APP), 0);
+    static const char *const allow[] = { "GREETING", NULL };
+    js.base.test_env_allow = allow;
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(js_run_main_cases(
+        "test('declared', () => {\n"
+        "  const x = test.runMain(['env'], { env: { GREETING: 'hi' } });\n"
+        "  if (x.stdout !== 'hi') throw new Error(x.stdout);\n"
+        "  if (test.runMain(['env']).stdout !== 'undefined') throw new Error('no env given');\n"
+        "});\n"
+        "test('undeclared', () => {\n"
+        "  test.runMain(['env'], { env: { HOME: '/' } });\n"
+        "});\n", r, &passed), 2);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    EXPECT_FALSE(r[1].passed);
+    EXPECT_NE(strstr(r[1].error, "not in the manifest"), NULL);
+    js_run_main_close(&f);
+}
+
+UTEST(js_test_run_main, charges_the_case_and_keeps_its_transaction)
+{
+    JsRunMainFix f;
+    ASSERT_EQ(js_run_main_open(&f, JS_RUN_MAIN_APP), 0);
+    char *c = eval_str("db.exec('CREATE TABLE rm_t (x INTEGER)'); 'ok'");
+    ASSERT_TRUE(c != NULL);
+    free(c);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    int64_t saved = js.max_instructions;
+    js.max_instructions = 2000000;
+    EXPECT_EQ(js_run_main_cases(
+        "test('loops over runMain', () => {\n"
+        "  for (let i = 0; i < 400; i++) test.runMain(['spin']);\n"
+        "});\n"
+        "test('one run fits', () => {\n"
+        "  if (test.runMain(['spin']).code !== 0) throw new Error('code');\n"
+        "});\n"
+        "test('inside db.batch', () => {\n"
+        "  db.batch(() => {\n"
+        "    db.exec('INSERT INTO rm_t VALUES (1)');\n"
+        "    if (test.runMain(['write']).code !== 0) throw new Error('write');\n"
+        "  });\n"
+        "  const rows = db.query('SELECT x FROM rm_t ORDER BY x');\n"
+        "  if (rows.length !== 2) throw new Error('rows: ' + rows.length);\n"
+        "});\n", r, &passed), 3);
+    js.max_instructions = saved;
+    EXPECT_FALSE(r[0].passed);
+    EXPECT_NE(strstr(r[0].error, "instruction limit"), NULL);
+    EXPECT_TRUE_MSG(r[1].passed, r[1].error);
+    EXPECT_TRUE_MSG(r[2].passed, r[2].error);
+    js_run_main_close(&f);
+}
+
+UTEST(js_test_run_main, test_setup_accepts_a_cli_app)
+{
+    init_js();
+    KlAllocator kalloc = kl_allocator_default();
+    KlHttpRouter router;
+    kl_http_router_init(&router, &kalloc);
+    EXPECT_NE(hl_js_vtable.test_setup(&js.base, &router), 0);
+    const char *src = "import { app } from 'hull:app'; app.main(() => 0);";
+    JSValue v = JS_Eval(js.ctx, src, strlen(src), "<cli>", JS_EVAL_TYPE_MODULE);
+    ASSERT_FALSE(JS_IsException(v));
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+    EXPECT_EQ(hl_js_vtable.test_setup(&js.base, &router), 0);
+    kl_http_router_free(&router);
+    cleanup_js();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
 UTEST_MAIN();

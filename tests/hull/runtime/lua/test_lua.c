@@ -17745,4 +17745,241 @@ UTEST(outbox_audit44, cleanup_parity)
 #endif /* HL_ENABLE_HTTP_CLIENT && HL_ENABLE_HTTP_SERVER */
 
 
+/* ── test.run_main: hull test for CLI apps ─────────────────────────────
+ * The app's main run in-process from a test case: ctx.args / stdin / env
+ * from the test, ctx.stdout / stderr captured, waits driven on the test's
+ * loop, the case's budget charged, the transaction guard held off while
+ * the case is inside one. */
+#ifdef HL_ENABLE_HTTP_SERVER
+
+typedef struct {
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx    *loop;
+    KlHttpRouter          router;
+    KlAllocator           kalloc;
+} RunMainFix;
+
+/* A runtime (with the db / env caps and a loop) whose app is @p app_src,
+ * with the test module registered on an empty router. */
+static int run_main_open(RunMainFix *f, const char *app_src)
+{
+    f->be = hl_async_backend();
+    f->loop = NULL;
+    if (f->be->init(&f->loop, NULL) != 0) return -1;
+    pending_async_ctx = f->loop;
+    init_lua_with_caps();
+    if (!lua_initialized) return -1;
+    if (luaL_dostring(lua_rt.L, app_src) != LUA_OK) return -1;
+    f->kalloc = kl_allocator_default();
+    kl_http_router_init(&f->router, &f->kalloc);
+    hl_lua_test_register(lua_rt.L, &f->router, &lua_rt);
+    return 0;
+}
+
+static void run_main_close(RunMainFix *f)
+{
+    lua_rt.base.test_env_allow = NULL;
+    hl_lua_vtable.stop_async(&lua_rt.base);
+    kl_http_router_free(&f->router);
+    cleanup_lua_caps();
+    if (f->loop) f->be->free(f->loop);
+}
+
+/* Run the cases @p cases defines; results into @p r (4 slots). */
+static int run_main_cases(const char *cases, HlTestCaseResult *r, int *passed)
+{
+    if (luaL_dostring(lua_rt.L, cases) != LUA_OK) return -1;
+    int total = 0, failed = 0;
+    *passed = 0;
+    memset(r, 0, 4 * sizeof *r);
+    hl_lua_test_run(lua_rt.L, &total, passed, &failed, NULL, r, 4);
+    return total;
+}
+
+static const char *const RUN_MAIN_APP =
+    "app.manifest({ env = { 'GREETING' } })\n"
+    "app.main(function(ctx)\n"
+    "  local cmd = ctx.args[1]\n"
+    "  if cmd == 'echo' then\n"
+    "    ctx.stdout:write(table.concat(ctx.args, ',', 2))\n"
+    "    ctx.stderr:write('e')\n"
+    "    return #ctx.args\n"
+    "  elseif cmd == 'sleep' then hull.sleep(5) ctx.stdout:write('slept') return 0\n"
+    "  elseif cmd == 'hang' then hull.sleep(60000) return 0\n"
+    "  elseif cmd == 'nap' then hull.sleep(tonumber(ctx.args[2])) ctx.stdout:write('napped') return 5\n"
+    "  elseif cmd == 'cat' then\n"
+    "    ctx.stdout:write(tostring(ctx.stdin:read('*l')) .. '|' .. ctx.stdin:read('*a'))\n"
+    "    return 0\n"
+    "  elseif cmd == 'env' then ctx.stdout:write(tostring(ctx.env.GREETING)) return 0\n"
+    "  elseif cmd == 'boom' then error('kaboom')\n"
+    "  elseif cmd == 'spin' then for i = 1, 30000 do end return 0\n"
+    "  elseif cmd == 'write' then db.exec('INSERT INTO rm_t VALUES (2)') return 0\n"
+    "  end\n"
+    "  return 0\n"
+    "end)\n";
+
+UTEST(lua_test_run_main, captures_args_exit_code_and_streams)
+{
+    RunMainFix f;
+    ASSERT_EQ(run_main_open(&f, RUN_MAIN_APP), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(run_main_cases(
+        "test('echo', function()\n"
+        "  local x = test.run_main({ 'echo', 'a', 'b' })\n"
+        "  assert(x.code == 3, 'code ' .. tostring(x.code))\n"
+        "  assert(x.stdout == 'a,b', x.stdout)\n"
+        "  assert(x.stderr == 'e', x.stderr)\n"
+        "  local y = test.run_main({ 'echo' })\n"
+        "  assert(y.code == 1 and y.stdout == '', 'second run')\n"
+        "end)\n"
+        "test('stdin', function()\n"
+        "  local x = test.run_main({ 'cat' }, { stdin = 'l1\\nrest' })\n"
+        "  assert(x.stdout == 'l1|rest', x.stdout)\n"
+        "  assert(test.run_main({ 'cat' }).stdout == 'nil|', 'empty stdin')\n"
+        "end)\n"
+        "test('error', function()\n"
+        "  local x = test.run_main({ 'boom' })\n"
+        "  assert(x.code == 1, 'code')\n"
+        "  assert(x.stderr:find('kaboom', 1, true), x.stderr)\n"
+        "end)\n", r, &passed), 3);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    EXPECT_TRUE_MSG(r[1].passed, r[1].error);
+    EXPECT_TRUE_MSG(r[2].passed, r[2].error);
+    /* Nothing of main is left running. */
+    EXPECT_TRUE(lua_rt.cli_main_co == NULL);
+    run_main_close(&f);
+}
+
+UTEST(lua_test_run_main, drives_waits_and_bounds_them)
+{
+    RunMainFix f;
+    ASSERT_EQ(run_main_open(&f, RUN_MAIN_APP), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(run_main_cases(
+        "test('sleep', function()\n"
+        "  local x = test.run_main({ 'sleep' })\n"
+        "  assert(x.code == 0 and x.stdout == 'slept', x.stdout)\n"
+        "end)\n"
+        "test('hang', function()\n"
+        "  local ok, err = pcall(test.run_main, { 'hang' }, { timeout_ms = 30 })\n"
+        "  assert(not ok and tostring(err):find('did not finish', 1, true), tostring(err))\n"
+        "end)\n"
+        "test('after hang', function()\n"
+        "  assert(test.run_main({ 'sleep' }).stdout == 'slept', 'next run')\n"
+        "end)\n", r, &passed), 3);
+    EXPECT_EQ(passed, 3);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    EXPECT_TRUE_MSG(r[1].passed, r[1].error);
+    EXPECT_TRUE_MSG(r[2].passed, r[2].error);
+    EXPECT_TRUE(lua_rt.cli_main_co == NULL);
+    run_main_close(&f);
+}
+
+/* A main given up on whose wait completes during the next invocation is
+ * not resumed (abandoned) and does not end the next one. */
+UTEST(lua_test_run_main, abandoned_main_does_not_end_the_next)
+{
+    RunMainFix f;
+    ASSERT_EQ(run_main_open(&f, RUN_MAIN_APP), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(run_main_cases(
+        "test('overlap', function()\n"
+        "  local ok, err = pcall(test.run_main, { 'nap', '300' }, { timeout_ms = 10 })\n"
+        "  assert(not ok and tostring(err):find('did not finish', 1, true), tostring(err))\n"
+        "  local x = test.run_main({ 'nap', '700' })\n"
+        "  assert(x.code == 5 and x.stdout == 'napped', x.code .. ' ' .. x.stdout .. ' ' .. x.stderr)\n"
+        "end)\n", r, &passed), 1);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    run_main_close(&f);
+}
+
+UTEST(lua_test_run_main, env_takes_only_manifest_names)
+{
+    RunMainFix f;
+    ASSERT_EQ(run_main_open(&f, RUN_MAIN_APP), 0);
+    static const char *const allow[] = { "GREETING", NULL };
+    lua_rt.base.test_env_allow = allow;
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(run_main_cases(
+        "test('declared', function()\n"
+        "  local x = test.run_main({ 'env' }, { env = { GREETING = 'hi' } })\n"
+        "  assert(x.stdout == 'hi', x.stdout)\n"
+        "  assert(test.run_main({ 'env' }).stdout == 'nil', 'no env given')\n"
+        "end)\n"
+        "test('undeclared', function()\n"
+        "  test.run_main({ 'env' }, { env = { HOME = '/' } })\n"
+        "end)\n", r, &passed), 2);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    EXPECT_FALSE(r[1].passed);
+    EXPECT_NE(strstr(r[1].error, "not in the manifest"), NULL);
+    run_main_close(&f);
+}
+
+/* As test.get's request (audit 10): main runs on the case's budget, and a
+ * case inside a transaction keeps it across the call. */
+UTEST(lua_test_run_main, charges_the_case_and_keeps_its_transaction)
+{
+    RunMainFix f;
+    ASSERT_EQ(run_main_open(&f, RUN_MAIN_APP), 0);
+    ASSERT_EQ(luaL_dostring(lua_rt.L, "db.exec('CREATE TABLE rm_t (x INTEGER)')"),
+              LUA_OK);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    lua_rt.max_instructions = 100000;
+    EXPECT_EQ(run_main_cases(
+        "test('loops over run_main', function()\n"
+        "  for i = 1, 10 do test.run_main({ 'spin' }) end\n"
+        "end)\n"
+        "test('one run fits', function()\n"
+        "  assert(test.run_main({ 'spin' }).code == 0)\n"
+        "end)\n"
+        "test('inside db.batch', function()\n"
+        "  db.batch(function()\n"
+        "    db.exec('INSERT INTO rm_t VALUES (1)')\n"
+        "    assert(test.run_main({ 'write' }).code == 0)\n"
+        "  end)\n"
+        "  local rows = db.query('SELECT x FROM rm_t ORDER BY x')\n"
+        "  assert(#rows == 2, 'rows: ' .. #rows)\n"
+        "end)\n", r, &passed), 3);
+    lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    EXPECT_FALSE(r[0].passed);
+    EXPECT_NE(strstr(r[0].error, "instruction limit"), NULL);
+    EXPECT_TRUE_MSG(r[1].passed, r[1].error);
+    EXPECT_TRUE_MSG(r[2].passed, r[2].error);
+    run_main_close(&f);
+}
+
+UTEST(lua_test_run_main, refused_without_app_main)
+{
+    RunMainFix f;
+    ASSERT_EQ(run_main_open(&f, "app.manifest({})\n"), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(run_main_cases("test('x', function() test.run_main({}) end)\n",
+                             r, &passed), 1);
+    EXPECT_FALSE(r[0].passed);
+    EXPECT_NE(strstr(r[0].error, "did not register app.main"), NULL);
+    run_main_close(&f);
+}
+
+/* The vtable's test_setup: a CLI app (app.main, no routes) needs no routes;
+ * an app with neither is refused. */
+UTEST(lua_test_run_main, test_setup_accepts_a_cli_app)
+{
+    init_lua();
+    KlAllocator kalloc = kl_allocator_default();
+    KlHttpRouter router;
+    kl_http_router_init(&router, &kalloc);
+    EXPECT_NE(hl_lua_vtable.test_setup(&lua_rt.base, &router), 0);
+    ASSERT_EQ(luaL_dostring(lua_rt.L, "app.main(function() return 0 end)"), LUA_OK);
+    EXPECT_EQ(hl_lua_vtable.test_setup(&lua_rt.base, &router), 0);
+    kl_http_router_free(&router);
+    cleanup_lua();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
 UTEST_MAIN();

@@ -133,18 +133,34 @@ end
 return M
 ]]
 
-lua_files["tests/commands/test_greet.lua"] = [[-- Tests use test.run_main to synthesise argv/stdin/env and capture
--- the exit code + stdout/stderr. As of v0.1.0 the CLI test
--- harness is still being shaped - for now invoke through `hull run`
--- in the project root.
+lua_files["tests/commands/test_greet.lua"] = [[-- test.run_main(args, opts) runs app.main once with ctx.args = args and
+-- returns { code, stdout, stderr } (ctx.stdout / ctx.stderr captured).
+-- opts: stdin (string), env (names from manifest.env), timeout_ms.
 
-test("greet: smoke", function()
-    test.eq(1, 1)  -- placeholder; replace with test.run_main once shipped
+test("greet: prints a greeting", function()
+    local r = test.run_main({ "greet", "world" })
+    test.eq(r.code, 0)
+    test.eq(r.stdout, "hello world\n")
+    test.eq(r.stderr, "")
+end)
+
+test("greet: a missing name is a usage error", function()
+    local r = test.run_main({ "greet" })
+    test.eq(r.code, 2)
+    test.ok(r.stderr:find("missing NAME", 1, true), r.stderr)
+end)
+
+test("an unknown command prints usage", function()
+    local r = test.run_main({ "nope" })
+    test.eq(r.code, 1)
+    test.ok(r.stderr:find("unknown command", 1, true), r.stderr)
 end)
 ]]
 
-lua_files["tests/commands/test_count.lua"] = [[test("count: smoke", function()
-    test.eq(1, 1)
+lua_files["tests/commands/test_count.lua"] = [[test("count: prints the number of items", function()
+    local r = test.run_main({ "count", "a", "b", "c" })
+    test.eq(r.code, 0)
+    test.eq(r.stdout, "3\n")
 end)
 ]]
 
@@ -244,13 +260,34 @@ export function greeting(name) {
 }
 ]]
 
-js_files["tests/commands/test_greet.js"] = [[test("greet: smoke", () => {
-    test.eq(1, 1);
+js_files["tests/commands/test_greet.js"] = [[// test.runMain(args, opts) runs app.main once with ctx.args = args and
+// returns { code, stdout, stderr } (ctx.stdout / ctx.stderr captured).
+// opts: stdin (string or bytes), env (names from manifest.env), timeoutMs.
+
+test("greet: prints a greeting", () => {
+    const r = test.runMain(["greet", "world"]);
+    test.eq(r.code, 0);
+    test.eq(r.stdout, "hello world\n");
+    test.eq(r.stderr, "");
+});
+
+test("greet: a missing name is a usage error", () => {
+    const r = test.runMain(["greet"]);
+    test.eq(r.code, 2);
+    test.ok(r.stderr.includes("missing NAME"), r.stderr);
+});
+
+test("an unknown command prints usage", () => {
+    const r = test.runMain(["nope"]);
+    test.eq(r.code, 1);
+    test.ok(r.stderr.includes("unknown command"), r.stderr);
 });
 ]]
 
-js_files["tests/commands/test_count.js"] = [[test("count: smoke", () => {
-    test.eq(1, 1);
+js_files["tests/commands/test_count.js"] = [[test("count: prints the number of items", () => {
+    const r = test.runMain(["count", "a", "b", "c"]);
+    test.eq(r.code, 0);
+    test.eq(r.stdout, "3\n");
 });
 ]]
 

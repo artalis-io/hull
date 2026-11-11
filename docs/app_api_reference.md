@@ -2813,6 +2813,33 @@ WASM and GPU compute share symmetric naming where the concepts align:
 
 Intentionally different: `call` vs `dispatch` (function call vs hardware dispatch), `instance` vs `buffer` (retained linear memory vs GPU storage), `segment` vs `buffer` (read-only shared heap vs read/write GPU buffer).
 
+### Test harness (`hull test`)
+
+`hull test` loads the app once and runs every `test_*.lua` / `test_*.js`
+under it; `test` is a global in those files.
+
+| Lua | JS | |
+|---|---|---|
+| `test(name, fn)` | `test(name, [opts,] fn)` | register a case (JS: `fn` may be async; `opts.timeout` ms) |
+| `test.get/post/put/delete/patch(path, opts?)` | same | in-process request through the app's routes and middleware: `{ status, body, json?, headers }` |
+| `test.run_main(args, opts?)` | `test.runMain(args, opts?)` | run `app.main` once: `{ code, stdout, stderr }` |
+| `test.eq(a, b, msg?)`, `test.ok(v, msg?)`, `test.err(fn, pattern?)` | same | assertions |
+
+`test.run_main` / `runMain` (for an app that registers `app.main`, with or
+without routes): `args` becomes `ctx.args` (strings); `ctx.stdout` /
+`ctx.stderr` are captured into the result, the process's own streams
+untouched. `opts.stdin` (Lua a string, JS a string or bytes) is what
+`ctx.stdin` reads; `opts.env` is exactly `ctx.env`, and each name must be in
+the manifest's `env` list (else the call raises); `opts.timeout_ms` /
+`timeoutMs` bounds main's waits (default 10 s, never past the case's
+deadline; a main still waiting is abandoned and the call raises). An error
+or rejected promise in main is `code = 1` with `[hull:main] error: ...` on
+the captured stderr. main's waits (`hull.sleep`, `http.fetch`, `db.async`,
+`compute.async`) are driven on the test run's event loop. main runs on the
+case's instruction budget, as a `test.get` request does, and inside the
+case's transaction if it has one open (main cannot wait then). Each call is
+a fresh invocation of the loaded app; no signal reaches it.
+
 ## Terminal UI API surface
 
 Design: [tui_mode.md](tui_mode.md). Contributor notes stay in `CLAUDE.md` ("Terminal UI module").

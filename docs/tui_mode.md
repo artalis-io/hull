@@ -811,16 +811,16 @@ E2E (`tests/e2e_tui.sh`):
 - Validates that `hull doctor --tui`, when run on a non-tty (CI), falls
   back to the existing plain-text output.
 
-`test.run_main` from CLI mode (already proposed in `docs/cli_mode.md`)
-gains a `tui` option:
+`test.run_main(args, opts)` (shipped for CLI apps, see `docs/cli_mode.md`
+"Test harness for CLI apps") would gain a `tui` option (proposed, not
+implemented):
 
 ```lua
-local result = test.run_main({
-    args  = {},
+local result = test.run_main({}, {
     stdin = "alpha\n\x1b[B\n",   -- simulated keys: "alpha", enter, down arrow, enter
     tui   = true,                 -- attach a fake PTY
 })
-test.eq(result.exit_code, 0)
+test.eq(result.code, 0)
 test.eq(result.stdout, "you picked: beta\n")
 ```
 

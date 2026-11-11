@@ -496,6 +496,11 @@ static void hl_js_run_tag_fail(HlJS *js, uint64_t tag)
     js->txn_dead_len++;
 }
 
+void hl_js_run_tag_abandon(HlJS *js, uint64_t tag)
+{
+    hl_js_run_tag_fail(js, tag);
+}
+
 int hl_js_run_tag_failed(const HlJS *js, uint64_t tag)
 {
     if (!js || tag == 0) return 0;
@@ -750,6 +755,13 @@ static void hl_js_async_resume_impl(HlAsyncCont *self, void *driver)
     JSContext *ctx = js->ctx;
 
     if (!ctx) return;
+
+    /* An op of an app.main that is no longer the one running (test.runMain
+     * gave up on it and has started main again since: each invocation is a
+     * run of its own, cli_main_tag) is not main's: it must not end, or be
+     * reported as, the current one. */
+    if (jc->cli_main && jc->link.run_tag != js->cli_main_tag)
+        jc->cli_main = 0;
 
     /* An entry point: the resumed run gets a budget of its own (it used to
      * inherit whatever count the last entry left - and after one trip,

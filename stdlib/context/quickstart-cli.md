@@ -135,22 +135,42 @@ app.get("/", function(req, res) ... end)   -- normal routes
 
 ## Testing CLI apps
 
+`hull test` runs a CLI app's tests too. `test` is a global in test files;
+`test.run_main(args, opts)` (JS `test.runMain`) runs `app.main` once with
+`ctx.args = args` and returns `{ code, stdout, stderr }` (`ctx.stdout` /
+`ctx.stderr` captured):
+
 ```lua
 -- tests/test_main.lua
-local t = require("hull.test")
-
-t.case("main with no args exits 2", function()
-    local rc = t.run_main({})
-    t.assert_eq(rc, 2)
+test("main with no args exits 2", function()
+    test.eq(test.run_main({}).code, 2)
 end)
 
-t.case("main echoes name", function()
-    local stdout = {}
-    local rc = t.run_main({"alice"}, { stdout = stdout })
-    t.assert_eq(rc, 0)
-    t.assert_match(table.concat(stdout), "alice")
+test("main echoes name", function()
+    local r = test.run_main({ "alice" })
+    test.eq(r.code, 0)
+    test.ok(r.stdout:find("alice", 1, true), r.stdout)
+end)
+
+test("reads stdin, sees declared env", function()
+    -- opts.env names must be in the manifest's env list
+    local r = test.run_main({ "cat" }, { stdin = "x\n", env = { LANG = "en" } })
+    test.eq(r.code, 0)
 end)
 ```
+
+```javascript
+// tests/test_main.js
+test("main echoes name", () => {
+    const r = test.runMain(["alice"]);
+    test.eq(r.code, 0);
+    test.ok(r.stdout.includes("alice"), r.stdout);
+});
+```
+
+A raised error is `code = 1` with the message on `r.stderr`. `main`'s
+waits (`hull.sleep`, `http.fetch`, `db.async`) are driven to completion,
+bounded by `opts.timeout_ms` / `timeoutMs` (default 10 s).
 
 <!-- full -->
 ## Argv parsing

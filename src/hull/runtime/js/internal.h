@@ -445,6 +445,14 @@ void hl_js_run_session_switch(HlJS *js);
 /* 1 when run @p tag held a transaction across a wait (above, or
  * hl_js_run_yield_check): its continuations resume without continuing it. */
 int hl_js_run_tag_failed(const HlJS *js, uint64_t tag);
+/* Fail run @p tag outright: its pending and later promise jobs are dropped
+ * unrun. For an app.main test.runMain gave up on (runtime.c). */
+void hl_js_run_tag_abandon(HlJS *js, uint64_t tag);
+/* test.runMain(args?, opts?) (runtime.c, registered by mod_test.c): run the
+ * app's app.main once inside the calling test case, ctx.stdout / stderr
+ * captured, and return { code, stdout, stderr }. */
+JSValue js_test_run_main(JSContext *ctx, JSValueConst this_val,
+                         int argc, JSValueConst *argv);
 /* 1 when hl_js_run_jobs should hold other runs' jobs back: a registry /
  * db.open connection is in a transaction, the guard is not held, and the
  * run is not over its budget (its jobs are being discarded). */

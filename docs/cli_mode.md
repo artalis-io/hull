@@ -522,26 +522,60 @@ sandbox phase 2 (step 4 → step 5).
 
 ## Test harness for CLI apps
 
-Today's `hull test` runs `tests/test_*.lua|.js` files against an
-in-memory dispatched HTTP server. For CLI apps the harness needs to
-synthesize `argv` / `stdin` / `env` and run `main`:
+`hull test` runs a CLI app's tests (an app that registers `app.main` and no
+routes) as it runs a server app's. A test drives `main` with
+`test.run_main(args, opts)` (Lua) / `test.runMain(args, opts)` (JS): it runs
+the loaded app's `app.main` once, in-process, and returns
+`{ code, stdout, stderr }`.
 
 ```lua
+-- app.manifest({ env = { "LANG" } })
 test("greets the name passed via argv", function()
-    local result = test.run_main({
-        args = { "alice" },
-        env  = { LANG = "en" },
+    local r = test.run_main({ "alice" }, {
+        env   = { LANG = "en" },
         stdin = "",
     })
-    test.eq(result.exit_code, 0)
-    test.eq(result.stdout, "hello alice\n")
-    test.eq(result.stderr, "")
+    test.eq(r.code, 0)
+    test.eq(r.stdout, "hello alice\n")
+    test.eq(r.stderr, "")
 end)
 ```
 
-`test.run_main(opts)` returns `{exit_code, stdout, stderr}`. The
-existing `test.get/post/etc` helpers continue to exist but error if the
-loaded app is CLI mode (`app.main` registered, no routes).
+```javascript
+test("greets the name passed via argv", () => {
+    const r = test.runMain(["alice"], { env: { LANG: "en" }, stdin: "" });
+    test.eq(r.code, 0);
+    test.eq(r.stdout, "hello alice\n");
+});
+```
+
+- **`args`** becomes `ctx.args` (an array of strings; omitted = empty).
+- **`opts.stdin`** is what `ctx.stdin` reads (Lua a string, JS a string or
+  bytes); without it `ctx.stdin` is at end of input.
+- **`opts.env`** is exactly `ctx.env`. Every name must be in the manifest's
+  `env` list, or the call raises: a test cannot give `main` a variable the
+  app does not declare. The process environment is not read.
+- **`opts.timeout_ms`** / **`opts.timeoutMs`** bounds how long `main` may
+  wait (default 10 s, never past the test case's own deadline). A `main`
+  still waiting then is abandoned and the call raises.
+- **`ctx.stdout` / `ctx.stderr`** writes are captured into the result; the
+  process's own streams are untouched. (`log.*` still goes to the log.)
+- A raised error or rejected promise is `code = 1` with the runner's
+  message (`[hull:main] error: ...`) appended to the captured `stderr`, as
+  the real runner prints it.
+- `main`'s waits - `hull.sleep`, `http.fetch`, `db.async`, `compute.async` -
+  work: `hull test` drives its own event loop until `main` ends.
+- Each call is a fresh invocation of the same loaded app (a new `ctx`;
+  module-level state persists, as within one process). Call it as often as
+  a case needs.
+- `main` runs on the case's time, as a `test.get` request does: its
+  instructions count against the case's budget, and a case inside a
+  transaction keeps it (`main` cannot wait inside one). No signal reaches
+  it: `ctx.on_interrupt` / `ctx.signal` exist but never fire.
+
+An app that registers routes and `app.main` gets both `test.get` & co and
+`run_main`. An app with neither fails with "no routes or app.main
+registered".
 
 ## Manifest
 
@@ -690,9 +724,10 @@ Total: ~1 week of focused work.
   build". Otherwise CLI apps on HTTP-enabled hulls would still get an
   oversized profile. Existing tests in `e2e_sandbox.sh` catch regressions.
 
-- **`hull test` for CLI apps**. Existing tests assume HTTP. The
-  `test.run_main()` helper is new code; gate it behind "loaded app is CLI
-  mode" so server-mode tests stay clean. Decided in phase 2 design pass.
+- **`hull test` for CLI apps**. Resolved: `test.run_main(args, opts)` /
+  `test.runMain(args, opts)` (see "Test harness for CLI apps" above). It is
+  available whenever the app registered `app.main`, alongside `test.get` &
+  co for an app that also registers routes.
 
 - **Cosmo build**. `make platform-cosmo HL_ENABLE_HTTP=0` must produce
   both arch archives without Keel. The conditional compilation in phase 3

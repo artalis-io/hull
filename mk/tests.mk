@@ -1531,6 +1531,9 @@ e2e-blob: $(BUILDDIR)/hull
 e2e-jobs: $(BUILDDIR)/hull
 	sh tests/e2e_jobs.sh
 
+e2e-test-cli: $(BUILDDIR)/hull
+	sh tests/e2e_test_cli.sh
+
 e2e-test-harness: $(BUILDDIR)/hull
 	sh tests/e2e_test_harness.sh
 

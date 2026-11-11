@@ -2154,11 +2154,25 @@ static void vt_js_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *u
 }
 
 #ifdef HL_ENABLE_HTTP_SERVER
+static int vt_js_has_main(HlRuntime *rt);
+
 static int vt_js_test_setup(HlRuntime *rt, KlHttpRouter *router)
 {
     HlJS *js = (HlJS *)rt;
-    if (hl_js_wire_routes(js, router) != 0)
-        return -1;
+    /* A CLI app (app.main, no routes) has nothing to wire: its tests use
+     * test.runMain. Routes, when there are any, are wired as before. */
+    JSValue store = hl_js_internals(js->ctx);
+    JSValue defs = JS_GetPropertyStr(js->ctx, store, "__hull_route_defs");
+    int32_t nroutes = 0;
+    if (JS_IsArray(js->ctx, defs) &&
+        hl_js_get_length32(js->ctx, defs, &nroutes) < 0)
+        JS_FreeValue(js->ctx, JS_GetException(js->ctx));
+    JS_FreeValue(js->ctx, defs);
+    JS_FreeValue(js->ctx, store);
+    if (nroutes > 0 || !vt_js_has_main(rt)) {
+        if (hl_js_wire_routes(js, router) != 0)
+            return -1;
+    }
     hl_js_test_register(js->ctx, router, js);
     return 0;
 }
@@ -2912,7 +2926,232 @@ static int vt_js_has_server_handlers(HlRuntime *rt)
     return found;
 }
 
-static int coerce_js_exit_code(JSContext *ctx, JSValue v)
+/* ── test.runMain's streams (runtime/js/mod_test.c) ────────────────────
+ *
+ * ctx.stdin / stdout / stderr over a capture object instead of the process's
+ * stdio: func_data[0] is { out: [chunks], err: [chunks], input: ArrayBuffer
+ * | undefined, pos: n } (no prototypes), which js_test_run_main reads back.
+ * Writes are charged as js_cli_write's; each chunk is an ArrayBuffer copy on
+ * the VM heap, under its limit. The object is reachable only as these
+ * functions' data. */
+static int cap_list_push(JSContext *ctx, JSValueConst list, JSValue v)
+{
+    int32_t len = 0;
+    if (hl_js_get_length32(ctx, list, &len) < 0) { JS_FreeValue(ctx, v); return -1; }
+    return JS_DefinePropertyValueUint32(ctx, list, (uint32_t)len, v,
+                                        JS_PROP_C_W_E) < 0 ? -1 : 0;
+}
+
+static JSValue js_cli_cap_write(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv, int magic,
+                                JSValue *func_data)
+{
+    (void)this_val;
+    JSValue list = JS_GetPropertyStr(ctx, func_data[0],
+                                     magic == 2 ? "err" : "out");
+    if (JS_IsException(list)) return JS_EXCEPTION;
+    for (int i = 0; i < argc; i++) {
+        /* As js_cli_write: a string as its UTF-8, a byte view as its bytes;
+         * converted and copied before the next argument is looked at. */
+        HlBufferView view = {0};
+        const char *s = NULL;
+        int needs_free = 0;
+        if (!js_get_buffer(ctx, argv[i], &view, &s, &needs_free)) {
+            JS_FreeValue(ctx, list);
+            return JS_ThrowTypeError(ctx, "write: expected a string, ArrayBuffer "
+                                          "or typed array");
+        }
+        size_t n = view.len;
+        int rc = hl_js_budget_charge(ctx, HL_WORK_CALL_UNITS +
+                                          hl_work_bytes_units((uint64_t)n));
+        JSValue ab = JS_UNDEFINED;
+        if (rc == 0 && n)
+            ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)view.data, n);
+        if (needs_free && s) JS_FreeCString(ctx, s);
+        if (rc < 0 || JS_IsException(ab) ||
+            (n && cap_list_push(ctx, list, ab) < 0)) {
+            JS_FreeValue(ctx, list);
+            return JS_EXCEPTION;
+        }
+    }
+    JS_FreeValue(ctx, list);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_cli_cap_flush(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv, int magic,
+                                JSValue *func_data)
+{
+    (void)this_val; (void)argc; (void)argv; (void)magic; (void)func_data;
+    if (hl_js_budget_charge(ctx, HL_WORK_CLI_FLUSH_UNITS) < 0)
+        return JS_EXCEPTION;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_cli_cap_close(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv, int magic,
+                                JSValue *func_data)
+{
+    (void)ctx; (void)this_val; (void)argc; (void)argv; (void)magic;
+    (void)func_data;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_cli_cap_read(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv, int magic,
+                               JSValue *func_data)
+{
+    (void)this_val; (void)magic;
+    /* As js_cli_read: only app.main's own code reads. */
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    int mains = js && (js->active_cli_main ||
+                       (js->cli_main_active && js->cli_main_tag != 0 &&
+                        JS_GetJobTag(js->rt) == js->cli_main_tag));
+    if (!mains)
+        return JS_ThrowTypeError(ctx, "ctx.stdin.read() is only available in "
+                                      "app.main's own code (it blocks the event loop)");
+    if (hl_js_budget_charge(ctx, HL_WORK_CLI_FLUSH_UNITS) < 0) return JS_EXCEPTION;
+
+    int want_bytes = 0;
+    int64_t nbytes = 0;
+    char mode = 'l';
+    if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0])) {
+        if (JS_IsNumber(argv[0])) {
+            if (JS_ToInt64(ctx, &nbytes, argv[0]) != 0) return JS_EXCEPTION;
+            if (nbytes < 0) return JS_ThrowRangeError(ctx, "read: negative count");
+            want_bytes = 1;
+        } else {
+            const char *s = JS_ToCString(ctx, argv[0]);
+            if (!s) return JS_EXCEPTION;
+            const char *src = (s[0] == '*' ? s + 1 : s);
+            if (src[0] != 'a' && src[0] != 'l') {
+                JSValue err = JS_ThrowRangeError(ctx,
+                    "read: unsupported mode '%s' (use 'l', 'a', or n bytes)", s);
+                JS_FreeCString(ctx, s);
+                return err;
+            }
+            mode = src[0];
+            JS_FreeCString(ctx, s);
+        }
+    }
+    if (want_bytes && nbytes == 0) return JS_NewString(ctx, "");
+
+    uint32_t pos = 0;
+    if (hl_js_get_uint32(ctx, func_data[0], "pos", &pos) < 0) return JS_EXCEPTION;
+    JSValue in = JS_GetPropertyStr(ctx, func_data[0], "input");
+    if (JS_IsException(in)) return JS_EXCEPTION;
+    size_t len = 0;
+    const uint8_t *buf = JS_IsUndefined(in) ? NULL : JS_GetArrayBuffer(ctx, &len, in);
+    if (!buf) { JS_FreeValue(ctx, JS_GetException(ctx)); len = 0; }
+    if (pos > len) pos = (uint32_t)len;
+    size_t avail = len - pos;
+    const uint8_t *p = buf ? buf + pos : NULL;
+
+    size_t take, skip = 0;
+    int got;
+    if (want_bytes) {
+        take = (uint64_t)nbytes < (uint64_t)avail ? (size_t)nbytes : avail;
+        got = take > 0;
+    } else if (mode == 'a') {
+        take = avail;
+        got = 1;                       /* "a" at EOF is "", as stdio's */
+    } else {
+        const uint8_t *nl = avail ? memchr(p, '\n', avail) : NULL;
+        take = nl ? (size_t)(nl - p) : avail;
+        skip = nl ? 1 : 0;
+        got = avail > 0;
+    }
+    /* The string is made before anything else runs: no app code between
+     * taking the buffer's pointer and the copy. */
+    JSValue r = got ? JS_NewStringLen(ctx, take ? (const char *)p : "", take)
+                    : JS_NULL;
+    JS_FreeValue(ctx, in);
+    if (JS_IsException(r)) return r;
+    if (JS_DefinePropertyValueStr(ctx, func_data[0], "pos",
+                                  JS_NewUint32(ctx, pos + (uint32_t)(take + skip)),
+                                  JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, r);
+        return JS_EXCEPTION;
+    }
+    return r;
+}
+
+/* An error value's text, for a test's captured stderr: .message, else the
+ * value as a string. Either conversion can run app code and throw; a throw
+ * is cleared, never left pending. */
+static void extract_main_error(JSContext *ctx, JSValueConst err,
+                               char *buf, size_t size)
+{
+    const char *msg = NULL;
+    JSValue m = JS_IsObject(err) ? JS_GetPropertyStr(ctx, err, "message")
+                                 : JS_UNDEFINED;
+    if (JS_IsException(m)) { JS_FreeValue(ctx, JS_GetException(ctx)); m = JS_UNDEFINED; }
+    if (!JS_IsUndefined(m) && !JS_IsNull(m)) {
+        msg = JS_ToCString(ctx, m);
+        if (!msg) JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+    if (!msg) {
+        msg = JS_ToCString(ctx, err);
+        if (!msg) JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+    snprintf(buf, size, "%s", msg ? msg : "(unknown)");
+    if (msg) JS_FreeCString(ctx, msg);
+    JS_FreeValue(ctx, m);
+}
+
+/* One app.main invocation: the real runner's (vt_js_run_main) or a test's
+ * (js_test_run_main, test.runMain). They differ only in where ctx's args,
+ * env and streams come from, where the runner's own messages go, and how
+ * the loop is driven while main waits. */
+typedef struct HlJsMainRun {
+    /* The real runner: argv, the env allowlist (values from getenv). */
+    int                argc;
+    char             **argv;
+    const char *const *env;
+    /* test.runMain: ctx.args / ctx.env are copies of these (checked by
+     * js_test_run_main), the streams capture into @c cap, and the wait is
+     * bounded by @c timeout_ms (0 = none) and the case's budget. */
+    int                test;
+    JSValueConst       args;
+    JSValueConst       env_obj;
+    JSValueConst       cap;
+    uint32_t           timeout_ms;
+    int64_t            case_used;   /* the calling case's count so far */
+    /* out (test) */
+    int64_t            used;        /* main's stretches' instructions in all */
+    int                gave_up;     /* 1 timed out, 2 over the case's budget */
+    char               msg[512];    /* what the real runner prints on stderr */
+} HlJsMainRun;
+
+static void js_main_report(HlJsMainRun *r, const char *prefix, const char *arg)
+{
+    if (r && r->test) {
+        snprintf(r->msg, sizeof r->msg, "%s%s", prefix, arg);
+        return;
+    }
+    hl_eprintf_line("%s%s", prefix, arg);
+}
+
+/* The exception main raised: logged by the real runner (hl_js_dump_error),
+ * kept as "[hull:main] error: ..." by a test's. */
+static void js_main_error(HlJS *js, HlJsMainRun *r)
+{
+    if (!r->test) {
+        hl_js_dump_error(js);
+        return;
+    }
+    JSValue exc = JS_GetException(js->ctx);
+    if (js->budget_tripped) {
+        js_main_report(r, "[hull:main] error: ", hl_js_trip_reason(js));
+    } else {
+        char buf[480];
+        extract_main_error(js->ctx, exc, buf, sizeof buf);
+        js_main_report(r, "[hull:main] error: ", buf);
+    }
+    JS_FreeValue(js->ctx, exc);
+}
+
+static int coerce_js_exit_code(JSContext *ctx, JSValue v, HlJsMainRun *r)
 {
     if (JS_IsUndefined(v) || JS_IsNull(v)) return 0;
     if (JS_IsNumber(v)) {
@@ -2923,26 +3162,96 @@ static int coerce_js_exit_code(JSContext *ctx, JSValue v)
         return i;
     }
     const char *s = JS_ToCString(ctx, v);
-    hl_eprintf_line("[hull:main] non-numeric return: %s",
-            s ? s : "(unprintable)");
+    js_main_report(r, "[hull:main] non-numeric return: ",
+                   s ? s : "(unprintable)");
     if (s) JS_FreeCString(ctx, s);
+    else JS_FreeValue(ctx, JS_GetException(ctx));
     return 1;
 }
 
-static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
-                           int argc, char **argv,
-                           const char *const *env_allowlist,
-                           int *exit_code_out)
-{
-    if (exit_code_out) *exit_code_out = 1;
-    if (!rt || !exit_code_out) return -1;
-    HlJS *js = (HlJS *)rt;
-    JSContext *ctx = js->ctx;
+/* test.runMain's wait (run_until's predicate): each of main's resumes
+ * re-arms the budget, so what a stretch used is taken off here, between
+ * ticks, and added up; the wait ends when main has settled, when its run or
+ * the case's budget is spent, or when the time bound passes. */
+typedef struct {
+    HlJS        *js;
+    HlJsMainRun *r;
+    uint64_t     deadline;   /* backend->monotonic_ms(); 0 = none */
+} HlJsMainWait;
 
-    /* Same reasoning as the Lua side: CLI bypasses wire_routes_server,
-     * so the server pointer isn't wired. Async ops (hull.sleep,
-     * compute.async, gpu.async, http.fetch) reach for js->server. */
-    if (server) js->server = server;
+static void js_main_take_used(HlJS *js, HlJsMainRun *r)
+{
+    int64_t u = js->instruction_count;
+    r->used = u > INT64_MAX - r->used ? INT64_MAX : r->used + u;
+    js->instruction_count = 0;
+}
+
+static int js_main_test_wait_done(void *user)
+{
+    HlJsMainWait *w = (HlJsMainWait *)user;
+    HlJS *js = w->js;
+    js_main_take_used(js, w->r);
+    if (!js->cli_main_active) return 1;                  /* main settled */
+    int64_t limit = js->max_instructions;
+    if (js->budget_tripped ||
+        (limit > 0 && (w->r->used >= limit - w->r->case_used ||
+                       w->r->used > INT64_MAX - w->r->case_used))) {
+        w->r->gave_up = 2;
+        return 1;
+    }
+    if (w->deadline && hl_async_backend()->monotonic_ms() >= w->deadline) {
+        w->r->gave_up = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* ctx.stdin / stdout / stderr: the process's, or (test) the capture's. */
+static int js_main_streams(JSContext *ctx, JSValueConst ctxobj, HlJsMainRun *r)
+{
+    struct { const char *prop; int magic; int writer; } streams[] = {
+        { "stdin",  0, 0 },
+        { "stdout", 1, 1 },
+        { "stderr", 2, 1 },
+    };
+    for (size_t i = 0; i < sizeof(streams)/sizeof(streams[0]); i++) {
+        JSValue s = JS_NewObject(ctx);
+        if (JS_IsException(s)) return -1;
+        const char *n1 = streams[i].writer ? "write" : "read";
+        const char *n2 = streams[i].writer ? "flush" : "close";
+        JSValue f1, f2;
+        if (r->test) {
+            JSValueConst data[1] = { r->cap };
+            f1 = JS_NewCFunctionData(ctx, streams[i].writer ? js_cli_cap_write
+                                                            : js_cli_cap_read,
+                                     1, streams[i].magic, 1, data);
+            f2 = JS_NewCFunctionData(ctx, streams[i].writer ? js_cli_cap_flush
+                                                            : js_cli_cap_close,
+                                     0, streams[i].magic, 1, data);
+        } else {
+            f1 = JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)
+                                      (streams[i].writer ? js_cli_write : js_cli_read),
+                                      n1, 1, JS_CFUNC_generic_magic,
+                                      streams[i].magic);
+            f2 = JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)
+                                      (streams[i].writer ? js_cli_flush : js_cli_close),
+                                      n2, 0, JS_CFUNC_generic_magic,
+                                      streams[i].magic);
+        }
+        JS_SetPropertyStr(ctx, s, n1, f1);
+        JS_SetPropertyStr(ctx, s, n2, f2);
+        JS_SetPropertyStr(ctx, ctxobj, streams[i].prop, s);
+    }
+    return 0;
+}
+
+/* Run app.main once (the real runner, or test.runMain). The exit code in
+ * *exit_code_out; 0 when main settled fulfilled, -1 when it could not start,
+ * threw or rejected, or (test) was given up. */
+static int js_main_run(HlJS *js, HlJsMainRun *r, int *exit_code_out)
+{
+    JSContext *ctx = js->ctx;
+    *exit_code_out = 1;
 
     /* Look up the main function. */
     JSValue store = hl_js_internals(ctx);
@@ -2958,52 +3267,60 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
 
     /* ctx.args = [...argv] */
     JSValue args_arr = JS_NewArray(ctx);
-    for (int i = 0; i < argc; i++) {
-        JS_SetPropertyUint32(ctx, args_arr, (uint32_t)i,
-                             JS_NewString(ctx, argv[i] ? argv[i] : ""));
+    if (r->test) {
+        /* Checked by js_test_run_main: an array of strings, its own. */
+        int32_t n = 0;
+        if (JS_IsArray(ctx, r->args) && hl_js_get_length32(ctx, r->args, &n) == 0) {
+            for (int32_t i = 0; i < n; i++)
+                JS_SetPropertyUint32(ctx, args_arr, (uint32_t)i,
+                                     JS_GetPropertyUint32(ctx, r->args, (uint32_t)i));
+        }
+    } else {
+        for (int i = 0; i < r->argc; i++) {
+            JS_SetPropertyUint32(ctx, args_arr, (uint32_t)i,
+                                 JS_NewString(ctx, r->argv[i] ? r->argv[i] : ""));
+        }
     }
     JS_SetPropertyStr(ctx, ctxobj, "args", args_arr);
 
-    /* ctx.env = { NAME: value, ... } from env_allowlist */
-    JSValue env_obj = JS_NewObject(ctx);
-    if (env_allowlist) {
-        for (int i = 0; env_allowlist[i]; i++) {
-            const char *name = env_allowlist[i];
-            const char *val = getenv(name);
-            if (val)
-                JS_SetPropertyStr(ctx, env_obj, name, JS_NewString(ctx, val));
+    /* ctx.env = { NAME: value, ... } from env_allowlist; a test's is exactly
+     * opts.env (names checked against the manifest by js_test_run_main). */
+    JSValue env_obj;
+    if (r->test) {
+        env_obj = JS_NewObject(ctx);
+        if (JS_IsObject(r->env_obj)) {
+            JSPropertyEnum *props = NULL;
+            uint32_t np = 0;
+            if (JS_GetOwnPropertyNames(ctx, &props, &np, r->env_obj,
+                                       JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+                for (uint32_t i = 0; i < np; i++)
+                    JS_SetProperty(ctx, env_obj, props[i].atom,
+                                   JS_GetProperty(ctx, r->env_obj, props[i].atom));
+                JS_FreePropertyEnum(ctx, props, np);
+            } else {
+                JS_FreeValue(ctx, JS_GetException(ctx));
+            }
+        }
+    } else {
+        env_obj = JS_NewObject(ctx);
+        if (r->env) {
+            for (int i = 0; r->env[i]; i++) {
+                const char *name = r->env[i];
+                const char *val = getenv(name);
+                if (val)
+                    JS_SetPropertyStr(ctx, env_obj, name, JS_NewString(ctx, val));
+            }
         }
     }
     JS_SetPropertyStr(ctx, ctxobj, "env", env_obj);
 
     /* ctx.stdin / stdout / stderr */
-    struct { const char *prop; int magic; int writer; } streams[] = {
-        { "stdin",  0, 0 },
-        { "stdout", 1, 1 },
-        { "stderr", 2, 1 },
-    };
-    for (size_t i = 0; i < sizeof(streams)/sizeof(streams[0]); i++) {
-        JSValue s = JS_NewObject(ctx);
-        if (streams[i].writer) {
-            JS_SetPropertyStr(ctx, s, "write",
-                JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_cli_write,
-                                     "write", 1, JS_CFUNC_generic_magic,
-                                     streams[i].magic));
-            JS_SetPropertyStr(ctx, s, "flush",
-                JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_cli_flush,
-                                     "flush", 0, JS_CFUNC_generic_magic,
-                                     streams[i].magic));
-        } else {
-            JS_SetPropertyStr(ctx, s, "read",
-                JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_cli_read,
-                                     "read", 1, JS_CFUNC_generic_magic,
-                                     streams[i].magic));
-            JS_SetPropertyStr(ctx, s, "close",
-                JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_cli_close,
-                                     "close", 0, JS_CFUNC_generic_magic,
-                                     streams[i].magic));
-        }
-        JS_SetPropertyStr(ctx, ctxobj, streams[i].prop, s);
+    if (js_main_streams(ctx, ctxobj, r) != 0) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        JS_FreeValue(ctx, ctxobj);
+        JS_FreeValue(ctx, main_fn);
+        JS_FreeValue(ctx, store);
+        return -1;
     }
 
     /* ctx.signal (gap 7). Alive for the main window: freed below. */
@@ -3020,7 +3337,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     msig->onabort = JS_UNDEFINED;
     JSValue sigobj = js_main_signal_make(ctx, msig);
     if (JS_IsException(sigobj)) {
-        hl_js_dump_error(js);
+        js_main_error(js, r);
         js_main_signal_free(ctx, msig);
         JS_FreeValue(ctx, ctxobj);
         JS_FreeValue(ctx, main_fn);
@@ -3051,7 +3368,8 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         js->active_cli_main = 0;
         js->last_async_cont = NULL;
         hl_js_sleep_cancel_pending(js);
-        hl_js_dump_error(js);
+        js_main_error(js, r);
+        if (r->test) js_main_take_used(js, r);
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, main_fn);
         JS_FreeValue(ctx, store);
@@ -3079,6 +3397,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
      * routes - never runs on in autocommit (audit 35). It used to stay open
      * until the next entry's guard rolled it back unseen. */
     (void)hl_js_entry_end_txn_check(js);
+    if (r->test) js_main_take_used(js, r);
 
     /* Branch on whether main returned a Promise. */
     JSValue value = ret;
@@ -3089,7 +3408,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     if (js->budget_tripped) {
         /* Over the limit before main settled: its promise never will (a
          * tripped run settles nothing), so do not wait on it. */
-        fprintf(stderr, "[hull:main] %s\n", hl_js_trip_reason(js));
+        js_main_report(r, "[hull:main] ", hl_js_trip_reason(js));
         hl_js_sleep_cancel_pending(js);
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, main_fn);
@@ -3103,8 +3422,9 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         /* Main's pending promise is driven by either async backend, including
          * a standalone poll context with no HTTP server. */
         if (!js->base.async_ctx) {
-            fprintf(stderr, "[hull:main] no async context to drive event loop\n");
+            js_main_report(r, "[hull:main] ", "no async context to drive event loop");
             hl_js_sleep_cancel_pending(js);
+            if (r->test) hl_js_run_tag_abandon(js, js->cli_main_tag);
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, main_fn);
             JS_FreeValue(ctx, store);
@@ -3135,8 +3455,8 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         if (wrc != 0) {
             JSValue exc = JS_GetException(ctx);
             const char *msg = JS_ToCString(ctx, exc);
-            hl_eprintf_line("[hull:main] %s",
-                    msg ? msg : "cannot wait for main's promise");
+            js_main_report(r, "[hull:main] ",
+                           msg ? msg : "cannot wait for main's promise");
             if (msg) JS_FreeCString(ctx, msg);
             else JS_FreeValue(ctx, JS_GetException(ctx));
             JS_FreeValue(ctx, exc);
@@ -3160,9 +3480,36 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
              * this is a wrap around KlHttpServer's KlEventCtx; on HTTP=0
              * it's the poll backend's standalone loop. The .then
              * callbacks attached above (js_cli_main_settle) call
-             * backend->stop when main's promise settles. */
-            int srv_rc = hl_async_backend()->run(js->base.async_ctx);
-            int ended = hl_main_signal_ended();
+             * backend->stop when main's promise settles. A test's wait is
+             * bounded (js_main_test_wait_done). */
+            int srv_rc;
+            if (r->test) {
+                HlJsMainWait w = { js, r, 0 };
+                if (r->timeout_ms)
+                    w.deadline = hl_async_backend()->monotonic_ms() + r->timeout_ms;
+                srv_rc = hl_async_backend()->run_until(js->base.async_ctx,
+                                                       js_main_test_wait_done, &w);
+                js_main_take_used(js, r);   /* the last stretch */
+                if (srv_rc >= 0 && js->cli_main_active) {
+                    /* Given up while main still waits: its run's later jobs
+                     * are dropped unrun (its tag failed), and its settle
+                     * callbacks find no slot to write. */
+                    if (!r->gave_up) r->gave_up = 1;
+                    hl_js_run_tag_abandon(js, js->cli_main_tag);
+                    js->cli_main_value = NULL;
+                    js->cli_main_active = 0;
+                    JS_FreeValue(ctx, settled_slot);
+                    JS_FreeValue(ctx, ret);
+                    JS_FreeValue(ctx, main_fn);
+                    JS_FreeValue(ctx, store);
+                    js_main_signal_free(ctx, msig);
+                    js->main_signal = NULL;
+                    return -1;
+                }
+            } else {
+                srv_rc = hl_async_backend()->run(js->base.async_ctx);
+            }
+            int ended = r->test ? 0 : hl_main_signal_ended();
             if (srv_rc >= 0 && js->cli_main_active && ended) {
                 /* An interrupt ended main (shared/main_signal.h): it is
                  * still pending, and the exit status is 128 + the signal. */
@@ -3179,10 +3526,11 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
                 return -1;
             }
             if (srv_rc < 0 || js->cli_main_active) {
-                fprintf(stderr, "[hull:main] event loop ended before main settled\n");
+                js_main_report(r, "[hull:main] ", "event loop ended before main settled");
                 js->cli_main_value = NULL;
                 js->cli_main_active = 0;
                 hl_js_sleep_cancel_pending(js);
+                if (r->test) hl_js_run_tag_abandon(js, js->cli_main_tag);
                 JS_FreeValue(ctx, settled_slot);
                 JS_FreeValue(ctx, ret);
                 JS_FreeValue(ctx, main_fn);
@@ -3192,6 +3540,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
                 return -1;
             }
             hl_js_run_jobs(js);  /* drain anything that landed after stop */
+            if (r->test) js_main_take_used(js, r);
         }
 
         value = settled_slot;
@@ -3207,13 +3556,19 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
 
     int rc;
     if (rejected) {
-        const char *msg = JS_ToCString(ctx, value);
-        hl_eprintf_line("[hull:main] promise rejected: %s",
-                msg ? msg : "(unknown)");
-        if (msg) JS_FreeCString(ctx, msg);
+        if (r->test) {
+            char buf[480];
+            extract_main_error(ctx, value, buf, sizeof buf);
+            js_main_report(r, "[hull:main] promise rejected: ", buf);
+        } else {
+            const char *msg = JS_ToCString(ctx, value);
+            hl_eprintf_line("[hull:main] promise rejected: %s",
+                    msg ? msg : "(unknown)");
+            if (msg) JS_FreeCString(ctx, msg);
+        }
         rc = 1;
     } else {
-        rc = coerce_js_exit_code(ctx, value);
+        rc = coerce_js_exit_code(ctx, value, r);
     }
 
     if (owned_value) JS_FreeValue(ctx, value);
@@ -3226,6 +3581,316 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
 
     *exit_code_out = rc;
     return rejected ? -1 : 0;
+}
+
+static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
+                           int argc, char **argv,
+                           const char *const *env_allowlist,
+                           int *exit_code_out)
+{
+    if (exit_code_out) *exit_code_out = 1;
+    if (!rt || !exit_code_out) return -1;
+    HlJS *js = (HlJS *)rt;
+
+    /* Same reasoning as the Lua side: CLI bypasses wire_routes_server,
+     * so the server pointer isn't wired. Async ops (hull.sleep,
+     * compute.async, gpu.async, http.fetch) reach for js->server. */
+    if (server) js->server = server;
+
+    HlJsMainRun r;
+    memset(&r, 0, sizeof r);
+    r.argc = argc;
+    r.argv = argv;
+    r.env  = env_allowlist;
+    r.args = JS_UNDEFINED;
+    r.env_obj = JS_UNDEFINED;
+    r.cap  = JS_UNDEFINED;
+    return js_main_run(js, &r, exit_code_out);
+}
+
+/* ── test.runMain(args?, opts?) ────────────────────────────────────────
+ *
+ * The JS twin of Lua's test.run_main (runtime/lua/runtime.c): runs the
+ * loaded app's app.main once inside the calling test case and returns
+ * { code, stdout, stderr }. ctx.args is @p args (strings), ctx.stdin reads
+ * opts.stdin (a string or byte view), ctx.stdout / ctx.stderr are captured,
+ * and ctx.env is exactly opts.env, whose names must be in the manifest's
+ * `env` list. main's waits are driven on the test's event loop until it
+ * settles, at most opts.timeoutMs (default HL_TEST_MAIN_TIMEOUT_MS, never
+ * past the case's own deadline); a main given up then throws. A throw or
+ * rejection is code 1 with the runner's message on the captured stderr. As
+ * test.get's request, main runs on the case's time: its instructions are
+ * added to the case's, the case's deadline and run tag put back, and the
+ * stale-transaction guard held off while the case has a transaction open. */
+#define HL_TEST_MAIN_TIMEOUT_MS  10000u
+#define HL_TEST_MAIN_MAX_ARGS    1024
+
+static JSValue cap_list_string(JSContext *ctx, JSValueConst cap, const char *key,
+                               const char *tail)
+{
+    JSValue list = JS_GetPropertyStr(ctx, cap, key);
+    if (JS_IsException(list)) return JS_EXCEPTION;
+    int32_t n = 0;
+    if (hl_js_get_length32(ctx, list, &n) < 0) { JS_FreeValue(ctx, list); return JS_EXCEPTION; }
+    size_t tlen = tail ? strlen(tail) : 0;
+    size_t total = tlen + (tail ? 1 : 0);
+    for (int32_t i = 0; i < n; i++) {
+        JSValue ab = JS_GetPropertyUint32(ctx, list, (uint32_t)i);
+        size_t len = 0;
+        if (!JS_GetArrayBuffer(ctx, &len, ab)) JS_FreeValue(ctx, JS_GetException(ctx));
+        JS_FreeValue(ctx, ab);
+        if (len > SIZE_MAX / 2 - total) { JS_FreeValue(ctx, list); return JS_ThrowRangeError(ctx, "output too large"); }
+        total += len;
+    }
+    char *buf = js_malloc(ctx, total + 1);
+    if (!buf) { JS_FreeValue(ctx, list); return JS_EXCEPTION; }
+    size_t off = 0;
+    for (int32_t i = 0; i < n; i++) {
+        JSValue ab = JS_GetPropertyUint32(ctx, list, (uint32_t)i);
+        size_t len = 0;
+        const uint8_t *p = JS_GetArrayBuffer(ctx, &len, ab);
+        if (!p) JS_FreeValue(ctx, JS_GetException(ctx));
+        else if (len <= total - off) { memcpy(buf + off, p, len); off += len; }
+        JS_FreeValue(ctx, ab);
+    }
+    if (tail) { memcpy(buf + off, tail, tlen); off += tlen; buf[off++] = '\n'; }
+    JS_FreeValue(ctx, list);
+    JSValue s = JS_NewStringLen(ctx, buf, off);
+    js_free(ctx, buf);
+    return s;
+}
+
+JSValue js_test_run_main(JSContext *ctx, JSValueConst this_val,
+                         int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js) return JS_ThrowInternalError(ctx, "test not initialized");
+    if (!vt_js_has_main((HlRuntime *)js))
+        return JS_ThrowTypeError(ctx, "test.runMain: the app did not register app.main");
+    if (js->active_cli_main || js->cli_main_active || js->main_signal)
+        return JS_ThrowTypeError(ctx, "test.runMain: app.main is already running");
+
+    JSValueConst a0 = argc >= 1 ? argv[0] : JS_UNDEFINED;
+    JSValueConst a1 = argc >= 2 ? argv[1] : JS_UNDEFINED;
+
+    /* Copies of what the test passed, checked: main gets these, not the
+     * test's own objects. */
+    JSValue args = JS_NewArray(ctx);
+    JSValue env = JS_UNDEFINED;
+    JSValue cap = JS_UNDEFINED;
+    JSValue ret = JS_EXCEPTION;
+    if (JS_IsException(args)) return JS_EXCEPTION;
+    if (!JS_IsUndefined(a0) && !JS_IsNull(a0)) {
+        if (!JS_IsArray(ctx, a0)) {
+            JS_ThrowTypeError(ctx, "test.runMain: args must be an array of strings");
+            goto out;
+        }
+        int32_t n = 0;
+        if (hl_js_get_length32(ctx, a0, &n) < 0) goto out;
+        if (n > HL_TEST_MAIN_MAX_ARGS) {
+            JS_ThrowRangeError(ctx, "test.runMain: more than %d args", HL_TEST_MAIN_MAX_ARGS);
+            goto out;
+        }
+        for (int32_t i = 0; i < n; i++) {
+            JSValue v = JS_GetPropertyUint32(ctx, a0, (uint32_t)i);
+            if (JS_IsException(v)) goto out;
+            if (!JS_IsString(v)) {
+                JS_FreeValue(ctx, v);
+                JS_ThrowTypeError(ctx, "test.runMain: args[%d] is not a string", (int)i);
+                goto out;
+            }
+            if (JS_DefinePropertyValueUint32(ctx, args, (uint32_t)i, v, JS_PROP_C_W_E) < 0)
+                goto out;
+        }
+    }
+
+    cap = JS_NewObjectProto(ctx, JS_NULL);
+    if (JS_IsException(cap)) goto out;
+    {
+        JSValue out_l = JS_NewArray(ctx), err_l = JS_NewArray(ctx);
+        if (!JS_IsException(out_l)) JS_SetPrototype(ctx, out_l, JS_NULL);
+        if (!JS_IsException(err_l)) JS_SetPrototype(ctx, err_l, JS_NULL);
+        if (JS_DefinePropertyValueStr(ctx, cap, "out", out_l, JS_PROP_C_W_E) < 0 ||
+            JS_DefinePropertyValueStr(ctx, cap, "err", err_l, JS_PROP_C_W_E) < 0 ||
+            JS_DefinePropertyValueStr(ctx, cap, "pos", JS_NewInt32(ctx, 0), JS_PROP_C_W_E) < 0)
+            goto out;
+    }
+
+    uint32_t timeout_ms = HL_TEST_MAIN_TIMEOUT_MS;
+    if (!JS_IsUndefined(a1) && !JS_IsNull(a1)) {
+        if (!JS_IsObject(a1)) {
+            JS_ThrowTypeError(ctx, "test.runMain: opts must be an object");
+            goto out;
+        }
+        JSValue in = JS_GetPropertyStr(ctx, a1, "stdin");
+        if (JS_IsException(in)) goto out;
+        if (!JS_IsUndefined(in) && !JS_IsNull(in)) {
+            HlBufferView view = {0};
+            const char *s = NULL;
+            int needs_free = 0;
+            if (!js_get_buffer(ctx, in, &view, &s, &needs_free)) {
+                JS_FreeValue(ctx, in);
+                JS_ThrowTypeError(ctx, "test.runMain: opts.stdin must be a string "
+                                       "or bytes");
+                goto out;
+            }
+            JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)view.data, view.len);
+            if (needs_free && s) JS_FreeCString(ctx, s);
+            if (JS_IsException(ab) ||
+                JS_DefinePropertyValueStr(ctx, cap, "input", ab, JS_PROP_C_W_E) < 0) {
+                JS_FreeValue(ctx, in);
+                goto out;
+            }
+        }
+        JS_FreeValue(ctx, in);
+
+        int32_t t = 0;
+        int got = hl_js_opt_int32(ctx, a1, "timeoutMs", &t);
+        if (got < 0) goto out;
+        if (got > 0) {
+            if (t <= 0) {
+                JS_ThrowRangeError(ctx, "test.runMain: opts.timeoutMs must be a "
+                                        "positive integer");
+                goto out;
+            }
+            timeout_ms = (uint32_t)t;
+        }
+
+        JSValue ev = JS_GetPropertyStr(ctx, a1, "env");
+        if (JS_IsException(ev)) goto out;
+        if (!JS_IsUndefined(ev) && !JS_IsNull(ev)) {
+            if (!JS_IsObject(ev)) {
+                JS_FreeValue(ctx, ev);
+                JS_ThrowTypeError(ctx, "test.runMain: opts.env must be an object");
+                goto out;
+            }
+            env = JS_NewObjectProto(ctx, JS_NULL);
+            JSPropertyEnum *props = NULL;
+            uint32_t np = 0;
+            if (JS_IsException(env) ||
+                JS_GetOwnPropertyNames(ctx, &props, &np, ev,
+                                       JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0) {
+                JS_FreeValue(ctx, ev);
+                goto out;
+            }
+            int bad = 0;
+            for (uint32_t i = 0; !bad && i < np; i++) {
+                const char *name = JS_AtomToCString(ctx, props[i].atom);
+                if (!name) { bad = 1; break; }
+                int allowed = 0;
+                const char *const *al = js->base.test_env_allow;
+                for (int k = 0; al && al[k]; k++)
+                    if (strcmp(al[k], name) == 0) { allowed = 1; break; }
+                if (!allowed) {
+                    JS_ThrowTypeError(ctx, "test.runMain: env '%s' is not in the "
+                                           "manifest's env list", name);
+                    JS_FreeCString(ctx, name);
+                    bad = 1;
+                    break;
+                }
+                JS_FreeCString(ctx, name);
+                JSValue v = JS_GetProperty(ctx, ev, props[i].atom);
+                if (JS_IsException(v)) { bad = 1; break; }
+                if (!JS_IsString(v)) {
+                    JS_FreeValue(ctx, v);
+                    JS_ThrowTypeError(ctx, "test.runMain: opts.env values must be "
+                                           "strings");
+                    bad = 1;
+                    break;
+                }
+                if (JS_DefinePropertyValue(ctx, env, props[i].atom, v, JS_PROP_C_W_E) < 0)
+                    bad = 1;
+            }
+            JS_FreePropertyEnum(ctx, props, np);
+            JS_FreeValue(ctx, ev);
+            if (bad) goto out;
+        }
+    }
+
+    {
+        /* Never past the case's own deadline (cap/run_watchdog.h). */
+        int64_t left = hl_run_deadline_left_ms();
+        if (left >= 0 && (uint64_t)left < timeout_ms)
+            timeout_ms = left > 0 ? (uint32_t)left : 1;
+
+        /* main runs inside this case, as test.get's request does (audit 10,
+         * parity with Lua). */
+        int64_t  saved_count    = js->instruction_count;
+        uint64_t saved_deadline = hl_run_watch_save(&js->run_watch);
+        uint64_t saved_entry_tag = js->entry_tag;
+        uint64_t saved_job_tag   = JS_GetJobTag(js->rt);
+        int      saved_kind      = js->run_kind;
+        KlHttpConn       *saved_conn  = js->active_conn;
+        KlHttpRequest    *saved_req   = js->active_req;
+        void             *saved_timer = js->active_timer;
+        struct HlReqLife *saved_life  = js->active_life;
+        void             *saved_last  = js->last_async_cont;
+        int hold = hl_db_registry_open_txn(js->base.db_registry) != NULL;
+        if (hold) hl_db_registry_guard_hold(1);
+
+        HlJsMainRun r;
+        memset(&r, 0, sizeof r);
+        r.test       = 1;
+        r.args       = args;
+        r.env_obj    = env;
+        r.cap        = cap;
+        r.timeout_ms = timeout_ms;
+        r.case_used  = saved_count;
+        int code = 1;
+        (void)js_main_run(js, &r, &code);
+
+        if (hold) hl_db_registry_guard_hold(-1);
+        js->active_conn     = saved_conn;
+        js->active_req      = saved_req;
+        js->active_timer    = saved_timer;
+        js->active_life     = saved_life;
+        js->last_async_cont = saved_last;
+        js->run_kind        = saved_kind;
+        js->instruction_count = r.used > INT64_MAX - saved_count
+                                ? INT64_MAX : saved_count + r.used;
+        if (js->max_instructions > 0 &&
+            js->instruction_count > js->max_instructions)
+            js->budget_tripped = 1;
+        if (r.gave_up == 2) js->budget_tripped = 1;
+        hl_run_watch_restore(&js->run_watch, saved_deadline);
+        hl_js_run_tag_enter(js, saved_entry_tag);
+        JS_SetJobTag(js->rt, saved_job_tag);
+        if (!js->budget_tripped && hl_run_watch_stopped(&js->run_watch)) {
+            js->budget_tripped = 1;
+            js->budget_timed_out = 1;
+        }
+        if (js->budget_tripped) {
+            ret = hl_js_budget_throw(ctx);
+            goto out;
+        }
+        if (r.gave_up) {
+            ret = JS_ThrowInternalError(ctx, "test.runMain: app.main did not "
+                                             "finish within %u ms", timeout_ms);
+            goto out;
+        }
+
+        JSValue res = JS_NewObject(ctx);
+        if (JS_IsException(res)) goto out;
+        JSValue so = cap_list_string(ctx, cap, "out", NULL);
+        JSValue se = JS_IsException(so) ? JS_EXCEPTION
+                   : cap_list_string(ctx, cap, "err", r.msg[0] ? r.msg : NULL);
+        if (JS_IsException(so) || JS_IsException(se)) {
+            JS_FreeValue(ctx, so);
+            JS_FreeValue(ctx, res);
+            goto out;
+        }
+        JS_DefinePropertyValueStr(ctx, res, "code", JS_NewInt32(ctx, code), JS_PROP_C_W_E);
+        JS_DefinePropertyValueStr(ctx, res, "stdout", so, JS_PROP_C_W_E);
+        JS_DefinePropertyValueStr(ctx, res, "stderr", se, JS_PROP_C_W_E);
+        ret = res;
+    }
+
+out:
+    JS_FreeValue(ctx, args);
+    JS_FreeValue(ctx, env);
+    JS_FreeValue(ctx, cap);
+    return ret;
 }
 
 #ifdef HL_ENABLE_HTTP_SERVER

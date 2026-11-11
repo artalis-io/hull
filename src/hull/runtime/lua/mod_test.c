@@ -407,6 +407,7 @@ static const luaL_Reg test_methods[] = {
     { "eq",     l_test_eq },
     { "ok",     l_test_ok },
     { "err",    l_test_err },
+    { "run_main", hl_lua_test_run_main },
     { NULL, NULL }
 };
 

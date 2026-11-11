@@ -98,7 +98,8 @@ Apply this when working on app code:
   + `hull agent request` are the right tools to iterate.
 - If you see `app.main`, it's CLI mode. Run the entry directly
   (`hull app.lua ...`); `hull dev` doesn't apply. Test files use
-  `test.run_main({args=..., stdin=...})` instead of `test.get/post`.
+  `test.run_main(args, { stdin = ..., env = ... })` (JS `test.runMain`)
+  instead of `test.get/post`; it returns `{ code, stdout, stderr }`.
 - Registering both `app.main` and routes is an error. Hull fails at
   startup. If you're refactoring, pick one mode for the whole app.
 - `hull agent manifest` reports `"mode": "server" | "cli"` so you can
