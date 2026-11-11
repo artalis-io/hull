@@ -3004,7 +3004,9 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
         the AuthMoreData (0x01) exchange: fast-auth success (0x03, cache hit,
         OK follows) and full-auth (0x04) by sending the cleartext password over
         TLS; without TLS it fails with a "set sslmode=require" hint (the
-        plaintext RSA public-key path is deferred). AuthSwitchRequest now
+        plaintext RSA public-key path was deferred; it has since landed:
+        `?server_public_key=` / `?get_server_public_key=true`, see CLAUDE.md
+        "MySQL/MariaDB specifics"). AuthSwitchRequest now
         re-dispatches through the same helper (native or caching_sha2).
         Unit-tested: the scramble formula + a caching_sha2 fast-auth socketpair
         handshake asserting the client's response. ASan/UBSan-clean.

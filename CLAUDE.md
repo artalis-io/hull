@@ -1271,10 +1271,33 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   `caching_sha2_password` (MySQL 8 default: SHA-256 fast path always;
   full-auth sends the cleartext password, only over TLS whose server
   certificate was VERIFIED - `sslmode=verify-ca` / `verify-full` - since
-  `prefer` / `require` would hand it to any MITM (audit 5 M4); otherwise it
-  fails with a hint. The RSA public-key exchange is not implemented. Once the
-  server has cached the account's hash, the fast path works under any
-  sslmode). The exchange takes at most ONE AuthSwitchRequest, and a switch TO
+  `prefer` / `require` would hand it to any MITM (audit 5 M4), so full auth
+  over unverified TLS still fails: the server reads the answer as the
+  cleartext password over ANY TLS session and takes RSA only without TLS.
+  Over a connection with no TLS (`sslmode=disable`, or `prefer` against a
+  server that offers none) full auth uses the RSA public-key exchange, as
+  MySQL's own client does: (password || NUL) XOR the scramble, RSA-OAEP
+  (SHA-1) encrypted to a
+  key the DSN trusts - `?server_public_key=` pins it (a PEM file path, or the
+  PEM itself percent-encoded, which a `"$VAR"` DSN can carry), and
+  `?get_server_public_key=true` opts into asking the server for it (0x02),
+  which whoever answers an unverified channel can replace - WARNed once per
+  user@host:port. With neither it fails with a hint naming both. One RSA
+  answer per connection; the key is at most `HL_CRYPTO_RSA_PUBKEY_PEM_MAX`
+  (16 KiB, a server-sent one refused past it before parsing), RSA of 2048+
+  bits with an exponent of at most 64 bits; the work is charged
+  `HL_WORK_DB_RSA_AUTH_UNITS` before it runs. The encrypt goes through the
+  asym backend seam (`hl_cap_crypto_rsa_oaep_sha1_encrypt`, the TLS-less stub
+  fails closed). A key FILE is read by Hull at connect (O_NOFOLLOW, regular,
+  bounded), so who may name one is limited: a manifest DSN's path is confined
+  like a file DSN (app tree or `@state/`, no `..`, link or `.hull`;
+  `confine_mysql_pubkey` in `cap/db_registry.c` rewrites it to the absolute
+  path), the operator's `-d` is taken as given (it must be readable under the
+  kernel sandbox - put it in the app directory), and a `db.open` DSN may give
+  only the inline PEM (`db_dynamic.c`, via `hl_dsn_query_param`): a path there
+  would read a file outside the app's fs grants. Once the server has cached
+  the account's hash, the fast path works under any sslmode). The exchange
+  takes at most ONE AuthSwitchRequest, and a switch TO
   `mysql_native_password` is answered only over verified TLS or under
   `sslmode=disable` (audit 44, the twin of Postgres's audit 29 rule): a MySQL
   8 account using native over `prefer` / `require` now fails with a hint. The

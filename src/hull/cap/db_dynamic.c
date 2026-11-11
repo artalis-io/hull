@@ -279,6 +279,22 @@ HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
             if (err) *err = "db.open: host not allowed by databases.dynamic.hosts";
             return NULL;
         }
+        /* A MySQL ?server_public_key= naming a FILE would have Hull read it
+         * at connect, outside the app's fs grants (a db.open DSN is app
+         * text): here it may only be the PEM itself. A key file is for a
+         * manifest DSN (confined to the app tree by the registry) or the
+         * operator's -d. Every occurrence is checked. */
+        for (int i = 0;; i++) {
+            char kv[4352];
+            int r = hl_dsn_query_param(dsn, "server_public_key", i, kv, sizeof kv);
+            if (r == -1) break;
+            if (r < 0 || strncmp(kv, "-----BEGIN ", strlen("-----BEGIN ")) != 0) {
+                if (err) *err = "db.open: server_public_key must be the PEM "
+                                "itself (a key file may be named only by a "
+                                "manifest or -d DSN)";
+                return NULL;
+            }
+        }
     }
 
     /* The open's fixed work, charged before it to the thread's charge scope

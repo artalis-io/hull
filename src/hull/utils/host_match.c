@@ -10,6 +10,7 @@
 
 #include "hull/host_match.h"
 #include "hull/utils/env_ref.h"   /* hl_env_ref (header-only inline) */
+#include "url.h"                  /* hl_url_decode (header-only inline) */
 
 #include <arpa/inet.h>
 #include <stdlib.h>
@@ -339,4 +340,31 @@ int hl_dsn_host(const char *dsn, char *buf, size_t bufsz)
     memcpy(buf, host, n);
     buf[n] = '\0';
     return 1;
+}
+
+int hl_dsn_query_param(const char *dsn, const char *key, int nth,
+                       char *out, size_t outsz)
+{
+    if (!dsn || !key || !out || outsz == 0 || nth < 0) return -2;
+    const char *sep = strstr(dsn, "://");
+    const char *q = sep ? strchr(sep + 3, '?') : NULL;
+    if (!q) return -1;
+    q++;
+    size_t klen = strlen(key);
+    int seen = 0;
+    while (*q) {
+        const char *amp = strchr(q, '&');
+        size_t pair_len = amp ? (size_t)(amp - q) : strlen(q);
+        const char *eq = memchr(q, '=', pair_len);
+        if (eq && (size_t)(eq - q) == klen && strncmp(q, key, klen) == 0 &&
+            seen++ == nth) {
+            size_t vlen = pair_len - klen - 1;
+            long n = hl_url_decode(eq + 1, vlen, out, outsz, 0);
+            if (n < 0 || (size_t)n != strlen(out)) return -2;
+            return (int)n;
+        }
+        if (!amp) break;
+        q = amp + 1;
+    }
+    return -1;
 }

@@ -304,7 +304,12 @@ static inline uint64_t hl_work_mime_units(size_t len)
  *                                 -> HL_WORK_TUI_LEAVE_UNITS      1024
  *   smtp.send: DNS, connect, TLS and the SMTP conversation, as an HTTP
  *     request                     -> HL_WORK_SMTP_SEND_UNITS     16384
+ *   MySQL caching_sha2 full authentication over RSA: reading a pinned key
+ *     file, parsing the PEM and one RSA-OAEP public-key operation (an
+ *     RSA-8192 encrypt with e = 65537 is ~1 ms), charged before the work
+ *                                 -> HL_WORK_DB_RSA_AUTH_UNITS   65536
  */
+#define HL_WORK_DB_RSA_AUTH_UNITS    65536u
 #define HL_WORK_KV_COMMAND_UNITS      8192u
 #define HL_WORK_KV_OPEN_UNITS        16384u
 #define HL_WORK_NET_SQL_UNITS         8192u
