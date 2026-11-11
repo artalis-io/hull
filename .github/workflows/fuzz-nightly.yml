@@ -101,7 +101,7 @@ jobs:
 
       - name: Install clang
         if: steps.sel.outputs.run == 'true'
-        run: sudo apt-get update && sudo apt-get install -y clang
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y clang
 
       - name: Build fuzz_${{ matrix.target }}
         if: steps.sel.outputs.run == 'true'
