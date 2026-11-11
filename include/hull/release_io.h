@@ -288,6 +288,16 @@ int hl_release_io_requires_signed_version(const char *tag);
  * comes unsigned from the GitHub API and is pasted into download URLs. */
 int hl_release_io_tag_valid(const char *tag);
 
+/* The version a release tag names, for display: "v0.20.1" -> "0.20.1",
+ * the form `hull version` and HL_VERSION use. Any other string is returned
+ * as given. Points into @p tag. */
+const char *hl_release_io_display_version(const char *tag);
+
+/* The prefix of a message about @p ua's operation: "hull-update" ->
+ * "hull update", the command the user typed; any other value as given
+ * (truncated to @p n). The ua itself stays the User-Agent. */
+void hl_release_io_msg_prefix(const char *ua, char *out, size_t n);
+
 /** 1 when @p repo is a well-formed GitHub "owner/name" (each side 1..100 of
  *  [A-Za-z0-9._-]); 0 otherwise. */
 int hl_release_io_repo_valid(const char *repo);
