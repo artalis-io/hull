@@ -230,6 +230,23 @@ int hl_release_io_get(const char *url,
     return 0;
 }
 
+const char *hl_release_io_display_version(const char *tag)
+{
+    if (!tag) return "";
+    if (tag[0] == 'v' && tag[1] >= '0' && tag[1] <= '9') return tag + 1;
+    return tag;
+}
+
+void hl_release_io_msg_prefix(const char *ua, char *out, size_t n)
+{
+    if (!out || n == 0) return;
+    if (!ua) ua = "hull";
+    if (strncmp(ua, "hull-", 5) == 0 && ua[5] != '\0')
+        snprintf(out, n, "hull %s", ua + 5);
+    else
+        snprintf(out, n, "%s", ua);
+}
+
 /* ── The signed manifest names the release ───────────────────────────── */
 
 int hl_release_io_check_release_tag(const char *repo, const char *tag,
@@ -243,6 +260,8 @@ int hl_release_io_check_release_tag(const char *repo, const char *tag,
     if (out_version_len) *out_version_len = 0;
     if (!repo || !tag || !manifest || !alloc || !tls) return -1;
     if (!ua) ua = "hull";
+    char pfx[64];
+    hl_release_io_msg_prefix(ua, pfx, sizeof(pfx));
 
     /* The tag is the caller's (unsigned) choice. hull.version, hashed into
      * the signed manifest, says which release these bytes are: an old
@@ -268,7 +287,7 @@ int hl_release_io_check_release_tag(const char *repo, const char *tag,
         fprintf(stderr,
                 "%s: the signed manifest does not name the release %s\n"
                 "  (hull.version missing or different); refusing to proceed\n",
-                ua, tag);
+                pfx, tag);
         if (ver) hl_release_io_free(alloc, ver, ver_len);
         return -1;
     }
@@ -278,15 +297,16 @@ int hl_release_io_check_release_tag(const char *repo, const char *tag,
         fprintf(stderr,
                 "%s: the signed manifest for %s has no hull.version entry,\n"
                 "  which every release since %s carries; refusing to proceed\n",
-                ua, tag, HL_RELEASE_SIGNED_VERSION_SINCE);
+                pfx, tag, HL_RELEASE_SIGNED_VERSION_SINCE);
         if (ver) hl_release_io_free(alloc, ver, ver_len);   /* audit 23: leaked */
         return -1;
     }
     if (vrc == 0)
-        fprintf(stdout, "%s: signed manifest names %s\n", ua, tag);
+        fprintf(stdout, "%s: signed manifest names %s\n", pfx,
+                hl_release_io_display_version(tag));
     else
         fprintf(stdout, "%s: %s predates the signed version entry; "
-                        "trusting the release tag\n", ua, tag);
+                        "trusting the release tag\n", pfx, tag);
     if (ver && out_version) {
         *out_version = ver;
         if (out_version_len) *out_version_len = ver_len;

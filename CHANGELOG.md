@@ -8,6 +8,16 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`hull update` spells every version the same way.** It printed the
+  running version without a `v` (`current  0.20.0`) and the release's with
+  one (`latest   v0.20.1`, `installed v0.20.1`); every line now prints the
+  bare version, as `hull version` does (a source build's `git describe`
+  version included). The release-tag check's line also
+  said `hull-update:` (its User-Agent) instead of `hull update:`; the
+  feature / flavor / tools installs get the same prefix fix.
+
 ## [0.20.1] - 2026-11-10
 
 Three audit 44 follow-ups, mainly a Windows fix: on Windows (no kernel sandbox there) a manifest
