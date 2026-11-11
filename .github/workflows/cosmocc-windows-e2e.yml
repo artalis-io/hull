@@ -89,7 +89,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install strace (the producer traces a build to trim the tree)
-        run: sudo apt-get update -qq && sudo apt-get install -y strace
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update -qq && sudo apt-get install -y strace
       - name: Produce hull-cosmocc.tar
         shell: bash
         run: |
