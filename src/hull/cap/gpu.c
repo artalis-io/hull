@@ -2991,6 +2991,9 @@ struct HlGpuCompileJob {
     pthread_cond_t      cv;
     int                 done;       /* the thread is finished with the backend */
     int                 abandoned;  /* nobody takes `out`: the thread frees it */
+    int                 async;      /* a gpu.async.compile's (set before start) */
+    int                 settled;    /* async: its finisher installed the
+                                     * pipeline or the job was abandoned */
     int                 refs;
     size_t              min_stack;  /* refuse a thread smaller than this (0 = any):
                                      * the stack the compile helper's verdict
@@ -3199,17 +3202,19 @@ static int gpu_compile_wait(HlGpuCompileJob *job)
     return finished;
 }
 
-/* Whether the device still has an abandoned compile running (audit 40).
- * Called under the device mutex; drops the device's reference once the
- * compile is finished. */
+/* Whether the device still has an abandoned compile running (audit 40), or
+ * a gpu.async.compile its finisher has not settled yet. Called under the
+ * device mutex; drops the device's reference once the compile is finished
+ * (and, for an async one, settled). */
 static int compile_busy(HlGpuDevice *dev)
 {
     HlGpuCompileJob *job = dev->compile_job;
     if (!job) return 0;
     pthread_mutex_lock(&job->mu);
     int done = job->done;
+    int unsettled = job->async && !job->settled;
     pthread_mutex_unlock(&job->mu);
-    if (!done) return 1;
+    if (!done || unsettled) return 1;
     dev->compile_job = NULL;
     compile_job_unref(job);
     return 0;
@@ -3258,12 +3263,22 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
     return hl_cap_gpu_compile_ex(ctx, device, name, wgsl, wgsl_len, 0);
 }
 
-int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
-                          const char *wgsl, size_t wgsl_len, int flags)
+/* compile_enter's "go on and compile": the device is locked. */
+#define GPU_COMPILE_PROCEED 1
+
+/* Everything a compile does before its backend compile starts, shared by
+ * the synchronous compile and gpu.async.compile, in this order: the shader
+ * policy, the WGSL pre-checks, the name, the device, the compile helper
+ * (runtime source a built binary opted into), the device lock, the
+ * pipeline cache, an earlier compile still running, the cache's capacity.
+ * HL_GPU_OK when @p name is compiled already, an HlGpuError, or
+ * GPU_COMPILE_PROCEED with the device mutex held and *dev_out / *idx_out /
+ * *helper_stack_out set. Event loop only. */
+static int compile_enter(HlGpuCtx *ctx, int device, const char *name,
+                         const char *wgsl, size_t wgsl_len, int flags,
+                         HlGpuDevice **dev_out, int *idx_out,
+                         size_t *helper_stack_out)
 {
-    /* Shader compile is event-loop-only (gpu.compile / gpu.load bindings);
-     * workers only look up already-compiled pipelines under the device lock. */
-    hl_assert_on_event_loop("hl_cap_gpu_compile (gpu.compile/load)");
     if (!ctx || !name || !wgsl)
         return HL_GPU_ERR_INTERNAL;
     /* A built binary compiles only its embedded shaders unless the manifest
@@ -3359,7 +3374,8 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_OK;
     }
 
-    /* An abandoned compile still running holds the device (audit 40). */
+    /* An abandoned compile still running, or a gpu.async.compile not yet
+     * settled, holds the device (audit 40): one compile at a time. */
     if (compile_busy(dev)) {
         pthread_mutex_unlock(&dev->mutex);
         log_warn("[hull:gpu] shader '%s' refused: %s (an earlier compile "
@@ -3374,11 +3390,59 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_INTERNAL;
     }
 
+    *dev_out = dev;
+    *idx_out = dev_idx;
+    *helper_stack_out = helper_stack;
+    return GPU_COMPILE_PROCEED;
+}
+
+/* Take a finished compile's pipeline into the device's cache (under the
+ * device mutex; capacity was checked when the compile started, and no
+ * other compile can start on the device meanwhile). */
+static void compile_install(HlGpuDevice *dev, const HlGpuCompileJob *job)
+{
+    HlGpuPipeline *slot = &dev->pipelines[dev->pipeline_count];
+    slot->handle = job->out.handle;
+    slot->bind_group_layout = job->out.bind_group_layout;
+    snprintf(slot->name, sizeof(slot->name), "%s", job->name);
+    /* Group 0's declared bindings, checked before every dispatch and
+     * pipeline stage that uses it (audit 35). */
+    (void)hl_gpu_wgsl_layout(job->wgsl, job->wgsl_len, slot);
+    dev->pipeline_count++;
+}
+
+/* The audit writer's buffer is process-wide: event loop only. */
+static void compile_audit(const char *cap, const char *name, int dev_idx,
+                          int rc)
+{
+    if (!hl_audit_enabled) return;
+    ShJsonWriter w = hl_audit_begin(cap);
+    sh_json_write_kv_string(&w, "shader", name);
+    sh_json_write_kv_int(&w, "device", dev_idx);
+    sh_json_write_kv_int(&w, "rc", rc);
+    hl_audit_end(&w);
+}
+
+int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
+                          const char *wgsl, size_t wgsl_len, int flags)
+{
+    /* A shader compile starts on the event loop only (gpu.compile /
+     * gpu.load, and gpu.async.compile / load through
+     * hl_cap_gpu_compile_async_begin); a gpu.async.compile's pool thread
+     * only installs the pipeline its compile thread made, under the device
+     * lock. */
+    hl_assert_on_event_loop("hl_cap_gpu_compile (gpu.compile/load)");
+    HlGpuDevice *dev = NULL;
+    int dev_idx = -1;
+    size_t helper_stack = 0;
+    int rc = compile_enter(ctx, device, name, wgsl, wgsl_len, flags,
+                           &dev, &dev_idx, &helper_stack);
+    if (rc != GPU_COMPILE_PROCEED)
+        return rc;
+
     /* Compile via backend, on a thread of its own (audit 39), waited for
      * with a deadline (audit 40). */
-    HlGpuPipeline *slot = &dev->pipelines[dev->pipeline_count];
     HlGpuCompileJob *job = compile_job_new(ctx, dev, name, wgsl, wgsl_len);
-    int rc;
     if (job)
         job->min_stack = helper_stack;
     if (!job) {
@@ -3388,10 +3452,8 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
         rc = HL_GPU_ERR_INTERNAL;
     } else if (gpu_compile_wait(job)) {
         rc = job->rc;
-        if (rc == HL_GPU_OK) {
-            slot->handle = job->out.handle;
-            slot->bind_group_layout = job->out.bind_group_layout;
-        }
+        if (rc == HL_GPU_OK)
+            compile_install(dev, job);
         compile_job_unref(job);
     } else {
         /* Abandoned: the device keeps the loop's reference and refuses GPU
@@ -3402,25 +3464,197 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
                  "deadline or the run's (%zu bytes of WGSL); the device is "
                  "busy until it finishes", name, wgsl_len);
     }
-    if (rc == HL_GPU_OK) {
-        snprintf(slot->name, sizeof(slot->name), "%s", name);
-        /* Group 0's declared bindings, checked before every dispatch and
-         * pipeline stage that uses it (audit 35). */
-        (void)hl_gpu_wgsl_layout(wgsl, wgsl_len, slot);
-        dev->pipeline_count++;
-    }
 
     pthread_mutex_unlock(&dev->mutex);
 
-    if (hl_audit_enabled) {
-        ShJsonWriter w = hl_audit_begin("gpu.compile");
-        sh_json_write_kv_string(&w, "shader", name);
-        sh_json_write_kv_int(&w, "device", dev_idx);
-        sh_json_write_kv_int(&w, "rc", rc);
-        hl_audit_end(&w);
-    }
-
+    compile_audit("gpu.compile", name, dev_idx, rc);
     return rc;
+}
+
+/* ── gpu.async.compile ───────────────────────────────────────────────
+ *
+ * The same compile as hl_cap_gpu_compile_ex - every check in
+ * compile_enter, the same order, then the backend compile on its own
+ * large-stack thread - but the event loop does not wait for it. begin
+ * starts the compile thread and registers the job on the device as a
+ * compile not yet settled (compile_busy: the device refuses other compiles
+ * and GPU work, as while an abandoned compile runs, where the synchronous
+ * compile held the device mutex); a pool thread (worker_gpu.c) then waits
+ * for the compile with the same deadline, measured from begin, and
+ * installs the pipeline under the device mutex. The calling run is parked
+ * meanwhile. A compile past the deadline, or whose op was cancelled, is
+ * abandoned as the synchronous one is: the device stays busy until its
+ * thread is done.
+ *
+ * Lifetimes: the handle holds a job reference; the device holds one until
+ * the job is settled and done (the finisher, or compile_busy, drops it);
+ * the thread holds one. The finisher runs on a pool thread and touches the
+ * device: the pool is freed before the GPU context at teardown (serve.c),
+ * and a finisher that never runs is replaced by
+ * hl_cap_gpu_compile_async_free, which touches only the job. */
+struct HlGpuCompileAsync {
+    HlGpuCompileJob *job;
+    HlGpuDevice     *dev;
+    int              dev_idx;
+    uint64_t         deadline_ms;   /* CLOCK_MONOTONIC */
+    int              finished;      /* the finisher ran */
+    int              rc;
+};
+
+int hl_cap_gpu_compile_async_begin(HlGpuCtx *ctx, int device,
+                                   const char *name, const char *wgsl,
+                                   size_t wgsl_len, int flags,
+                                   HlGpuCompileAsync **out)
+{
+    hl_assert_on_event_loop("hl_cap_gpu_compile_async_begin "
+                            "(gpu.async.compile/load)");
+    if (!out)
+        return HL_GPU_ERR_INTERNAL;
+    *out = NULL;
+    HlGpuDevice *dev = NULL;
+    int dev_idx = -1;
+    size_t helper_stack = 0;
+    int rc = compile_enter(ctx, device, name, wgsl, wgsl_len, flags,
+                           &dev, &dev_idx, &helper_stack);
+    if (rc != GPU_COMPILE_PROCEED)
+        return rc;
+
+    HlGpuCompileAsync *a = calloc(1, sizeof(*a));
+    HlGpuCompileJob *job = a ? compile_job_new(ctx, dev, name, wgsl, wgsl_len)
+                             : NULL;
+    if (!job) {
+        free(a);
+        pthread_mutex_unlock(&dev->mutex);
+        compile_audit("gpu.async.compile", name, dev_idx, HL_GPU_ERR_INTERNAL);
+        return HL_GPU_ERR_INTERNAL;
+    }
+    job->min_stack = helper_stack;
+    job->async = 1;
+    if (gpu_compile_start(job) != 0) {
+        compile_job_unref(job);
+        free(a);
+        pthread_mutex_unlock(&dev->mutex);
+        compile_audit("gpu.async.compile", name, dev_idx, HL_GPU_ERR_INTERNAL);
+        return HL_GPU_ERR_INTERNAL;
+    }
+    uint32_t limit = g_compile_timeout_ms ? g_compile_timeout_ms
+                                          : HL_GPU_COMPILE_TIMEOUT_MS;
+    /* The handle's reference is compile_job_new's; the device's is new. */
+    pthread_mutex_lock(&job->mu);
+    job->refs++;
+    pthread_mutex_unlock(&job->mu);
+    dev->compile_job = job;
+    pthread_mutex_unlock(&dev->mutex);
+
+    a->job = job;
+    a->dev = dev;
+    a->dev_idx = dev_idx;
+    a->deadline_ms = gpu_mono_ms() + limit;
+    a->rc = HL_GPU_ERR_INTERNAL;
+    *out = a;
+    return HL_GPU_OK;
+}
+
+/* Abandon an unsettled async job, touching only the job: the thread frees
+ * a pipeline it has yet to make, and one already made is released here.
+ * The device drops its reference once the thread is done (compile_busy). */
+static void compile_async_abandon(HlGpuCompileJob *job)
+{
+    pthread_mutex_lock(&job->mu);
+    int release = job->done && !job->abandoned && !job->settled &&
+                  job->rc == HL_GPU_OK;
+    job->abandoned = 1;
+    job->settled = 1;
+    pthread_mutex_unlock(&job->mu);
+    if (release && job->backend->pipeline_destroy)
+        job->backend->pipeline_destroy(job->shadow, &job->out);
+}
+
+int hl_cap_gpu_compile_async_finish(HlGpuCompileAsync *a,
+                                    const atomic_int *cancelled)
+{
+    if (!a || !a->job)
+        return HL_GPU_ERR_INTERNAL;
+    if (a->finished)
+        return a->rc;
+    HlGpuCompileJob *job = a->job;
+
+    /* Wait for the compile thread: until it is done, the deadline passes
+     * or the op is cancelled. No run is bound on a pool thread, and the
+     * parked run is not charged for the wait. */
+    pthread_mutex_lock(&job->mu);
+    while (!job->done) {
+        if (gpu_mono_ms() >= a->deadline_ms ||
+            (cancelled && atomic_load(cancelled)))
+            break;
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += (long)HL_GPU_COMPILE_POLL_MS * 1000000L;
+        while (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000L;
+        }
+        (void)pthread_cond_timedwait(&job->cv, &job->mu, &ts);
+    }
+    int done = job->done;
+    pthread_mutex_unlock(&job->mu);
+
+    HlGpuDevice *dev = a->dev;
+    int rc;
+    if (!done) {
+        compile_async_abandon(job);
+        rc = HL_GPU_ERR_TIMEOUT;
+        log_warn("[hull:gpu] shader '%s' async compile abandoned: past its "
+                 "deadline or cancelled (%zu bytes of WGSL); the device is "
+                 "busy until it finishes", job->name, job->wgsl_len);
+    } else {
+        /* Installed under the device mutex. A pool thread has no run, so
+         * dev_lock waits as a gpu.async dispatch's does. */
+        if (dev_lock(dev) != 0)          /* only a thread with a run stops */
+            pthread_mutex_lock(&dev->mutex);
+        rc = job->rc;
+        if (rc == HL_GPU_OK) {
+            if (find_pipeline(dev, job->name) ||
+                dev->pipeline_count >= HL_GPU_PIPELINE_MAX) {
+                /* Not reachable while the job holds the device; never
+                 * leak the pipeline if it is. */
+                if (job->backend->pipeline_destroy)
+                    job->backend->pipeline_destroy(job->shadow, &job->out);
+                rc = find_pipeline(dev, job->name) ? HL_GPU_OK
+                                                   : HL_GPU_ERR_INTERNAL;
+            } else {
+                compile_install(dev, job);
+            }
+        }
+        pthread_mutex_lock(&job->mu);
+        job->settled = 1;
+        pthread_mutex_unlock(&job->mu);
+        if (dev->compile_job == job) {
+            dev->compile_job = NULL;
+            compile_job_unref(job);           /* the device's */
+        }
+        pthread_mutex_unlock(&dev->mutex);
+    }
+    a->rc = rc;
+    a->finished = 1;
+    return rc;
+}
+
+void hl_cap_gpu_compile_async_free(HlGpuCompileAsync *a)
+{
+    if (!a) return;
+    int rc = a->rc;
+    if (a->job) {
+        if (!a->finished) {
+            /* The finisher never ran (the op was cancelled in the pool's
+             * queue, or the binding failed after begin). */
+            compile_async_abandon(a->job);
+            rc = HL_GPU_ERR_TIMEOUT;
+        }
+        compile_audit("gpu.async.compile", a->job->name, a->dev_idx, rc);
+        compile_job_unref(a->job);            /* the handle's */
+    }
+    free(a);
 }
 
 /* ── Dispatch ──────────────────────────────────────────────────────── */

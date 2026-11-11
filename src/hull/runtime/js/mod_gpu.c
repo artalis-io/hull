@@ -193,43 +193,30 @@ fail:
     return JS_EXCEPTION;
 }
 
-/* Load WGSL shader from shaders/<name>.wgsl (VFS or disk), compiled on the
- * device the opts name, as gpu.compile is (default device only before). */
-static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
-                            int argc, JSValueConst *argv)
+/* gpu.load's source: shaders/<name>.wgsl from the VFS, or (development
+ * only) the disk. 0 with *wgsl / *len set (*file_buf the caller frees, or
+ * NULL for a VFS entry), or -1 with an exception thrown (nothing held).
+ * @p what prefixes the messages ("gpu.load", "gpu.async.load"). */
+static int js_gpu_load_source(JSContext *ctx, HlJS *js, const char *name,
+                              const char *what, const char **wgsl_out,
+                              size_t *len_out, char **file_buf_out)
 {
-    (void)this_val;
-    if (argc < 1)
-        return JS_ThrowTypeError(ctx, "gpu.load requires name");
-
-    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
-    if (!gpu) return JS_ThrowInternalError(ctx, "gpu not available");
-
-    /* Read first: a getter is app code, run before anything is held. */
-    int device = -1;
-    if (argc > 1 && JS_IsObject(argv[1])) {
-        int32_t d;
-        int r = hl_js_opt_int32(ctx, argv[1], "device", &d);
-        if (r < 0) return JS_EXCEPTION;
-        if (r) device = d;
-    }
-
-    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    const char *name = JS_ToCString(ctx, argv[0]);
-    if (!name) return JS_EXCEPTION;
+    *wgsl_out = NULL;
+    *len_out = 0;
+    *file_buf_out = NULL;
 
     /* Validate shader name: reject path traversal */
     if (!name[0] || name[0] == '/' || strstr(name, "..") || strchr(name, '\\')) {
-        JS_FreeCString(ctx, name);
-        return JS_ThrowRangeError(ctx, "invalid shader name");
+        JS_ThrowRangeError(ctx, "invalid shader name");
+        return -1;
     }
 
     char vfs_name[512];
     int vn = snprintf(vfs_name, sizeof(vfs_name), "shaders/%s.wgsl", name);
     /* A cut name would open a different file: no ".wgsl", a prefix of it. */
     if (vn < 0 || (size_t)vn >= sizeof(vfs_name)) {
-        JS_FreeCString(ctx, name);
-        return JS_ThrowRangeError(ctx, "shader name too long");
+        JS_ThrowRangeError(ctx, "shader name too long");
+        return -1;
     }
     const HlEntry *entry = NULL;
     if (js && js->base.app_vfs)
@@ -251,8 +238,8 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
         int pn = snprintf(path, sizeof(path), "%s/shaders/%s.wgsl",
                  js->base.app_vfs->root_dir, name);
         if (pn < 0 || (size_t)pn >= sizeof(path)) {
-            JS_FreeCString(ctx, name);
-            return JS_ThrowInternalError(ctx, "gpu.load: shader path too long");
+            JS_ThrowInternalError(ctx, "%s: shader path too long", what);
+            return -1;
         }
         /* Opened under the app root: the name check above is lexical, and
          * a symlink below shaders/ used to be followed wherever it led. */
@@ -277,26 +264,76 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
             /* --verify-sig: only a signed shader, as signed. */
             if (wgsl && hl_vfs_disk_gate_check(vfs_name, wgsl, wgsl_len) != 0) {
                 free(file_buf);
-                JSValue err = JS_ThrowInternalError(
-                    ctx, "gpu.load: shader '%s' is not a signed file (--verify-sig)", name);
-                JS_FreeCString(ctx, name);
-                return err;
+                JS_ThrowInternalError(
+                    ctx, "%s: shader '%s' is not a signed file (--verify-sig)",
+                    what, name);
+                return -1;
             }
         }
     }
 
     if (too_large || (wgsl && wgsl_len > JS_GPU_WGSL_MAX)) {
         free(file_buf);
-        JSValue err = JS_ThrowRangeError(ctx, "gpu.load: shader '%s' is too large (at most %d bytes)",
-                                         name, (int)JS_GPU_WGSL_MAX);
-        JS_FreeCString(ctx, name);
-        return err;
+        JS_ThrowRangeError(ctx, "%s: shader '%s' is too large (at most %d bytes)",
+                           what, name, (int)JS_GPU_WGSL_MAX);
+        return -1;
     }
     if (!wgsl) {
         free(file_buf);
-        JSValue err = JS_ThrowInternalError(ctx, "gpu.load: shader '%s' not found in shaders/", name);
+        JS_ThrowInternalError(ctx, "%s: shader '%s' not found in shaders/",
+                              what, name);
+        return -1;
+    }
+    *wgsl_out = wgsl;
+    *len_out = wgsl_len;
+    *file_buf_out = file_buf;
+    return 0;
+}
+
+/* opts.device of gpu.compile / gpu.load and their async forms: 0 with
+ * *device set (-1 = the default), -1 on an exception. A getter is app
+ * code: read before anything is held. */
+static int js_gpu_device_opt(JSContext *ctx, int argc, JSValueConst *argv,
+                             int idx, int *device)
+{
+    *device = -1;
+    if (argc > idx && JS_IsObject(argv[idx])) {
+        int32_t d;
+        int r = hl_js_opt_int32(ctx, argv[idx], "device", &d);
+        if (r < 0) return -1;
+        if (r) *device = d;
+    }
+    return 0;
+}
+
+/* Load WGSL shader from shaders/<name>.wgsl (VFS or disk), compiled on the
+ * device the opts name, as gpu.compile is (default device only before). */
+static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "gpu.load requires name");
+
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    if (!gpu) return JS_ThrowInternalError(ctx, "gpu not available");
+
+    /* Read first: a getter is app code, run before anything is held. */
+    int device;
+    if (js_gpu_device_opt(ctx, argc, argv, 1, &device) < 0)
+        return JS_EXCEPTION;
+
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    const char *wgsl;
+    size_t wgsl_len;
+    char *file_buf;
+    if (js_gpu_load_source(ctx, js, name, "gpu.load", &wgsl, &wgsl_len,
+                           &file_buf) < 0) {
         JS_FreeCString(ctx, name);
-        return err;
+        return JS_EXCEPTION;
     }
 
     /* The read and the compile are charged before the compile: WGSL
@@ -328,13 +365,9 @@ static JSValue js_gpu_compile(JSContext *ctx, JSValueConst this_val,
     HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
     /* The device opts name, as Lua's gpu.compile reads it: compiled on the
      * default device only, a shader could not be dispatched on another. */
-    int device = -1;
-    if (argc > 2 && JS_IsObject(argv[2])) {
-        int32_t d;
-        int r = hl_js_opt_int32(ctx, argv[2], "device", &d);
-        if (r < 0) return JS_EXCEPTION;
-        if (r) device = d;
-    }
+    int device;
+    if (js_gpu_device_opt(ctx, argc, argv, 2, &device) < 0)
+        return JS_EXCEPTION;
     const char *name = JS_ToCString(ctx, argv[0]);
     if (!name) return JS_EXCEPTION;
 
@@ -363,6 +396,225 @@ static JSValue js_gpu_compile(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.compile failed: %s", hl_gpu_compile_errstr(rc));
 
     return JS_TRUE;
+}
+
+/* ── gpu.async.compile / gpu.async.load ─────────────────────────────
+ *
+ * The same compile as gpu.compile / gpu.load - the same charge, shader
+ * policy, pre-checks and compile-helper verdict, in the same order and with
+ * the same results - but the backend compile is not waited for on the
+ * event loop: the returned Promise settles once a pool thread has seen the
+ * compile finish (or abandoned it at its deadline) and installed the
+ * pipeline. Resolves true; rejects with the error the synchronous call
+ * throws. The compile helper's round trip, for runtime source a built
+ * binary opted into, still runs before the call returns. */
+
+static JSValue js_push_worker_gpu_compile_result(JSContext *ctx, void *driver)
+{
+    HlWorkerGpuOp *op = (HlWorkerGpuOp *)driver;
+    if (op->error)
+        return JS_ThrowInternalError(ctx, "%s: %s",
+                                     op->is_compile == HL_WORKER_GPU_LOAD
+                                         ? "gpu.async.load"
+                                         : "gpu.async.compile failed",
+                                     op->error_msg);
+    return JS_TRUE;
+}
+
+/* A Promise already resolved to true (the shader was compiled already). */
+static JSValue js_gpu_resolved_true(JSContext *ctx)
+{
+    JSValue funcs[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, funcs);
+    if (JS_IsException(promise)) return promise;
+    JSValue t = JS_TRUE;
+    JSValue r = JS_Call(ctx, funcs[0], JS_UNDEFINED, 1, &t);
+    JS_FreeValue(ctx, funcs[0]);
+    JS_FreeValue(ctx, funcs[1]);
+    if (JS_IsException(r)) {
+        JS_FreeValue(ctx, promise);
+        return r;
+    }
+    JS_FreeValue(ctx, r);
+    return promise;
+}
+
+/* Begin the compile of @p wgsl and return a Promise that settles once it
+ * is installed. Every argument was converted before (no app code runs from
+ * the gate on). @p file_buf (gpu.async.load's disk read, or NULL) is freed
+ * on every path. @p what names the call in the gate's refusals. */
+static JSValue js_gpu_async_compile_common(JSContext *ctx, HlJS *js,
+                                           int device, const char *name,
+                                           const char *wgsl, size_t wgsl_len,
+                                           char *file_buf, int kind,
+                                           const char *what)
+{
+    const char *pre = NULL;
+    if (!js || !js->base.thread_pool)
+        pre = "gpu.async not available (no thread pool)";
+    else if (!js->base.async_ctx)
+        pre = "gpu.async requires an active event loop";
+    if (pre) {
+        free(file_buf);
+        return JS_ThrowInternalError(ctx, "%s", pre);
+    }
+    if (hl_js_async_gate(ctx, js, what) != 0 ||
+        hl_js_db_refuse_wait(ctx, "gpu.async")) {
+        free(file_buf);
+        return JS_EXCEPTION;
+    }
+    /* Charged before the compile starts, as gpu.compile's. */
+    if (hl_js_budget_charge(ctx, hl_gpu_wgsl_compile_units(wgsl, wgsl_len)) < 0) {
+        free(file_buf);
+        return JS_EXCEPTION;
+    }
+    HlGpuCompileAsync *ca = NULL;
+    int rc = hl_cap_gpu_compile_async_begin(
+        js->base.gpu_ctx, device, name, wgsl, wgsl_len,
+        kind == HL_WORKER_GPU_LOAD ? HL_GPU_COMPILE_FROM_SHADERS : 0, &ca);
+    free(file_buf);
+    if (rc != HL_GPU_OK) {
+        if (kind == HL_WORKER_GPU_LOAD)
+            return JS_ThrowInternalError(ctx, "gpu.async.load: %s",
+                                         hl_gpu_compile_errstr(rc));
+        return JS_ThrowInternalError(ctx, "gpu.async.compile failed: %s",
+                                     hl_gpu_compile_errstr(rc));
+    }
+    if (!ca)                     /* compiled already */
+        return js_gpu_resolved_true(ctx);
+
+    /* From here every failure frees `ca` (abandoning the compile). */
+    HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
+    if (!op) {
+        hl_cap_gpu_compile_async_free(ca);
+        return JS_ThrowInternalError(ctx, "%s: out of memory", what);
+    }
+    op->server = js->server;
+    op->gpu_ctx = js->base.gpu_ctx;
+    op->is_compile = kind;
+    op->compile = ca;
+    snprintf(op->shader_name, sizeof(op->shader_name), "%s", name);
+
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx,
+                                           js->base.alloc);
+    if (!actx) {
+        hl_worker_gpu_op_free_all(op);
+        return JS_ThrowInternalError(ctx, "%s: out of memory", what);
+    }
+    JSValue resolving_funcs[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    if (JS_IsException(promise)) {
+        hl_worker_gpu_op_free_all(op);
+        hl_async_ctx_free(actx);
+        return JS_EXCEPTION;
+    }
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
+        JSValue resolve, JSValue reject, HlAllocator *alloc,
+        JSValue (*push_result)(JSContext *, void *));
+    HlAsyncCont *cont = hl_js_async_cont_create(js, resolving_funcs[0],
+                                                resolving_funcs[1],
+                                                js->base.alloc,
+                                                js_push_worker_gpu_compile_result);
+    if (!cont) {
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        JS_FreeValue(ctx, promise);
+        hl_worker_gpu_op_free_all(op);
+        hl_async_ctx_free(actx);
+        return JS_ThrowInternalError(ctx, "%s: out of memory", what);
+    }
+    actx->cont = cont;
+    actx->driver = op;
+    actx->free_driver = hl_worker_gpu_op_free_all;
+    actx->op.on_cancel = hl_worker_gpu_async_cancel;
+    actx->detached = (hl_js_cont_suspend_conn(cont) == NULL);
+
+    op->async_ctx = actx;
+    atomic_store(&op->cancelled, 0);
+
+    if (hl_worker_gpu_submit(js->base.thread_pool, op) != 0) {
+        actx->cont->destroy(actx->cont);
+        hl_worker_gpu_op_free_all(op);
+        hl_async_ctx_free(actx);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "%s: thread pool full", what);
+    }
+
+    if (!actx->detached &&
+        hl_js_op_suspend(js, (HlSuspendOp *)&actx->op) < 0) {
+        /* The worker sees the cancel, abandons the compile and done_fn
+         * frees the op. Never armed: destroy frees resolve / reject. */
+        atomic_store(&op->cancelled, 1);
+        actx->cont->destroy(actx->cont);
+        actx->cont = NULL;
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "%s: failed to suspend", what);
+    }
+
+    return promise;
+}
+
+/* gpu.async.compile(name, wgsl, opts?) -> Promise<true> */
+static JSValue js_gpu_async_compile(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "gpu.async.compile requires name and wgsl");
+    int device;
+    if (js_gpu_device_opt(ctx, argc, argv, 2, &device) < 0)
+        return JS_EXCEPTION;
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+    size_t wgsl_len;
+    const char *wgsl = JS_ToCStringLen(ctx, &wgsl_len, argv[1]);
+    if (!wgsl) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
+    JSValue ret;
+    if (wgsl_len > JS_GPU_WGSL_MAX)
+        ret = JS_ThrowRangeError(ctx, "gpu.async.compile: WGSL source too large");
+    else if (!js || !js->base.gpu_ctx)
+        ret = JS_ThrowInternalError(ctx, "gpu.async.compile: GPU not initialized");
+    else
+        ret = js_gpu_async_compile_common(ctx, js, device, name, wgsl, wgsl_len,
+                                          NULL, HL_WORKER_GPU_COMPILE,
+                                          "gpu.async.compile");
+    JS_FreeCString(ctx, name);
+    JS_FreeCString(ctx, wgsl);
+    return ret;
+}
+
+/* gpu.async.load(name, opts?) -> Promise<true> */
+static JSValue js_gpu_async_load(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "gpu.async.load requires name");
+    int device;
+    if (js_gpu_device_opt(ctx, argc, argv, 1, &device) < 0)
+        return JS_EXCEPTION;
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+    if (!js || !js->base.gpu_ctx) {
+        JS_FreeCString(ctx, name);
+        return JS_ThrowInternalError(ctx, "gpu.async.load: GPU not initialized");
+    }
+    const char *wgsl;
+    size_t wgsl_len;
+    char *file_buf;
+    if (js_gpu_load_source(ctx, js, name, "gpu.async.load", &wgsl, &wgsl_len,
+                           &file_buf) < 0) {
+        JS_FreeCString(ctx, name);
+        return JS_EXCEPTION;
+    }
+    JSValue ret = js_gpu_async_compile_common(ctx, js, device, name, wgsl,
+                                              wgsl_len, file_buf,
+                                              HL_WORKER_GPU_LOAD,
+                                              "gpu.async.load");
+    JS_FreeCString(ctx, name);
+    return ret;
 }
 
 static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
@@ -2502,6 +2754,10 @@ static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
 
     /* gpu.async sub-object */
     JSValue async_obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, async_obj, "compile",
+                      JS_NewCFunction(ctx, js_gpu_async_compile, "compile", 2));
+    JS_SetPropertyStr(ctx, async_obj, "load",
+                      JS_NewCFunction(ctx, js_gpu_async_load, "load", 1));
     JS_SetPropertyStr(ctx, async_obj, "dispatch",
                       JS_NewCFunction(ctx, js_gpu_async_dispatch, "dispatch", 2));
     JS_SetPropertyStr(ctx, async_obj, "pipeline",

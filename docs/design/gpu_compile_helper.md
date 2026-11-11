@@ -243,8 +243,10 @@ the worker and answers `CANCELLED`, so the next request does not queue behind a 
 Replies whose id does not match the current request (a cancelled one's) are dropped. The call
 then returns `compile_timeout`.
 
-**Not async.** `gpu.compile` / `gpu.load` stay synchronous calls in both runtimes. The event loop
-waits, but the wait is bounded by:
+**The helper wait is synchronous.** `gpu.compile` / `gpu.load` are synchronous calls in both
+runtimes, and `gpu.async.compile` / `gpu.async.load` park the run only for the in-process compile:
+the helper round trip runs before the park, on the event loop. The event loop waits, but the wait
+is bounded by:
 
 - the helper's deadlines: about 5 s worst case on a cache miss, typically 40-300 ms;
 - the run's deadline and budget, through the cancel;
@@ -252,10 +254,10 @@ waits, but the wait is bounded by:
   cache lifetime);
 - the floor charge (§7).
 
-Making `gpu.compile` yield, a promise in JS or a coroutine park in Lua, would add a new
-async-op binding in both runtimes. That means transaction checks before arming, run-tag wiring,
-cancel paths and teardown entries. It is a follow-up and needs no change to the helper: the wait
-already sits on a socket that an async backend watcher could take over.
+`gpu.async.compile` added that async-op binding in both runtimes for the in-process compile (a
+pool thread waits for the compile thread and installs the pipeline; see CLAUDE.md "Shader size
+and the compile deadline"). Moving the helper round trip off the loop too needs no change to the
+helper: the wait already sits on a socket that an async backend watcher could take over.
 
 ## 7. Charging (§6.1)
 
@@ -358,7 +360,7 @@ embedded shaders in the tool process. Keeping that in-process is deliberate:
 
 ## 12. Follow-ups
 
-- An async `gpu.compile` (§6).
+- The helper round trip of `gpu.async.compile` on an async backend watcher instead of the event loop (§6).
 - A pre-warmed worker, spawned and sandboxed ahead of the next request, to hide the about 50 ms
   start-up. It holds a GPU device while idle, so it was left out for now.
 - Run the Linux worker sandbox with a real device (Mesa / NVIDIA) in CI. Revisit Landlock TSYNC
