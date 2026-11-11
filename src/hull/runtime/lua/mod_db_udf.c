@@ -18,6 +18,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"    /* hl_db_sqlite_raw */
+#include "mod_db.h"                /* db.open owner-box seam */
 
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/db_udf.h"
@@ -28,31 +29,47 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Minimal handle resolver: the udf sub-table binds the connection handle as
- * lightuserdata upvalue 1 (see hl_lua_db_attach_udf below), so a udf call
- * resolves it directly. udf is never attached to an owner box (db.open), so the
- * owned-conn path in mod_db.c's db_call_handle is not needed here. */
-static HlDbHandle *db_call_handle(lua_State *L)
+/* Handle resolver: the udf sub-table binds its connection as upvalue 1 -
+ * the handle as lightuserdata for a registry connection (see
+ * hl_lua_db_attach_udf below), the owner box for a db.open() one (NULL once
+ * closed; *box gets the box). Resolved again after any app code a call runs:
+ * an opts metamethod could close a db.open() handle under it. */
+static HlDbHandle *db_call_handle_box(lua_State *L, void **box)
 {
     int uv = lua_upvalueindex(1);
-    HlDbHandle *h = lua_islightuserdata(L, uv)
-        ? (HlDbHandle *)lua_touserdata(L, uv) : NULL;
-    return h && h->backend ? h : NULL;   /* no backend: registry closed (audit 17) */
+    if (box) *box = NULL;
+    if (lua_islightuserdata(L, uv)) {
+        HlDbHandle *h = (HlDbHandle *)lua_touserdata(L, uv);
+        return h && h->backend ? h : NULL;   /* registry closed (audit 17) */
+    }
+    HlDbHandle *h = hl_lua_db_owned_handle(L, uv, box);
+    return h && h->backend ? h : NULL;
 }
 
-/* Context for Lua scalar UDF trampoline */
+static HlDbHandle *db_call_handle(lua_State *L)
+{
+    return db_call_handle_box(L, NULL);
+}
+
+/* Context for Lua scalar UDF trampoline. On a registry connection func_ref
+ * is a LUA_REGISTRYINDEX reference. On a db.open() connection (box != NULL)
+ * it is the key the owner box keeps the function under (mod_db.h): a
+ * registry reference is a GC root, and a UDF capturing its own connection
+ * would pin it. */
 typedef struct {
     lua_State *L;
-    int func_ref;    /* LUA_REGISTRYINDEX ref to the Lua function */
+    int func_ref;
     int *alive;      /* points to HlLua.udf_runtime_alive */
+    void *box;       /* db.open() owner box, or NULL (registry) */
 } LuaScalarUdfCtx;
 
-/* Context for Lua aggregate UDF trampoline */
+/* Context for Lua aggregate UDF trampoline (refs as above) */
 typedef struct {
     lua_State *L;
     int step_ref;
     int finalize_ref;
     int *alive;      /* points to HlLua.udf_runtime_alive */
+    void *box;
 } LuaAggUdfCtx;
 
 /* Per-group state for Lua aggregates (via sqlite3_aggregate_context) */
@@ -154,14 +171,21 @@ typedef struct {
     int               fn_ref;
     LuaAggGroupState *gs;      /* aggregates only */
     int               nresults;
+    void             *box;     /* db.open() owner box: fn_ref is its key */
 } LuaUdfCall;
 
 /* (arg: LuaUdfCall *) */
 static int lua_udf_call_k(lua_State *L)
 {
     LuaUdfCall *c = (LuaUdfCall *)lua_touserdata(L, 1);
-    luaL_checkstack(L, c->argc + 3, "UDF arguments");
-    lua_rawgeti(L, LUA_REGISTRYINDEX, c->fn_ref);
+    luaL_checkstack(L, c->argc + 6, "UDF arguments");
+    if (c->box) {
+        if (!hl_lua_db_udf_push(L, c->box, c->fn_ref))
+            return luaL_error(L, "udf: the connection it was registered on "
+                                 "is gone");
+    } else {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, c->fn_ref);
+    }
     int nargs = c->argc;
     if (c->gs) {
         if (c->gs->ctx_table_ref == 0) {
@@ -200,7 +224,7 @@ static void lua_scalar_udf_func(sqlite3_context *ctx, int argc,
                                  sqlite3_value **argv)
 {
     LuaScalarUdfCtx *udf = (LuaScalarUdfCtx *)sqlite3_user_data(ctx);
-    LuaUdfCall c = { ctx, argc, argv, udf->func_ref, NULL, 1 };
+    LuaUdfCall c = { ctx, argc, argv, udf->func_ref, NULL, 1, udf->box };
     lua_udf_run(udf->L, &c, "Lua UDF error");
 }
 
@@ -211,8 +235,12 @@ static void lua_scalar_udf_destroy(void *data)
     if (!udf) return;
     /* Free the registry ref only if the Lua state is still alive
      * (explicit unregister). During sqlite3_close the state is dead. */
-    if (udf->alive && *udf->alive && udf->L)
-        luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->func_ref);
+    if (udf->alive && *udf->alive && udf->L) {
+        if (udf->box)
+            hl_lua_db_udf_release(udf->L, udf->box, udf->func_ref);
+        else
+            luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->func_ref);
+    }
     free(udf);
 }
 
@@ -231,7 +259,7 @@ static void lua_agg_step_func(sqlite3_context *ctx, int argc,
 
     /* step(ctx_table, arg1, arg2, ...); the context table is created on the
      * group's first call, inside the protected call. */
-    LuaUdfCall c = { ctx, argc, argv, udf->step_ref, gs, 0 };
+    LuaUdfCall c = { ctx, argc, argv, udf->step_ref, gs, 0, udf->box };
     lua_udf_run(L, &c, "Lua UDF step error");
 }
 
@@ -248,7 +276,7 @@ static void lua_agg_finalize_func(sqlite3_context *ctx)
     }
 
     /* finalize(ctx_table) -> result */
-    LuaUdfCall c = { ctx, 0, NULL, udf->finalize_ref, gs, 1 };
+    LuaUdfCall c = { ctx, 0, NULL, udf->finalize_ref, gs, 1, udf->box };
     lua_udf_run(L, &c, "Lua UDF finalize error");
 
     /* Clean up group state */
@@ -263,8 +291,13 @@ static void lua_agg_udf_destroy(void *data)
     if (!udf) return;
     /* Free registry refs only if the Lua state is still alive */
     if (udf->alive && *udf->alive && udf->L) {
-        luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->step_ref);
-        luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->finalize_ref);
+        if (udf->box) {
+            hl_lua_db_udf_release(udf->L, udf->box, udf->step_ref);
+            hl_lua_db_udf_release(udf->L, udf->box, udf->finalize_ref);
+        } else {
+            luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->step_ref);
+            luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->finalize_ref);
+        }
     }
     free(udf);
 }
@@ -328,7 +361,8 @@ static void lua_parse_udf_opts(lua_State *L, int opts_idx,
 static int lua_db_udf_register(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    HlDbHandle *conn = db_call_handle(L);
+    void *box = NULL;
+    HlDbHandle *conn = db_call_handle_box(L, &box);
     sqlite3 *raw_db = hl_db_sqlite_raw(conn);
     if (!lua || !raw_db)
         return luaL_error(L, "database not available");
@@ -376,6 +410,11 @@ static int lua_db_udf_register(lua_State *L)
             .timeout_ms    = lim.timeout_ms,
         };
 
+        /* Resolved again: the opts' metamethods are app code, and could
+         * have closed a db.open() handle. */
+        conn = db_call_handle(L);
+        if (!conn)
+            return luaL_error(L, "database not available");
         const char *err_msg = NULL;
         int rc = hl_cap_db_udf_register_wasm(
             conn, lua->base.wasm_cache, &opts,
@@ -392,17 +431,28 @@ static int lua_db_udf_register(lua_State *L)
         lua_parse_udf_opts(L, 3, &deterministic, &nargs, &aggregate,
                            &gas, &heap, &stack_sz);
 
+        /* A db.open() connection keeps the function itself (raises on
+         * OOM, so before anything C-side is allocated). */
+        lua_Integer key = box ? hl_lua_db_udf_hold(L, lua_upvalueindex(1), 2)
+                              : 0;
         LuaScalarUdfCtx *udf_ctx = calloc(1, sizeof(*udf_ctx));
-        if (!udf_ctx)
+        if (!udf_ctx) {
+            if (box) hl_lua_db_udf_release(L, box, key);
             return luaL_error(L, "db.udf.register: out of memory");
+        }
 
         /* The main state, not L: L is whatever coroutine registered the
          * UDF (a handler, app.main), and the UDF runs on every later query
          * - long after that coroutine has finished and been collected. */
         udf_ctx->L = lua->L;
         udf_ctx->alive = &lua->udf_runtime_alive;
-        lua_pushvalue(L, 2);
-        udf_ctx->func_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        udf_ctx->box = box;
+        if (box) {
+            udf_ctx->func_ref = (int)key;
+        } else {
+            lua_pushvalue(L, 2);
+            udf_ctx->func_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        }
 
         int encoding = SQLITE_UTF8;
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
@@ -411,7 +461,7 @@ static int lua_db_udf_register(lua_State *L)
          * getters / metamethods), and the connection's sqlite3* is not
          * kept across app code - the stale-transaction guard may have
          * replaced it, or withheld it (broken) (audit 12). */
-        raw_db = hl_db_sqlite_raw(conn);
+        raw_db = hl_db_sqlite_raw(db_call_handle(L));
         if (!raw_db) {
             lua_scalar_udf_destroy(udf_ctx);
             return luaL_error(L, "database not available");
@@ -443,8 +493,18 @@ static int lua_db_udf_register(lua_State *L)
         lua_parse_udf_opts(L, 3, &deterministic, &nargs, &aggregate,
                            &gas, &heap, &stack_sz);
 
+        /* As the scalar case: a db.open() connection keeps both. */
+        lua_Integer skey = 0, fkey = 0;
+        if (box) {
+            skey = hl_lua_db_udf_hold(L, lua_upvalueindex(1), -2);
+            fkey = hl_lua_db_udf_hold(L, lua_upvalueindex(1), -1);
+        }
         LuaAggUdfCtx *udf_ctx = calloc(1, sizeof(*udf_ctx));
         if (!udf_ctx) {
+            if (box) {
+                hl_lua_db_udf_release(L, box, skey);
+                hl_lua_db_udf_release(L, box, fkey);
+            }
             lua_pop(L, 2);
             return luaL_error(L, "db.udf.register: out of memory");
         }
@@ -454,9 +514,16 @@ static int lua_db_udf_register(lua_State *L)
          * - long after that coroutine has finished and been collected. */
         udf_ctx->L = lua->L;
         udf_ctx->alive = &lua->udf_runtime_alive;
-        /* finalize is on top of stack, step below it */
-        udf_ctx->finalize_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        udf_ctx->step_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        udf_ctx->box = box;
+        if (box) {
+            udf_ctx->step_ref = (int)skey;
+            udf_ctx->finalize_ref = (int)fkey;
+            lua_pop(L, 2);
+        } else {
+            /* finalize is on top of stack, step below it */
+            udf_ctx->finalize_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+            udf_ctx->step_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        }
 
         int encoding = SQLITE_UTF8;
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
@@ -465,7 +532,7 @@ static int lua_db_udf_register(lua_State *L)
          * getters / metamethods), and the connection's sqlite3* is not
          * kept across app code - the stale-transaction guard may have
          * replaced it, or withheld it (broken) (audit 12). */
-        raw_db = hl_db_sqlite_raw(conn);
+        raw_db = hl_db_sqlite_raw(db_call_handle(L));
         if (!raw_db) {
             lua_agg_udf_destroy(udf_ctx);
             return luaL_error(L, "database not available");
@@ -496,6 +563,9 @@ static int lua_db_udf_unregister(lua_State *L)
         return luaL_error(L, "database not available");
 
     const char *sql_name = luaL_checkstring(L, 1);
+    conn = db_call_handle(L);   /* resolved again after the conversion */
+    if (!conn)
+        return luaL_error(L, "database not available");
 
 #ifdef HL_ENABLE_WASM
     if (hl_cap_db_udf_unregister(conn, sql_name) != 0)
@@ -532,6 +602,22 @@ void hl_lua_db_attach_udf(lua_State *L, HlDbHandle *h)
     lua_newtable(L);
     for (const luaL_Reg *m = db_udf_funcs; m->name; m++) {
         lua_pushlightuserdata(L, h);
+        hl_lua_pushcclosure(L, m->func, 1);
+        lua_setfield(L, -2, m->name);
+    }
+    lua_setfield(L, -2, "udf");
+}
+
+/* The same for a db.open() connection: each function carries the owner box
+ * at @p box_idx as upvalue 1, so it resolves that connection (NULL once
+ * closed) and keeps the UDF functions it registers in the box. Strong
+ * override of the weak no-op in mod_db.c. */
+void hl_lua_db_attach_owned_udf(lua_State *L, int box_idx)
+{
+    box_idx = lua_absindex(L, box_idx);
+    lua_newtable(L);
+    for (const luaL_Reg *m = db_udf_funcs; m->name; m++) {
+        lua_pushvalue(L, box_idx);
         hl_lua_pushcclosure(L, m->func, 1);
         lua_setfield(L, -2, m->name);
     }

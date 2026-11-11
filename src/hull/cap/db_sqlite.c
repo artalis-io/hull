@@ -381,6 +381,15 @@ static int sqlite_in_txn(HlDbHandle *h)
     return s && s->db && !s->broken && !sqlite3_get_autocommit(s->db);
 }
 
+/* A statement of this connection is stepping: a UDF's callback (app code)
+ * is running inside it, and closing the connection would finalize that
+ * statement under the step. */
+static int sqlite_in_use(HlDbHandle *h)
+{
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    return s && s->cache.stepping;
+}
+
 static uint64_t sqlite_txn_seq(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
@@ -643,6 +652,7 @@ const HlDbBackend hl_db_backend_sqlite = {
     .guard_stale_txn       = sqlite_guard_stale_txn,
     .in_txn                = sqlite_in_txn,
     .txn_seq               = sqlite_txn_seq,
+    .in_use                = sqlite_in_use,
     .insert_if_absent      = sqlite_insert_if_absent,
     .upsert                = sqlite_upsert,
     .table_columns         = sqlite_table_columns,

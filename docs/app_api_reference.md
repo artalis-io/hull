@@ -1445,7 +1445,18 @@ on a bad value instead of silently turning the bound off:
 - `opts.args`. Number of arguments (-1 = variadic, default: 1)
 - `opts.gas`. Per-row gas limit for WASM UDFs (default: 100K)
 - Names must start with `hull_` to prevent shadowing SQLite built-ins.
-- Lua/JS UDFs work with `db.query()` only (sync). WASM UDFs work with both `db.query()` and `db.async.query()`.
+- A UDF is registered on the connection whose `udf` you call (`db.default()`,
+  `db.connect(name)`, or a SQLite `db.open(dsn)` connection) and runs only in
+  that connection's own synchronous statements (`conn.query`, `conn.exec`, ...).
+  `conn.async` runs on a worker connection, which has no UDFs: a query there
+  that calls one fails with `no such function`. That holds for Lua/JS and WASM
+  UDFs alike.
+- On a `db.open(dsn)` connection, `close()` (or the connection being collected)
+  drops its UDFs; `close()` called from inside one of that connection's own
+  statements (from a UDF it is running) is refused. A UDF that refers to its
+  own connection does not keep it alive. Its `udf` methods only ever register
+  on that connection: called with another connection object as `this`, they
+  throw (JS).
 
 **image**. Image creation, encoding, and decoding via pluggable codec vtable (stb_image default).
 - `image.new(w, h, format, pixels)` → HlImage. Formats: `"rgba8"`, `"r8"`, `"rgba16float"`, `"r32float"`.

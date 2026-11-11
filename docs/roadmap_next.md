@@ -2714,11 +2714,15 @@ ride in the app-provided DSN; the reachable surface stays bounded.
       under ASan (incl. a 50-distinct-DSN churn exercising eviction + the JS
       refcount). Covered by the async cases in `tests/e2e_dynamic_connections.sh`
       (both runtimes).
-- [ ] **`udf` on a dynamic handle (still deferred).** Worker-side udf
-      re-registration is keyed off the registry a dynamic handle is not in, and
-      the intersection (dynamic SQLite file + async + udf) is thin. `.udf` is
-      intentionally absent on dynamic connections (clear "not a function" error);
-      may stay permanently unsupported.
+- [x] **`udf` on a dynamic handle.** A SQLite `db.open` connection carries
+      `udf` bound to that handle, with the registry connections' rule: a UDF
+      runs in the handle's own sync statements, never on a worker connection
+      (no connection's UDFs reach the worker pool). The UDF functions are kept
+      by the connection object (not GC roots), so one that captures its own
+      connection is collected with it; `close()` from inside the handle's own
+      statement is refused. Covered by the udf cases in
+      `tests/e2e_dynamic_connections.sh` and `lua_db_open_udf.*` /
+      `js_db_open_udf.*` (both runtimes).
 
 ### 2.3 Split the abstract interface from concrete backends (+ generic native-handle accessor)
 

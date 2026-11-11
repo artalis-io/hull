@@ -66,6 +66,11 @@ void hl_db_dynamic_close(HlDbHandle *h);
 /* Current count of open dynamic connections (tests / diagnostics). */
 int hl_db_dynamic_open_count(void);
 
+/* Whether every dynamic-connection slot is taken: db.open collects garbage
+ * once and retries then, since a connection the app dropped without close()
+ * holds its slot until collected. */
+int hl_db_dynamic_full(void);
+
 /* The id of an open dynamic handle (0 when @p h is not one). Ids are never
  * reused; a db.async op on the handle carries it to the worker. */
 uint64_t hl_db_dynamic_id(const HlDbHandle *h);

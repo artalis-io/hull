@@ -15,6 +15,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_registry.h"
 #include "hull/cap/db_dynamic.h"
+#include "mod_db.h"   /* the udf bridge seam */
 #include "hull/cap/fs_resolve.h"   /* the db.open charge scope (audit 39) */
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
@@ -294,7 +295,32 @@ typedef struct {
                         * conn.async (worker pool is DSN-keyed). Freed in __gc,
                         * not close(), so a post-close async fails on the NULL
                         * handle guard before the dsn is ever read. */
+    lua_Integer next_key;   /* next UDF holder key (hl_lua_db_udf_hold) */
 } HlLuaOwnedConn;
+
+/* UDF functions registered on a db.open() connection (conn.udf) are kept in
+ * the owner box's user value (a table, key -> function), not the registry: a
+ * registry reference is a GC root, so a UDF that captures its own connection
+ * would keep the box - and its HL_DB_DYNAMIC_MAX slot - alive until teardown.
+ * Held by the box, they live exactly as long as it does. The SQLite function
+ * context reaches them from C through a weak-valued registry table (box
+ * pointer -> box), which does not keep the box alive. */
+static const char g_owned_boxes_key = 0;
+
+/* Push the weak-valued box table (creating it on first use). Raises. */
+static void push_owned_boxes(lua_State *L)
+{
+    if (lua_rawgetp(L, LUA_REGISTRYINDEX, &g_owned_boxes_key) == LUA_TTABLE)
+        return;
+    lua_pop(L, 1);
+    lua_newtable(L);
+    lua_createtable(L, 0, 1);
+    lua_pushliteral(L, "v");
+    lua_setfield(L, -2, "__mode");
+    lua_setmetatable(L, -2);
+    lua_pushvalue(L, -1);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &g_owned_boxes_key);
+}
 
 /* Release the handle exactly once; NULL-guarded so close() + __gc are safe in
  * either order. Does not touch dsn (see the struct comment). */
@@ -1273,6 +1299,14 @@ __attribute__((weak)) void hl_lua_db_attach_udf(lua_State *L, HlDbHandle *h)
     (void)L; (void)h;
 }
 
+/* Likewise for a db.open() connection: the bridge binds the udf functions to
+ * the owner box at @p box_idx. */
+__attribute__((weak)) void hl_lua_db_attach_owned_udf(lua_State *L,
+                                                      int box_idx)
+{
+    (void)L; (void)box_idx;
+}
+
 /* ── Module opener ───────────────────────────────────────────────────── */
 
 /* ── Connection objects: db.connect(name) / db.default() ──────────── */
@@ -1390,8 +1424,15 @@ static int lua_owned_conn_close(lua_State *L)
     if (g_db_row_loops > 0)
         return luaL_error(L, "db: close() while a query's rows are being read "
                              "(from a __gc finalizer?)");
-    owned_conn_release(luaL_testudata(L, lua_upvalueindex(1),
-                                      HL_LUA_DB_OWNED_MT));
+    HlLuaOwnedConn *o = luaL_testudata(L, lua_upvalueindex(1),
+                                       HL_LUA_DB_OWNED_MT);
+    /* From a UDF running inside one of this connection's own statements
+     * (one the row-loop count does not cover, a trigger's UDF under
+     * upsert): closing would finalize that statement under its step. */
+    if (o && o->h && hl_db_in_use(o->h))
+        return luaL_error(L, "db: close() called from inside one of this "
+                             "connection's own statements (a UDF)");
+    owned_conn_release(o);
     return 0;
 }
 
@@ -1402,11 +1443,91 @@ static int lua_owned_conn_close(lua_State *L)
  * NULL handle as a no-op. */
 static HlLuaOwnedConn *push_owned_box(lua_State *L)
 {
-    HlLuaOwnedConn *o = lua_newuserdatauv(L, sizeof *o, 0);
+    /* One user value: the UDF holder table (made on first registration). */
+    HlLuaOwnedConn *o = lua_newuserdatauv(L, sizeof *o, 1);
     o->h = NULL;
     o->dsn = NULL;
+    o->next_key = 1;
     luaL_setmetatable(L, HL_LUA_DB_OWNED_MT);   /* installs __gc */
+    /* box pointer -> box, weakly, for the UDF trampoline. */
+    push_owned_boxes(L);
+    lua_pushvalue(L, -2);
+    lua_rawsetp(L, -2, o);
+    lua_pop(L, 1);
     return o;
+}
+
+/* ── UDF holder seam (runtime/lua/mod_db.h, used by mod_db_udf.c) ── */
+
+HlDbHandle *hl_lua_db_owned_handle(lua_State *L, int idx, void **box)
+{
+    HlLuaOwnedConn *o = luaL_testudata(L, idx, HL_LUA_DB_OWNED_MT);
+    if (box) *box = o;
+    return o ? o->h : NULL;
+}
+
+lua_Integer hl_lua_db_udf_hold(lua_State *L, int box_idx, int fn_idx)
+{
+    box_idx = lua_absindex(L, box_idx);
+    fn_idx = lua_absindex(L, fn_idx);
+    HlLuaOwnedConn *o = luaL_checkudata(L, box_idx, HL_LUA_DB_OWNED_MT);
+    /* The SQLite function context keeps the key in an int. */
+    if (o->next_key >= INT_MAX)
+        luaL_error(L, "db.udf.register: too many registrations");
+    if (lua_getiuservalue(L, box_idx, 1) != LUA_TTABLE) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setiuservalue(L, box_idx, 1);
+    }
+    lua_Integer key = o->next_key++;
+    lua_pushvalue(L, fn_idx);
+    lua_rawseti(L, -2, key);
+    lua_pop(L, 1);
+    return key;
+}
+
+/* Push the box whose pointer is @p box, or nothing (0) when it is gone or
+ * the stack cannot grow. Allocates nothing. */
+static int push_box_by_ptr(lua_State *L, void *box)
+{
+    if (!box || !lua_checkstack(L, 4)) return 0;
+    if (lua_rawgetp(L, LUA_REGISTRYINDEX, &g_owned_boxes_key) != LUA_TTABLE) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    if (lua_rawgetp(L, -1, box) != LUA_TUSERDATA) {
+        lua_pop(L, 2);
+        return 0;
+    }
+    lua_remove(L, -2);
+    return 1;
+}
+
+int hl_lua_db_udf_push(lua_State *L, void *box, lua_Integer key)
+{
+    if (!push_box_by_ptr(L, box)) return 0;
+    if (lua_getiuservalue(L, -1, 1) != LUA_TTABLE ||
+        lua_rawgeti(L, -1, key) != LUA_TFUNCTION) {
+        lua_settop(L, lua_gettop(L) - 3);
+        return 0;
+    }
+    lua_replace(L, -3);   /* fn where the box was */
+    lua_pop(L, 1);
+    return 1;
+}
+
+void hl_lua_db_udf_release(lua_State *L, void *box, lua_Integer key)
+{
+    int top = lua_gettop(L);
+    /* A box being collected is already gone from the weak table; its
+     * holder goes with it. */
+    if (!push_box_by_ptr(L, box)) return;
+    if (lua_getiuservalue(L, -1, 1) == LUA_TTABLE) {
+        lua_pushnil(L);
+        lua_rawseti(L, -2, key);   /* clearing a key allocates nothing */
+    }
+    lua_settop(L, top);
 }
 
 /* Turn the owner box @p o at the top of the stack (holding a handle from
@@ -1414,9 +1535,10 @@ static HlLuaOwnedConn *push_owned_box(lua_State *L)
  * object. Unlike push_conn_object, this object owns its handle: it adds a
  * close() method and a __gc finalizer that both release it via
  * hl_db_dynamic_close. It carries sync methods + async (bound to the owner box,
- * so conn.async targets @p dsn through the worker pool). udf is intentionally
- * absent: worker-side udf re-registration is keyed off the registry a dynamic
- * handle is not in (tracked follow-up, §2.2). */
+ * so conn.async targets @p dsn through the worker pool), and on SQLite udf,
+ * bound to the owner box too. As on a registry connection, a UDF is visible
+ * to this connection's own (sync) statements only: conn.async runs on a
+ * worker connection that has none. */
 static int push_owned_conn_object(lua_State *L, HlLuaOwnedConn *o,
                                   const char *dsn)
 {
@@ -1441,8 +1563,7 @@ static int push_owned_conn_object(lua_State *L, HlLuaOwnedConn *o,
     lua_setfield(L, -2, "close");
 
     /* async bound to the owner box: conn.async resolves the same live handle +
-     * DSN as the sync methods (db_call_handle / db_call_dsn). No udf (see the
-     * function comment). */
+     * DSN as the sync methods (db_call_handle / db_call_dsn). */
     lua_newtable(L);
     for (const luaL_Reg *m = db_async_funcs; m->name; m++) {
         lua_pushvalue(L, owner);
@@ -1452,6 +1573,9 @@ static int push_owned_conn_object(lua_State *L, HlLuaOwnedConn *o,
     lua_setfield(L, -2, "async");
 
     const HlDbBackend *be = h ? h->backend : NULL;
+    /* udf only when the backend supports it (§2.5), as push_conn_object. */
+    if (be && be->supports_udf)
+        hl_lua_db_attach_owned_udf(L, owner);
     lua_pushstring(L, be ? be->name : "none");
     lua_setfield(L, -2, "backend_name");
     lua_pushstring(L, (be && be->dialect.identity_column)
@@ -1487,6 +1611,12 @@ static int lua_db_open(lua_State *L)
      * conn.async opens its worker connection from this, so both name the same
      * database. */
     char opened[HL_DB_DYNAMIC_DSN_MAX];
+    /* At the cap, collect once first: a connection the app dropped without
+     * close() - one a UDF of its own captures included (the box keeps that
+     * function, mod_db.h) - holds its slot until collected, as fs.mmap and
+     * kv.open retry for theirs. */
+    if (hl_db_dynamic_full())
+        lua_gc(L, LUA_GCCOLLECT);
     HlLuaOwnedConn *o = push_owned_box(L);
     /* Nothing allocates on the Lua heap between the open and o->h. The
      * path checks and the open's fixed work are charged to the run as they

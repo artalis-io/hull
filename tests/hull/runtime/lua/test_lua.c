@@ -17745,4 +17745,151 @@ UTEST(outbox_audit44, cleanup_parity)
 #endif /* HL_ENABLE_HTTP_CLIENT && HL_ENABLE_HTTP_SERVER */
 
 
+#if defined(HL_ENABLE_DB) && defined(HL_ENABLE_SQLITE)
+#include "hull/cap/db_dynamic.h"
+/* ── db.udf on a db.open() connection ─────────────────────────────────
+ * conn.udf is present on a dynamic SQLite handle as on a registry one, bound
+ * to that handle; it is visible to the handle's own statements only. The
+ * UDF functions live in the connection's owner box, not the registry, so a
+ * UDF that captures its own connection does not pin it (and its slot of the
+ * 16-connection cap); close() from inside one of the connection's own
+ * statements is refused; an opts metamethod that closes the handle cannot
+ * make the registration use it. */
+static void db_open_udf_manifest(HlManifest *m)
+{
+    memset(m, 0, sizeof *m);
+    m->databases.dynamic.declared = 1;
+    m->databases.dynamic.schemes[0] = "sqlite";
+    m->databases.dynamic.scheme_count = 1;
+    hl_db_registry_set_manifest(test_db_registry, m);
+}
+
+UTEST(lua_db_open_udf, register_query_unregister)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "local c = dbm.open(':memory:') "
+        "assert(type(c.udf) == 'table') "
+        "c.exec('CREATE TABLE t(x INTEGER)') "
+        "c.exec('INSERT INTO t VALUES (21)') c.exec('INSERT INTO t VALUES (4)') "
+        "c.udf.register('hull_dbl', function(n) return n * 2 end) "
+        "assert(c.query('SELECT sum(hull_dbl(x)) AS y FROM t')[1].y == 50) "
+        "c.udf.register('hull_sum2', { step = function(s, v) s.n = (s.n or 0) + v end, "
+        "  finalize = function(s) return s.n end }) "
+        "assert(c.query('SELECT hull_sum2(x) AS y FROM t')[1].y == 25) "
+        /* bound to its own handle: another connection has no hull_dbl */
+        "local d = dbm.open(':memory:') "
+        "assert(not pcall(d.query, 'SELECT hull_dbl(1) AS y')) "
+        "assert(not pcall(dbm.default().query, 'SELECT hull_dbl(1) AS y')) "
+        "d.close() "
+        "c.udf.unregister('hull_dbl') "
+        "local ok, e = pcall(c.query, 'SELECT hull_dbl(x) AS y FROM t') "
+        "assert(not ok and tostring(e):find('no such function'), tostring(e)) "
+        "c.close() "
+        "ok, e = pcall(c.udf.register, 'hull_z', function() return 1 end) "
+        "assert(not ok and tostring(e):find('not available'), tostring(e)) "
+        "assert(not pcall(c.udf.unregister, 'hull_sum2')) "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_db_open_udf, close_inside_its_own_statement_is_refused)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "local c = dbm.open(':memory:') "
+        "c.udf.register('hull_cl', function() c.close() return 1 end) "
+        "local ok, e = pcall(c.query, 'SELECT hull_cl() AS v') "
+        "assert(not ok, 'closed under its step') "
+        /* a trigger's UDF under upsert: not a row loop, the backend says */
+        "c.exec('CREATE TABLE u(x INTEGER PRIMARY KEY)') "
+        "c.exec('CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT hull_cl(); END') "
+        "ok, e = pcall(c.upsert, 'u', { 'x' }, { 'x' }, { 5 }) "
+        "assert(not ok and tostring(e):find('own statements'), tostring(e)) "
+        "assert(c.query('SELECT 7 AS v')[1].v == 7) "
+        /* in Lua no connection closes while any statement's rows are
+         * read (the row-loop count), another connection's UDF included */
+        "local d = dbm.open(':memory:') "
+        "d.udf.register('hull_cl2', function() c.close() return 1 end) "
+        "assert(not pcall(d.query, 'SELECT hull_cl2() AS v')) "
+        "assert(c.query('SELECT 8 AS v')[1].v == 8) "
+        "d.close() c.close() "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_db_open_udf, opts_metamethod_closing_the_handle)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "for _, impl in ipairs({ function() return 1 end, "
+        "    { step = function() end, finalize = function() return 1 end } }) do "
+        "  local c = dbm.open(':memory:') "
+        "  local o = setmetatable({}, { __index = function() c.close() end }) "
+        "  local ok, e = pcall(c.udf.register, 'hull_g', impl, o) "
+        "  assert(not ok and tostring(e):find('not available'), tostring(e)) "
+        "end "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_db_open_udf, a_udf_capturing_its_connection_does_not_pin_it)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    char err[512];
+    /* 40 connections, never closed, past the cap of 16: each is collected
+     * (the open at the cap collects once) although its UDF captures it. */
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "for i = 1, 40 do "
+        "  local cc = dbm.open(':memory:') "
+        "  cc.udf.register('hull_self', function() return cc.backend_name end) "
+        "  cc.udf.register('hull_agg', { step = function() local _ = cc end, "
+        "    finalize = function() return cc.backend_name end }) "
+        "  assert(cc.query('SELECT hull_self() AS b')[1].b == 'sqlite') "
+        "end "
+        "collectgarbage() collectgarbage() "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    /* One left open with UDFs at teardown: closed by its finalizer while the
+     * state goes, the UDFs' destructors skipping the dead state. */
+    EXPECT_EQ(audit10_run(
+        "KEEP = require('hull.db').open(':memory:') "
+        "KEEP.udf.register('hull_k', function() return KEEP end) "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_EQ(hl_db_dynamic_open_count(), 1);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+}
+#endif /* HL_ENABLE_DB && HL_ENABLE_SQLITE */
+
 UTEST_MAIN();
