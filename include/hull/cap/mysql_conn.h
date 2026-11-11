@@ -73,6 +73,17 @@ int hl_my_caching_sha2_scramble(const char *password,
                                 const uint8_t nonce[HL_MY_SCRAMBLE_LEN],
                                 uint8_t out[HL_MY_CACHING_SHA2_DIGEST_LEN]);
 
+/*
+ * client_ed25519 auth response (MariaDB auth_ed25519): the Ed25519 signature
+ * R || S of the server's 32-byte nonce under the expanded key
+ * SHA-512(password) - every password, the empty one included, signs (the
+ * server holds the public key PASSWORD() derived from it). Returns
+ * HL_MY_ED25519_SIG_LEN or -1 on a crypto error.
+ */
+int hl_my_ed25519_scramble(const char *password,
+                           const uint8_t nonce[HL_MY_ED25519_NONCE_LEN],
+                           uint8_t out[HL_MY_ED25519_SIG_LEN]);
+
 /* ── Connection (socket + handshake) ────────────────────── */
 
 #define HL_MY_ERRMSG_SIZE    256    /* connection error-message buffer */
@@ -175,7 +186,7 @@ typedef struct HlMyConn {
  * Connect to dsn->host:port and run the handshake (mysql_native_password +
  * AuthSwitch to native). On success the connection is authenticated and idle
  * (0). On failure returns -1 with conn->errmsg set and the socket closed.
- * caching_sha2_password is handled; client_ed25519 is not yet supported.
+ * caching_sha2_password and MariaDB's client_ed25519 are handled too.
  */
 int  hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms);
 

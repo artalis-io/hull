@@ -389,6 +389,25 @@ int hl_cap_crypto_ed25519_keypair(uint8_t out_pk[32], uint8_t out_sk[64]);
 int hl_cap_crypto_ed25519_seed_keypair(const uint8_t seed[32],
                                        uint8_t out_pk[32], uint8_t out_sk[64]);
 
+/** Largest message @ref hl_cap_crypto_ed25519_password_sign signs. */
+#define HL_CRYPTO_ED25519_PASSWORD_MSG_MAX 64
+
+/**
+ * @brief Ed25519 signature keyed by a password of any length (MariaDB's
+ *        client_ed25519 authentication).
+ *
+ * The expanded secret key is SHA-512(@p password) - RFC 8032 hashes a 32-byte
+ * seed there - so for a 32-byte password the signature equals
+ * @ref hl_cap_crypto_ed25519_sign's with that password as the seed. Writes
+ * R || S (64 bytes). The derived key material is scrubbed.
+ *
+ * @return `0` on success, `-1` on a NULL argument or a message longer than
+ *         HL_CRYPTO_ED25519_PASSWORD_MSG_MAX.
+ */
+int hl_cap_crypto_ed25519_password_sign(const void *password, size_t pw_len,
+                                        const uint8_t *msg, size_t msg_len,
+                                        uint8_t out_sig[64]);
+
 /* ── Asymmetric verify (RSA / ECDSA, PEM-keyed) ────────────────────── */
 
 /** Asymmetric-signature algorithm identifier. Values are stable wire-
