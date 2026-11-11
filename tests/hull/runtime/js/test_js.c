@@ -19684,6 +19684,7 @@ UTEST(js_test_run_main, abandoned_main_does_not_end_the_next)
 {
     JsRunMainFix f;
     ASSERT_EQ(js_run_main_open(&f, JS_RUN_MAIN_APP), 0);
+    task_log_reset();   /* collects "async callback error" records */
     HlTestCaseResult r[4];
     int passed = 0;
     EXPECT_EQ(js_run_main_cases(
@@ -19695,6 +19696,10 @@ UTEST(js_test_run_main, abandoned_main_does_not_end_the_next)
         "  if (x.code !== 5 || x.stdout !== 'napped') throw new Error(x.code + ' ' + x.stdout + ' ' + x.stderr);\n"
         "});\n", r, &passed), 1);
     EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    /* The abandoned run's resume is logged as what it is, not as a
+     * transaction held across a wait. */
+    EXPECT_NE(strstr(g_task_log, "an abandoned test.runMain run resumed; dropped"), NULL);
+    EXPECT_EQ(strstr(g_task_log, "database transaction"), NULL);
     js_run_main_close(&f);
 }
 
