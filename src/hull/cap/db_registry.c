@@ -18,6 +18,7 @@
 #include "hull/cap/policy_seal.h"  /* hl_policy_page_* */
 #include "hull/shared/host.h"     /* hl_host_normalize_path, HL_HOST_PATH_MAX */
 #include "hull/cap/fs_resolve.h"   /* hl_fs_reserved_name */
+#include "hull/host_match.h"      /* hl_dsn_query_param */
 
 #include <limits.h>
 #include <sys/stat.h>   /* mkdir */
@@ -264,6 +265,88 @@ static int has_dotdot(const char *path)
  * cache.db -> ../secret.db opened that database wherever the kernel sandbox
  * is absent. Returns the DSN to open (@p buf for a file DSN, holding its
  * absolute path with the original scheme), or NULL + *err. */
+/* A manifest-named file path (a file DSN's, or a MySQL server_public_key's)
+ * confined to the app directory or, spelled "@state/<path>", the state
+ * directory: the absolute path in @p abs (@p abssz) and the length of its
+ * root in *base_len, or -1 + *err. @p internal admits the app's .hull. */
+static int confine_manifest_path(const HlDbRegistry *reg, const char *path,
+                                 int internal, char *abs, size_t abssz,
+                                 size_t *base_len_out, const char **err);
+
+/* The MySQL / MariaDB ?server_public_key= of a manifest DSN: a PEM passes, a
+ * FILE is confined like a file DSN (app tree or @state/, no "..", no link,
+ * not .hull, a regular file) and the DSN rewritten to name it by its
+ * absolute path - Hull reads it at every connect, and a cloned app's
+ * manifest naming ~/.ssh/... must not reach outside the tree. Returns the
+ * DSN to open (@p dsn, or @p buf rewritten), or NULL + *err. */
+static const char *confine_mysql_pubkey(const HlDbRegistry *reg,
+                                        const char *dsn, char *buf,
+                                        size_t bufsz, const char **err)
+{
+    static const char key[] = "server_public_key";
+    char val[HL_HOST_PATH_MAX + 512];
+    int r = hl_dsn_query_param(dsn, key, 0, val, sizeof val);
+    if (r == -1) return dsn;
+    if (r < 0 || hl_dsn_query_param(dsn, key, 1, buf, bufsz) != -1) {
+        *err = "a MySQL server_public_key is malformed, too long, or given more than once";
+        return NULL;
+    }
+    if (strncmp(val, "-----BEGIN ", strlen("-----BEGIN ")) == 0) return dsn;
+
+    char abs[HL_HOST_PATH_MAX];
+    size_t base_len = 0;
+    const char *perr = NULL;
+    if (confine_manifest_path(reg, val, 0, abs, sizeof abs, &base_len, &perr) != 0) {
+        *err = "a MySQL server_public_key file must be a regular file inside "
+               "the app directory (or \"@state/...\"), with no \"..\", symbolic "
+               "link or .hull component";
+        return NULL;
+    }
+    /* Rebuild the DSN with the value replaced, percent-encoding anything but
+     * unreserved characters and '/'. The value starts after the '=' of the
+     * one "server_public_key=" pair at a pair boundary. */
+    const char *q = strchr(strstr(dsn, "://") + 3, '?');
+    const char *v = NULL, *vend = NULL;
+    for (const char *p = q + 1; *p; ) {
+        const char *amp = strchr(p, '&');
+        size_t pl = amp ? (size_t)(amp - p) : strlen(p);
+        if (pl > sizeof key - 1 && strncmp(p, key, sizeof key - 1) == 0 &&
+            p[sizeof key - 1] == '=') {
+            v = p + sizeof key;
+            vend = p + pl;
+            break;
+        }
+        if (!amp) break;
+        p = amp + 1;
+    }
+    if (!v) { *err = "a MySQL server_public_key is malformed"; return NULL; }
+    static const char hx[] = "0123456789ABCDEF";
+    size_t o = 0, head = (size_t)(v - dsn);
+    if (head >= bufsz) goto too_long;
+    memcpy(buf, dsn, head);
+    o = head;
+    for (const unsigned char *c = (const unsigned char *)abs; *c; c++) {
+        int keep = (*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') ||
+                   (*c >= '0' && *c <= '9') || *c == '-' || *c == '.' ||
+                   *c == '_' || *c == '~' || *c == '/';
+        if (o + (keep ? 1 : 3) >= bufsz) goto too_long;
+        if (keep) {
+            buf[o++] = (char)*c;
+        } else {
+            buf[o++] = '%';
+            buf[o++] = hx[*c >> 4];
+            buf[o++] = hx[*c & 15];
+        }
+    }
+    size_t tail = strlen(vend);
+    if (o + tail >= bufsz) goto too_long;
+    memcpy(buf + o, vend, tail + 1);
+    return buf;
+too_long:
+    *err = "database DSN too long once its server_public_key path is made absolute";
+    return NULL;
+}
+
 static const char *confine_manifest_dsn(const HlDbRegistry *reg,
                                         const char *dsn, char *buf,
                                         size_t bufsz, int internal,
@@ -285,6 +368,9 @@ static const char *confine_manifest_dsn(const HlDbRegistry *reg,
                 (n == 4 && strncasecmp(dsn, "file", 4) == 0) ||
                 (n == 6 && strncasecmp(dsn, "duckdb", 6) == 0))
                 plen = n + 3;
+            else if ((n == 5 && strncasecmp(dsn, "mysql", 5) == 0) ||
+                     (n == 7 && strncasecmp(dsn, "mariadb", 7) == 0))
+                return confine_mysql_pubkey(reg, dsn, buf, bufsz, err);
             else
                 return dsn;   /* a network backend, or one the selector refuses */
         }
@@ -292,18 +378,34 @@ static const char *confine_manifest_dsn(const HlDbRegistry *reg,
     const char *path = dsn + plen;
     if (!path[0] || strcmp(path, ":memory:") == 0) return dsn;
 
+    char abs[HL_HOST_PATH_MAX];
+    size_t base_len;
+    if (confine_manifest_path(reg, path, internal, abs, sizeof abs, &base_len,
+                              err) != 0)
+        return NULL;
+    int n = snprintf(buf, bufsz, "%.*s%s", (int)plen, dsn, abs);
+    if (n < 0 || (size_t)n >= bufsz) {
+        *err = "database path too long";
+        return NULL;
+    }
+    return buf;
+}
+
+static int confine_manifest_path(const HlDbRegistry *reg, const char *path,
+                                 int internal, char *abs, size_t abssz,
+                                 size_t *base_len_out, const char **err)
+{
     if (!reg->has_app_dir) {
         *err = "a file database DSN needs the app directory (none is known)";
-        return NULL;
+        return -1;
     }
     char norm[HL_HOST_PATH_MAX];
     if (hl_host_normalize_path(path, norm, sizeof norm) >= 0) path = norm;
     if (has_dotdot(path)) {
         *err = "a file database DSN may not have a \"..\" component";
-        return NULL;
+        return -1;
     }
 
-    char abs[HL_HOST_PATH_MAX];
     size_t base_len;
     if (hl_fs_grant_is_state(path)) {
         /* "@state/<path>": under the app's state directory (shared/
@@ -312,24 +414,24 @@ static const char *confine_manifest_dsn(const HlDbRegistry *reg,
         if (!reg->has_state_dir) {
             *err = "a \"@state/\" database DSN needs the app's state directory "
                    "(declare state = { name = ... })";
-            return NULL;
+            return -1;
         }
         while (*path == '/') path++;
         path += strcspn(path, "/");
         while (*path == '/') path++;
         if (!path[0]) {
             *err = "a \"@state/\" database DSN must name a file under the state directory";
-            return NULL;
+            return -1;
         }
-        int n = snprintf(abs, sizeof abs, "%s/%s", reg->state_dir_real, path);
-        if (n < 0 || (size_t)n >= sizeof abs) {
+        int n = snprintf(abs, abssz, "%s/%s", reg->state_dir_real, path);
+        if (n < 0 || (size_t)n >= abssz) {
             *err = "database path too long";
-            return NULL;
+            return -1;
         }
         base_len = strlen(reg->state_dir_real);
     } else if (path[0] == '/') {
         size_t n = strlen(path);
-        if (n >= sizeof abs) { *err = "database path too long"; return NULL; }
+        if (n >= abssz) { *err = "database path too long"; return -1; }
         memcpy(abs, path, n + 1);
         if (under_dir(abs, reg->app_dir_real)) {
             base_len = strlen(reg->app_dir_real);
@@ -355,16 +457,16 @@ static const char *confine_manifest_dsn(const HlDbRegistry *reg,
             if (m < 0 || (size_t)m >= sizeof tmp ||
                 !under_dir(tmp, reg->app_dir_real)) {
                 *err = "a file database DSN must name a file inside the app directory";
-                return NULL;
+                return -1;
             }
             memcpy(abs, tmp, (size_t)m + 1);
             base_len = strlen(reg->app_dir_real);
         }
     } else {
-        int n = snprintf(abs, sizeof abs, "%s/%s", reg->app_dir_real, path);
-        if (n < 0 || (size_t)n >= sizeof abs) {
+        int n = snprintf(abs, abssz, "%s/%s", reg->app_dir_real, path);
+        if (n < 0 || (size_t)n >= abssz) {
             *err = "database path too long";
-            return NULL;
+            return -1;
         }
         base_len = strlen(reg->app_dir_real);
     }
@@ -378,7 +480,7 @@ static const char *confine_manifest_dsn(const HlDbRegistry *reg,
     if (hl_host_path_unsafe_on_windows(abs + base_len)) {
         *err = "a file database DSN may not hold a backslash, a drive, a "
                "component ending in a dot or space, or a short name on Windows";
-        return NULL;
+        return -1;
     }
     /* <app>/.hull is Hull's (audit 37), and holds the internal database
      * (§7.2): a databases.named file DSN may not name anything in it. Only
@@ -394,20 +496,16 @@ static const char *confine_manifest_dsn(const HlDbRegistry *reg,
         if (hl_fs_reserved_name(c, e ? (size_t)(e - c) : strlen(c))) {
             *err = "a databases.named file DSN may not name the app's .hull "
                    "directory (Hull's own)";
-            return NULL;
+            return -1;
         }
     }
     if (hl_db_path_has_symlink(abs, base_len)) {
         *err = "a file database DSN runs through a symbolic link, or names "
                "something that is not a regular file";
-        return NULL;
+        return -1;
     }
-    int n = snprintf(buf, bufsz, "%.*s%s", (int)plen, dsn, abs);
-    if (n < 0 || (size_t)n >= bufsz) {
-        *err = "database path too long";
-        return NULL;
-    }
-    return buf;
+    *base_len_out = base_len;
+    return 0;
 }
 
 /* The Hull-owned default internal database (§7.2). Hull's own DSN, like the

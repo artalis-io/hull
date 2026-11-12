@@ -124,6 +124,27 @@ app directory: a relative one is opened under it, and `..`, a path elsewhere,
 or a symbolic link on the way to the file (or at it, or at its `-wal` / `-shm`
 / `-journal`) is refused when the connection opens (audit 34).
 
+**MySQL 8 `caching_sha2_password` without verified TLS.** When the server has
+not cached an account's hash it asks for the password itself ("full
+authentication"). Hull sends it in the clear only over TLS whose certificate
+was verified (`sslmode=verify-full` / `verify-ca`). Over unverified TLS
+(`sslmode=require`, or `prefer` against a TLS server) it refuses: the server
+reads the answer as the cleartext password on any TLS session. On a
+connection without TLS (`sslmode=disable`, or `prefer` against a server that
+offers none) it sends it RSA-encrypted to the server's public key, which the
+DSN must name (the session itself is then unencrypted; only the password is
+protected):
+
+| DSN option | Meaning |
+|---|---|
+| `server_public_key=keys/mysql.pem` | Pin the key: a PEM file (the server's `public_key.pem`, or `SHOW STATUS LIKE 'Caching_sha2_password_rsa_public_key'`). In a manifest DSN the path is relative to the app directory (or `@state/...`) and may not leave it; with `-d` it is used as given and must be readable under the sandbox. |
+| `server_public_key=-----BEGIN%20PUBLIC%20KEY-----%0A...` | Pin the key inline: the PEM itself, percent-encoded (newlines as `%0A`). The only form a `db.open` DSN may use - a file path there is refused. |
+| `get_server_public_key=true` | Ask the server for its key. The connection has no TLS here, so whoever answers can send their own key and read the password: an explicit opt-in, WARNed once per account. |
+
+With neither, full authentication fails with a hint. Once the server has
+cached the hash (after any successful full authentication), the fast path
+needs none of this.
+
 **MySQL / MariaDB / Postgres: no session state across entries.** Every
 connection a request (or timer, SSE event, WebSocket callback, task,
 `app.main` stretch) used is reset when it ends or waits: MySQL

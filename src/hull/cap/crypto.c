@@ -1124,6 +1124,26 @@ int hl_cap_crypto_rsa_private_pem(const HlCryptoRsaParts *parts,
     return rc;
 }
 
+int hl_cap_crypto_rsa_oaep_sha1_encrypt(const void *pubkey_pem, size_t pubkey_len,
+                                        const void *in, size_t in_len,
+                                        uint8_t *out, size_t out_size,
+                                        size_t *out_len)
+{
+    if (out && out_size) memset(out, 0, out_size);
+    if (out_len) *out_len = 0;
+    const HlCryptoAsymBackend *b = hl_crypto_asym_active_backend();
+    if (!b || !b->rsa_oaep_sha1_encrypt || !pubkey_pem || pubkey_len == 0 ||
+        (!in && in_len > 0) || !out || !out_len || out_size == 0)
+        return -2;
+    int rc = b->rsa_oaep_sha1_encrypt(pubkey_pem, pubkey_len, in, in_len,
+                                      out, out_size, out_len);
+    if (rc != 0) {
+        hull_secure_zero(out, out_size);
+        *out_len = 0;
+    }
+    return rc;
+}
+
 /* Pure string<->enum alg helpers. Base-resident (no mbedTLS) so mod_crypto's
  * references link on a TLS-less base where cap/crypto_asym_mbedtls.c is composed
  * away. Relocated from that TU. See docs/tls_feature.md, a2. */

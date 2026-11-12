@@ -16,6 +16,12 @@
  * leaves cap_db_mysql.o out of this test's link). */
 #include "../../../src/hull/cap/db_mysql.c"
 
+#include "hull/cap/crypto.h"              /* hl_cap_crypto_rsa_oaep_sha1_encrypt */
+#include <mbedtls/pk.h>                  /* the fake server's RSA decrypt */
+#include <mbedtls/rsa.h>
+
+#include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <pthread.h>
@@ -3481,6 +3487,502 @@ UTEST(mysql_conn_audit44, auth_switch_native_refused_unverified)
         hl_my_writer_free(&s);
         close(sv[0]);
     }
+}
+
+/* ── caching_sha2 full authentication over RSA ─────────────────────────
+ * Without verified TLS the password goes RSA-OAEP (SHA-1) encrypted to a key
+ * the DSN trusts: pinned (server_public_key=) or fetched on an explicit
+ * opt-in (get_server_public_key=true). The fake server decrypts with the
+ * matching private key and checks (password || NUL) XOR the scramble. A
+ * throwaway test key pair. */
+static const char MY_K2048[] =
+    "-----BEGIN RSA PRIVATE KEY-----\n"
+    "MIIEogIBAAKCAQEA3OgmpLcLSSa7KL6Lbn0K6evc8/cQCsdRRuXpvozQ6JboEzgk\n"
+    "DFJT1N8JzJoT6lfxSCcE3rz+iv67cBxvl62mquXiaDlaXPb/cc6SSt8WezIOTERc\n"
+    "1LVp7BA3uHZcnbz5hFbZYRdHGDwLCiEQnSD9LGYzeVC3BMrDm3ShRzP0Gif8wWWS\n"
+    "qgg8w8tzU7hd+3E28rgyT78/BnzxGK1x8Zr7aZsT+8ToLh1RVDK1yJlTEsijWZDR\n"
+    "LiZsaoNlBMyugvnQN5fA6P1ILBVIPrszNRNqCRzDgMeR7hzDrOUbs683KfnplNif\n"
+    "2pXT3k6ckOVOqWcWHCD1Zi3r0MTmzYNerQkrnQIDAQABAoIBAAjx7pSnY9HZu2Tm\n"
+    "OFOoRQ+dUSRg2fmxwfkGuM0SOyhb6fhTQuRr1gCt6mHqUEmiN382M0SIrx72OyVK\n"
+    "RXuFGNVdOyqAvge7KbNUS8iz2V9yMrGEaCTl1qzsKDF0O4JYo1roQGOl02doEQNf\n"
+    "POK78fyBA+8S5WJQipSqJ5iwQh9n8VMMR4TCFx4dpsUIcU7aTrpXaMQWuhI9SfYc\n"
+    "fMN96eogHnxdDc3mTv/Ewk4/fuUDuBMXRMM+S+7V2/+ENgrSt5Np2hyxyXYxbdLJ\n"
+    "TVv01AQihbZ6gvKuI4cp9dxZc9hcGStjKab6fYIf5gJ7w+xlsiplFTNk+0aaHn58\n"
+    "E4npcIECgYEA+uE8Xq2x6NFsf2l/Bd8XWxG8LX44nUbvaqXAd5tRFby0u7Du+qZ9\n"
+    "Hub9yzAagcTLLGBnRQCPkoBGi0xxdLvS4/6s3Hesix2TkaXq1l0rpzWDpVPq9D0A\n"
+    "3hUNYDXz1UpgjJI1c7lW12kifjYrIFKYI43FPZwRF5njWG+5iVmz8IECgYEA4WpQ\n"
+    "8O/0bPXLLQ3S9aMtTq9ENtZA5QmUsVBrYtyBeKnhxq06epHEn4YL1ponjJhIdZ3x\n"
+    "idBAYBzCItSHWpLRUVsMv/k5L3gBEpTxb9i7OE2Z89mjGr4+iFo5sUixZz7XgnDk\n"
+    "PFjMJKY8JK80wGxPH07iChQJhOLYF9J7nsZAbR0CgYB0BGLpmcOTWf2lskCmk3N2\n"
+    "ju4Jz7wYp2wiUoJ+DVpjBgBCZ+EsEn/8IXAuXZF0f3BBlldLZqX+Zsm4s2IoTI+L\n"
+    "FgQUdFdbghLzINpHxZBhY/L8KqGVzvwut2eXHXwkH6AkgZysZoJNXXYxDZXF/cwT\n"
+    "bQVQp3KUCntDM2+Gn/ABgQKBgDhYmQ8BDDpIXpdOg1M/jM3EZerHN8WI1ZBVJ+K4\n"
+    "d+yvmm5NUvbchSfTHBZyxjwQvNwZtQzb75uW1LhcI9FyLbyGY/OA2tiQyMPaU1e/\n"
+    "91ylmTwpROokcAEpfI5iO2YxgTFsAsFK+QyYOSR6X1dSO5z53OrkA1UiVx3tUVVo\n"
+    "/SXJAoGAedA8xm6qrdR2s764T20j0g8dqjHAbsY8ilmvbtnJlBGEo03uHBqxBK7c\n"
+    "Cs0U3D76M+vFyAOE0WY+KGK/835/ZwxIbGBPEvaL96dQG00HsDymU65WiBN68Ls6\n"
+    "x24EkJoW3h/7FIvkRgNVw6ocpFDI1AUe4sgjEaOtMG0bRKU22kk=\n"
+    "-----END RSA PRIVATE KEY-----\n"
+    ;
+static const char MY_P2048[] =
+    "-----BEGIN PUBLIC KEY-----\n"
+    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3OgmpLcLSSa7KL6Lbn0K\n"
+    "6evc8/cQCsdRRuXpvozQ6JboEzgkDFJT1N8JzJoT6lfxSCcE3rz+iv67cBxvl62m\n"
+    "quXiaDlaXPb/cc6SSt8WezIOTERc1LVp7BA3uHZcnbz5hFbZYRdHGDwLCiEQnSD9\n"
+    "LGYzeVC3BMrDm3ShRzP0Gif8wWWSqgg8w8tzU7hd+3E28rgyT78/BnzxGK1x8Zr7\n"
+    "aZsT+8ToLh1RVDK1yJlTEsijWZDRLiZsaoNlBMyugvnQN5fA6P1ILBVIPrszNRNq\n"
+    "CRzDgMeR7hzDrOUbs683KfnplNif2pXT3k6ckOVOqWcWHCD1Zi3r0MTmzYNerQkr\n"
+    "nQIDAQAB\n"
+    "-----END PUBLIC KEY-----\n"
+    ;
+static const char MY_P1024[] =
+    "-----BEGIN PUBLIC KEY-----\n"
+    "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDNrsZpUgvppC9NVwSXlU2tBB8o\n"
+    "XPymEqkGvzMkvb1KGyCDvkx/DQVorZPG1O5Ss3jH75kHX4m7rntdUypMdkx4ap8A\n"
+    "rECTE8xoHZx94bUqqPzWc3G1110bGopEURuNV17L8rj2HD387DTNv/MNbHTH6PkC\n"
+    "TbdiwuYtZXNWj+cZnQIDAQAB\n"
+    "-----END PUBLIC KEY-----\n"
+    ;
+
+static int rsa_t_rng(void *c, unsigned char *b, size_t n)
+{
+    (void)c;
+    return hl_cap_crypto_random(b, n) == 0 ? 0 : -1;
+}
+
+/* The test handshake's scramble: bytes 1..20 (build_handshake_cs). */
+static void rsa_t_scramble(uint8_t out[HL_MY_SCRAMBLE_LEN])
+{
+    for (int i = 0; i < HL_MY_SCRAMBLE_LEN; i++) out[i] = (uint8_t)(i + 1);
+}
+
+/* The client packet with sequence @p seq in @p buf: its body and length. */
+static const uint8_t *rsa_t_packet(const uint8_t *buf, size_t n, uint8_t seq,
+                                   size_t *blen)
+{
+    size_t off = 0;
+    while (off + 4 <= n) {
+        size_t len = (size_t)buf[off] | ((size_t)buf[off + 1] << 8) |
+                     ((size_t)buf[off + 2] << 16);
+        if (off + 4 + len > n) return NULL;
+        if (buf[off + 3] == seq) { *blen = len; return buf + off + 4; }
+        off += 4 + len;
+    }
+    return NULL;
+}
+
+/* Decrypt @p ct with MY_K2048: 1 when it is @p pw's RSA answer. */
+static int rsa_t_is_password(const uint8_t *ct, size_t ctlen, const char *pw)
+{
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+    uint8_t plain[512];
+    size_t olen = 0;
+    int ok = 0;
+    if (ctlen == 256 &&
+        mbedtls_pk_parse_key(&pk, (const unsigned char *)MY_K2048,
+                             sizeof MY_K2048, NULL, 0, rsa_t_rng, NULL) == 0) {
+        mbedtls_rsa_context *r = mbedtls_pk_rsa(pk);
+        mbedtls_rsa_set_padding(r, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA1);
+        if (mbedtls_rsa_rsaes_oaep_decrypt(r, rsa_t_rng, NULL, NULL, 0, &olen,
+                                           ct, plain, sizeof plain) == 0) {
+            uint8_t sc[HL_MY_SCRAMBLE_LEN];
+            rsa_t_scramble(sc);
+            size_t pl = strlen(pw) + 1;
+            ok = olen == pl;
+            for (size_t i = 0; ok && i < pl; i++)
+                if ((uint8_t)(plain[i] ^ sc[i % HL_MY_SCRAMBLE_LEN]) !=
+                    (uint8_t)pw[i])
+                    ok = 0;
+        }
+    }
+    mbedtls_pk_free(&pk);
+    return ok;
+}
+
+/* @p in percent-encoded for a DSN query value. */
+static void rsa_t_pct(const char *in, char *out, size_t cap)
+{
+    static const char hx[] = "0123456789ABCDEF";
+    size_t o = 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p && o + 4 < cap; p++) {
+        if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+            (*p >= '0' && *p <= '9') || *p == '-' || *p == '/' || *p == '+') {
+            out[o++] = (char)*p;
+        } else {
+            out[o++] = '%';
+            out[o++] = hx[*p >> 4];
+            out[o++] = hx[*p & 15];
+        }
+    }
+    out[o] = '\0';
+}
+
+/* Queue a caching_sha2 greeting and a FULL_AUTH request. */
+static void rsa_t_full_auth(HlMyWriter *s)
+{
+    build_handshake_plugin(s, 0, "caching_sha2_password");
+    size_t m = hl_my_packet_begin(s, 2);
+    hl_my_put_u8(s, HL_MY_AUTH_MORE_DATA);
+    hl_my_put_u8(s, HL_MY_CACHING_SHA2_FULL_AUTH);
+    hl_my_packet_end(s, m);
+}
+
+static void rsa_t_key_packet(HlMyWriter *s, uint8_t seq, const char *pem, size_t n)
+{
+    size_t m = hl_my_packet_begin(s, seq);
+    hl_my_put_u8(s, HL_MY_AUTH_MORE_DATA);
+    hl_my_put_bytes(s, pem, n);
+    hl_my_packet_end(s, m);
+}
+
+/* Run the handshake against the queued bytes with @p dsn_s: the rc, and
+ * what the client sent in @p got / *n. */
+static int rsa_t_run(HlMyWriter *s, const char *dsn_s, HlMyConn *conn,
+                     uint8_t *got, size_t cap, size_t *n)
+{
+    int sv[2];
+    *n = 0;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return -99;
+    if (write(sv[0], s->buf, s->len) != (ssize_t)s->len) return -99;
+    HlMyDsn dsn; char err[128];
+    if (hl_my_dsn_parse(dsn_s, &dsn, err, sizeof err) != 0) {
+        close(sv[0]); close(sv[1]);
+        return -98;
+    }
+    int rc = hl_my_conn_start(conn, sv[1], &dsn);
+    hl_my_dsn_scrub(&dsn);
+    if (rc == 0) hl_my_conn_close(conn);
+    int fl = fcntl(sv[0], F_GETFL);
+    fcntl(sv[0], F_SETFL, fl | O_NONBLOCK);
+    for (;;) {
+        ssize_t r = read(sv[0], got + *n, cap - *n);
+        if (r <= 0) break;
+        *n += (size_t)r;
+    }
+    close(sv[0]);
+    return rc;
+}
+
+UTEST(mysql_rsa, obfuscate_xors_password_and_nul_with_the_scramble)
+{
+    uint8_t sc[3] = { 0x01, 0x02, 0x03 };
+    uint8_t out[8];
+    ASSERT_EQ(5, hl_my_rsa_obfuscate("abcd", sc, 3, out, sizeof out));
+    EXPECT_EQ('a' ^ 1, out[0]);
+    EXPECT_EQ('d' ^ 1, out[3]);          /* the scramble repeats */
+    EXPECT_EQ(0 ^ 2, out[4]);            /* the NUL is part of it */
+    EXPECT_EQ(-1, hl_my_rsa_obfuscate("abcd", sc, 3, out, 4));
+}
+
+UTEST(mysql_rsa, oaep_encrypt_round_trips_and_refuses_bad_keys)
+{
+    uint8_t ct[HL_CRYPTO_SIGN_MAX];
+    size_t ctlen = 0;
+    ASSERT_EQ(0, hl_cap_crypto_rsa_oaep_sha1_encrypt(MY_P2048, strlen(MY_P2048),
+                                                     "pw", 3, ct, sizeof ct, &ctlen));
+    EXPECT_EQ((size_t)256, ctlen);
+    /* A 1024-bit key, garbage, a message longer than OAEP-SHA1 allows for
+     * the key (256 - 42 = 214), an oversized PEM, a short output: refused. */
+    EXPECT_EQ(-1, hl_cap_crypto_rsa_oaep_sha1_encrypt(MY_P1024, strlen(MY_P1024),
+                                                      "x", 2, ct, sizeof ct, &ctlen));
+    const char *junk = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n";
+    EXPECT_EQ(-1, hl_cap_crypto_rsa_oaep_sha1_encrypt(junk, strlen(junk),
+                                                      "x", 2, ct, sizeof ct, &ctlen));
+    uint8_t big[215];
+    memset(big, 'a', sizeof big);
+    EXPECT_EQ(-1, hl_cap_crypto_rsa_oaep_sha1_encrypt(MY_P2048, strlen(MY_P2048),
+                                                      big, sizeof big, ct, sizeof ct, &ctlen));
+    EXPECT_EQ(0, hl_cap_crypto_rsa_oaep_sha1_encrypt(MY_P2048, strlen(MY_P2048),
+                                                     big, 214, ct, sizeof ct, &ctlen));
+    size_t hn = HL_CRYPTO_RSA_PUBKEY_PEM_MAX + 1;
+    char *huge = malloc(hn);
+    ASSERT_TRUE(huge != NULL);
+    memset(huge, 'A', hn);
+    EXPECT_EQ(-1, hl_cap_crypto_rsa_oaep_sha1_encrypt(huge, hn, "x", 2,
+                                                      ct, sizeof ct, &ctlen));
+    free(huge);
+    EXPECT_EQ(-1, hl_cap_crypto_rsa_oaep_sha1_encrypt(MY_P2048, strlen(MY_P2048),
+                                                      "x", 2, ct, 255, &ctlen));
+    EXPECT_EQ((size_t)0, ctlen);
+}
+
+UTEST(mysql_rsa, dsn_options_parse)
+{
+    HlMyDsn d; char err[128];
+    char enc[2048], dsn_s[2400];
+    rsa_t_pct(MY_P2048, enc, sizeof enc);
+    snprintf(dsn_s, sizeof dsn_s, "mysql://u:p@h/db?server_public_key=%s", enc);
+    ASSERT_EQ(0, hl_my_dsn_parse(dsn_s, &d, err, sizeof err));
+    EXPECT_EQ(HL_MY_PUBKEY_INLINE, d.server_public_key_kind);
+    EXPECT_STREQ(MY_P2048, d.server_public_key);
+    EXPECT_EQ(0, d.get_server_public_key);
+
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u@h/db?server_public_key=%2Fetc%2Fk.pem"
+                                 "&get_server_public_key=true", &d, err, sizeof err));
+    EXPECT_EQ(HL_MY_PUBKEY_FILE, d.server_public_key_kind);
+    EXPECT_STREQ("/etc/k.pem", d.server_public_key);
+    EXPECT_EQ(1, d.get_server_public_key);
+
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u@h/db?get_server_public_key=false",
+                                 &d, err, sizeof err));
+    EXPECT_EQ(0, d.get_server_public_key);
+    EXPECT_EQ(HL_MY_PUBKEY_NONE, d.server_public_key_kind);
+
+    /* Given twice, empty, holding a %00, an unknown boolean: refused. */
+    EXPECT_NE(0, hl_my_dsn_parse("mysql://u@h/db?server_public_key=a&server_public_key=b",
+                                 &d, err, sizeof err));
+    EXPECT_NE(0, hl_my_dsn_parse("mysql://u@h/db?get_server_public_key=1&get_server_public_key=0",
+                                 &d, err, sizeof err));
+    EXPECT_NE(0, hl_my_dsn_parse("mysql://u@h/db?server_public_key=", &d, err, sizeof err));
+    EXPECT_NE(0, hl_my_dsn_parse("mysql://u@h/db?server_public_key=a%00b", &d, err, sizeof err));
+    EXPECT_NE(0, hl_my_dsn_parse("mysql://u@h/db?get_server_public_key=yes", &d, err, sizeof err));
+}
+
+UTEST(mysql_rsa, pinned_inline_key_encrypts_the_password)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    build_ok(&s, 4);
+    char enc[2048], dsn_s[2400];
+    rsa_t_pct(MY_P2048, enc, sizeof enc);
+    snprintf(dsn_s, sizeof dsn_s,
+             "mysql://alice:Sup3rSecretPw@localhost/shop?sslmode=disable&server_public_key=%s",
+             enc);
+    HlMyConn conn;
+    uint8_t got[4096]; size_t n = 0;
+    ASSERT_EQ(0, rsa_t_run(&s, dsn_s, &conn, got, sizeof got, &n));
+    size_t blen = 0;
+    const uint8_t *b = rsa_t_packet(got, n, 3, &blen);
+    ASSERT_TRUE(b != NULL);
+    EXPECT_EQ((size_t)256, blen);
+    EXPECT_TRUE(rsa_t_is_password(b, blen, "Sup3rSecretPw"));
+    int leaked = 0;   /* the password never went out in the clear */
+    for (size_t i = 0; i + 13 <= n; i++)
+        if (memcmp(got + i, "Sup3rSecretPw", 13) == 0) leaked = 1;
+    EXPECT_EQ(0, leaked);
+    hl_my_writer_free(&s);
+}
+
+/* Under sslmode=prefer against a server offering no TLS (an unverified
+ * channel): the pinned key is used the same way. */
+UTEST(mysql_rsa, pinned_key_works_under_prefer)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    build_ok(&s, 4);
+    char enc[2048], dsn_s[2400];
+    rsa_t_pct(MY_P2048, enc, sizeof enc);
+    snprintf(dsn_s, sizeof dsn_s,
+             "mysql://alice:pw@localhost/shop?server_public_key=%s", enc);
+    HlMyConn conn;
+    uint8_t got[4096]; size_t n = 0;
+    ASSERT_EQ(0, rsa_t_run(&s, dsn_s, &conn, got, sizeof got, &n));
+    size_t blen = 0;
+    const uint8_t *b = rsa_t_packet(got, n, 3, &blen);
+    ASSERT_TRUE(b != NULL);
+    EXPECT_TRUE(rsa_t_is_password(b, blen, "pw"));
+    hl_my_writer_free(&s);
+}
+
+UTEST(mysql_rsa, pinned_key_file_encrypts_the_password)
+{
+    char path[] = "/tmp/hull_my_pubkey_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_TRUE(write(fd, MY_P2048, strlen(MY_P2048)) == (ssize_t)strlen(MY_P2048));
+    close(fd);
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    build_ok(&s, 4);
+    char dsn_s[512];
+    snprintf(dsn_s, sizeof dsn_s,
+             "mysql://alice:pw2@localhost/shop?sslmode=disable&server_public_key=%s", path);
+    HlMyConn conn;
+    uint8_t got[4096]; size_t n = 0;
+    ASSERT_EQ(0, rsa_t_run(&s, dsn_s, &conn, got, sizeof got, &n));
+    size_t blen = 0;
+    const uint8_t *b = rsa_t_packet(got, n, 3, &blen);
+    ASSERT_TRUE(b != NULL);
+    EXPECT_TRUE(rsa_t_is_password(b, blen, "pw2"));
+    hl_my_writer_free(&s);
+
+    /* A symbolic link at the leaf is not followed; a missing file fails. */
+    char link[64];
+    snprintf(link, sizeof link, "%s.lnk", path);
+    unlink(link);
+    ASSERT_EQ(0, symlink(path, link));
+    hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    snprintf(dsn_s, sizeof dsn_s,
+             "mysql://alice:pw2@localhost/shop?sslmode=disable&server_public_key=%s", link);
+    EXPECT_EQ(-1, rsa_t_run(&s, dsn_s, &conn, got, sizeof got, &n));
+    EXPECT_TRUE(strstr(conn.errmsg, "server_public_key file") != NULL);
+    EXPECT_TRUE(rsa_t_packet(got, n, 3, &blen) == NULL);
+    hl_my_writer_free(&s);
+    unlink(link);
+    unlink(path);
+
+    hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    snprintf(dsn_s, sizeof dsn_s,
+             "mysql://alice:pw2@localhost/shop?sslmode=disable&server_public_key=%s", path);
+    EXPECT_EQ(-1, rsa_t_run(&s, dsn_s, &conn, got, sizeof got, &n));
+    EXPECT_TRUE(strstr(conn.errmsg, "server_public_key file") != NULL);
+    hl_my_writer_free(&s);
+}
+
+UTEST(mysql_rsa, fetched_key_on_opt_in)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    rsa_t_key_packet(&s, 4, MY_P2048, strlen(MY_P2048));
+    build_ok(&s, 6);
+    HlMyConn conn;
+    uint8_t got[4096]; size_t n = 0;
+    ASSERT_EQ(0, rsa_t_run(&s, "mysql://alice:fetchMe@localhost/shop?sslmode=disable"
+                               "&get_server_public_key=true",
+                           &conn, got, sizeof got, &n));
+    size_t blen = 0;
+    const uint8_t *req = rsa_t_packet(got, n, 3, &blen);
+    ASSERT_TRUE(req != NULL);
+    ASSERT_EQ((size_t)1, blen);
+    EXPECT_EQ(HL_MY_CACHING_SHA2_REQUEST_PUBKEY, req[0]);
+    const uint8_t *b = rsa_t_packet(got, n, 5, &blen);
+    ASSERT_TRUE(b != NULL);
+    EXPECT_TRUE(rsa_t_is_password(b, blen, "fetchMe"));
+    hl_my_writer_free(&s);
+}
+
+UTEST(mysql_rsa, no_option_is_refused_with_a_hint)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    HlMyConn conn;
+    uint8_t got[4096]; size_t n = 0;
+    EXPECT_EQ(-1, rsa_t_run(&s, "mysql://alice:pw@localhost/shop?sslmode=disable",
+                            &conn, got, sizeof got, &n));
+    EXPECT_TRUE(strstr(conn.errmsg, "server_public_key") != NULL);
+    EXPECT_TRUE(strstr(conn.errmsg, "get_server_public_key") != NULL);
+    size_t blen = 0;
+    EXPECT_TRUE(rsa_t_packet(got, n, 3, &blen) == NULL);   /* nothing sent */
+    hl_my_writer_free(&s);
+}
+
+UTEST(mysql_rsa, bad_and_oversized_keys_are_refused)
+{
+    /* A pinned key that is not usable (1024 bits). */
+    HlMyWriter s; hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    char enc[2048], dsn_s[2400];
+    rsa_t_pct(MY_P1024, enc, sizeof enc);
+    snprintf(dsn_s, sizeof dsn_s,
+             "mysql://alice:pw@localhost/shop?sslmode=disable&server_public_key=%s", enc);
+    HlMyConn conn;
+    uint8_t got[4096]; size_t n = 0;
+    EXPECT_EQ(-1, rsa_t_run(&s, dsn_s, &conn, got, sizeof got, &n));
+    EXPECT_TRUE(strstr(conn.errmsg, "not a PEM RSA public key") != NULL);
+    hl_my_writer_free(&s);
+
+    /* A fetched key that is garbage. */
+    hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    rsa_t_key_packet(&s, 4, "not a key", 9);
+    EXPECT_EQ(-1, rsa_t_run(&s, "mysql://alice:pw@localhost/shop?sslmode=disable"
+                                "&get_server_public_key=true",
+                            &conn, got, sizeof got, &n));
+    EXPECT_TRUE(strstr(conn.errmsg, "not a PEM RSA public key") != NULL);
+    hl_my_writer_free(&s);
+
+    /* A fetched key past the PEM cap is refused before it is parsed. */
+    hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    size_t big = HL_CRYPTO_RSA_PUBKEY_PEM_MAX + 1;
+    char *pem = malloc(big);
+    ASSERT_TRUE(pem != NULL);
+    memset(pem, 'A', big);
+    rsa_t_key_packet(&s, 4, pem, big);
+    free(pem);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    int sz = 1 << 20;
+    setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
+    setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://alice:pw@localhost/shop?sslmode=disable"
+                                 "&get_server_public_key=true", &dsn, err, sizeof err));
+    EXPECT_EQ(-1, hl_my_conn_start(&conn, sv[1], &dsn));
+    EXPECT_TRUE(strstr(conn.errmsg, "too large") != NULL);
+    close(sv[0]);
+    hl_my_writer_free(&s);
+}
+
+UTEST(mysql_rsa, the_rsa_answer_is_charged_before_the_work)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    build_ok(&s, 4);
+    char enc[2048], dsn_s[2400];
+    rsa_t_pct(MY_P2048, enc, sizeof enc);
+    snprintf(dsn_s, sizeof dsn_s,
+             "mysql://alice:pw@localhost/shop?sslmode=disable&server_public_key=%s", enc);
+    HlMyConn conn;
+    uint8_t got[4096]; size_t n = 0;
+    HlDbOpBudget budget = { .limit = 1000, .used = 0, .tripped = 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = rsa_t_run(&s, dsn_s, &conn, got, sizeof got, &n);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+    size_t blen = 0;
+    EXPECT_TRUE(rsa_t_packet(got, n, 3, &blen) == NULL);   /* nothing sent */
+    hl_my_writer_free(&s);
+}
+
+/* A server that asks for full authentication again gets no second answer. */
+UTEST(mysql_rsa, a_second_full_auth_request_is_refused)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    rsa_t_full_auth(&s);
+    { size_t m = hl_my_packet_begin(&s, 4);
+      hl_my_put_u8(&s, HL_MY_AUTH_MORE_DATA);
+      hl_my_put_u8(&s, HL_MY_CACHING_SHA2_FULL_AUTH);
+      hl_my_packet_end(&s, m); }
+    char enc[2048], dsn_s[2400];
+    rsa_t_pct(MY_P2048, enc, sizeof enc);
+    snprintf(dsn_s, sizeof dsn_s,
+             "mysql://alice:pw@localhost/shop?sslmode=disable&server_public_key=%s", enc);
+    HlMyConn conn;
+    uint8_t got[4096]; size_t n = 0;
+    EXPECT_EQ(-1, rsa_t_run(&s, dsn_s, &conn, got, sizeof got, &n));
+    EXPECT_TRUE(strstr(conn.errmsg, "second full-authentication") != NULL);
+    hl_my_writer_free(&s);
+}
+
+/* An auth switch to mysql_native_password over an unverified channel stays
+ * refused with a pinned key (RSA applies to caching_sha2 only; audit 44). */
+UTEST(mysql_rsa, native_switch_stays_refused_with_a_pinned_key)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake_plugin(&s, 0, "caching_sha2_password");
+    { size_t m = hl_my_packet_begin(&s, 2);
+      hl_my_put_u8(&s, HL_MY_PKT_EOF);
+      hl_my_put_cstr(&s, "mysql_native_password");
+      for (int i = 0; i < HL_MY_SCRAMBLE_LEN; i++) hl_my_put_u8(&s, 7);
+      hl_my_put_u8(&s, 0);
+      hl_my_packet_end(&s, m); }
+    char enc[2048], dsn_s[2400];
+    rsa_t_pct(MY_P2048, enc, sizeof enc);
+    snprintf(dsn_s, sizeof dsn_s,
+             "mysql://alice:pw@localhost/shop?sslmode=prefer&server_public_key=%s", enc);
+    HlMyConn conn;
+    uint8_t got[4096]; size_t n = 0;
+    EXPECT_EQ(-1, rsa_t_run(&s, dsn_s, &conn, got, sizeof got, &n));
+    EXPECT_TRUE(strstr(conn.errmsg, "mysql_native_password refused") != NULL);
+    hl_my_writer_free(&s);
 }
 
 UTEST_MAIN()

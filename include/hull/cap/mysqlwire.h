@@ -179,6 +179,7 @@ int hl_my_parse_err(const HlMyFrame *f, int protocol_41, HlMyErr *out);
 #define HL_MY_AUTH_MORE_DATA             0x01  /* AuthMoreData packet header */
 #define HL_MY_CACHING_SHA2_FAST_SUCCESS  0x03  /* cache hit; OK follows */
 #define HL_MY_CACHING_SHA2_FULL_AUTH     0x04  /* send the password (over TLS) */
+#define HL_MY_CACHING_SHA2_REQUEST_PUBKEY 0x02 /* client asks for the RSA key */
 
 /* client_ed25519 (MariaDB auth_ed25519): the server sends a 32-byte nonce
  * and the client answers with a 64-byte Ed25519 signature of it, keyed by
