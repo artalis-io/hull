@@ -732,7 +732,7 @@ static int lua_compute_async_call(lua_State *L)
         hl_worker_wasm_op_free(op);
         free(op);
         hl_async_ctx_free(ctx);
-        return luaL_error(L, "compute.async.call: thread pool full");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "compute.async.call: thread pool full");
     }
 
     /* Suspend the FD (attached only). Detached callers yield via
@@ -1021,7 +1021,7 @@ static int lua_wasm_inst_async_call(lua_State *L)
         hl_worker_wasm_op_free(op);
         free(op);
         hl_async_ctx_free(ctx);
-        return luaL_error(L, "WasmInstance:async_call: thread pool full");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "WasmInstance:async_call: thread pool full");
     }
 
     if (!ctx->detached &&

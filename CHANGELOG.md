@@ -56,6 +56,12 @@ release-artifact layout).
 
 ### Fixed
 
+- **A full thread pool is a `busy` refusal (audit 45).** `db.async`,
+  `compute.async`, `worker.dispatch` and `gpu.async.*` raised a plain error
+  when the worker pool's queue was full; it now carries the `busy` refusal
+  code like every other admission cap, so the stdlib (jobs, outbox) hands the
+  work back instead of counting a failed attempt.
+
 - **`hull test`, `hull agent` and `hull mcp` accept a relative app
   directory.** `hull test app` (or `hull test ..`) failed an app's relative
   imports - JS `module not found: app/lib/a.js`, Lua `module not found:

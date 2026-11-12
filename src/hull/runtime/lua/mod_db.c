@@ -1242,7 +1242,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         hl_worker_db_op_free(op);
         free(op);
         hl_async_ctx_free(ctx);
-        return luaL_error(L, "db.async: thread pool full");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "db.async: thread pool full");
     }
 
     /* Suspend the FD (attached only). */

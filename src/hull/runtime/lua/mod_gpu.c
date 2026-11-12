@@ -558,7 +558,7 @@ static int gpu_async_compile_common(lua_State *L, HlLua *lua, int device,
         actx->cont->destroy(actx->cont);
         hl_worker_gpu_op_free_all(op);
         hl_async_ctx_free(actx);
-        return luaL_error(L, "%s: thread pool full", what);
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "%s: thread pool full", what);
     }
 
     if (!actx->detached &&
@@ -1560,7 +1560,7 @@ static int l_gpu_async_dispatch(lua_State *L)
     if (hl_worker_gpu_submit(lua->base.thread_pool, op) != 0) {
         actx->cont->destroy(actx->cont);
         hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
-        return luaL_error(L, "gpu.async.dispatch: thread pool full");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "gpu.async.dispatch: thread pool full");
     }
 
     if (!actx->detached &&
@@ -2105,7 +2105,7 @@ static int l_gpu_async_pipeline(lua_State *L)
     if (hl_worker_gpu_submit(lua->base.thread_pool, op) != 0) {
         actx->cont->destroy(actx->cont);
         hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
-        return luaL_error(L, "gpu.async.pipeline: thread pool full");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "gpu.async.pipeline: thread pool full");
     }
 
     if (!actx->detached &&
