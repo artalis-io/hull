@@ -56,6 +56,14 @@ release-artifact layout).
 
 ### Fixed
 
+- **MySQL auth (audit 45).** A FULL_AUTH (AuthMoreData) request is refused
+  unless caching_sha2_password is the active plugin: under native or
+  client_ed25519, with `get_server_public_key=true`, an on-path party answered
+  the scramble with FULL_AUTH and its own key and read the password. The RSA
+  key's exponent is held to 17 bits (65537), as its fixed charge assumes, and
+  a client_ed25519 signature is charged its measured cost (~3.4 ms), 8x the
+  old charge.
+
 - **`hull test`, `hull agent` and `hull mcp` accept a relative app
   directory.** `hull test app` (or `hull test ..`) failed an app's relative
   imports - JS `module not found: app/lib/a.js`, Lua `module not found:

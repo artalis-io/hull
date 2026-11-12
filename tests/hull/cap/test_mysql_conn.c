@@ -3986,3 +3986,104 @@ UTEST(mysql_rsa, native_switch_stays_refused_with_a_pinned_key)
 }
 
 UTEST_MAIN()
+
+/* ── audit 45 ──────────────────────────────────────────────────────── */
+
+/* A native greeting answered with FULL_AUTH and then the asker's own key:
+ * the password went out encrypted to that key (only caching_sha2 continues
+ * with AuthMoreData). */
+UTEST(mysql_conn_audit45, full_auth_under_native_is_refused)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);                      /* mysql_native_password */
+    { size_t m = hl_my_packet_begin(&s, 2);
+      hl_my_put_u8(&s, HL_MY_AUTH_MORE_DATA);
+      hl_my_put_u8(&s, HL_MY_CACHING_SHA2_FULL_AUTH);
+      hl_my_packet_end(&s, m); }
+    rsa_t_key_packet(&s, 4, MY_P2048, strlen(MY_P2048));
+    build_ok(&s, 6);
+    HlMyConn conn;
+    uint8_t got[4096]; size_t n = 0;
+    EXPECT_EQ(-1, rsa_t_run(&s, "mysql://alice:nativePw@localhost/shop?sslmode=disable"
+                                "&get_server_public_key=true",
+                            &conn, got, sizeof got, &n));
+    EXPECT_TRUE(strstr(conn.errmsg, "caching_sha2_password") != NULL);
+    size_t blen = 0;
+    EXPECT_TRUE(rsa_t_packet(got, n, 3, &blen) == NULL);   /* no REQUEST_PUBKEY */
+    EXPECT_TRUE(rsa_t_packet(got, n, 5, &blen) == NULL);   /* no password */
+    hl_my_writer_free(&s);
+}
+
+/* The same after a switch to client_ed25519. */
+UTEST(mysql_conn_audit45, full_auth_after_ed25519_switch_is_refused)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake_plugin(&s, 0, "caching_sha2_password");
+    ed_switch(&s, 2, HL_MY_ED25519_NONCE_LEN);
+    { size_t m = hl_my_packet_begin(&s, 4);
+      hl_my_put_u8(&s, HL_MY_AUTH_MORE_DATA);
+      hl_my_put_u8(&s, HL_MY_CACHING_SHA2_FULL_AUTH);
+      hl_my_packet_end(&s, m); }
+    rsa_t_key_packet(&s, 6, MY_P2048, strlen(MY_P2048));
+    build_ok(&s, 8);
+    HlMyConn conn;
+    uint8_t got[4096]; size_t n = 0;
+    EXPECT_EQ(-1, rsa_t_run(&s, "mariadb://alice:edPw@localhost/shop?sslmode=disable"
+                                "&get_server_public_key=true",
+                            &conn, got, sizeof got, &n));
+    size_t blen = 0;
+    EXPECT_TRUE(rsa_t_packet(got, n, 5, &blen) == NULL);
+    EXPECT_TRUE(rsa_t_packet(got, n, 7, &blen) == NULL);
+    hl_my_writer_free(&s);
+}
+
+/* One signature is charged its measured cost (~2^18), not 2^15. */
+UTEST(mysql_conn_audit45, ed25519_charged_at_measured_cost)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    ed_switch(&s, 2, HL_MY_ED25519_NONCE_LEN);
+    build_ok(&s, 4);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mariadb://u:p@localhost/db",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    HlDbOpBudget budget = { .limit = 200000, .used = 0, .tripped = 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_my_conn_start(&conn, sv[1], &dsn);
+    hl_db_budget_restore(prev);
+    if (rc == 0) hl_my_conn_close(&conn);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A key whose exponent is past 17 bits (here 2^32 + 1) is refused by the
+ * OAEP encrypt, whose fixed charge assumes 65537. */
+static const char MY_P2048_BIGE[] =
+    "-----BEGIN PUBLIC KEY-----\n"
+    "MIIBJDANBgkqhkiG9w0BAQEFAAOCAREAMIIBDAKCAQEAwN7Tiar0W8VQLbMVoZcE\n"
+    "rppw18QvxguY0S9hmJVYjqe7xHfO5RQWjw+7V26yfaa2E0bFmdeo37FPURqVD102\n"
+    "hcMiToqV3RMhbjSTy/GXkVi3IUArrL3CeXYBRsrbtFfJAll61v5jPC2ZoiKoVDAw\n"
+    "35OJCrcvSy1iwXhYr2LBJpTkf/i6j2k2ubVp9i328UENfx7kNuoWVeLvzFVGfojg\n"
+    "8yZ3WZDVy+OboJ+etCYCixxlx1ZAVQVioCy0JyAchJ/r9+z9DWK3JqcYccbuyGXR\n"
+    "iBo92poOvwW/Il8xFZES2+nwAJ06Thsm/dQSV3+Yn5k6MRW1OxRmrQTfMtO3iH1v\n"
+    "jwIFAQAAAAE=\n"
+    "-----END PUBLIC KEY-----\n";
+
+UTEST(mysql_conn_audit45, oaep_refuses_a_long_exponent)
+{
+    uint8_t ct[HL_CRYPTO_SIGN_MAX];
+    size_t ctlen = 0;
+    EXPECT_EQ(-1, hl_cap_crypto_rsa_oaep_sha1_encrypt(MY_P2048_BIGE,
+                                                      strlen(MY_P2048_BIGE),
+                                                      "pw", 3, ct, sizeof ct,
+                                                      &ctlen));
+    EXPECT_EQ(0, hl_cap_crypto_rsa_oaep_sha1_encrypt(MY_P2048, strlen(MY_P2048),
+                                                     "pw", 3, ct, sizeof ct,
+                                                     &ctlen));
+}

@@ -1304,8 +1304,13 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   user@host:port. With neither it fails with a hint naming both. One RSA
   answer per connection; the key is at most `HL_CRYPTO_RSA_PUBKEY_PEM_MAX`
   (16 KiB, a server-sent one refused past it before parsing), RSA of 2048+
-  bits with an exponent of at most 64 bits; the work is charged
-  `HL_WORK_DB_RSA_AUTH_UNITS` before it runs. The encrypt goes through the
+  bits with an exponent of at most 17 bits (65537; audit 45 - the fixed
+  charge assumes it); the work is charged
+  `HL_WORK_DB_RSA_AUTH_UNITS` before it runs. An AuthMoreData packet is
+  honoured only while caching_sha2_password is the active plugin (the
+  greeting's, then the switch's): a FULL_AUTH under native or ed25519 asked
+  for a password those accounts never send (audit 45). A client_ed25519
+  signature is charged `HL_WORK_DB_ED25519_AUTH_UNITS` (its measured cost). The encrypt goes through the
   asym backend seam (`hl_cap_crypto_rsa_oaep_sha1_encrypt`, the TLS-less stub
   fails closed). A key FILE is read by Hull at connect (O_NOFOLLOW, regular,
   bounded), so who may name one is limited: a manifest DSN's path is confined

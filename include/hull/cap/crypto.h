@@ -598,7 +598,7 @@ int hl_cap_crypto_rsa_private_pem(const HlCryptoRsaParts *parts,
  *  The key is a PEM "PUBLIC KEY" (SubjectPublicKeyInfo) or "RSA PUBLIC KEY"
  *  (PKCS#1) of at most @ref HL_CRYPTO_RSA_PUBKEY_PEM_MAX bytes, with a modulus
  *  of at least @ref HL_CRYPTO_RSA_OAEP_MIN_BITS bits and a public exponent of
- *  at most 64 bits. The ciphertext is as long as the modulus
+ *  at most 17 bits (65537; the caller's fixed charge assumes it). The ciphertext is as long as the modulus
  *  (HL_CRYPTO_SIGN_MAX always suffices for @p out_size).
  *
  *  @return  0 with @p out_len set.

@@ -308,8 +308,13 @@ static inline uint64_t hl_work_mime_units(size_t len)
  *     file, parsing the PEM and one RSA-OAEP public-key operation (an
  *     RSA-8192 encrypt with e = 65537 is ~1 ms), charged before the work
  *                                 -> HL_WORK_DB_RSA_AUTH_UNITS   65536
+ *   MariaDB client_ed25519 authentication: one TweetNaCl Ed25519 signature
+ *     of the server's nonce (key derivation + two scalar multiplications,
+ *     measured ~3.4 ms at -O2; audit 45 - it was charged 2^15)
+ *                                 -> HL_WORK_DB_ED25519_AUTH_UNITS 262144
  */
 #define HL_WORK_DB_RSA_AUTH_UNITS    65536u
+#define HL_WORK_DB_ED25519_AUTH_UNITS 262144u
 #define HL_WORK_KV_COMMAND_UNITS      8192u
 #define HL_WORK_KV_OPEN_UNITS        16384u
 #define HL_WORK_NET_SQL_UNITS         8192u
