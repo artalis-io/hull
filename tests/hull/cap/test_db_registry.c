@@ -1347,4 +1347,91 @@ UTEST(db_registry_audit44, windows_backslash_dsn_refused)
     rm_tree(root);
 }
 
+/* A manifest MySQL DSN's ?server_public_key= FILE is Hull's to read at every
+ * connect, so it is confined like a file DSN and the DSN rewritten to name
+ * it by its absolute path; an inline PEM, and a DSN without the option, pass
+ * unchanged. */
+static const char *pubkey_default_dsn(const char *app, const char *dsn,
+                                      HlManifest *m, char *buf, size_t bufsz,
+                                      const char **err)
+{
+    memset(m, 0, sizeof *m);
+    m->databases.named[0].name = "default";
+    m->databases.named[0].dsn = dsn;
+    m->databases.named_count = 1;
+    HlDbRegistry *reg = hl_db_registry_create(m, NULL, NULL);
+    if (!reg) return NULL;
+    const char *r = NULL;
+    if (hl_db_registry_set_app_dir(reg, app) == 0)
+        r = hl_db_registry_manifest_default_dsn(reg, buf, bufsz, err);
+    /* Copy out before the registry goes (r may be dsn or buf). */
+    static char out[HL_HOST_PATH_MAX + 64];
+    if (r) snprintf(out, sizeof out, "%s", r);
+    hl_db_registry_destroy(reg);
+    return r ? out : NULL;
+}
+
+UTEST(db_registry, mysql_server_public_key_file_is_confined)
+{
+    char root[PATH_MAX], app[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    char key[PATH_MAX + 16], outside[PATH_MAX + 16], link[PATH_MAX + 16];
+    snprintf(key, sizeof key, "%s/my key.pem", app);
+    snprintf(outside, sizeof outside, "%s/outside.pem", root);
+    snprintf(link, sizeof link, "%s/link.pem", app);
+    FILE *f = fopen(key, "w");
+    ASSERT_TRUE(f != NULL);
+    fputs("-----BEGIN PUBLIC KEY-----\n", f);
+    fclose(f);
+    f = fopen(outside, "w");
+    ASSERT_TRUE(f != NULL);
+    fclose(f);
+    ASSERT_EQ(0, symlink(outside, link));
+
+    HlManifest m;
+    char buf[HL_HOST_PATH_MAX + 16];
+    const char *err = NULL;
+
+    /* A relative path becomes the app-tree absolute path, percent-encoded,
+     * the rest of the DSN kept. */
+    const char *d = pubkey_default_dsn(app,
+        "mysql://u:p@h/db?sslmode=disable&server_public_key=my%20key.pem&read_timeout=5",
+        &m, buf, sizeof buf, &err);
+    ASSERT_TRUE(d != NULL);
+    char want[PATH_MAX * 3];
+    char enc[PATH_MAX * 3];
+    size_t o = 0;
+    for (const char *c = app; *c; c++) enc[o++] = *c;   /* mkdtemp: no specials */
+    enc[o] = '\0';
+    snprintf(want, sizeof want,
+             "mysql://u:p@h/db?sslmode=disable&server_public_key=%s/my%%20key.pem&read_timeout=5",
+             enc);
+    EXPECT_STREQ(want, d);
+
+    /* Escaping, a link, ".hull", a missing scheme-ful twin given twice: refused. */
+    const char *bad[] = {
+        "mysql://u@h/db?server_public_key=../outside.pem",
+        "mysql://u@h/db?server_public_key=link.pem",
+        "mysql://u@h/db?server_public_key=.hull/k.pem",
+        "mysql://u@h/db?server_public_key=%2Fetc%2Fpasswd",
+        "mysql://u@h/db?server_public_key=my%20key.pem&server_public_key=x",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        err = NULL;
+        EXPECT_TRUE(pubkey_default_dsn(app, bad[i], &m, buf, sizeof buf, &err) == NULL);
+        EXPECT_TRUE(err != NULL);
+    }
+
+    /* An inline PEM and a DSN without the option pass unchanged; MariaDB too. */
+    const char *pem = "mariadb://u@h/db?server_public_key=-----BEGIN%20PUBLIC%20KEY-----%0AAA";
+    d = pubkey_default_dsn(app, pem, &m, buf, sizeof buf, &err);
+    ASSERT_TRUE(d != NULL);
+    EXPECT_STREQ(pem, d);
+    d = pubkey_default_dsn(app, "mysql://u@h/db?get_server_public_key=true",
+                           &m, buf, sizeof buf, &err);
+    ASSERT_TRUE(d != NULL);
+    EXPECT_STREQ("mysql://u@h/db?get_server_public_key=true", d);
+    rm_tree(root);
+}
+
 UTEST_MAIN()

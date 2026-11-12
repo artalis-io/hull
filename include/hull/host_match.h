@@ -73,4 +73,15 @@ int hl_host_match_any_env_n(const char *const *patterns, int n,
  */
 int hl_dsn_host(const char *dsn, char *buf, size_t bufsz);
 
+/*
+ * The percent-decoded value of the @p nth (0-based) `key=value` pair named
+ * exactly @p key in a network DSN's query - the text after the first '?'
+ * past "://", split on '&' and each pair's first '=' - the way the MySQL and
+ * Postgres DSN parsers read it. Returns the decoded length (@p out holds it,
+ * NUL-terminated), -1 when there is no such pair, -2 when the value does not
+ * decode into @p outsz bytes or holds a NUL.
+ */
+int hl_dsn_query_param(const char *dsn, const char *key, int nth,
+                       char *out, size_t outsz);
+
 #endif /* HL_UTILS_HOST_MATCH_H */

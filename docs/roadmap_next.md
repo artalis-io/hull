@@ -2714,11 +2714,15 @@ ride in the app-provided DSN; the reachable surface stays bounded.
       under ASan (incl. a 50-distinct-DSN churn exercising eviction + the JS
       refcount). Covered by the async cases in `tests/e2e_dynamic_connections.sh`
       (both runtimes).
-- [ ] **`udf` on a dynamic handle (still deferred).** Worker-side udf
-      re-registration is keyed off the registry a dynamic handle is not in, and
-      the intersection (dynamic SQLite file + async + udf) is thin. `.udf` is
-      intentionally absent on dynamic connections (clear "not a function" error);
-      may stay permanently unsupported.
+- [x] **`udf` on a dynamic handle.** A SQLite `db.open` connection carries
+      `udf` bound to that handle, with the registry connections' rule: a UDF
+      runs in the handle's own sync statements, never on a worker connection
+      (no connection's UDFs reach the worker pool). The UDF functions are kept
+      by the connection object (not GC roots), so one that captures its own
+      connection is collected with it; `close()` from inside the handle's own
+      statement is refused. Covered by the udf cases in
+      `tests/e2e_dynamic_connections.sh` and `lua_db_open_udf.*` /
+      `js_db_open_udf.*` (both runtimes).
 
 ### 2.3 Split the abstract interface from concrete backends (+ generic native-handle accessor)
 
@@ -3004,23 +3008,22 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
         the AuthMoreData (0x01) exchange: fast-auth success (0x03, cache hit,
         OK follows) and full-auth (0x04) by sending the cleartext password over
         TLS; without TLS it fails with a "set sslmode=require" hint (the
-        plaintext RSA public-key path is deferred). AuthSwitchRequest now
+        plaintext RSA public-key path was deferred; it has since landed:
+        `?server_public_key=` / `?get_server_public_key=true`, see CLAUDE.md
+        "MySQL/MariaDB specifics"). AuthSwitchRequest now
         re-dispatches through the same helper (native or caching_sha2).
         Unit-tested: the scramble formula + a caching_sha2 fast-auth socketpair
         handshake asserting the client's response. ASan/UBSan-clean.
-  - [~] **5c - client_ed25519 (deferred).** MariaDB derives the ed25519 signing
-        scalar from `SHA512(password)` directly rather than the standard
-        seed->SHA512 path, so `hl_cap_crypto_ed25519_sign` / TweetNaCl
-        `crypto_sign` can't produce it for arbitrary-length passwords, and the
-        curve group-ops needed (`scalarbase` / `pack` / `sc_reduce` /
-        `sc_muladd`) are `static` in `vendor/tweetnacl` (which convention says
-        not to modify) and absent from mbedTLS. Rather than hand-roll or
-        re-vendor curve crypto in an auth path, 5c ships the plumbing only: the
-        plugin dispatcher rejects `client_ed25519` (initial or via
-        AuthSwitchRequest) with a clear "create the user with
-        mysql_native_password or caching_sha2_password" hint. MariaDB is fully
-        reachable today via those two plugins. Full ed25519 (a vetted vendored
-        implementation with MariaDB test vectors) is a tracked follow-up.
+  - [x] **5c - client_ed25519.** MariaDB derives the ed25519 signing key
+        from `SHA512(password)` directly rather than the standard
+        seed->SHA512 path. A TweetNaCl HULL PATCH
+        (`crypto_sign_ed25519_tweet_sign_expanded`) signs from a given
+        expanded key, wrapped as `hl_cap_crypto_ed25519_password_sign` and
+        `hl_my_ed25519_scramble`; the plugin is answered from the greeting or
+        an AuthSwitchRequest. Known-answer tests against an independent model
+        of MariaDB's ref10 `sign.c` (and RFC 8032 for 32-byte passwords),
+        socketpair handshakes, and a MariaDB `IDENTIFIED VIA ed25519` phase in
+        `tests/e2e_mysql.sh`.
 - [x] **6 - stdlib + db.async + docker e2e + CI.** `tests/e2e_mysql.sh` stands up
       a real MySQL 8 in Docker and proves the whole path end-to-end: `mysql://`
       DSN -> backend select -> handshake -> parameterized `db.exec`/`db.query`

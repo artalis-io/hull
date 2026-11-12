@@ -261,6 +261,39 @@ UTEST(db_dynamic, network_host_gate)
 }
 #endif
 
+#ifdef HL_ENABLE_MYSQL
+/* A db.open DSN is app text: its MySQL ?server_public_key= may only be the
+ * PEM itself, never a file Hull would read at connect outside the app's fs
+ * grants (in any occurrence). The inline form passes the gate and only then
+ * fails to connect (port 1). */
+UTEST(db_dynamic, mysql_server_public_key_file_is_refused)
+{
+    HlManifestDbDynamic p = {0};
+    p.declared = 1;
+    p.schemes[0] = "mysql"; p.scheme_count = 1;
+    p.hosts[0] = "127.0.0.0/8"; p.host_count = 1;
+
+    const char *bad[] = {
+        "mysql://u@127.0.0.1:1/db?server_public_key=%2Fetc%2Fpasswd",
+        "mysql://u@127.0.0.1:1/db?server_public_key=k.pem",
+        "mysql://u@127.0.0.1:1/db?server_public_key=-----BEGIN%20X&server_public_key=k.pem",
+        "mysql://u@127.0.0.1:1/db?server_public_key=%zz",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        const char *err = NULL;
+        EXPECT_TRUE(hl_db_dynamic_open(bad[i], &p, NULL, &err) == NULL);
+        ASSERT_TRUE(err != NULL);
+        EXPECT_TRUE(strstr(err, "server_public_key") != NULL);
+    }
+    const char *err = NULL;
+    EXPECT_TRUE(hl_db_dynamic_open("mysql://u@127.0.0.1:1/db?sslmode=disable"
+                                   "&server_public_key=-----BEGIN%20PUBLIC%20KEY-----",
+                                   &p, NULL, &err) == NULL);
+    ASSERT_TRUE(err != NULL);
+    EXPECT_TRUE(strstr(err, "server_public_key") == NULL);
+}
+#endif
+
 /* Audit 44: on Windows a backslash is a separator and "C:" a drive, a
  * trailing dot or space is dropped and "~1" opens a long name. A db.open
  * file DSN under a root write grant, spelled any of those ways, is refused

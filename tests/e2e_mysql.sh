@@ -1118,6 +1118,62 @@ else
     exit 1
 fi
 
+# ── client_ed25519 (MariaDB auth_ed25519) ──────────────────────────────
+# A MariaDB server greets with mysql_native_password and moves an ed25519
+# account over with an AuthSwitchRequest carrying a 32-byte nonce; Hull signs
+# it with the Ed25519 key derived from SHA-512(password). The empty password
+# signs too, a wrong one is refused by the server. MariaDB only (MySQL has no
+# such plugin).
+case "$IMG" in
+mariadb*)
+    echo "=== client_ed25519: an ed25519 account logs in (MariaDB) ==="
+    docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e "
+        INSTALL SONAME 'auth_ed25519';
+        CREATE USER 'hull_ed'@'%' IDENTIFIED VIA ed25519 USING PASSWORD('ed-s3cret pw');
+        CREATE USER 'hull_ed0'@'%' IDENTIFIED VIA ed25519 USING PASSWORD('');
+        GRANT SELECT ON hulldb.* TO 'hull_ed'@'%';
+        GRANT SELECT ON hulldb.* TO 'hull_ed0'@'%';" >/dev/null 2>&1 || {
+        echo "::error ed25519: could not install auth_ed25519 / create the users"; exit 1; }
+    EDDIR=$(mktemp -d)
+    cat > "$EDDIR/app.lua" <<'LUA'
+app.manifest({
+    modules = { "hull/db@1" },
+    databases = { dynamic = { schemes = { "mysql", "mariadb" }, hosts = { "127.0.0.0/8" } } },
+})
+local db = require("hull.db")
+app.main(function(ctx)
+    for i, dsn in ipairs(ctx.args) do
+        local ok, res = pcall(function()
+            local conn = db.open(dsn)
+            local u = conn.query("SELECT CURRENT_USER() AS u")[1].u
+            local c = conn.query("SELECT count(*) AS c FROM e2e")[1].c
+            conn.close()
+            return u .. "/" .. tostring(c)
+        end)
+        print("ed" .. i .. "=" .. (ok and res or ("ERR:" .. tostring(res))))
+    end
+    return 0
+end)
+LUA
+    EDB="127.0.0.1:${MYPORT}/hulldb"
+    ED_OUT=$(./build/hull "$EDDIR/app.lua" -- \
+        "mariadb://hull_ed:ed-s3cret%20pw@${EDB}?sslmode=disable" \
+        "mariadb://hull_ed0@${EDB}?sslmode=disable" \
+        "mariadb://hull_ed:wrong@${EDB}?sslmode=disable" \
+        "mariadb://hull_ed:ed-s3cret%20pw@${EDB}" 2>&1 || true)
+    echo "$ED_OUT" | grep -qE "ed1=hull_ed@%/3" || {
+        echo "::error ed25519: the account did not log in"; echo "$ED_OUT"; exit 1; }
+    echo "$ED_OUT" | grep -qE "ed2=hull_ed0@%/3" || {
+        echo "::error ed25519: the empty-password account did not log in"; echo "$ED_OUT"; exit 1; }
+    echo "$ED_OUT" | grep -qE "ed3=ERR:" || {
+        echo "::error ed25519: a wrong password logged in"; echo "$ED_OUT"; exit 1; }
+    echo "$ED_OUT" | grep -qE "ed4=hull_ed@%/3" || {
+        echo "::error ed25519: the account did not log in under the default sslmode"; echo "$ED_OUT"; exit 1; }
+    echo "PASS: client_ed25519 accounts log in (empty password included); a wrong password is refused"
+    rm -rf "$EDDIR"
+    ;;
+esac
+
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
 # full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the
 # plaintext MariaDB run (MariaDB defaults to mysql_native_password; its TLS matrix
@@ -1173,6 +1229,117 @@ docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e \
 # Hull refuses rather than send it (audit 5 M4).
 echo "=== sslmode=require refuses caching_sha2 FULL auth (password over unverified TLS) ==="
 assert_connect_refused "caching_sha2 full auth over unverified TLS" "$DSN_TLS"
+
+# ── caching_sha2 full auth over RSA ───────────────────────────────────
+# Without verified TLS the password may go RSA-OAEP encrypted to a key the DSN
+# trusts: pinned (server_public_key=, a PEM file or the PEM itself) or fetched
+# on an explicit opt-in (get_server_public_key=true). FLUSH PRIVILEGES empties
+# the server's caching_sha2 cache before each run, so every connect below is
+# a FULL authentication, never the fast path.
+RSADIR=$(mktemp -d)
+docker exec "$CONTAINER" cat /var/lib/mysql/public_key.pem > "$RSADIR/server_key.pem" 2>/dev/null || true
+if ! grep -q 'BEGIN PUBLIC KEY' "$RSADIR/server_key.pem"; then
+    echo "::error could not read the server's caching_sha2 RSA public key"; exit 1
+fi
+mkdir -p "$RSADIR/keys"
+cp "$RSADIR/server_key.pem" "$RSADIR/keys/server_key.pem"
+cat > "$RSADIR/app.lua" <<'LUA'
+app.manifest({
+    modules = { "hull/db@1", "hull/http-server@1" },
+    secrets = { "HULL_E2E_RSA_DSN" },
+    databases = { named = { rsa = "$HULL_E2E_RSA_DSN" } },
+})
+local dbm = require("hull.db")
+app.get("/", function(req, res)
+    local c = req.query.named == "1" and dbm.connect("rsa") or dbm.default()
+    local n = c.query("SELECT count(*) AS c FROM e2e")
+    res:json({ count = n[1].c })
+end)
+LUA
+
+flush_sha2_cache() {
+    docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e "FLUSH PRIVILEGES;" >/dev/null 2>&1
+}
+
+# $1 label, $2 -d DSN, $3 query string ("" or "?named=1"). Serves the app,
+# asserts the query ran, stops it.
+rsa_serve() {
+    flush_sha2_cache
+    ./build/hull -d "$2" -p "$PORT" "$RSADIR/app.lua" >"$RSADIR/serve.log" 2>&1 &
+    SVR=$!
+    wait_for_server "$RSADIR/serve.log" || exit 1
+    _r=$(curl -fsS "http://127.0.0.1:${PORT}/$3" || echo FAIL)
+    kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
+    if echo "$_r" | grep -q '"count":3'; then
+        echo "PASS: $1"
+    else
+        echo "::error $1: $_r"; cat "$RSADIR/serve.log"; exit 1
+    fi
+}
+
+BASE="mysql://hull:s3cretpw@127.0.0.1:${MYPORT}/hulldb"
+echo "=== caching_sha2 full auth over RSA: pinned key file, sslmode=disable (-d) ==="
+rsa_serve "RSA full auth, pinned key file, plaintext" \
+    "${BASE}?sslmode=disable&server_public_key=${RSADIR}/server_key.pem" ""
+
+# Over ANY TLS session the server reads the full-auth answer as the cleartext
+# password (it takes RSA only on a non-TLS connection), so over unverified TLS
+# a pinned key cannot help: refused, the password never sent.
+echo "=== caching_sha2 full auth over unverified TLS stays refused even with a pinned key ==="
+flush_sha2_cache
+assert_connect_refused "caching_sha2 full auth, unverified TLS, pinned key" \
+    "${BASE}?sslmode=require&server_public_key=${RSADIR}/server_key.pem"
+
+echo "=== caching_sha2 full auth over RSA: inline PEM ==="
+PEM_ENC=$(sed -e 's/ /%20/g' "$RSADIR/server_key.pem" | awk '{printf "%s%%0A", $0}')
+rsa_serve "RSA full auth, inline PEM" \
+    "${BASE}?sslmode=disable&server_public_key=${PEM_ENC}" ""
+
+echo "=== caching_sha2 full auth over RSA: manifest DSN, key path relative to the app ==="
+# The default -d connects at startup (a full auth too, so it carries the
+# pinned key), then FLUSH so the named connection - opened lazily by the
+# request - is a full auth through the registry's confined, rewritten path.
+HULL_E2E_RSA_DSN="${BASE}?sslmode=disable&server_public_key=keys/server_key.pem"
+export HULL_E2E_RSA_DSN
+flush_sha2_cache
+./build/hull -d "${BASE}?sslmode=disable&server_public_key=${RSADIR}/server_key.pem" \
+    -p "$PORT" "$RSADIR/app.lua" >"$RSADIR/serve.log" 2>&1 &
+SVR=$!
+wait_for_server "$RSADIR/serve.log" || exit 1
+flush_sha2_cache
+_r=$(curl -fsS "http://127.0.0.1:${PORT}/?named=1" || echo FAIL)
+kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
+if echo "$_r" | grep -q '"count":3'; then
+    echo "PASS: RSA full auth, manifest DSN with an app-relative key file"
+else
+    echo "::error manifest RSA DSN: $_r"; cat "$RSADIR/serve.log"; exit 1
+fi
+unset HULL_E2E_RSA_DSN
+
+echo "=== caching_sha2 full auth over RSA: get_server_public_key=true ==="
+rsa_serve "RSA full auth, key fetched on opt-in" \
+    "${BASE}?sslmode=disable&get_server_public_key=true" ""
+if grep -q 'get_server_public_key=true' "$RSADIR/serve.log"; then
+    echo "PASS: a fetched key over an unverified channel is WARNed"
+else
+    echo "::error no WARN for a fetched key"; cat "$RSADIR/serve.log"; exit 1
+fi
+
+echo "=== caching_sha2 full auth without a key option stays refused (sslmode=disable) ==="
+flush_sha2_cache
+assert_connect_refused "caching_sha2 full auth, plaintext, no key option" \
+    "${BASE}?sslmode=disable"
+echo "=== a wrong pinned key fails authentication ==="
+openssl genrsa 2048 2>/dev/null | openssl rsa -pubout -out "$RSADIR/wrong.pem" 2>/dev/null || true
+if grep -q 'BEGIN PUBLIC KEY' "$RSADIR/wrong.pem" 2>/dev/null; then
+    flush_sha2_cache
+    assert_connect_refused "caching_sha2 RSA with the wrong pinned key" \
+        "${BASE}?sslmode=disable&server_public_key=${RSADIR}/wrong.pem"
+fi
+rm -rf "$RSADIR"
+
+# Back to an uncached hash for the phases below.
+flush_sha2_cache
 
 # A login over a channel the server trusts caches the hash (here the mysql
 # client inside the container); from then on Hull takes the fast path, a

@@ -1124,6 +1124,26 @@ int hl_cap_crypto_rsa_private_pem(const HlCryptoRsaParts *parts,
     return rc;
 }
 
+int hl_cap_crypto_rsa_oaep_sha1_encrypt(const void *pubkey_pem, size_t pubkey_len,
+                                        const void *in, size_t in_len,
+                                        uint8_t *out, size_t out_size,
+                                        size_t *out_len)
+{
+    if (out && out_size) memset(out, 0, out_size);
+    if (out_len) *out_len = 0;
+    const HlCryptoAsymBackend *b = hl_crypto_asym_active_backend();
+    if (!b || !b->rsa_oaep_sha1_encrypt || !pubkey_pem || pubkey_len == 0 ||
+        (!in && in_len > 0) || !out || !out_len || out_size == 0)
+        return -2;
+    int rc = b->rsa_oaep_sha1_encrypt(pubkey_pem, pubkey_len, in, in_len,
+                                      out, out_size, out_len);
+    if (rc != 0) {
+        hull_secure_zero(out, out_size);
+        *out_len = 0;
+    }
+    return rc;
+}
+
 /* Pure string<->enum alg helpers. Base-resident (no mbedTLS) so mod_crypto's
  * references link on a TLS-less base where cap/crypto_asym_mbedtls.c is composed
  * away. Relocated from that TU. See docs/tls_feature.md, a2. */
@@ -1478,6 +1498,25 @@ int hl_cap_crypto_ed25519_seed_keypair(const uint8_t seed[32],
     if (!seed || !out_pk || !out_sk)
         return -1;
     return crypto_sign_ed25519_seed_keypair(out_pk, out_sk, seed) == 0 ? 0 : -1;
+}
+
+int hl_cap_crypto_ed25519_password_sign(const void *password, size_t pw_len,
+                                        const uint8_t *msg, size_t msg_len,
+                                        uint8_t out_sig[64])
+{
+    if ((!password && pw_len) || (!msg && msg_len) || !out_sig ||
+        msg_len > HL_CRYPTO_ED25519_PASSWORD_MSG_MAX)
+        return -1;
+    /* The expanded key is SHA-512 of the password itself, of any length -
+     * where RFC 8032 hashes a 32-byte seed (MariaDB auth_ed25519). */
+    uint8_t az[64];
+    static const uint8_t empty[1] = { 0 };
+    crypto_hash_sha512(az, password ? (const unsigned char *)password : empty,
+                       (unsigned long long)pw_len);
+    int rc = crypto_sign_ed25519_tweet_sign_expanded(
+        out_sig, msg ? msg : empty, (unsigned long long)msg_len, az);
+    hull_secure_zero(az, sizeof az);
+    return rc == 0 ? 0 : -1;
 }
 
 /* ── SHA-512 (via TweetNaCl) ────────────────────────────────────────── */

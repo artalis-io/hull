@@ -15603,7 +15603,7 @@ UTEST(js_audit29, udf_refuses_a_db_open_this)
         "globalThis.__a29udf = out.join('|');\n"), 0);
     char *s = eval_str("globalThis.__a29udf");
     ASSERT_NE(s, NULL);
-    EXPECT_STREQ(s, "undefined|type|type|type|type|type|7");
+    EXPECT_STREQ(s, "object|type|type|type|type|type|7");
     free(s);
     EXPECT_FALSE(JS_HasException(js.ctx));
     js.base.db_registry = test_db_registry;
@@ -16102,6 +16102,156 @@ UTEST(js_gpu_audit_convergence, manifest_dynamic_shaders)
         hl_manifest_free(&m);
         cleanup_js();
     }
+}
+
+/* ── gpu.async.compile / gpu.async.load ─────────────────────────────────
+ * The twins of lua_gpu_async_compile: the compile is begun on the loop and
+ * the Promise settles once a pool thread has installed it. */
+
+typedef struct {
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx    *actx;
+    HlAsyncBackendPool   *pool;
+} JgpuLoop;
+
+static int jgpu_loop_open(JgpuLoop *l)
+{
+    memset(l, 0, sizeof *l);
+    l->be = hl_async_backend();
+    if (!l->be || l->be->init(&l->actx, NULL) != 0) return -1;
+    if (l->be->pool_create(&l->pool, l->actx, 1, 8) != 0) return -1;
+    js.base.async_ctx = l->actx;
+    js.base.thread_pool = l->pool;
+    return 0;
+}
+
+static void jgpu_loop_close(JgpuLoop *l)
+{
+    if (l->be && l->actx) {
+        l->be->tick(l->actx, 0);
+        if (l->pool) l->be->pool_free(l->pool);
+        l->be->free(l->actx);
+    }
+    js.base.async_ctx = NULL;
+    js.base.thread_pool = NULL;
+}
+
+/* Evaluate `call` (an expression giving a Promise) and drive the loop until
+ * it settles: "ok: <value>", "rej: <message>", "throw: <message>" when the
+ * call itself threw. *settled_sync says whether it had settled before the
+ * loop ran. Caller frees. */
+static char *jgpu_async_run(JgpuLoop *l, const char *call, int *settled_sync)
+{
+    char src[4096];
+    snprintf(src, sizeof src,
+        "globalThis.__r = 'pending';"
+        "try { (%s).then((v) => { globalThis.__r = 'ok: ' + String(v); },"
+        "                (e) => { globalThis.__r = 'rej: ' + e.message; }); }"
+        "catch (e) { globalThis.__r = 'throw: ' + e.message; }"
+        "'x'", call);
+    char *x = eval_str(src);
+    free(x);
+    hl_js_run_jobs(&js);
+    char *r = eval_str("globalThis.__r");
+    *settled_sync = r && strcmp(r, "pending") != 0;
+    for (int i = 0; i < 250 && r && strcmp(r, "pending") == 0; i++) {
+        free(r);
+        l->be->tick(l->actx, 20);
+        hl_js_run_jobs(&js);
+        r = eval_str("globalThis.__r");
+    }
+    return r ? r : strdup("(null)");
+}
+
+UTEST(js_gpu_async_compile, settles_and_installs)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    JgpuLoop l;
+    ASSERT_EQ(jgpu_loop_open(&l), 0);
+    gpu_mock_compiles = 0;
+    int sync = 1;
+    char *got = jgpu_async_run(&l, "gpu.async.compile('s', '" HL_TEST_GPU_WGSL "')", &sync);
+    EXPECT_STREQ(got, "ok: true");
+    free(got);
+    EXPECT_FALSE(sync);
+    EXPECT_EQ(gpu_mock_compiles, 1);
+    EXPECT_EQ(jgpu->devices[0].pipeline_count, 1);
+    EXPECT_TRUE(jgpu->devices[0].compile_job == NULL);
+    /* Compiled already: a Promise that is resolved, nothing started. */
+    got = jgpu_async_run(&l, "gpu.async.compile('s', 'x')", &sync);
+    EXPECT_STREQ(got, "ok: true");
+    free(got);
+    EXPECT_TRUE(sync);
+    EXPECT_EQ(gpu_mock_compiles, 1);
+    JGPU_EXPECT("return s(gpu.dispatch('s', { buffers: [{ data: u('abcd') }] }));",
+                "abcd");
+    /* A backend error rejects with gpu.compile's message. */
+    got = jgpu_async_run(&l, "gpu.async.compile('empty', '')", &sync);
+    EXPECT_STREQ(got, "rej: gpu.async.compile failed: shader_error");
+    free(got);
+    EXPECT_EQ(jgpu->devices[0].pipeline_count, 1);
+    jgpu_loop_close(&l);
+    jgpu_cleanup();
+}
+
+UTEST(js_gpu_async_compile, refusals_before_anything_starts)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    gpu_mock_compiles = 0;
+    /* No pool: the same error as gpu.async.dispatch. */
+    JGPU_EXPECT("gpu.async.compile('s', 'fn main() {}'); return 'ran';",
+                "throw: gpu.async not available (no thread pool)");
+    JgpuLoop l;
+    ASSERT_EQ(jgpu_loop_open(&l), 0);
+    /* While the app's module top level runs, the async gate refuses with
+     * the wait_refused code (C audit L4). */
+    js.in_load = 1;
+    JGPU_EXPECT("try { gpu.async.compile('s', 'fn main() {}'); return 'ran'; }"
+                "catch (e) { return String(e.code); }",
+                "wait_refused");
+    js.in_load = 0;
+    /* Argument errors and the size cap throw, as gpu.compile's. */
+    JGPU_EXPECT("gpu.async.compile('s'); return 'ran';",
+                "throw: gpu.async.compile requires name and wgsl");
+    JGPU_EXPECT("gpu.async.compile('s', ' '.repeat((1 << 20) + 1)); return 'ran';",
+                "throw: gpu.async.compile: WGSL source too large");
+    /* A source the pre-checks refuse: thrown at once, nothing compiled. */
+    JGPU_EXPECT("gpu.async.compile('q', 'fn main() { let q = \"x\"; }'); return 'ran';",
+                "throw: gpu.async.compile failed: shader_error");
+    EXPECT_EQ(gpu_mock_compiles, 0);
+    jgpu_loop_close(&l);
+    jgpu_cleanup();
+}
+
+UTEST(js_gpu_async_compile, policy_and_load)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, jgpu_shader_entries, NULL);
+    js.base.app_vfs = &vfs;
+    hl_cap_gpu_set_shader_policy(jgpu, HL_GPU_SHADERS_EMBEDDED, 0, &vfs);
+    JgpuLoop l;
+    ASSERT_EQ(jgpu_loop_open(&l), 0);
+    gpu_mock_compiles = 0;
+    js.in_load = 1;
+    JGPU_EXPECT("try { gpu.async.load('id'); return 'ran'; }"
+                "catch (e) { return String(e.code); }",
+                "wait_refused");
+    js.in_load = 0;
+    JGPU_EXPECT("gpu.async.compile('other', '" JGPU_OTHER_WGSL "'); return 'ran';",
+                "throw: gpu.async.compile failed: dynamic_shader_refused");
+    JGPU_EXPECT("gpu.async.load('missing'); return 'ran';",
+                "throw: gpu.async.load: shader 'missing' not found in shaders/");
+    int sync = 1;
+    char *got = jgpu_async_run(&l, "gpu.async.load('id')", &sync);
+    EXPECT_STREQ(got, "ok: true");
+    free(got);
+    EXPECT_FALSE(sync);
+    EXPECT_EQ(gpu_mock_compiles, 1);
+    EXPECT_EQ(jgpu->devices[0].pipeline_count, 1);
+    jgpu_loop_close(&l);
+    js.base.app_vfs = NULL;
+    jgpu_cleanup();
 }
 
 /* ── Audit 37: fs.list, fs.stat and small fs / blob writes are charged ─
@@ -19777,5 +19927,238 @@ UTEST(js_test_run_main, test_setup_accepts_a_cli_app)
     cleanup_js();
 }
 #endif /* HL_ENABLE_HTTP_SERVER */
+
+#if defined(HL_ENABLE_DB) && defined(HL_ENABLE_SQLITE)
+#include "hull/cap/db_dynamic.h"
+/* ── db.udf on a db.open() connection ─────────────────────────────────
+ * conn.udf is present on a dynamic SQLite handle as on a registry one. Its
+ * methods are bound to their own connection (not to `this`): called on
+ * another connection's object they refuse, as a registry udf method refuses
+ * a db.open `this` (audit 29). The UDF functions are held by the connection
+ * (GC-traced), so one that captures its own connection is collected with it;
+ * close() from inside one of the connection's own statements is refused; an
+ * opts getter that closes the handle cannot make the registration use it. */
+static HlDbRegistry *db_open_udf_registry(HlManifest *m)
+{
+    memset(m, 0, sizeof *m);
+    m->databases.declared = 1;
+    m->databases.dynamic.declared = 1;
+    m->databases.dynamic.schemes[0] = "sqlite";
+    m->databases.dynamic.scheme_count = 1;
+    HlDbRegistry *reg = hl_db_registry_create(m, NULL, NULL);
+    if (reg) {
+        hl_db_registry_seed(reg, "default", &test_db_handle);
+        js.base.db_registry = reg;
+    }
+    return reg;
+}
+
+static void db_open_udf_done(HlDbRegistry *reg)
+{
+    js.base.db_registry = test_db_registry;
+    hl_db_registry_destroy(reg);
+}
+
+UTEST(js_db_open_udf, register_query_unregister)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static HlManifest m;
+    HlDbRegistry *reg = db_open_udf_registry(&m);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const out = [];\n"
+        "const t = (f) => { try { return String(f()); }\n"
+        "  catch (e) { return (e instanceof TypeError ? 'type:' : 'err:') + e.message; } };\n"
+        "const c = dbMod.open(':memory:');\n"
+        "out.push(typeof c.udf, Object.isFrozen(c.udf));\n"
+        "c.exec('CREATE TABLE t(x INTEGER)');\n"
+        "c.exec('INSERT INTO t VALUES (21)'); c.exec('INSERT INTO t VALUES (4)');\n"
+        "c.udf.register('hull_dbl', (n) => n * 2);\n"
+        "out.push(c.query('SELECT sum(hull_dbl(x)) AS y FROM t')[0].y);\n"
+        "c.udf.register('hull_s2', { step: (s, v) => { s.n = (s.n || 0) + v; },\n"
+        "  finalize: (s) => s.n });\n"
+        "out.push(c.query('SELECT hull_s2(x) AS y FROM t')[0].y);\n"
+        "const d = dbMod.open(':memory:');\n"
+        "out.push(t(() => d.query('SELECT hull_dbl(1) AS y').length));\n"
+        "d.close();\n"
+        "const reg = c.udf.register;\n"
+        "out.push(t(() => { reg('hull_det', () => 5);\n"
+        "  return c.query('SELECT hull_det() AS v')[0].v; }));\n"
+        "c.udf.unregister('hull_dbl');\n"
+        "out.push(t(() => c.query('SELECT hull_dbl(x) AS y FROM t').length));\n"
+        "c.close();\n"
+        "out.push(t(() => c.udf.register('hull_z', () => 1)));\n"
+        "out.push(t(() => c.udf.unregister('hull_s2')));\n"
+        "globalThis.__dou = out.join('|');\n"), 0);
+    char *s = eval_str("globalThis.__dou");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "object|true|50|25|err:query failed: no such function: "
+                    "hull_dbl|5|err:query failed: no such function: hull_dbl|"
+                    "err:database not available|err:database not available");
+    free(s);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    db_open_udf_done(reg);
+    cleanup_js_caps();
+}
+
+UTEST(js_db_open_udf, bound_to_its_own_connection)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static HlManifest m;
+    HlDbRegistry *reg = db_open_udf_registry(&m);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const out = [];\n"
+        "const t = (f) => { try { f(); return 'ran'; }\n"
+        "  catch (e) { return e instanceof TypeError ? 'type' : 'other'; } };\n"
+        "const a = dbMod.open(':memory:'), b = dbMod.open(':memory:');\n"
+        "const d = dbMod.default();\n"
+        /* a's methods on b's objects, on the default's, and back */
+        "out.push(t(() => a.udf.register.call(b, 'hull_x', () => 1)));\n"
+        "out.push(t(() => a.udf.register.call(b.udf, 'hull_x', () => 1)));\n"
+        "out.push(t(() => a.udf.register.call(b.async, 'hull_x', () => 1)));\n"
+        "out.push(t(() => a.udf.register.call(d, 'hull_x', () => 1)));\n"
+        "out.push(t(() => a.udf.unregister.call(b, 'hull_x')));\n"
+        "out.push(t(() => d.udf.register.call(a.udf, 'hull_x', () => 1)));\n"
+        "out.push(t(() => d.udf.register.call(a, 'hull_x', () => 1)));\n"
+        /* its own objects are fine */
+        "out.push(t(() => a.udf.register.call(a, 'hull_x', () => 1)));\n"
+        "out.push(t(() => a.udf.register.call(a.async, 'hull_y', () => 2)));\n"
+        "out.push(String(a.query('SELECT hull_x() + hull_y() AS v')[0].v));\n"
+        "out.push(t(() => b.query('SELECT hull_x() AS v')));\n"
+        "out.push(t(() => { a.udf.register = null; }));\n"
+        "a.close(); b.close();\n"
+        "globalThis.__dou = out.join('|');\n"), 0);
+    char *s = eval_str("globalThis.__dou");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "type|type|type|type|type|type|type|ran|ran|3|other|type");
+    free(s);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    db_open_udf_done(reg);
+    cleanup_js_caps();
+}
+
+UTEST(js_db_open_udf, close_inside_its_own_statement_and_from_getters)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static HlManifest m;
+    HlDbRegistry *reg = db_open_udf_registry(&m);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const out = [];\n"
+        "const t = (f) => { try { return String(f()); }\n"
+        "  catch (e) { return 'err:' + e.message; } };\n"
+        "const c = dbMod.open(':memory:');\n"
+        "c.udf.register('hull_cl', () => { c.close(); return 1; });\n"
+        "out.push(t(() => c.query('SELECT hull_cl() AS v')[0].v));\n"
+        "c.exec('CREATE TABLE u(x INTEGER PRIMARY KEY)');\n"
+        "c.exec('CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT hull_cl(); END');\n"
+        "out.push(t(() => c.upsert('u', ['x'], ['x'], [5])));\n"
+        "out.push(c.query('SELECT 7 AS v')[0].v);\n"
+        /* another connection's UDF may close this one */
+        "const d = dbMod.open(':memory:');\n"
+        "d.udf.register('hull_cl2', () => { c.close(); return 1; });\n"
+        "out.push(d.query('SELECT hull_cl2() AS v')[0].v);\n"
+        "out.push(t(() => c.query('SELECT 1 AS v').length));\n"
+        /* a getter that closes the handle mid-registration */
+        "for (const impl of [() => 1, { step() {}, finalize() { return 1; } }]) {\n"
+        "  const e = dbMod.open(':memory:');\n"
+        "  out.push(t(() => e.udf.register('hull_g', impl,\n"
+        "    { get args() { e.close(); return 1; } })));\n"
+        "  e.close();\n"
+        "}\n"
+        "const f = dbMod.open(':memory:');\n"
+        "out.push(t(() => f.udf.unregister({ toString() { f.close(); return 'hull_g'; } })));\n"
+        "d.close();\n"
+        "globalThis.__dou = out.join('|');\n"), 0);
+    char *s = eval_str("globalThis.__dou");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s,
+        "err:query failed: TypeError: db: close() called from inside one of "
+        "this connection's own statements (a UDF)|"
+        "err:db.upsert failed: TypeError: db: close() called from inside one "
+        "of this connection's own statements (a UDF)|7|1|"
+        "err:database not available|err:database not available|"
+        "err:database not available|err:database not available");
+    free(s);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    db_open_udf_done(reg);
+    cleanup_js_caps();
+}
+
+UTEST(js_db_open_udf, a_udf_capturing_its_connection_does_not_pin_it)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static HlManifest m;
+    HlDbRegistry *reg = db_open_udf_registry(&m);
+    ASSERT_TRUE(reg != NULL);
+    /* 40 connections, never closed, past the cap of 16: each is a cycle
+     * through its UDFs that the open at the cap collects. */
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "let n = 0;\n"
+        "for (let i = 0; i < 40; i++) {\n"
+        "  const cc = dbMod.open(':memory:');\n"
+        "  cc.udf.register('hull_self', () => cc.backendName);\n"
+        "  cc.udf.register('hull_agg', { step() { void cc; },\n"
+        "    finalize() { return cc.backendName; } });\n"
+        "  if (cc.query('SELECT hull_self() AS b')[0].b === 'sqlite') n++;\n"
+        "}\n"
+        "globalThis.__dou = String(n);\n"
+        /* left open with UDFs: closed at teardown */
+        "globalThis.KEEP = dbMod.open(':memory:');\n"
+        "KEEP.udf.register('hull_k', () => KEEP.backendName);\n"), 0);
+    char *s = eval_str("globalThis.__dou");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "40");
+    free(s);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_GE(hl_db_dynamic_open_count(), 1);
+    db_open_udf_done(reg);
+    cleanup_js_caps();   /* the finalizers close what is left */
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+}
+/* The cap of 16 dynamic connections is an admission cap: past it, with
+ * every handle still referenced (the one collection frees none), db.open
+ * refuses coded busy, as kv.open does. */
+UTEST(js_db_open_udf, cap_refusal_is_busy)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static HlManifest m;
+    HlDbRegistry *reg = db_open_udf_registry(&m);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const held = [];\n"
+        "for (let i = 0; i < 16; i++) held.push(dbMod.open(':memory:'));\n"
+        "let code = 'none';\n"
+        "try { dbMod.open(':memory:'); } catch (e) { code = String(e.code); }\n"
+        "held[0].close();\n"
+        "const c = dbMod.open(':memory:');\n"
+        "const v = c.query('SELECT 1 AS v')[0].v; c.close();\n"
+        "for (const h of held) h.close();\n"
+        "globalThis.__dou = code + '|' + v;\n"), 0);
+    char *s = eval_str("globalThis.__dou");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "busy|1");
+    free(s);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    db_open_udf_done(reg);
+    cleanup_js_caps();
+}
+
+#endif /* HL_ENABLE_DB && HL_ENABLE_SQLITE */
 
 UTEST_MAIN();

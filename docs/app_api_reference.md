@@ -124,6 +124,27 @@ app directory: a relative one is opened under it, and `..`, a path elsewhere,
 or a symbolic link on the way to the file (or at it, or at its `-wal` / `-shm`
 / `-journal`) is refused when the connection opens (audit 34).
 
+**MySQL 8 `caching_sha2_password` without verified TLS.** When the server has
+not cached an account's hash it asks for the password itself ("full
+authentication"). Hull sends it in the clear only over TLS whose certificate
+was verified (`sslmode=verify-full` / `verify-ca`). Over unverified TLS
+(`sslmode=require`, or `prefer` against a TLS server) it refuses: the server
+reads the answer as the cleartext password on any TLS session. On a
+connection without TLS (`sslmode=disable`, or `prefer` against a server that
+offers none) it sends it RSA-encrypted to the server's public key, which the
+DSN must name (the session itself is then unencrypted; only the password is
+protected):
+
+| DSN option | Meaning |
+|---|---|
+| `server_public_key=keys/mysql.pem` | Pin the key: a PEM file (the server's `public_key.pem`, or `SHOW STATUS LIKE 'Caching_sha2_password_rsa_public_key'`). In a manifest DSN the path is relative to the app directory (or `@state/...`) and may not leave it; with `-d` it is used as given and must be readable under the sandbox. |
+| `server_public_key=-----BEGIN%20PUBLIC%20KEY-----%0A...` | Pin the key inline: the PEM itself, percent-encoded (newlines as `%0A`). The only form a `db.open` DSN may use - a file path there is refused. |
+| `get_server_public_key=true` | Ask the server for its key. The connection has no TLS here, so whoever answers can send their own key and read the password: an explicit opt-in, WARNed once per account. |
+
+With neither, full authentication fails with a hint. Once the server has
+cached the hash (after any successful full authentication), the fast path
+needs none of this.
+
 **MySQL / MariaDB / Postgres: no session state across entries.** Every
 connection a request (or timer, SSE event, WebSocket callback, task,
 `app.main` stretch) used is reset when it ends or waits: MySQL
@@ -1445,7 +1466,18 @@ on a bad value instead of silently turning the bound off:
 - `opts.args`. Number of arguments (-1 = variadic, default: 1)
 - `opts.gas`. Per-row gas limit for WASM UDFs (default: 100K)
 - Names must start with `hull_` to prevent shadowing SQLite built-ins.
-- Lua/JS UDFs work with `db.query()` only (sync). WASM UDFs work with both `db.query()` and `db.async.query()`.
+- A UDF is registered on the connection whose `udf` you call (`db.default()`,
+  `db.connect(name)`, or a SQLite `db.open(dsn)` connection) and runs only in
+  that connection's own synchronous statements (`conn.query`, `conn.exec`, ...).
+  `conn.async` runs on a worker connection, which has no UDFs: a query there
+  that calls one fails with `no such function`. That holds for Lua/JS and WASM
+  UDFs alike.
+- On a `db.open(dsn)` connection, `close()` (or the connection being collected)
+  drops its UDFs; `close()` called from inside one of that connection's own
+  statements (from a UDF it is running) is refused. A UDF that refers to its
+  own connection does not keep it alive. Its `udf` methods only ever register
+  on that connection: called with another connection object as `this`, they
+  throw (JS).
 
 **image**. Image creation, encoding, and decoding via pluggable codec vtable (stb_image default).
 - `image.new(w, h, format, pixels)` → HlImage. Formats: `"rgba8"`, `"r8"`, `"rgba16float"`, `"r32float"`.
@@ -2510,6 +2542,8 @@ gpu.dispatch(name, opts)               -- run shader, return output (string)
 gpu.dispatch(name, { output = false }) -- fire-and-forget (no readback, returns true)
 gpu.pipeline(stages, opts)             -- multi-stage dispatch, single submission
 gpu.pipeline(stages, { output = false }) -- fire-and-forget pipeline
+gpu.async.compile(name, wgsl, {device=N}) -- gpu.compile, the run parks while it compiles: true / nil, err
+gpu.async.load(name, {device=N})       -- gpu.load, parked the same way
 gpu.async.dispatch(name, opts)         -- async dispatch (yields to event loop)
 gpu.async.pipeline(stages, opts)       -- async pipeline
 gpu.buffer(name, data)                 -- create/write persistent buffer (string or MappedBuffer)
@@ -2529,6 +2563,8 @@ gpu.dispatch(name, opts)               // ArrayBuffer output
 gpu.dispatch(name, { output: false })  // fire-and-forget (returns true)
 gpu.pipeline(stages, opts)             // multi-stage, ArrayBuffer or Array<ArrayBuffer>
 gpu.pipeline(stages, { output: false })// fire-and-forget pipeline
+gpu.async.compile(name, wgsl, {device: N}) // Promise<true>; rejects as gpu.compile throws
+gpu.async.load(name, {device: N})      // Promise<true>
 gpu.async.dispatch(name, opts)         // Promise<ArrayBuffer>
 gpu.async.pipeline(stages, opts)       // Promise
 gpu.buffer(name, data)                 // create/write (ArrayBuffer, MappedBuffer, or string)
@@ -2706,6 +2742,8 @@ local out = gpu.dispatch("search", {
 **Binding layout:** Uniforms at binding 0 (if present), storage buffers at binding 1..N. WGSL shader `@binding()` annotations must match this auto-layout.
 
 **Async dispatch:** `gpu.async.dispatch()` and `gpu.async.pipeline()` submit GPU work to the thread pool and yield to the event loop (Lua coroutine / JS Promise). Other requests are served while the GPU is working. Deep-copies all buffer data for thread safety.
+
+**Async compile:** `gpu.async.compile(name, wgsl, opts?)` / `gpu.async.load(name, opts?)` are `gpu.compile` / `gpu.load` without the event loop waiting for the shader compiler. Everything before the compile is the synchronous call's - the same charge, shader source policy, WGSL pre-checks and (for runtime source a built binary opted into) the compile helper's verdict, with the same results - then the compile runs on its own thread while the calling run parks (Lua: the coroutine yields and gets `true` or `nil, err`; JS: the Promise resolves `true` or rejects with `gpu.async.compile failed: <err>` / `gpu.async.load: <err>`). A shader compiled already answers at once. The compile keeps its deadline (`compile_timeout` past it, the device `gpu_busy` until the compiler finishes), and while it runs the device takes no other compile and no GPU work (`gpu_busy`) - the synchronous compile held the device for the same time. Like every async op it can only wait in a handler, a task or `app.main` (`wait_refused` at a module's top level, inside middleware or with a transaction open), and needs the thread pool. The compile-helper round trip, when there is one, still runs before the call parks.
 
 **Sandbox:** When `manifest.gpu` is set:
 - macOS: allows `iokit-open` and `com.apple.MTLCompilerService` mach-lookup

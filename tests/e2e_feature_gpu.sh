@@ -98,6 +98,20 @@ app.main(function()
         assert(out, "dispatch returned nil")
         local a = string.unpack("<f", out)
         assert(a == 2.0, "dispatch wrong result: " .. tostring(a))
+        -- gpu.async.compile parks app.main while the compile runs and
+        -- resumes once the pipeline is installed; the policy holds as for
+        -- the synchronous call.
+        assert(gpu.async.compile("dbl3", SAME), "async compile failed")
+        local okr, errr = gpu.async.compile("tri3", OTHER)
+        assert(okr == nil and errr == "dynamic_shader_refused",
+               "async: dynamic source was not refused: " .. tostring(errr))
+        local out3 = gpu.dispatch("dbl3", {
+            buffers    = {{ data = string.pack("<ffff", 5, 6, 7, 8), usage = "readwrite" }},
+            workgroups = { x = 4 },
+            output     = 1,
+        })
+        assert(out3 and string.unpack("<f", out3) == 10.0, "async-compiled dispatch")
+        print("ASYNC: compiled, installed and dispatched")
         print("GPU FEATURE APP OK (dispatch verified on device)")
     else
         print("GPU FEATURE APP OK (composed; no GPU device)")
@@ -128,6 +142,9 @@ if echo "$RUN_OUT" | grep -q "dispatch verified on device"; then
     echo "$RUN_OUT" | grep -q "POLICY: top-level dynamic source refused" \
         || { echo "FAIL: top-level dynamic source not refused"; exit 1; }
     echo "ok  built binary: embedded shaders only, dynamic source refused (top level included)"
+    echo "$RUN_OUT" | grep -q "ASYNC: compiled, installed and dispatched" \
+        || { echo "FAIL: gpu.async.compile"; exit 1; }
+    echo "ok  gpu.async.compile parks app.main and installs the pipeline"
 fi
 echo "$BUILD_OUT" | grep -q "shader(s) pre-checked" \
     || { echo "FAIL: hull build did not check the embedded shaders"; exit 1; }
@@ -161,6 +178,45 @@ if echo "$RUN_OUT" | grep -q "dispatch verified on device"; then
 fi
 echo "ok  gpu.dynamic_shaders opt-in"
 
+echo "=== JS: gpu.async.compile / gpu.async.load resolve once installed ==="
+JSA=$(mktemp -d)
+mkdir -p "$JSA/shaders"
+cp "$APP/shaders/dbl.wgsl" "$JSA/shaders/dbl.wgsl"
+cat > "$JSA/app.js" <<'JS'
+import { app } from "hull:app";
+app.manifest({ gpu: true, modules: ["hull/gpu@1"] });
+app.main(async () => {
+    let gpu = null;
+    try { ({ gpu } = await import("hull:gpu")); } catch (e) { gpu = null; }
+    if (!gpu || !gpu.available()) { console.log("JS ASYNC OK (no GPU device)"); return 0; }
+    const ok = await gpu.async.load("dbl");
+    if (ok !== true) throw new Error("async load: " + ok);
+    let refused = "";
+    try { await gpu.async.compile("other", "fn main() {}"); }
+    catch (e) { refused = e.message; }
+    if (refused !== "gpu.async.compile failed: dynamic_shader_refused")
+        throw new Error("async compile not refused: " + refused);
+    const out = gpu.dispatch("dbl", {
+        buffers: [{ data: new Float32Array([1, 2, 3, 4]).buffer, usage: "readwrite" }],
+        workgroups: { x: 4 },
+        output: 0,
+    });
+    const v = new Float32Array(out)[0];
+    if (v !== 2) throw new Error("dispatch: " + v);
+    console.log("JS ASYNC OK (compiled on device)");
+    return 0;
+});
+JS
+"$HULL" build --compiler=system --with=gpu --no-verify-platform -o "$JSA/bin" "$JSA" >/dev/null 2>&1 || true
+JSA_OUT=$("$JSA/bin" 2>&1) || true
+rm -rf "$JSA"
+echo "$JSA_OUT" | grep -q "JS ASYNC OK" || { echo "$JSA_OUT"; echo "FAIL: JS async compile app"; exit 1; }
+if echo "$RUN_OUT" | grep -q "dispatch verified on device"; then
+    echo "$JSA_OUT" | grep -q "compiled on device" \
+        || { echo "$JSA_OUT"; echo "FAIL: JS async compile did not run on the device"; exit 1; }
+fi
+echo "ok  JS gpu.async.load / compile"
+
 echo "=== the compile helper: a served opt-in app compiles runtime source in a helper process ==="
 # The built binary spawns itself as the helper before its sandbox
 # (cap/gpu_helper.c). HULL_TEST_GPU_HELPER makes the helper's worker hang,
@@ -191,6 +247,14 @@ app.get("/compile", function(req, res)
     local gpu = require("hull.gpu")
     n = n + 1
     local ok, err = gpu.compile("t" .. n, SRC)
+    res:text(ok and "compiled" or ("error:" .. tostring(err)))
+end)
+-- gpu.async.compile from a request handler: the request parks (attached
+-- to its connection) while the compile runs.
+app.get("/acompile", function(req, res)
+    local gpu = require("hull.gpu")
+    n = n + 1
+    local ok, err = gpu.async.compile("a" .. n, SRC)
     res:text(ok and "compiled" or ("error:" .. tostring(err)))
 end)
 LUA
@@ -244,6 +308,10 @@ LUA
     [ "$OUT" = "compiled|pong" ] \
         || { cat "$HAPP/srv-19934.log"; echo "got: $OUT"; echo "FAIL: helper compile"; exit 1; }
     echo "ok  runtime source compiled through the helper"
+    OUT=$(helper_case 19938 "" acompile)
+    [ "$OUT" = "compiled|pong" ] \
+        || { cat "$HAPP/srv-19938.log"; echo "got: $OUT"; echo "FAIL: gpu.async.compile in a handler"; exit 1; }
+    echo "ok  gpu.async.compile from a request handler"
     ls "$HCACHE"/gpu-shaders/blobs/*/* >/dev/null 2>&1 \
         || { ls -R "$HCACHE"; echo "FAIL: no sealed verdict cached"; exit 1; }
     # A restart finds the verdict in the sealed cache: the helper is not

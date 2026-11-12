@@ -754,6 +754,57 @@ int crypto_sign(u8 *sm,u64 *smlen,const u8 *m,u64 n,const u8 *sk)
   return 0;
 }
 
+/* HULL PATCH: Ed25519 signing from a caller-supplied EXPANDED key az (the
+ * 64-byte SHA-512 output a seed or a password hashes to) instead of from a
+ * secret key seed. MariaDB's client_ed25519 authentication derives az from
+ * SHA-512 of the password of any length (plugin/auth_ed25519/ref10/sign.c),
+ * so the seed step of crypto_sign cannot be used. The body is crypto_sign's
+ * with the first hash taken as given and the public key computed here, so
+ * for az = SHA-512(seed) the output is byte-identical to crypto_sign's
+ * signature (RFC 8032 section 5.1.6). Only the 64-byte signature R || S is
+ * written to sig; the message is at most 64 bytes (the nonce the server
+ * signs is 32), so the hashed buffers live on the stack. Every secret
+ * intermediate (the clamped scalar, the nonce, the product) is scrubbed. */
+int crypto_sign_ed25519_tweet_sign_expanded(u8 *sig, const u8 *m, u64 n,
+                                            const u8 *az)
+{
+  u8 d[64],h[64],r[64],buf[128];
+  i64 i,j,x[64];
+  gf p[4];
+  volatile u8 *vb;
+  volatile i64 *vx;
+
+  if (n > 64) return -1;
+  FOR(i,64) d[i] = az[i];
+  d[0] &= 248;
+  d[31] &= 127;
+  d[31] |= 64;
+
+  FOR(i,n) buf[64 + i] = m[i];
+  FOR(i,32) buf[32 + i] = d[32 + i];
+  crypto_hash(r, buf + 32, n + 32);
+  reduce(r);
+  scalarbase(p,r);
+  pack(buf,p);
+
+  scalarbase(p,d);
+  pack(buf + 32,p);
+  crypto_hash(h,buf,n + 64);
+  reduce(h);
+
+  FOR(i,64) x[i] = 0;
+  FOR(i,32) x[i] = (u64) r[i];
+  FOR(i,32) FOR(j,32) x[i+j] += h[i] * (u64) d[j];
+  FOR(i,32) sig[i] = buf[i];
+  modL(sig + 32,x);
+
+  vb = d; FOR(i,64) vb[i] = 0;
+  vb = r; FOR(i,64) vb[i] = 0;
+  vb = buf; FOR(i,128) vb[i] = 0;
+  vx = x; FOR(i,64) vx[i] = 0;
+  return 0;
+}
+
 static int unpackneg(gf r[4],const u8 p[32])
 {
   gf t, chk, num, den, den2, den4, den6;

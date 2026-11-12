@@ -2,7 +2,8 @@
  * worker_gpu.c - GPU compute worker for thread pool dispatch
  *
  * Follows the same three-callback pattern as worker_wasm.c:
- *   work_fn  - runs on worker thread (delegates to hl_cap_gpu_dispatch)
+ *   work_fn  - runs on worker thread (delegates to hl_cap_gpu_dispatch /
+ *              _pipeline, or waits for a gpu.async.compile)
  *   done_fn  - runs on event loop (resume or cleanup if cancelled)
  *   cancel_fn - cleanup for items that never ran
  *
@@ -37,7 +38,14 @@ static void gpu_work_fn(void *ud)
     op->opts.result_hold = &op->result_hold;
     op->pipe_opts.result_hold = &op->result_hold;
 
-    if (op->is_pipeline) {
+    if (op->is_compile) {
+        /* The compile thread was started on the event loop: wait for it
+         * (bounded by its deadline, or the op's cancel) and install its
+         * pipeline under the device mutex. */
+        rc = hl_cap_gpu_compile_async_finish(op->compile, &op->cancelled);
+        if (rc != HL_GPU_OK)
+            err_msg = hl_gpu_compile_errstr(rc);
+    } else if (op->is_pipeline) {
         /* Wire deep-copied stages and buffers into pipeline opts */
         op->pipe_opts.stages = op->stages;
         op->pipe_opts.stage_count = op->stage_count;
@@ -133,8 +141,9 @@ static void gpu_cancel_fn(void *ud)
 int hl_worker_gpu_submit(HlAsyncBackendPool *pool, HlWorkerGpuOp *op)
 {
     if (!pool || !op) return -1;
-    /* gpu.async submit is event-loop-only; workers only dispatch
-     * pre-compiled pipelines, never compile or mutate caches. */
+    /* gpu.async submit is event-loop-only; workers dispatch pre-compiled
+     * pipelines, and a gpu.async.compile's worker only installs the
+     * pipeline the compile begun on the loop made, under the device lock. */
     hl_assert_on_event_loop("hl_worker_gpu_submit (gpu.async)");
     const HlAsyncBackend *be = hl_async_backend();
     return be->pool_submit(pool, gpu_work_fn, gpu_done_fn,
@@ -183,6 +192,10 @@ void hl_worker_gpu_op_free(HlWorkerGpuOp *op)
 
     free(op->output);
     op->output = NULL;
+
+    /* A compile whose finish never ran is abandoned here (event loop). */
+    hl_cap_gpu_compile_async_free(op->compile);
+    op->compile = NULL;
 }
 
 void hl_worker_gpu_op_free_all(void *ptr)

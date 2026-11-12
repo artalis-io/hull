@@ -179,6 +179,16 @@ int hl_my_parse_err(const HlMyFrame *f, int protocol_41, HlMyErr *out);
 #define HL_MY_AUTH_MORE_DATA             0x01  /* AuthMoreData packet header */
 #define HL_MY_CACHING_SHA2_FAST_SUCCESS  0x03  /* cache hit; OK follows */
 #define HL_MY_CACHING_SHA2_FULL_AUTH     0x04  /* send the password (over TLS) */
+#define HL_MY_CACHING_SHA2_REQUEST_PUBKEY 0x02 /* client asks for the RSA key */
+
+/* client_ed25519 (MariaDB auth_ed25519): the server sends a 32-byte nonce
+ * and the client answers with a 64-byte Ed25519 signature of it, keyed by
+ * SHA-512 of the password. */
+#define HL_MY_ED25519_PLUGIN             "client_ed25519"
+#define HL_MY_ED25519_NONCE_LEN          32
+#define HL_MY_ED25519_SIG_LEN            64
+/* Longest auth response any supported plugin computes (the ed25519 one). */
+#define HL_MY_AUTH_RESP_MAX              HL_MY_ED25519_SIG_LEN
 
 /* Parsed initial Handshake v10 packet the server sends first. */
 typedef struct HlMyHandshake {

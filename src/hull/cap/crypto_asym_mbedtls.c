@@ -544,11 +544,57 @@ done:
     return rc;
 }
 
+/* ── RSA-OAEP (SHA-1) encrypt ─────────────────────────────────────────── */
+
+/* RSA-OAEP with SHA-1 for the OAEP and MGF1 hashes and an empty label
+ * (OpenSSL's RSA_PKCS1_OAEP_PADDING), for MySQL's caching_sha2_password RSA
+ * exchange. The key comes from a server or a file the operator named, so it
+ * is parsed like a JWKS key: bounded PEM, RSA only, the exponent bounded. */
+static int mbed_rsa_oaep_sha1_encrypt(const void *pubkey_pem, size_t pubkey_len,
+                                      const void *in, size_t in_len,
+                                      uint8_t *out, size_t out_size,
+                                      size_t *out_len)
+{
+    if (!pubkey_pem || pubkey_len == 0 || !out || !out_len) return -2;
+    if (pubkey_len > HL_CRYPTO_RSA_PUBKEY_PEM_MAX) return -1;
+    size_t pem_len_with_nl = 0;
+    unsigned char *pem_copy = pem_dup_nul(pubkey_pem, pubkey_len,
+                                          &pem_len_with_nl);
+    if (!pem_copy) return -1;
+
+    int rc = -1;
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+    if (mbedtls_pk_parse_public_key(&pk, pem_copy, pem_len_with_nl + 1) != 0)
+        goto done;
+    if (mbedtls_pk_get_type(&pk) != MBEDTLS_PK_RSA || !rsa_e_bounded(&pk))
+        goto done;
+    mbedtls_rsa_context *rsa = mbedtls_pk_rsa(pk);
+    if (!rsa || mbedtls_pk_get_bitlen(&pk) < HL_CRYPTO_RSA_OAEP_MIN_BITS)
+        goto done;
+    size_t klen = mbedtls_rsa_get_len(rsa);
+    /* OAEP: at most k - 2*hLen - 2 bytes of message (hLen = 20, SHA-1). */
+    if (klen < 42 || in_len > klen - 42 || out_size < klen) goto done;
+    if (mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA1) != 0)
+        goto done;
+    if (mbedtls_rsa_rsaes_oaep_encrypt(rsa, hl_mbed_rng, NULL, NULL, 0,
+                                       in_len, (const unsigned char *)in,
+                                       out) != 0)
+        goto done;
+    *out_len = klen;
+    rc = 0;
+done:
+    mbedtls_pk_free(&pk);
+    free(pem_copy);
+    return rc;
+}
+
 const HlCryptoAsymBackend hl_crypto_asym_backend_mbedtls = {
     .supports        = mbed_supports,
     .verify          = mbed_verify,
     .sign            = mbed_sign,
     .rsa_private_pem = mbed_rsa_private_pem,
+    .rsa_oaep_sha1_encrypt = mbed_rsa_oaep_sha1_encrypt,
 };
 
 /* STRONG override of the base's weak hl_crypto_asym_active_backend() (cap/crypto.c):

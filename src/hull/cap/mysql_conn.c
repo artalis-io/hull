@@ -116,7 +116,8 @@ int hl_my_dsn_parse(const char *dsn, HlMyDsn *out, char *errbuf, size_t errlen)
         }
     }
     if (qmark) {
-        /* sslmode and read_timeout are read; other params are ignored. */
+        /* sslmode, read_timeout, server_public_key and get_server_public_key
+         * are read; other params are ignored. */
         const char *q = qmark + 1;
         while (*q) {
             const char *amp = strchr(q, '&');
@@ -149,6 +150,45 @@ int hl_my_dsn_parse(const char *dsn, HlMyDsn *out, char *errbuf, size_t errlen)
                         return -1;
                     }
                     out->read_timeout_ms = (int)ms;
+                } else if (klen == strlen("server_public_key") &&
+                           strncmp(q, "server_public_key", klen) == 0) {
+                    /* Given twice, which one the open used and which one a
+                     * check (db.open's, the registry's) looked at could
+                     * differ: refused. */
+                    if (out->server_public_key_kind != HL_MY_PUBKEY_NONE) {
+                        set_err(errbuf, errlen, "DSN server_public_key given more than once");
+                        return -1;
+                    }
+                    size_t vlen = pair_len - klen - 1;
+                    int dn = vlen ? hl_url_decode(eq + 1, vlen, out->server_public_key,
+                                                  sizeof out->server_public_key, 0)
+                                  : -1;
+                    /* A %00 would end the value early for every reader. */
+                    if (dn <= 0 || (size_t)dn != strlen(out->server_public_key)) {
+                        set_err(errbuf, errlen, "DSN server_public_key empty, too long or malformed");
+                        return -1;
+                    }
+                    out->server_public_key_kind =
+                        hl_my_pubkey_is_inline(out->server_public_key)
+                            ? HL_MY_PUBKEY_INLINE : HL_MY_PUBKEY_FILE;
+                } else if (klen == strlen("get_server_public_key") &&
+                           strncmp(q, "get_server_public_key", klen) == 0) {
+                    const char *v = eq + 1;
+                    size_t vlen = pair_len - klen - 1;
+                    if (out->get_server_public_key != 0) {
+                        set_err(errbuf, errlen, "DSN get_server_public_key given more than once");
+                        return -1;
+                    }
+                    if ((vlen == 4 && strncmp(v, "true", 4) == 0) ||
+                        (vlen == 1 && v[0] == '1'))
+                        out->get_server_public_key = 1;
+                    else if ((vlen == 5 && strncmp(v, "false", 5) == 0) ||
+                             (vlen == 1 && v[0] == '0'))
+                        out->get_server_public_key = -1;   /* given: false */
+                    else {
+                        set_err(errbuf, errlen, "DSN get_server_public_key must be true or false");
+                        return -1;
+                    }
                 }
             }
             if (!amp) break;
@@ -156,10 +196,27 @@ int hl_my_dsn_parse(const char *dsn, HlMyDsn *out, char *errbuf, size_t errlen)
         }
     }
 
+    if (out->get_server_public_key < 0) out->get_server_public_key = 0;
     if (out->user[0] == '\0') {
         set_err(errbuf, errlen, "DSN missing user"); return -1;
     }
     return 0;
+}
+
+int hl_my_pubkey_is_inline(const char *v)
+{
+    return v && strncmp(v, "-----BEGIN ", strlen("-----BEGIN ")) == 0;
+}
+
+int hl_my_rsa_obfuscate(const char *password, const uint8_t *scramble,
+                        size_t scramble_len, uint8_t *out, size_t out_size)
+{
+    if (!password || !scramble || scramble_len == 0 || !out) return -1;
+    size_t n = strlen(password) + 1;   /* the NUL is part of it */
+    if (n > out_size) return -1;
+    for (size_t i = 0; i < n; i++)
+        out[i] = (uint8_t)((uint8_t)password[i] ^ scramble[i % scramble_len]);
+    return (int)n;
 }
 
 void hl_my_dsn_scrub(HlMyDsn *dsn)
@@ -183,8 +240,12 @@ void hl_my_dsn_scrub(HlMyDsn *dsn)
 #include "hull/cap/db_transport.h"
 #include "hull/cap/db_budget.h"     /* hl_db_budget_charge: a tripped run */
 #include "hull/shared/tls_client.h"
+#include "hull/shared/work_charge.h" /* HL_WORK_DB_RSA_AUTH_UNITS */
 #include "log.h"
+#include <fcntl.h>
 #include <pthread.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 /* TLS handshake timeout (blocking), distinct from the TCP connect timeout. */
@@ -229,6 +290,20 @@ int hl_my_caching_sha2_scramble(const char *password,
     if (hl_cap_crypto_sha256(cat, sizeof cat, d3) != 0) return -1;
     for (int i = 0; i < D; i++) out[i] = (uint8_t)(d1[i] ^ d3[i]);
     return D;
+}
+
+int hl_my_ed25519_scramble(const char *password,
+                           const uint8_t nonce[HL_MY_ED25519_NONCE_LEN],
+                           uint8_t out[HL_MY_ED25519_SIG_LEN])
+{
+    /* MariaDB's client signs whatever the password is, "" included
+     * (client_ed25519.c: crypto_sign(reply, nonce, 32, passwd,
+     * strlen(passwd))): the account's public key is PASSWORD('') then. */
+    const char *pw = password ? password : "";
+    if (hl_cap_crypto_ed25519_password_sign(pw, strlen(pw), nonce,
+                                            HL_MY_ED25519_NONCE_LEN, out) != 0)
+        return -1;
+    return HL_MY_ED25519_SIG_LEN;
 }
 
 /* ── Connection layer (Keel v3 transport) ─────────────────────────────
@@ -513,33 +588,67 @@ static int my_sslmode_parse(const char *s)
     return -1;
 }
 
-/* Compute the auth response for @p plugin into @p out (>= 32 bytes). Returns
- * the response length, 0 for an empty password, or -1 for an unsupported
- * plugin. */
+/* What one client_ed25519 signature is charged to the run before it is
+ * computed: two scalar multiplications (the nonce point R and the public key
+ * A) at the 2^14 units the crypto bindings charge one (audit 10). */
+#define HL_MY_ED25519_UNITS ((int64_t)2 << 14)
+
+/* compute_plugin_auth failures besides -1 (an unsupported plugin). */
+#define HL_MY_AUTH_BAD_CHALLENGE (-2)   /* the server's nonce is malformed */
+#define HL_MY_AUTH_INTERRUPTED   (-3)   /* the run's budget is spent */
+#define HL_MY_AUTH_CRYPTO_FAILED (-4)
+
+/* Compute the auth response for @p plugin to the server's challenge @p data
+ * (@p dlen bytes) into @p out. Returns the response length, 0 for an empty
+ * password (native / caching_sha2), -1 for an unsupported plugin, or one of
+ * the HL_MY_AUTH_* failures above. native / caching_sha2 take the first
+ * HL_MY_SCRAMBLE_LEN bytes (zero-padded, as before); client_ed25519 takes
+ * exactly HL_MY_ED25519_NONCE_LEN bytes, as MariaDB's client does. */
 static int compute_plugin_auth(const char *plugin, const char *password,
-                               const uint8_t nonce[HL_MY_SCRAMBLE_LEN],
-                               uint8_t out[HL_MY_CACHING_SHA2_DIGEST_LEN])
+                               const uint8_t *data, size_t dlen,
+                               uint8_t out[HL_MY_AUTH_RESP_MAX])
 {
+    if (strcmp(plugin, HL_MY_ED25519_PLUGIN) == 0) {
+        if (!data || dlen != HL_MY_ED25519_NONCE_LEN)
+            return HL_MY_AUTH_BAD_CHALLENGE;
+        if (hl_db_budget_charge(HL_MY_ED25519_UNITS) != 0)
+            return HL_MY_AUTH_INTERRUPTED;
+        int n = hl_my_ed25519_scramble(password, data, out);
+        return n < 0 ? HL_MY_AUTH_CRYPTO_FAILED : n;
+    }
+    uint8_t nonce[HL_MY_SCRAMBLE_LEN];
+    memset(nonce, 0, sizeof nonce);
+    if (data)
+        memcpy(nonce, data, dlen >= HL_MY_SCRAMBLE_LEN
+                            ? (size_t)HL_MY_SCRAMBLE_LEN : dlen);
+    int n;
     if (strcmp(plugin, "mysql_native_password") == 0)
-        return hl_my_native_password_scramble(password, nonce, out);
-    if (strcmp(plugin, "caching_sha2_password") == 0)
-        return hl_my_caching_sha2_scramble(password, nonce, out);
-    return -1;
+        n = hl_my_native_password_scramble(password, nonce, out);
+    else if (strcmp(plugin, "caching_sha2_password") == 0)
+        n = hl_my_caching_sha2_scramble(password, nonce, out);
+    else
+        return -1;
+    return n < 0 ? HL_MY_AUTH_CRYPTO_FAILED : n;
 }
 
-/* Set the error for a plugin compute_plugin_auth rejected. MariaDB's
- * client_ed25519 derives its ed25519 scalar from SHA512(password) directly,
- * which needs curve group-ops TweetNaCl keeps private; it is not yet supported,
- * so point the operator at a plugin Hull does implement. */
-static void set_unsupported_plugin_err(HlMyConn *conn, const char *plugin)
+/* Set the error for a compute_plugin_auth failure @p rc. */
+static void set_plugin_auth_err(HlMyConn *conn, const char *plugin, int rc)
 {
-    if (plugin && strcmp(plugin, "client_ed25519") == 0)
+    if (rc == HL_MY_AUTH_BAD_CHALLENGE)
         snprintf(conn->errmsg, sizeof conn->errmsg,
-                 "client_ed25519 auth is not supported yet; create the user with "
-                 "mysql_native_password or caching_sha2_password");
+                 "malformed %s challenge from the server (expected %d bytes)",
+                 plugin, HL_MY_ED25519_NONCE_LEN);
+    else if (rc == HL_MY_AUTH_INTERRUPTED)
+        snprintf(conn->errmsg, sizeof conn->errmsg,
+                 "interrupted (instruction limit exceeded) before the %s "
+                 "signature", plugin);
+    else if (rc == HL_MY_AUTH_CRYPTO_FAILED)
+        snprintf(conn->errmsg, sizeof conn->errmsg,
+                 "%s auth response could not be computed", plugin);
     else
         snprintf(conn->errmsg, sizeof conn->errmsg,
-                 "unsupported auth plugin '%s' (native / caching_sha2 only)",
+                 "unsupported auth plugin '%s' (mysql_native_password, "
+                 "caching_sha2_password and client_ed25519 only)",
                  plugin ? plugin : "?");
 }
 
@@ -556,16 +665,20 @@ static int my_auth_unverified(int tls_verified, int sslmode)
 }
 
 /* WARN once per DSN that a password-derived response (a native SHA-1 or
- * caching_sha2 scramble of the server's nonce) went over a connection whose
+ * caching_sha2 scramble, or a client_ed25519 signature, of the server's
+ * nonce) went over a connection whose
  * server certificate was not verified: whoever answered can test passwords
  * against it offline (audit 44, the MySQL twin of audit 29). */
-static void my_warn_unverified_auth(const HlMyDsn *dsn, const char *plugin,
-                                    int sslmode)
+/* 1 the first time a WARN of @p kind is asked for this DSN's user@host:port
+ * (at most HL_MY_UNVERIFIED_WARN_MAX distinct ones, then 0). */
+static int my_warn_first(const HlMyDsn *dsn, unsigned kind)
 {
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     static uint64_t seen[HL_MY_UNVERIFIED_WARN_MAX];
     static int nseen;
     uint64_t h = 1469598103934665603ULL;               /* FNV-1a */
+    h ^= kind;
+    h *= 1099511628211ULL;
     const char *parts[3] = { dsn->user, dsn->host, dsn->port };
     for (int i = 0; i < 3; i++) {
         for (const char *p = parts[i]; *p; p++) {
@@ -585,13 +698,101 @@ static void my_warn_unverified_auth(const HlMyDsn *dsn, const char *plugin,
         fresh = 1;
     }
     pthread_mutex_unlock(&mu);
-    if (!fresh) return;
+    return fresh;
+}
+
+static void my_warn_unverified_auth(const HlMyDsn *dsn, const char *plugin,
+                                    int sslmode)
+{
+    if (!my_warn_first(dsn, 0)) return;
     log_warn("[hull:c] mysql: %s authentication for %s@%s:%s answered the "
              "server's challenge over a connection whose server certificate "
              "was not verified (sslmode=%s): whoever answered can test "
              "passwords against the response offline; use sslmode=verify-full "
              "(or verify-ca)", plugin, dsn->user, dsn->host, dsn->port,
              sslmode == HL_MY_SSL_REQUIRE ? "require" : "prefer");
+}
+
+/* ── caching_sha2_password full authentication over RSA ───────────── */
+
+/* Zero @p n bytes at @p p where the compiler cannot drop it. */
+static void my_secure_zero(void *p, size_t n)
+{
+    volatile uint8_t *v = (volatile uint8_t *)p;
+    while (n--) *v++ = 0;
+}
+
+/* Read a pinned ?server_public_key= file into a malloc'd buffer (*out,
+ * *out_len). A regular file of at most HL_CRYPTO_RSA_PUBKEY_PEM_MAX bytes;
+ * the leaf is not followed if it is a symbolic link, and a FIFO does not
+ * block the open (O_NONBLOCK; refused as not regular). A manifest DSN's
+ * path was confined to the app tree / state directory and checked for links
+ * by the registry (db_registry.c); an operator's -d path is taken as given,
+ * and must be readable under the kernel sandbox. 0 / -1. */
+static int my_read_key_file(const char *path, char **out, size_t *out_len)
+{
+    *out = NULL;
+    *out_len = 0;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        (uint64_t)st.st_size > HL_CRYPTO_RSA_PUBKEY_PEM_MAX) {
+        close(fd);
+        return -1;
+    }
+    size_t want = (size_t)st.st_size;
+    char *buf = malloc(want);
+    if (!buf) { close(fd); return -1; }
+    size_t got = 0;
+    while (got < want) {
+        ssize_t r = read(fd, buf + got, want - got);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    close(fd);
+    if (got != want) { free(buf); return -1; }
+    *out = buf;
+    *out_len = got;
+    return 0;
+}
+
+/* Send the password RSA-OAEP encrypted to @p pem (the caching_sha2 full
+ * authentication answer when the channel is not verified TLS): the plaintext
+ * is (password || NUL) XOR the scramble, as MySQL's client sends it. Charged
+ * before the work. 0 / -1 with conn->errmsg set. */
+static int my_send_rsa_password(HlMyConn *conn, uint8_t seq, const HlMyDsn *dsn,
+                                const uint8_t nonce[HL_MY_SCRAMBLE_LEN],
+                                const char *pem, size_t pem_len)
+{
+    if (hl_db_budget_charge(HL_WORK_DB_RSA_AUTH_UNITS) != 0) {
+        conn_set_err(conn, "interrupted (instruction limit exceeded) during "
+                           "authentication");
+        return -1;
+    }
+    uint8_t plain[HL_MY_DSN_PASSWORD_MAX + 1];
+    uint8_t ct[HL_CRYPTO_SIGN_MAX];
+    size_t ctlen = 0;
+    int n = hl_my_rsa_obfuscate(dsn->password, nonce, HL_MY_SCRAMBLE_LEN,
+                                plain, sizeof plain);
+    int rc = n < 0 ? -1
+           : hl_cap_crypto_rsa_oaep_sha1_encrypt(pem, pem_len, plain, (size_t)n,
+                                                 ct, sizeof ct, &ctlen);
+    my_secure_zero(plain, sizeof plain);
+    if (rc != 0) {
+        conn_set_err(conn, rc == -2
+            ? "caching_sha2_password RSA exchange: this build has no RSA backend"
+            : "caching_sha2_password RSA exchange: the server public key is not "
+              "a PEM RSA public key of 2048 bits or more, or the password is too "
+              "long for it");
+        return -1;
+    }
+    if (send_auth_data(conn, seq, ct, (int)ctlen) != 0) {
+        conn_set_err(conn, "failed to send the encrypted password");
+        return -1;
+    }
+    return 0;
 }
 
 static int reply_frame(HlMyConn *conn, HlMyFrame *f, unsigned may_end);
@@ -619,6 +820,7 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
      * VERIFIED (sslmode=verify-ca / verify-full) is attached to the transport:
      * the only channel the password itself may cross (caching_sha2 full auth). */
     int tls_verified = 0;
+    int tls_used = 0;       /* any TLS session, verified or not */
 
     HlMyFrame f;
     if (conn_next_frame(conn, &f) != 0) { hl_my_conn_close(conn); return -1; }
@@ -638,6 +840,10 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
         conn_set_err(conn, "malformed server handshake"); hl_my_conn_close(conn);
         return -1;
     }
+    /* The scramble the current plugin answers (the greeting's, or an
+     * AuthSwitchRequest's): the RSA exchange XORs the password with it. */
+    uint8_t cur_nonce[HL_MY_SCRAMBLE_LEN];
+    memcpy(cur_nonce, hs.scramble, sizeof cur_nonce);
 
     /* FOUND_ROWS: an UPDATE reports the rows it MATCHED, as SQLite and
      * Postgres do. Without it MySQL counts only rows whose values changed,
@@ -712,6 +918,7 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
             hl_my_conn_close(conn); return -1;
         }
         tls_verified = verify;
+        tls_used = 1;
         resp_seq = (uint8_t)(f.seq + 2);   /* response follows the SSLRequest */
     } else if (sslmode >= HL_MY_SSL_REQUIRE) {
         conn_set_err(conn, "server does not support TLS but sslmode requires it");
@@ -722,10 +929,24 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
     /* The server names its default auth plugin in the handshake (MySQL 8:
      * caching_sha2_password; older / MariaDB: mysql_native_password). */
     const char *plugin = hs.auth_plugin[0] ? hs.auth_plugin : "mysql_native_password";
-    uint8_t auth[HL_MY_CACHING_SHA2_DIGEST_LEN];
-    int authlen = compute_plugin_auth(plugin, dsn->password, hs.scramble, auth);
+    uint8_t auth[HL_MY_AUTH_RESP_MAX];
+    int authlen;
+    /* client_ed25519 signs a 32-byte nonce the server sends AFTER this
+     * response (the greeting's scramble is 20 bytes): answer the greeting
+     * with an empty response under that plugin and wait for the nonce. A
+     * MariaDB server names its default plugin in the greeting
+     * (mysql_native_password) and moves an ed25519 account over with an
+     * AuthSwitchRequest carrying the nonce, the usual path. */
+    int ed25519_pending = 0;
+    if (strcmp(plugin, HL_MY_ED25519_PLUGIN) == 0) {
+        authlen = 0;
+        ed25519_pending = 1;
+    } else {
+        authlen = compute_plugin_auth(plugin, dsn->password, hs.scramble,
+                                      HL_MY_SCRAMBLE_LEN, auth);
+    }
     if (authlen < 0) {
-        set_unsupported_plugin_err(conn, plugin);
+        set_plugin_auth_err(conn, plugin, authlen);
         hl_my_conn_close(conn); return -1;
     }
 
@@ -747,6 +968,8 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
     /* Auth result: OK, ERR, an AuthSwitchRequest (0xFE), or an AuthMoreData
      * (0x01) fast/full-auth exchange for caching_sha2_password. */
     int switched = 0;
+    int awaiting_key = 0;   /* sent REQUEST_PUBKEY; the next AuthMoreData is the key */
+    int rsa_sent = 0;       /* at most one RSA answer per connection */
     for (int npkt = 0;; npkt++) {
         if (npkt >= HL_MY_AUTH_MAX_PACKETS) {
             conn_set_err(conn, "too many packets during authentication");
@@ -757,6 +980,36 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
         if (reply_frame(conn, &f, 0) != 0) { hl_my_conn_close(conn); return -1; }
         if (f.body_len == 0) continue;
         uint8_t hdr = f.body[0];
+        if (awaiting_key && hdr != HL_MY_AUTH_MORE_DATA && hdr != HL_MY_PKT_ERR) {
+            conn_set_err(conn, "server did not send its public key when asked");
+            hl_my_conn_close(conn); return -1;
+        }
+
+        /* The client_ed25519 nonce the greeting's plugin left owed. Inside
+         * the plugin every packet but an ERR or an AuthSwitchRequest is its
+         * data, a leading 0x01 the server's escape (MariaDB's
+         * server_mpvio_write_packet prefixes data starting 0x01 / 0xFE /
+         * 0xFF; libmariadb strips it): an OK-looking 0x00 is a nonce here,
+         * and anything but exactly 32 bytes is refused. */
+        if (ed25519_pending && hdr != HL_MY_PKT_ERR && hdr != HL_MY_PKT_EOF) {
+            const uint8_t *data = f.body;
+            size_t dlen = f.body_len;
+            if (hdr == HL_MY_AUTH_MORE_DATA) { data++; dlen--; }
+            ed25519_pending = 0;
+            int n = compute_plugin_auth(HL_MY_ED25519_PLUGIN, dsn->password,
+                                        data, dlen, auth);
+            if (n < 0) {
+                set_plugin_auth_err(conn, HL_MY_ED25519_PLUGIN, n);
+                hl_my_conn_close(conn); return -1;
+            }
+            if (send_auth_data(conn, (uint8_t)(f.seq + 1), auth, n) != 0) {
+                conn_set_err(conn, "client_ed25519 response failed");
+                hl_my_conn_close(conn); return -1;
+            }
+            if (my_auth_unverified(tls_verified, sslmode))
+                my_warn_unverified_auth(dsn, HL_MY_ED25519_PLUGIN, sslmode);
+            continue;   /* read the OK / ERR result */
+        }
 
         if (hdr == HL_MY_PKT_OK) {           /* authenticated */
             HlMyOk ok;
@@ -802,14 +1055,23 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
                     "to caching_sha2_password");
                 hl_my_conn_close(conn); return -1;
             }
-            uint8_t nonce[HL_MY_SCRAMBLE_LEN];
-            memset(nonce, 0, sizeof nonce);
+            /* A switch to client_ed25519 is answered on any sslmode, as the
+             * greeting's plugin is: its response is a signature of the
+             * server's nonce under a key derived from the password, which
+             * an on-path party can test password guesses against offline -
+             * as it can native's or caching_sha2's scramble, at a higher
+             * cost per guess - so an unverified channel is WARNed below,
+             * not refused. */
+            ed25519_pending = 0;
+            /* The RSA exchange below XORs the password with the nonce of
+             * the switch, not the greeting's. */
+            memset(cur_nonce, 0, sizeof cur_nonce);
             if (data)
-                memcpy(nonce, data, dlen >= HL_MY_SCRAMBLE_LEN
-                                    ? (size_t)HL_MY_SCRAMBLE_LEN : dlen);
-            int n2 = compute_plugin_auth(sw, dsn->password, nonce, auth);
+                memcpy(cur_nonce, data, dlen >= HL_MY_SCRAMBLE_LEN
+                                        ? (size_t)HL_MY_SCRAMBLE_LEN : dlen);
+            int n2 = compute_plugin_auth(sw, dsn->password, data, dlen, auth);
             if (n2 < 0) {
-                set_unsupported_plugin_err(conn, sw);
+                set_plugin_auth_err(conn, sw, n2);
                 hl_my_conn_close(conn); return -1;
             }
             if (send_auth_data(conn, (uint8_t)(f.seq + 1), auth, n2) != 0) {
@@ -824,6 +1086,36 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
         if (hdr == HL_MY_AUTH_MORE_DATA) {   /* caching_sha2 fast / full auth */
             if (f.body_len < 2) { conn_set_err(conn, "malformed auth data");
                                   hl_my_conn_close(conn); return -1; }
+            if (awaiting_key) {
+                /* The server's PEM public key, asked for under
+                 * get_server_public_key=true. Bounded and parsed by the
+                 * encrypt (a malformed or non-RSA key is refused there). */
+                awaiting_key = 0;
+                size_t klen = f.body_len - 1;
+                if (klen > HL_CRYPTO_RSA_PUBKEY_PEM_MAX) {
+                    conn_set_err(conn, "server public key too large");
+                    hl_my_conn_close(conn); return -1;
+                }
+                /* Only asked for when the channel is not verified TLS. */
+                {
+                    if (my_warn_first(dsn, 1))
+                        log_warn("[hull:c] mysql: %s@%s:%s authenticated with "
+                                 "a public key the server sent "
+                                 "(get_server_public_key=true) over a "
+                                 "connection whose server was not verified: "
+                                 "whoever answered can read the password; pin "
+                                 "the key with server_public_key= or use "
+                                 "sslmode=verify-full", dsn->user, dsn->host,
+                                 dsn->port);
+                }
+                if (my_send_rsa_password(conn, (uint8_t)(f.seq + 1), dsn,
+                                         cur_nonce, (const char *)f.body + 1,
+                                         klen) != 0) {
+                    hl_my_conn_close(conn); return -1;
+                }
+                rsa_sent = 1;
+                continue;                    /* read the OK / ERR result */
+            }
             uint8_t status = f.body[1];
             if (status == HL_MY_CACHING_SHA2_FAST_SUCCESS)
                 continue;                    /* cache hit; an OK packet follows */
@@ -845,13 +1137,68 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
                     }
                     continue;                /* read the OK / ERR result */
                 }
+                /* Not verified TLS: the password goes RSA-OAEP encrypted to
+                 * a public key the operator trusts - pinned in the DSN
+                 * (server_public_key=), or, opted into with
+                 * get_server_public_key=true, the one the server sends
+                 * (whoever answers can replace it). Once per connection. */
+                if (rsa_sent) {
+                    conn_set_err(conn, "second full-authentication request "
+                                       "from the server refused");
+                    hl_my_conn_close(conn); return -1;
+                }
+                /* The server takes the RSA exchange only on a connection
+                 * that is not TLS: over any TLS session it reads the next
+                 * packet as the cleartext password (MySQL's own client sends
+                 * that), which Hull sends only over VERIFIED TLS. So over
+                 * unverified TLS (sslmode=prefer against a TLS server, or
+                 * require) full auth has no safe answer. */
+                if (tls_used) {
+                    conn_set_err(conn,
+                        "caching_sha2_password full auth over unverified TLS "
+                        "wants the cleartext password: use sslmode=verify-full, "
+                        "or sslmode=disable with ?server_public_key= (RSA)");
+                    hl_my_conn_close(conn); return -1;
+                }
+                if (dsn->server_public_key_kind != HL_MY_PUBKEY_NONE) {
+                    const char *pem = dsn->server_public_key;
+                    size_t pem_len = strlen(pem);
+                    char *file = NULL;
+                    if (dsn->server_public_key_kind == HL_MY_PUBKEY_FILE) {
+                        if (my_read_key_file(dsn->server_public_key, &file,
+                                             &pem_len) != 0) {
+                            snprintf(conn->errmsg, sizeof conn->errmsg,
+                                     "cannot read server_public_key file (a "
+                                     "regular file of at most %d bytes, not a "
+                                     "symbolic link, readable under the "
+                                     "sandbox)", HL_CRYPTO_RSA_PUBKEY_PEM_MAX);
+                            hl_my_conn_close(conn); return -1;
+                        }
+                        pem = file;
+                    }
+                    int src = my_send_rsa_password(conn, (uint8_t)(f.seq + 1),
+                                                   dsn, cur_nonce, pem, pem_len);
+                    free(file);
+                    if (src != 0) { hl_my_conn_close(conn); return -1; }
+                    rsa_sent = 1;
+                    continue;                /* read the OK / ERR result */
+                }
+                if (dsn->get_server_public_key) {
+                    uint8_t req = HL_MY_CACHING_SHA2_REQUEST_PUBKEY;
+                    if (send_auth_data(conn, (uint8_t)(f.seq + 1), &req, 1) != 0) {
+                        conn_set_err(conn, "failed to ask for the server public key");
+                        hl_my_conn_close(conn); return -1;
+                    }
+                    awaiting_key = 1;
+                    rsa_sent = 1;
+                    continue;                /* read the key */
+                }
+                /* (HL_MY_ERRMSG_SIZE bounds this; the docs say the rest.) */
                 conn_set_err(conn,
-                    "caching_sha2_password full authentication sends the password "
-                    "itself, which Hull does only over TLS whose server certificate "
-                    "was verified: set sslmode=verify-full or verify-ca (RSA "
-                    "public-key exchange is not supported). Once the server has "
-                    "cached the account's hash (any verified login), the fast "
-                    "path works under any sslmode");
+                    "caching_sha2_password full auth: the password goes in the "
+                    "clear only over verified TLS (sslmode=verify-full), else "
+                    "RSA-encrypted: set ?server_public_key=<PEM file or PEM>, or "
+                    "?get_server_public_key=true (MITM-able without verified TLS)");
                 hl_my_conn_close(conn); return -1;
             }
             conn_set_err(conn, "unexpected caching_sha2 auth data");

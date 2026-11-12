@@ -211,9 +211,38 @@ int hl_cap_crypto_hmac_sha256(const void *key, size_t key_len,
     return 0;
 }
 
+int hl_cap_crypto_ed25519_password_sign(const void *password, size_t pw_len,
+                                        const uint8_t *msg, size_t msg_len,
+                                        uint8_t out_sig[64]);
+int hl_cap_crypto_ed25519_password_sign(const void *password, size_t pw_len,
+                                        const uint8_t *msg, size_t msg_len,
+                                        uint8_t out_sig[64])
+{
+    if (msg_len > 64) return -1;
+    fz_mix(password, pw_len, msg, msg_len, out_sig, 64);
+    return 0;
+}
+
 int hl_cap_crypto_random(void *buf, size_t len);
 int hl_cap_crypto_random(void *buf, size_t len)
 {
     memset(buf, 'r', len);   /* a fixed client nonce the fuzzer can extend */
+    return 0;
+}
+
+int hl_cap_crypto_rsa_oaep_sha1_encrypt(const void *pubkey_pem, size_t pubkey_len,
+                                        const void *in, size_t in_len,
+                                        uint8_t *out, size_t out_size,
+                                        size_t *out_len);
+int hl_cap_crypto_rsa_oaep_sha1_encrypt(const void *pubkey_pem, size_t pubkey_len,
+                                        const void *in, size_t in_len,
+                                        uint8_t *out, size_t out_size,
+                                        size_t *out_len)
+{
+    /* A fixed-size "ciphertext": the fuzzer drives the server's replies,
+     * not the RSA math. */
+    if (out_size < 256 || in_len > 214) return -1;
+    fz_mix(pubkey_pem, pubkey_len, in, in_len, out, 256);
+    *out_len = 256;
     return 0;
 }

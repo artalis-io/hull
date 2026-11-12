@@ -15430,6 +15430,199 @@ UTEST(lua_gpu_audit_convergence, manifest_dynamic_shaders)
     }
 }
 
+/* ── gpu.async.compile / gpu.async.load ─────────────────────────────────
+ * The compile is begun on the loop and the run parks until a pool thread
+ * has installed it. Over the mock backend with a real async backend and
+ * pool; the code runs in a detached coroutine, as under app.main. */
+
+typedef struct {
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx    *actx;
+    HlAsyncBackendPool   *pool;
+} LgpuLoop;
+
+static int lgpu_loop_open(LgpuLoop *l)
+{
+    memset(l, 0, sizeof *l);
+    l->be = hl_async_backend();
+    if (!l->be || l->be->init(&l->actx, NULL) != 0) return -1;
+    if (l->be->pool_create(&l->pool, l->actx, 1, 8) != 0) return -1;
+    lua_rt.base.async_ctx = l->actx;
+    lua_rt.base.thread_pool = l->pool;
+    return 0;
+}
+
+static void lgpu_loop_close(LgpuLoop *l)
+{
+    if (l->be && l->actx) {
+        l->be->tick(l->actx, 0);
+        if (l->pool) l->be->pool_free(l->pool);
+        l->be->free(l->actx);
+    }
+    lua_rt.base.async_ctx = NULL;
+    lua_rt.base.thread_pool = NULL;
+}
+
+/* Run `src` (which returns one string) in a fresh coroutine, driving the
+ * loop until it finishes. *parked says whether it yielded. Caller frees. */
+static char *lgpu_co_run(LgpuLoop *l, const char *src, int *parked)
+{
+    lua_State *L = lua_rt.L;
+    lua_State *co = lua_newthread(L);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    if (luaL_loadbuffer(co, src, strlen(src), "=app") != LUA_OK) {
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        return strdup("(load error)");
+    }
+    HL_LUA_ARM(&lua_rt, co);
+    lua_rt.active_co = co;
+    lua_rt.active_conn = NULL;
+    lua_rt.active_thread_ref = ref;
+    int nres = 0;
+    int st = lua_resume(co, L, 0, &nres);
+    *parked = st == LUA_YIELD;
+    if (st != LUA_YIELD) {
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        lua_rt.active_co = NULL;
+        lua_rt.active_thread_ref = LUA_NOREF;
+    }
+    for (int i = 0; i < 250 && lua_status(co) == LUA_YIELD; i++)
+        l->be->tick(l->actx, 20);
+    char *out;
+    if (lua_status(co) == LUA_OK && lua_gettop(co) > 0) {
+        const char *r = lua_tostring(co, -1);
+        out = strdup(r ? r : "(nil)");
+    } else if (lua_status(co) == LUA_YIELD) {
+        out = strdup("(still parked)");
+    } else {
+        const char *e = lua_tostring(co, -1);
+        out = strdup(e ? e : "(error)");
+    }
+    lua_settop(L, 0);
+    return out;
+}
+
+UTEST(lua_gpu_async_compile, parks_and_installs)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    LgpuLoop l;
+    ASSERT_EQ(lgpu_loop_open(&l), 0);
+    gpu_mock_compiles = 0;
+    int parked = 0;
+    char *got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.compile('s', '" HL_TEST_GPU_WGSL "') "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "true nil");
+    free(got);
+    EXPECT_TRUE(parked);
+    EXPECT_EQ(gpu_mock_compiles, 1);
+    EXPECT_EQ(lgpu->devices[0].pipeline_count, 1);
+    EXPECT_TRUE(lgpu->devices[0].compile_job == NULL);
+    /* Compiled already: answered at once, no park. */
+    got = lgpu_co_run(&l, "return tostring(gpu.async.compile('s', 'x'))", &parked);
+    EXPECT_STREQ(got, "true");
+    free(got);
+    EXPECT_FALSE(parked);
+    /* The installed pipeline dispatches. */
+    got = lgpu_co_run(&l,
+        "return gpu.dispatch('s', { buffers = { { data = 'abcd' } } })", &parked);
+    EXPECT_STREQ(got, "abcd");
+    free(got);
+    /* A backend error comes back as gpu.compile's: nil + its string. */
+    got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.compile('empty', '') "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "nil shader_error");
+    free(got);
+    EXPECT_TRUE(parked);
+    EXPECT_EQ(lgpu->devices[0].pipeline_count, 1);
+    lgpu_loop_close(&l);
+    lgpu_cleanup();
+}
+
+UTEST(lua_gpu_async_compile, refusals_before_anything_starts)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    gpu_mock_compiles = 0;
+    /* No pool: the same error as gpu.async.dispatch. */
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.compile, 's', 'fn main() {}') "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('no thread pool', 1, true) and 'nopool' or tostring(e))",
+                "false nopool");
+    LgpuLoop l;
+    ASSERT_EQ(lgpu_loop_open(&l), 0);
+    /* Not in a handler / task / app.main (here: a plain chunk): the wait
+     * gate refuses with the wait_refused code. */
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.compile, 's', 'fn main() {}') "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('[hull:wait_refused]', 1, true) and 'refused' or tostring(e))",
+                "false refused");
+    /* Argument errors and the size cap raise, as gpu.compile's. */
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.compile, 's') "
+                "R = tostring(ok)", "false");
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.compile, 's', string.rep(' ', (1 << 20) + 1)) "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('too large', 1, true) and 'large' or tostring(e))",
+                "false large");
+    /* A source the pre-checks refuse: nil + shader_error at once, no park,
+     * nothing compiled. */
+    int parked = 1;
+    char *got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.compile('q', 'fn main() { let q = \"x\"; }') "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "nil shader_error");
+    free(got);
+    EXPECT_FALSE(parked);
+    EXPECT_EQ(gpu_mock_compiles, 0);
+    lgpu_loop_close(&l);
+    lgpu_cleanup();
+}
+
+/* The shader policy and gpu.async.load: the same results as the
+ * synchronous calls. */
+UTEST(lua_gpu_async_compile, policy_and_load)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, lgpu_shader_entries, NULL);
+    lua_rt.base.app_vfs = &vfs;
+    hl_cap_gpu_set_shader_policy(lgpu, HL_GPU_SHADERS_EMBEDDED, 0, &vfs);
+    lua_pushstring(lua_rt.L, lgpu_other_wgsl);
+    lua_setglobal(lua_rt.L, "OTHER");
+    LgpuLoop l;
+    ASSERT_EQ(lgpu_loop_open(&l), 0);
+    gpu_mock_compiles = 0;
+    /* The wait gate refuses outside a handler / task / app.main. */
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.load, 'id') "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('[hull:wait_refused]', 1, true) and 'refused' or tostring(e))",
+                "false refused");
+    int parked = 1;
+    char *got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.compile('other', OTHER) "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "nil dynamic_shader_refused");
+    free(got);
+    EXPECT_FALSE(parked);
+    got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.load('missing') "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "nil shader 'missing' not found in shaders/");
+    free(got);
+    EXPECT_FALSE(parked);
+    got = lgpu_co_run(&l,
+        "local ok, e = gpu.async.load('id') "
+        "return tostring(ok) .. ' ' .. tostring(e)", &parked);
+    EXPECT_STREQ(got, "true nil");
+    free(got);
+    EXPECT_TRUE(parked);
+    EXPECT_EQ(gpu_mock_compiles, 1);
+    EXPECT_EQ(lgpu->devices[0].pipeline_count, 1);
+    lgpu_loop_close(&l);
+    lua_rt.base.app_vfs = NULL;
+    lgpu_cleanup();
+}
+
 /* ── Audit 37: fs.list, fs.stat and small fs / blob writes are charged ─
  *
  * fs.list read a whole directory (every entry, matching the grant's pattern
@@ -17981,5 +18174,179 @@ UTEST(lua_test_run_main, test_setup_accepts_a_cli_app)
     cleanup_lua();
 }
 #endif /* HL_ENABLE_HTTP_SERVER */
+
+#if defined(HL_ENABLE_DB) && defined(HL_ENABLE_SQLITE)
+#include "hull/cap/db_dynamic.h"
+/* ── db.udf on a db.open() connection ─────────────────────────────────
+ * conn.udf is present on a dynamic SQLite handle as on a registry one, bound
+ * to that handle; it is visible to the handle's own statements only. The
+ * UDF functions live in the connection's owner box, not the registry, so a
+ * UDF that captures its own connection does not pin it (and its slot of the
+ * 16-connection cap); close() from inside one of the connection's own
+ * statements is refused; an opts metamethod that closes the handle cannot
+ * make the registration use it. */
+static void db_open_udf_manifest(HlManifest *m)
+{
+    memset(m, 0, sizeof *m);
+    m->databases.dynamic.declared = 1;
+    m->databases.dynamic.schemes[0] = "sqlite";
+    m->databases.dynamic.scheme_count = 1;
+    hl_db_registry_set_manifest(test_db_registry, m);
+}
+
+UTEST(lua_db_open_udf, register_query_unregister)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "local c = dbm.open(':memory:') "
+        "assert(type(c.udf) == 'table') "
+        "c.exec('CREATE TABLE t(x INTEGER)') "
+        "c.exec('INSERT INTO t VALUES (21)') c.exec('INSERT INTO t VALUES (4)') "
+        "c.udf.register('hull_dbl', function(n) return n * 2 end) "
+        "assert(c.query('SELECT sum(hull_dbl(x)) AS y FROM t')[1].y == 50) "
+        "c.udf.register('hull_sum2', { step = function(s, v) s.n = (s.n or 0) + v end, "
+        "  finalize = function(s) return s.n end }) "
+        "assert(c.query('SELECT hull_sum2(x) AS y FROM t')[1].y == 25) "
+        /* bound to its own handle: another connection has no hull_dbl */
+        "local d = dbm.open(':memory:') "
+        "assert(not pcall(d.query, 'SELECT hull_dbl(1) AS y')) "
+        "assert(not pcall(dbm.default().query, 'SELECT hull_dbl(1) AS y')) "
+        "d.close() "
+        "c.udf.unregister('hull_dbl') "
+        "local ok, e = pcall(c.query, 'SELECT hull_dbl(x) AS y FROM t') "
+        "assert(not ok and tostring(e):find('no such function'), tostring(e)) "
+        "c.close() "
+        "ok, e = pcall(c.udf.register, 'hull_z', function() return 1 end) "
+        "assert(not ok and tostring(e):find('not available'), tostring(e)) "
+        "assert(not pcall(c.udf.unregister, 'hull_sum2')) "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_db_open_udf, close_inside_its_own_statement_is_refused)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "local c = dbm.open(':memory:') "
+        "c.udf.register('hull_cl', function() c.close() return 1 end) "
+        "local ok, e = pcall(c.query, 'SELECT hull_cl() AS v') "
+        "assert(not ok, 'closed under its step') "
+        /* a trigger's UDF under upsert: not a row loop, the backend says */
+        "c.exec('CREATE TABLE u(x INTEGER PRIMARY KEY)') "
+        "c.exec('CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT hull_cl(); END') "
+        "ok, e = pcall(c.upsert, 'u', { 'x' }, { 'x' }, { 5 }) "
+        "assert(not ok and tostring(e):find('own statements'), tostring(e)) "
+        "assert(c.query('SELECT 7 AS v')[1].v == 7) "
+        /* in Lua no connection closes while any statement's rows are
+         * read (the row-loop count), another connection's UDF included */
+        "local d = dbm.open(':memory:') "
+        "d.udf.register('hull_cl2', function() c.close() return 1 end) "
+        "assert(not pcall(d.query, 'SELECT hull_cl2() AS v')) "
+        "assert(c.query('SELECT 8 AS v')[1].v == 8) "
+        "d.close() c.close() "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_db_open_udf, opts_metamethod_closing_the_handle)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "for _, impl in ipairs({ function() return 1 end, "
+        "    { step = function() end, finalize = function() return 1 end } }) do "
+        "  local c = dbm.open(':memory:') "
+        "  local o = setmetatable({}, { __index = function() c.close() end }) "
+        "  local ok, e = pcall(c.udf.register, 'hull_g', impl, o) "
+        "  assert(not ok and tostring(e):find('not available'), tostring(e)) "
+        "end "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_db_open_udf, a_udf_capturing_its_connection_does_not_pin_it)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    char err[512];
+    /* 40 connections, never closed, past the cap of 16: each is collected
+     * (the open at the cap collects once) although its UDF captures it. */
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "for i = 1, 40 do "
+        "  local cc = dbm.open(':memory:') "
+        "  cc.udf.register('hull_self', function() return cc.backend_name end) "
+        "  cc.udf.register('hull_agg', { step = function() local _ = cc end, "
+        "    finalize = function() return cc.backend_name end }) "
+        "  assert(cc.query('SELECT hull_self() AS b')[1].b == 'sqlite') "
+        "end "
+        "collectgarbage() collectgarbage() "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    /* One left open with UDFs at teardown: closed by its finalizer while the
+     * state goes, the UDFs' destructors skipping the dead state. */
+    EXPECT_EQ(audit10_run(
+        "KEEP = require('hull.db').open(':memory:') "
+        "KEEP.udf.register('hull_k', function() return KEEP end) "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_EQ(hl_db_dynamic_open_count(), 1);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+}
+/* The cap of 16 dynamic connections is an admission cap: past it, with
+ * every handle still referenced (the one collection frees none), db.open
+ * refuses coded busy, as kv.open does. */
+UTEST(lua_db_open_udf, cap_refusal_is_busy)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "local held = {} "
+        "for i = 1, 16 do held[i] = dbm.open(':memory:') end "
+        "local ok, e = pcall(dbm.open, ':memory:') "
+        "assert(not ok and tostring(e):sub(1, 12) == '[hull:busy] ', tostring(e)) "
+        "held[1].close() "
+        "local c = dbm.open(':memory:') "
+        "assert(c.query('SELECT 1 AS v')[1].v == 1) c.close() "
+        "for i = 2, 16 do held[i].close() end "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+}
+
+#endif /* HL_ENABLE_DB && HL_ENABLE_SQLITE */
 
 UTEST_MAIN();

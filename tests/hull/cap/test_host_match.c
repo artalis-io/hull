@@ -191,4 +191,21 @@ UTEST(host_match_audit42, noncanonical_cidr_network_refused)
     ASSERT_FALSE(hl_host_match("fe80::%eth0/10", "fe80::1"));
 }
 
+UTEST(dsn_query_param, finds_each_occurrence_decoded)
+{
+    char v[64];
+    const char *d = "mysql://u:p%3Fx@h/db?a=1&server_public_key=k%20y.pem&a=2&b";
+    EXPECT_EQ(7, hl_dsn_query_param(d, "server_public_key", 0, v, sizeof v));
+    EXPECT_STREQ("k y.pem", v);
+    EXPECT_EQ(1, hl_dsn_query_param(d, "a", 1, v, sizeof v));
+    EXPECT_STREQ("2", v);
+    EXPECT_EQ(-1, hl_dsn_query_param(d, "a", 2, v, sizeof v));
+    EXPECT_EQ(-1, hl_dsn_query_param(d, "b", 0, v, sizeof v));       /* no '=' */
+    EXPECT_EQ(-1, hl_dsn_query_param(d, "server", 0, v, sizeof v));  /* exact key */
+    EXPECT_EQ(-1, hl_dsn_query_param("mysql://u@h/db", "a", 0, v, sizeof v));
+    EXPECT_EQ(-2, hl_dsn_query_param("mysql://u@h/db?a=%zz", "a", 0, v, sizeof v));
+    EXPECT_EQ(-2, hl_dsn_query_param("mysql://u@h/db?a=x%00y", "a", 0, v, sizeof v));
+    EXPECT_EQ(-2, hl_dsn_query_param("mysql://u@h/db?a=0123456789", "a", 0, v, 4));
+}
+
 UTEST_MAIN()

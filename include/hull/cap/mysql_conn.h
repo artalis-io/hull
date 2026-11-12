@@ -23,6 +23,14 @@
 #define HL_MY_DSN_PASSWORD_MAX  256
 #define HL_MY_DSN_DBNAME_MAX    128
 #define HL_MY_DSN_SSLMODE_MAX   16
+/* ?server_public_key=: a file path (up to a PATH_MAX-sized absolute path) or
+ * an inline PEM (an RSA-8192 SubjectPublicKeyInfo is ~1.5 KiB). */
+#define HL_MY_DSN_PUBKEY_MAX    4352
+
+/* What ?server_public_key= holds (hl_my_pubkey_is_inline). */
+#define HL_MY_PUBKEY_NONE   0
+#define HL_MY_PUBKEY_FILE   1
+#define HL_MY_PUBKEY_INLINE 2
 
 typedef struct HlMyDsn {
     char host[HL_MY_DSN_HOST_MAX];
@@ -32,7 +40,27 @@ typedef struct HlMyDsn {
     char dbname[HL_MY_DSN_DBNAME_MAX];
     char sslmode[HL_MY_DSN_SSLMODE_MAX];   /* parsed now, enforced in the TLS phase */
     int  read_timeout_ms;                  /* ?read_timeout=: bound on each read (0 = none) */
+    /* caching_sha2_password full authentication on a connection without TLS
+     * (the server takes RSA only there): the password goes RSA-OAEP encrypted to
+     * the server's public key, which must be trusted. ?server_public_key= is a
+     * pinned key - a PEM file path (HL_MY_PUBKEY_FILE) or the PEM itself
+     * (HL_MY_PUBKEY_INLINE). ?get_server_public_key=true asks the server for
+     * its key instead, which whoever answers can replace (no TLS: an
+     * explicit opt-in, as in MySQL's own client). */
+    char server_public_key[HL_MY_DSN_PUBKEY_MAX];
+    int  server_public_key_kind;           /* HL_MY_PUBKEY_* */
+    int  get_server_public_key;            /* 1 = fetch the key from the server */
 } HlMyDsn;
+
+/* 1 when @p v (a decoded ?server_public_key= value) is a PEM itself rather
+ * than a path: it begins with "-----BEGIN ". */
+int hl_my_pubkey_is_inline(const char *v);
+
+/* The RSA exchange's plaintext: (password || NUL) XOR the 20-byte scramble,
+ * repeated. Writes strlen(password) + 1 bytes to @p out and returns that
+ * count, or -1 when @p out_size is too small. The caller scrubs @p out. */
+int hl_my_rsa_obfuscate(const char *password, const uint8_t *scramble,
+                        size_t scramble_len, uint8_t *out, size_t out_size);
 
 /* A read that blocks longer than this fails (see HL_PG_READ_TIMEOUT_DEFAULT_MS):
  * a server that accepts and then stalls cannot hold a query forever. */
@@ -72,6 +100,17 @@ int hl_my_native_password_scramble(const char *password,
 int hl_my_caching_sha2_scramble(const char *password,
                                 const uint8_t nonce[HL_MY_SCRAMBLE_LEN],
                                 uint8_t out[HL_MY_CACHING_SHA2_DIGEST_LEN]);
+
+/*
+ * client_ed25519 auth response (MariaDB auth_ed25519): the Ed25519 signature
+ * R || S of the server's 32-byte nonce under the expanded key
+ * SHA-512(password) - every password, the empty one included, signs (the
+ * server holds the public key PASSWORD() derived from it). Returns
+ * HL_MY_ED25519_SIG_LEN or -1 on a crypto error.
+ */
+int hl_my_ed25519_scramble(const char *password,
+                           const uint8_t nonce[HL_MY_ED25519_NONCE_LEN],
+                           uint8_t out[HL_MY_ED25519_SIG_LEN]);
 
 /* ── Connection (socket + handshake) ────────────────────── */
 
@@ -175,7 +214,7 @@ typedef struct HlMyConn {
  * Connect to dsn->host:port and run the handshake (mysql_native_password +
  * AuthSwitch to native). On success the connection is authenticated and idle
  * (0). On failure returns -1 with conn->errmsg set and the socket closed.
- * caching_sha2_password is handled; client_ed25519 is not yet supported.
+ * caching_sha2_password and MariaDB's client_ed25519 are handled too.
  */
 int  hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms);
 
