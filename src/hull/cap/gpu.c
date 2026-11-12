@@ -3309,6 +3309,9 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
 
 /* compile_enter's "go on and compile": the device is locked. */
 #define GPU_COMPILE_PROCEED 1
+/* compile_enter's "a gpu.async.compile of this name is running: wait for
+ * it" (only when the caller passed @p join_out): the device is locked. */
+#define GPU_COMPILE_JOIN    2
 
 /* Everything a compile does before its backend compile starts, shared by
  * the synchronous compile and gpu.async.compile, in this order: the shader
@@ -3321,7 +3324,8 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
 static int compile_enter(HlGpuCtx *ctx, int device, const char *name,
                          const char *wgsl, size_t wgsl_len, int flags,
                          HlGpuDevice **dev_out, int *idx_out,
-                         size_t *helper_stack_out)
+                         size_t *helper_stack_out,
+                         HlGpuCompileJob **join_out)
 {
     if (!ctx || !name || !wgsl)
         return HL_GPU_ERR_INTERNAL;
@@ -3418,6 +3422,23 @@ static int compile_enter(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_OK;
     }
 
+    /* A gpu.async.compile of this very name still compiling: another async
+     * load of it waits for that compile instead of being refused gpu_busy
+     * (audit 45: lazily loaded shaders failed under concurrent requests). */
+    if (join_out && dev->compile_job) {
+        HlGpuCompileJob *j = dev->compile_job;
+        pthread_mutex_lock(&j->mu);
+        int joinable = j->async && !j->done && !j->abandoned &&
+                       strcmp(j->name, name) == 0;
+        pthread_mutex_unlock(&j->mu);
+        if (joinable) {
+            *dev_out = dev;
+            *idx_out = dev_idx;
+            *join_out = j;
+            return GPU_COMPILE_JOIN;
+        }
+    }
+
     /* An abandoned compile still running, or a gpu.async.compile not yet
      * settled, holds the device (audit 40): one compile at a time. */
     if (compile_busy(dev)) {
@@ -3486,7 +3507,7 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
     int dev_idx = -1;
     size_t helper_stack = 0;
     int rc = compile_enter(ctx, device, name, wgsl, wgsl_len, flags,
-                           &dev, &dev_idx, &helper_stack);
+                           &dev, &dev_idx, &helper_stack, NULL);
     if (rc != GPU_COMPILE_PROCEED)
         return rc;
 
@@ -3548,6 +3569,8 @@ struct HlGpuCompileAsync {
     int              dev_idx;
     uint64_t         deadline_ms;   /* CLOCK_MONOTONIC */
     int              finished;      /* the finisher ran */
+    int              joined;        /* waits on another call's compile: never
+                                     * abandons it (its owner's deadline does) */
     int              rc;
 };
 
@@ -3564,8 +3587,30 @@ int hl_cap_gpu_compile_async_begin(HlGpuCtx *ctx, int device,
     HlGpuDevice *dev = NULL;
     int dev_idx = -1;
     size_t helper_stack = 0;
+    HlGpuCompileJob *join = NULL;
     int rc = compile_enter(ctx, device, name, wgsl, wgsl_len, flags,
-                           &dev, &dev_idx, &helper_stack);
+                           &dev, &dev_idx, &helper_stack, &join);
+    uint32_t limit = g_compile_timeout_ms ? g_compile_timeout_ms
+                                          : HL_GPU_COMPILE_TIMEOUT_MS;
+    if (rc == GPU_COMPILE_JOIN) {
+        HlGpuCompileAsync *ja = calloc(1, sizeof(*ja));
+        if (!ja) {
+            pthread_mutex_unlock(&dev->mutex);
+            return HL_GPU_ERR_INTERNAL;
+        }
+        pthread_mutex_lock(&join->mu);
+        join->refs++;                         /* the joined handle's */
+        pthread_mutex_unlock(&join->mu);
+        pthread_mutex_unlock(&dev->mutex);
+        ja->job = join;
+        ja->dev = dev;
+        ja->dev_idx = dev_idx;
+        ja->joined = 1;
+        ja->deadline_ms = gpu_mono_ms() + limit;
+        ja->rc = HL_GPU_ERR_INTERNAL;
+        *out = ja;
+        return HL_GPU_OK;
+    }
     if (rc != GPU_COMPILE_PROCEED)
         return rc;
 
@@ -3587,8 +3632,6 @@ int hl_cap_gpu_compile_async_begin(HlGpuCtx *ctx, int device,
         compile_audit("gpu.async.compile", name, dev_idx, HL_GPU_ERR_INTERNAL);
         return HL_GPU_ERR_INTERNAL;
     }
-    uint32_t limit = g_compile_timeout_ms ? g_compile_timeout_ms
-                                          : HL_GPU_COMPILE_TIMEOUT_MS;
     /* The handle's reference is compile_job_new's; the device's is new. */
     pthread_mutex_lock(&job->mu);
     job->refs++;
@@ -3639,7 +3682,8 @@ int hl_cap_gpu_compile_async_finish(HlGpuCompileAsync *a,
     pthread_mutex_lock(&job->mu);
     while (!job->done) {
         if (gpu_mono_ms() >= a->deadline_ms ||
-            (cancelled && atomic_load(cancelled)))
+            (cancelled && atomic_load(cancelled)) ||
+            job->abandoned)      /* a joined wait: its owner gave up */
             break;
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
@@ -3655,11 +3699,13 @@ int hl_cap_gpu_compile_async_finish(HlGpuCompileAsync *a,
 
     HlGpuDevice *dev = a->dev;
     int rc;
-    if (!done && cancelled && atomic_load(cancelled)) {
-        /* Only the op is gone (its client disconnected): the compile is
-         * kept and installed by the first holder of the device mutex once
-         * done (compile_busy), so a client that hangs up cannot keep a
-         * shader from ever installing (audit 45). */
+    if (!done && (a->joined || (cancelled && atomic_load(cancelled)))) {
+        /* A joined wait never abandons the compile it waits on (its owner's
+         * deadline does). A cancelled op (its client disconnected) only
+         * drops its wait: the compile is kept and installed by the first
+         * holder of the device mutex once done (compile_busy), so a client
+         * that hangs up cannot keep a shader from ever installing
+         * (audit 45). */
         rc = HL_GPU_ERR_TIMEOUT;
     } else if (!done) {
         compile_async_abandon(job);
