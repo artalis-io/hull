@@ -568,9 +568,15 @@ test("greets the name passed via argv", () => {
 - Each call is a fresh invocation of the same loaded app (a new `ctx`;
   module-level state persists, as within one process). Call it as often as
   a case needs.
-- `main` runs on the case's time, as a `test.get` request does: its
-  instructions count against the case's budget, and a case inside a
-  transaction keeps it (`main` cannot wait inside one). No signal reaches
+- In JS the result also has `stdoutBytes` / `stderrBytes`: the captured
+  bytes as written, for binary output (`stdout` / `stderr` are them decoded
+  as UTF-8, invalid bytes replaced).
+- `main` runs on the case's time, as a `test.get` request does: each of its
+  runs gets only what the case has left of its instruction budget and its
+  deadline, its instructions count against the case's budget (once - its
+  time is not measured again around the call), and a case inside a
+  transaction keeps it (`main` cannot wait inside one). Work queued while
+  `main`'s result is read (an error's getter) ends with `main`. No signal reaches
   it: `ctx.on_interrupt` / `ctx.signal` exist but never fire.
 
 An app that registers routes and `app.main` gets both `test.get` & co and

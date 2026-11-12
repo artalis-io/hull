@@ -165,6 +165,17 @@ void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit,
                        uint32_t run_ms)
 {
     if (!thread || !b) return;
+    if (b->sink) {
+        /* test.run_main (HlLuaBudget.sink): the run before this one is the
+         * case's work too, and this one gets only what the case has left. */
+        int64_t u = b->used > 0 ? b->used : 0;
+        *b->sink = u > INT64_MAX - *b->sink ? INT64_MAX : *b->sink + u;
+        if (b->sink_cap > 0) {
+            int64_t left = b->sink_cap - *b->sink;
+            if (left < 1) left = 1;
+            if (limit <= 0 || left < limit) limit = left;
+        }
+    }
     b->limit = limit;
     b->used = 0;
     b->tripped = 0;
@@ -175,8 +186,19 @@ void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit,
         hl_meter_arm(&b->meter);
     /* The run's wall-clock deadline: armed (and its flag cleared) before any
      * of the run's code. */
-    if (b->watch) hl_run_watch_arm(b->watch, run_ms);
-    else run_ms = 0;
+    if (b->watch) {
+        hl_run_watch_arm(b->watch, run_ms);
+        if (b->sink && b->sink_deadline) {
+            /* Never past the calling case's deadline (test.run_main). */
+            uint64_t d = 0, seq = 0;
+            hl_run_watch_peek(b->watch, &d, &seq);
+            if (d == 0 || d > b->sink_deadline)
+                hl_run_watch_restore(b->watch, b->sink_deadline);
+            run_ms = 1;   /* the hook polls the deadline */
+        }
+    } else {
+        run_ms = 0;
+    }
 #ifdef HL_ENABLE_DB
     /* This thread's SQL is this run's from here on (audit 9 H4). */
     (void)hl_db_budget_swap(budget_db_charge, b);

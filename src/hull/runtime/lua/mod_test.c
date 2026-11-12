@@ -18,6 +18,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 #include "internal.h"               /* HL_LUA_ARM, get_hl_lua_from_L */
+#include "hull/shared/dispatch_meter.h"   /* hl_meter_ticks */
 
 #include <keel/http_request.h>
 
@@ -152,12 +153,21 @@ static int test_build_result_k(lua_State *L)
 
 /* After an in-process request: the case's budget again, charged with what
  * the request used (it ran on the case's time), and tripped when over. */
-static void test_budget_rejoin(HlLua *lua, const HlLuaBudget *saved)
+static void test_budget_rejoin(HlLua *lua, const HlLuaBudget *saved,
+                               int64_t earlier)
 {
-    int64_t nested = lua->budget.used;
+    /* What the request's runs used: the earlier ones, folded in at each arm
+     * (HlLuaBudget.sink), and the last one's. */
+    int64_t last = lua->budget.used > 0 ? lua->budget.used : 0;
+    int64_t nested = last > INT64_MAX - earlier ? INT64_MAX : earlier + last;
     int nested_tripped = lua->budget.tripped;
     int nested_timed_out = lua->budget.timed_out;
+    /* The charge meter only goes forward (HlLuaBudget.charged). */
+    uint64_t     live_charged = lua->budget.charged;
+    HlMeterState live_meter   = lua->budget.meter;
     lua->budget = *saved;
+    lua->budget.charged = live_charged;
+    lua->budget.meter   = live_meter;
     lua->budget.used = nested > INT64_MAX - saved->used
                        ? INT64_MAX : saved->used + nested;
     if (nested_tripped ||
@@ -293,14 +303,33 @@ static int l_test_http(lua_State *L, const char *method)
     int hold = hl_db_registry_open_txn(lua->base.db_registry) != NULL;
     if (hold) hl_db_registry_guard_hold(1);
     HlTestResult result;
+    /* The request's runs (each middleware and the handler arm their own)
+     * are held to what the case has left and add up (HlLuaBudget.sink,
+     * audit 45); its time is accounted through that count, so the binding
+     * call around it does not measure it again. */
+    int64_t earlier = 0;
+    lua->budget.used          = 0;
+    lua->budget.sink          = &earlier;
+    lua->budget.sink_cap      = saved_budget.limit > 0
+                                ? saved_budget.limit - saved_budget.used : 0;
+    if (saved_budget.limit > 0 && lua->budget.sink_cap < 1)
+        lua->budget.sink_cap = 1;
+    lua->budget.sink_deadline = saved_deadline;
+    uint64_t mt0 = hl_meter_ticks();
+    uint64_t mx0 = hl_meter_excluded;
     lua->base.test_dispatching++;
     int drc = hl_cap_test_dispatch(router, method, path, body_str, body_len,
                       header_names, header_values, num_headers,
                       ctx_json, lua->base.alloc, run_middleware,
                       &result);
     lua->base.test_dispatching--;
+    if (hl_meter_exclude_depth == 0) {
+        uint64_t el = hl_meter_ticks() - mt0;
+        if (hl_meter_excluded - mx0 < el) hl_meter_excluded = mx0 + el;
+    }
+    lua->budget.sink = NULL;
     if (hold) hl_db_registry_guard_hold(-1);
-    test_budget_rejoin(lua, &saved_budget);
+    test_budget_rejoin(lua, &saved_budget, earlier);
     hl_run_watch_restore(&lua->run_watch, saved_deadline);
     if (hl_run_watch_stopped(&lua->run_watch) && !lua->budget.tripped) {
         lua->budget.tripped = 1;

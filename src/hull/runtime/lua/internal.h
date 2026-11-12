@@ -241,6 +241,9 @@ int hl_lua_resume_status(lua_State *co, lua_State *from, int status);
  * close refuse it. For an app.main test.run_main gave up on (runtime.c);
  * the caller keeps @p co referenced, since its continuation still names it. */
 void hl_lua_async_abandon(lua_State *co);
+/* The same for a main test.run_main gave up on: its registry ref is handed
+ * to its pending continuation, which releases it (audit 45). */
+void hl_lua_async_abandon_owned(lua_State *co);
 
 /* test.run_main(args?, opts?) (runtime.c, registered by mod_test.c): run the
  * app's app.main once inside the calling test case, ctx.stdout / stderr

@@ -43,6 +43,9 @@ JSValue js_db_owned_subobject(JSContext *ctx, JSValueConst owned);
  * destructor; a no-op while the box's last finalizer runs). */
 int  js_db_udf_hold(JSContext *ctx, void *box, JSValueConst fn, uint32_t *key);
 void js_db_udf_release(JSContext *ctx, void *box, uint32_t key);
+/* The db.open handle behind a connection object, NULL for any other value
+ * (unit tests reach the backend through it). */
+HlDbHandle *hl_js_db_owned_handle(JSContext *ctx, JSValueConst conn);
 
 /* Attach `udf` to the db.open() connection object @p conn. Weak no-op in
  * mod_db.c; strong override in mod_db_udf.c. */

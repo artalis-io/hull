@@ -72,6 +72,15 @@ typedef struct HlLuaBudget {
     HlMeterState    meter;       /* mode + CPU reference (hl_meter_settle) */
     int             nframes;
     HlLuaMeterFrame frames[HL_LUA_METER_DEPTH];
+    /* test.run_main in progress (audit 45): every arm adds what the run
+     * before it used to *sink (main runs inside the calling case, and
+     * several stretches can run between two of the wait's reads), and
+     * holds the new run to what the case has left - sink_cap instructions
+     * in all (0 = no count limit) and the case's deadline (monotonic ms,
+     * 0 = none). NULL outside test.run_main. */
+    int64_t        *sink;
+    int64_t         sink_cap;
+    uint64_t        sink_deadline;
 } HlLuaBudget;
 
 /* Register binding functions through the dispatcher (budget.c): as

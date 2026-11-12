@@ -490,15 +490,48 @@ int js_db_udf_hold(JSContext *ctx, void *owner, JSValueConst fn, uint32_t *key)
  * a replacing register, close(), a replaced connection). Never while the
  * box's last finalizer runs - the collector is freeing holder then, and it
  * goes with the box anyway. Raises nothing. */
+/* The deferred half of js_db_udf_release: argv = { holder, key }. */
+static JSValue js_db_udf_release_job(JSContext *ctx, int argc, JSValueConst *argv)
+{
+    (void)argc;
+    uint32_t key = 0;
+    if (JS_ToUint32(ctx, &key, argv[1]) == 0) {
+        JSAtom a = JS_NewAtomUInt32(ctx, key);
+        if (a != JS_ATOM_NULL) {
+            if (JS_DeleteProperty(ctx, argv[0], a, 0) < 0)
+                JS_FreeValue(ctx, JS_GetException(ctx));
+            JS_FreeAtom(ctx, a);
+        } else {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+        }
+    } else {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+    return JS_UNDEFINED;
+}
+
 void js_db_udf_release(JSContext *ctx, void *owner, uint32_t key)
 {
     HlJsOwnedConn *box = (HlJsOwnedConn *)owner;
     if (!box || box->finalizing || !JS_IsObject(box->holder)) return;
-    JSAtom a = JS_NewAtomUInt32(ctx, key);
-    if (a == JS_ATOM_NULL) { JS_FreeValue(ctx, JS_GetException(ctx)); return; }
-    if (JS_DeleteProperty(ctx, box->holder, a, 0) < 0)
+    /* Dropped from a job, never here: this runs inside SQLite (the UDF's
+     * destructor, from sqlite3_close_v2 or a re-registration), and the
+     * function may hold a reference to its own connection - were it the
+     * last, its finalizer would close the handle under the stuck-transaction
+     * reopen that is closing the old connection (audit 45, defence in depth:
+     * the connection's udf methods keep it in a cycle today). A job that
+     * cannot be queued leaves the function to the holder's own end. */
+    JSValue args[2] = { box->holder, JS_NewUint32(ctx, key) };
+    if (JS_EnqueueJob(ctx, js_db_udf_release_job, 2, args) < 0)
         JS_FreeValue(ctx, JS_GetException(ctx));
-    JS_FreeAtom(ctx, a);
+}
+
+HlDbHandle *hl_js_db_owned_handle(JSContext *ctx, JSValueConst conn)
+{
+    (void)ctx;
+    HlJsOwnedConn *box =
+        (HlJsOwnedConn *)JS_GetOpaque(conn, hull_db_owned_conn_class_id);
+    return box ? box->h : NULL;
 }
 
 /* Resolve the DSN this call's connection opened from, symmetric with
