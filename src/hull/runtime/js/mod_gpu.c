@@ -537,7 +537,7 @@ static JSValue js_gpu_async_compile_common(JSContext *ctx, HlJS *js,
         hl_worker_gpu_op_free_all(op);
         hl_async_ctx_free(actx);
         JS_FreeValue(ctx, promise);
-        return JS_ThrowInternalError(ctx, "%s: thread pool full", what);
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowInternalError(ctx, "%s: thread pool full", what));
     }
 
     if (!actx->detached &&
@@ -1952,7 +1952,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
         actx->cont->destroy(actx->cont);
         hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
         JS_FreeValue(ctx, promise);
-        return JS_ThrowInternalError(ctx, "gpu.async.dispatch: thread pool full");
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowInternalError(ctx, "gpu.async.dispatch: thread pool full"));
     }
 
     if (!actx->detached &&
@@ -2704,7 +2704,7 @@ opts_done:
         actx->cont->destroy(actx->cont);
         hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
         JS_FreeValue(ctx, promise);
-        return JS_ThrowInternalError(ctx, "gpu.async.pipeline: thread pool full");
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowInternalError(ctx, "gpu.async.pipeline: thread pool full"));
     }
 
     if (!actx->detached &&

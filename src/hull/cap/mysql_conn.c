@@ -240,7 +240,7 @@ void hl_my_dsn_scrub(HlMyDsn *dsn)
 #include "hull/cap/db_transport.h"
 #include "hull/cap/db_budget.h"     /* hl_db_budget_charge: a tripped run */
 #include "hull/shared/tls_client.h"
-#include "hull/shared/work_charge.h" /* HL_WORK_DB_RSA_AUTH_UNITS */
+#include "hull/shared/work_charge.h" /* HL_WORK_DB_*_AUTH_UNITS */
 #include "log.h"
 #include <fcntl.h>
 #include <pthread.h>
@@ -589,9 +589,10 @@ static int my_sslmode_parse(const char *s)
 }
 
 /* What one client_ed25519 signature is charged to the run before it is
- * computed: two scalar multiplications (the nonce point R and the public key
- * A) at the 2^14 units the crypto bindings charge one (audit 10). */
-#define HL_MY_ED25519_UNITS ((int64_t)2 << 14)
+ * computed: its measured cost (work_charge.h). Two scalar multiplications at
+ * the bindings' 2^14 each undercounted TweetNaCl ~6x, and a db.async op on a
+ * db.open handle reconnects every op, off the loop's backstop (audit 45). */
+#define HL_MY_ED25519_UNITS ((int64_t)HL_WORK_DB_ED25519_AUTH_UNITS)
 
 /* compute_plugin_auth failures besides -1 (an unsupported plugin). */
 #define HL_MY_AUTH_BAD_CHALLENGE (-2)   /* the server's nonce is malformed */
@@ -938,6 +939,13 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
      * (mysql_native_password) and moves an ed25519 account over with an
      * AuthSwitchRequest carrying the nonce, the usual path. */
     int ed25519_pending = 0;
+    /* Only caching_sha2_password continues with AuthMoreData (fast / full
+     * auth, the RSA key). Under any other plugin a FULL_AUTH asked for the
+     * password a native / ed25519 account never sends - encrypted to a key
+     * the asker supplies under get_server_public_key, or in the clear over
+     * verified TLS (audit 45). Tracks the greeting's plugin, then the
+     * switch's. */
+    int sha2_active = strcmp(plugin, "caching_sha2_password") == 0;
     if (strcmp(plugin, HL_MY_ED25519_PLUGIN) == 0) {
         authlen = 0;
         ed25519_pending = 1;
@@ -1063,6 +1071,7 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
              * cost per guess - so an unverified channel is WARNed below,
              * not refused. */
             ed25519_pending = 0;
+            sha2_active = strcmp(sw, "caching_sha2_password") == 0;
             /* The RSA exchange below XORs the password with the nonce of
              * the switch, not the greeting's. */
             memset(cur_nonce, 0, sizeof cur_nonce);
@@ -1084,6 +1093,12 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
         }
 
         if (hdr == HL_MY_AUTH_MORE_DATA) {   /* caching_sha2 fast / full auth */
+            if (!sha2_active) {
+                conn_set_err(conn, "auth data refused: only "
+                                   "caching_sha2_password continues the "
+                                   "exchange with more data");
+                hl_my_conn_close(conn); return -1;
+            }
             if (f.body_len < 2) { conn_set_err(conn, "malformed auth data");
                                   hl_my_conn_close(conn); return -1; }
             if (awaiting_key) {

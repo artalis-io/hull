@@ -843,7 +843,7 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
         free(op);
         hl_async_ctx_free(actx);
         JS_FreeValue(ctx, promise);
-        return JS_ThrowInternalError(ctx, "compute.async.call: thread pool full");
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowInternalError(ctx, "compute.async.call: thread pool full"));
     }
 
     /* Suspend the FD (attached only). */
@@ -1244,7 +1244,7 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         free(op);
         hl_async_ctx_free(actx);
         JS_FreeValue(ctx, promise);
-        return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: thread pool full");
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: thread pool full"));
     }
 
     if (!actx->detached &&
