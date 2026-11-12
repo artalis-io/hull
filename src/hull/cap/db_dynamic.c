@@ -40,6 +40,11 @@ int hl_db_dynamic_open_count(void)
     return n;
 }
 
+int hl_db_dynamic_full(void)
+{
+    return hl_db_dynamic_open_count() >= HL_DB_DYNAMIC_MAX;
+}
+
 static int dynamic_slot(const HlDbHandle *h)
 {
     for (int i = 0; h && i < HL_DB_DYNAMIC_MAX; i++)

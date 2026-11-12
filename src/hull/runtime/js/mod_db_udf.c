@@ -30,19 +30,28 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Context for JS scalar UDF trampoline */
+/* Context for JS scalar UDF trampoline. On a registry connection the
+ * context owns a reference to func (released by the destructor). On a
+ * db.open() connection (owner != NULL) func is borrowed: the connection's
+ * owner box keeps it in its GC-traced holder under `key`, so a UDF that
+ * captures its own connection can still be collected with it, and the
+ * destructor drops that entry (js_db_udf_release). */
 typedef struct {
     JSContext *ctx;
-    JSValue    func;  /* borrowed - prevent GC via ref counting */
+    JSValue    func;
     int       *alive; /* points to HlJS.udf_runtime_alive */
+    void      *owner; /* db.open() owner box, or NULL (registry) */
+    uint32_t   key;   /* holder key of func (owner only) */
 } JsScalarUdfCtx;
 
-/* Context for JS aggregate UDF trampoline */
+/* Context for JS aggregate UDF trampoline (ownership as above) */
 typedef struct {
     JSContext *ctx;
     JSValue    step_fn;
     JSValue    finalize_fn;
     int       *alive; /* points to HlJS.udf_runtime_alive */
+    void      *owner;
+    uint32_t   step_key, finalize_key;
 } JsAggUdfCtx;
 
 /* Per-group state for JS aggregates (via sqlite3_aggregate_context) */
@@ -226,7 +235,12 @@ static void js_scalar_udf_func(sqlite3_context *sctx, int argc,
         }
     }
 
-    JSValue result = JS_Call(ctx, udf->func, JS_UNDEFINED, argc, args);
+    /* Held across the call: nothing it runs may free the function under it
+     * (SQLite refuses to drop a function of a connection that is stepping,
+     * and close() refuses then too; this is the backstop). */
+    JSValue fn = JS_DupValue(ctx, udf->func);
+    JSValue result = JS_Call(ctx, fn, JS_UNDEFINED, argc, args);
+    JS_FreeValue(ctx, fn);
 
     for (int i = 0; i < argc; i++)
         JS_FreeValue(ctx, args[i]);
@@ -247,8 +261,12 @@ static void js_scalar_udf_destroy(void *data)
     if (!udf) return;
     /* Free the JS value only if the JS runtime is still alive
      * (explicit unregister). During sqlite3_close the runtime is dead. */
-    if (udf->alive && *udf->alive && udf->ctx)
-        JS_FreeValue(udf->ctx, udf->func);
+    if (udf->alive && *udf->alive && udf->ctx) {
+        if (udf->owner)
+            js_db_udf_release(udf->ctx, udf->owner, udf->key);
+        else
+            JS_FreeValue(udf->ctx, udf->func);
+    }
     free(udf);
 }
 
@@ -296,7 +314,9 @@ static void js_agg_step_func(sqlite3_context *sctx, int argc,
         return;
     }
 
-    JSValue result = JS_Call(ctx, udf->step_fn, JS_UNDEFINED, total_args, args);
+    JSValue fn = JS_DupValue(ctx, udf->step_fn);   /* as the scalar call */
+    JSValue result = JS_Call(ctx, fn, JS_UNDEFINED, total_args, args);
+    JS_FreeValue(ctx, fn);
 
     for (int i = 0; i < total_args; i++)
         JS_FreeValue(ctx, args[i]);
@@ -321,7 +341,9 @@ static void js_agg_finalize_func(sqlite3_context *sctx)
 
     /* Call finalize(ctx_obj) -> result */
     JSValue arg = JS_DupValue(ctx, gs->ctx_obj);
-    JSValue result = JS_Call(ctx, udf->finalize_fn, JS_UNDEFINED, 1, &arg);
+    JSValue fn = JS_DupValue(ctx, udf->finalize_fn);   /* as the scalar call */
+    JSValue result = JS_Call(ctx, fn, JS_UNDEFINED, 1, &arg);
+    JS_FreeValue(ctx, fn);
     JS_FreeValue(ctx, arg);
 
     if (JS_IsException(result)) {
@@ -344,8 +366,13 @@ static void js_agg_udf_destroy(void *data)
     if (!udf) return;
     /* Free JS values only if the JS runtime is still alive */
     if (udf->alive && *udf->alive && udf->ctx) {
-        JS_FreeValue(udf->ctx, udf->step_fn);
-        JS_FreeValue(udf->ctx, udf->finalize_fn);
+        if (udf->owner) {
+            js_db_udf_release(udf->ctx, udf->owner, udf->step_key);
+            js_db_udf_release(udf->ctx, udf->owner, udf->finalize_key);
+        } else {
+            JS_FreeValue(udf->ctx, udf->step_fn);
+            JS_FreeValue(udf->ctx, udf->finalize_fn);
+        }
     }
     free(udf);
 }
@@ -393,16 +420,21 @@ static int js_parse_udf_opts(JSContext *ctx, JSValueConst opts,
     return 0;
 }
 
-/* The connection a udf call operates on, or NULL (audit 29): a db.open
- * (caller-owned) `this` is refused - udf is intentionally absent on a dynamic
- * handle, and app code the call runs (the name's toString, the opts' getters)
- * could close it under the call. A registry handle (db.connect / default)
- * lives until teardown; it is still resolved again after the last app-code
- * conversion and only that resolution is used. */
-static HlDbHandle *udf_call_handle(JSContext *ctx, JSValueConst this_val)
+/* The connection a udf call operates on, or NULL. @p target is what the call
+ * is bound to: `this` for a registry connection's udf (db.connect / default),
+ * where a db.open (caller-owned) `this` is refused (audit 29: a registry
+ * udf method must not register on another connection); the conn.udf
+ * sub-object itself (the function's data) for a db.open connection's, @p
+ * owned set. Either way app code the call runs (the name's toString, the
+ * opts' getters) could close a db.open handle under the call, so the handle
+ * is resolved again after the last app-code conversion and only that
+ * resolution is used (box->h is NULL once closed). */
+static HlDbHandle *udf_call_handle(JSContext *ctx, JSValueConst target,
+                                   int owned)
 {
-    if (js_call_is_owned(this_val)) return NULL;
-    return js_call_handle(ctx, this_val);
+    if (!owned && js_call_is_owned(target)) return NULL;
+    if (owned && !js_call_is_owned(target)) return NULL;
+    return js_call_handle(ctx, target);
 }
 
 /*
@@ -413,14 +445,15 @@ static HlDbHandle *udf_call_handle(JSContext *ctx, JSValueConst this_val)
  *   {step, finalize}  -> JS aggregate UDF
  *   string            -> WASM UDF (module name)
  */
-static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
-                                   int argc, JSValueConst *argv)
+static JSValue udf_register_impl(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv, int owned)
 {
     HlJS *js = get_hl_js(ctx);
-    if (js_call_is_owned(this_val))
+    if (!owned && js_call_is_owned(this_val))
         return JS_ThrowTypeError(ctx,
             "db.udf.register: not available on a db.open() connection");
-    HlDbHandle *conn = udf_call_handle(ctx, this_val);
+    void *owner = owned ? js_db_owned_box(this_val) : NULL;
+    HlDbHandle *conn = udf_call_handle(ctx, this_val, owned);
     sqlite3 *raw_db = hl_db_sqlite_raw(conn);
     if (!js || !raw_db)
         return JS_ThrowInternalError(ctx, "database not available");
@@ -487,7 +520,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
         };
 
         /* Resolved again after the last app code (audit 29). */
-        conn = udf_call_handle(ctx, this_val);
+        conn = udf_call_handle(ctx, this_val, owned);
         if (!conn) {
             JS_FreeCString(ctx, module_name);
             JS_FreeCString(ctx, sql_name);
@@ -525,7 +558,18 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 
         udf_ctx->ctx = ctx;
         udf_ctx->alive = &js->udf_runtime_alive;
-        udf_ctx->func = JS_DupValue(ctx, argv[1]);
+        if (owner) {
+            /* Held by the connection's holder, borrowed here. */
+            if (js_db_udf_hold(ctx, owner, argv[1], &udf_ctx->key) < 0) {
+                free(udf_ctx);
+                JS_FreeCString(ctx, sql_name);
+                return JS_EXCEPTION;
+            }
+            udf_ctx->owner = owner;
+            udf_ctx->func = argv[1];
+        } else {
+            udf_ctx->func = JS_DupValue(ctx, argv[1]);
+        }
 
         int encoding = SQLITE_UTF8;
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
@@ -534,7 +578,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
          * getters / metamethods), and the connection's sqlite3* is not
          * kept across app code - the stale-transaction guard may have
          * replaced it, or withheld it (broken) (audit 12). */
-        raw_db = hl_db_sqlite_raw(udf_call_handle(ctx, this_val));
+        raw_db = hl_db_sqlite_raw(udf_call_handle(ctx, this_val, owned));
         if (!raw_db) {
             js_scalar_udf_destroy(udf_ctx);
             JS_FreeCString(ctx, sql_name);
@@ -597,8 +641,30 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 
         udf_ctx->ctx = ctx;
         udf_ctx->alive = &js->udf_runtime_alive;
-        udf_ctx->step_fn = step_fn;       /* ownership transferred */
-        udf_ctx->finalize_fn = final_fn;   /* ownership transferred */
+        if (owner) {
+            /* Held by the connection's holder, borrowed here: the local
+             * references go once the holder has its own. */
+            int held = js_db_udf_hold(ctx, owner, step_fn,
+                                      &udf_ctx->step_key);
+            if (held == 0 &&
+                js_db_udf_hold(ctx, owner, final_fn,
+                               &udf_ctx->finalize_key) < 0) {
+                js_db_udf_release(ctx, owner, udf_ctx->step_key);
+                held = -1;
+            }
+            if (held < 0) {
+                free(udf_ctx);
+                JS_FreeValue(ctx, step_fn);
+                JS_FreeValue(ctx, final_fn);
+                JS_FreeCString(ctx, sql_name);
+                return JS_EXCEPTION;
+            }
+            udf_ctx->owner = owner;
+            JS_FreeValue(ctx, step_fn);    /* the holder keeps them */
+            JS_FreeValue(ctx, final_fn);
+        }
+        udf_ctx->step_fn = step_fn;       /* registry: ownership transferred */
+        udf_ctx->finalize_fn = final_fn;
 
         int encoding = SQLITE_UTF8;
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
@@ -607,7 +673,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
          * getters / metamethods), and the connection's sqlite3* is not
          * kept across app code - the stale-transaction guard may have
          * replaced it, or withheld it (broken) (audit 12). */
-        raw_db = hl_db_sqlite_raw(udf_call_handle(ctx, this_val));
+        raw_db = hl_db_sqlite_raw(udf_call_handle(ctx, this_val, owned));
         if (!raw_db) {
             js_agg_udf_destroy(udf_ctx);
             JS_FreeCString(ctx, sql_name);
@@ -634,15 +700,21 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    return udf_register_impl(ctx, this_val, argc, argv, 0);
+}
+
 /* db.udf.unregister(name) */
-static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
-                                     int argc, JSValueConst *argv)
+static JSValue udf_unregister_impl(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv, int owned)
 {
     HlJS *js = get_hl_js(ctx);
-    if (js_call_is_owned(this_val))
+    if (!owned && js_call_is_owned(this_val))
         return JS_ThrowTypeError(ctx,
             "db.udf.unregister: not available on a db.open() connection");
-    HlDbHandle *conn = udf_call_handle(ctx, this_val);
+    HlDbHandle *conn = udf_call_handle(ctx, this_val, owned);
     if (!js || !conn)
         return JS_ThrowInternalError(ctx, "database not available");
 
@@ -653,7 +725,7 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
     if (!sql_name)
         return JS_EXCEPTION;
     /* Resolved again after the name's toString (app code; audit 29). */
-    conn = udf_call_handle(ctx, this_val);
+    conn = udf_call_handle(ctx, this_val, owned);
     if (!conn) {
         JS_FreeCString(ctx, sql_name);
         return JS_ThrowInternalError(ctx, "database not available");
@@ -684,6 +756,74 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
 #endif
 }
 
+
+static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    return udf_unregister_impl(ctx, this_val, argc, argv, 0);
+}
+
+/* A db.open() connection's udf methods are bound to its own conn.udf
+ * sub-object (data[0]), not to `this`: called with `this` another
+ * connection's object they refuse, so neither kind of udf method registers on
+ * a connection other than its own (the audit 29 rule, both ways). A detached
+ * call (`this` undefined) uses the bound connection. */
+static int owned_udf_this_ok(JSValueConst this_val, JSValueConst bound)
+{
+    if (!js_db_is_conn(this_val)) return 1;
+    void *b = js_db_owned_box(this_val);
+    return b && b == js_db_owned_box(bound);
+}
+
+static JSValue js_db_owned_udf_register(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv,
+                                         int magic, JSValueConst *data)
+{
+    (void)magic;
+    if (!owned_udf_this_ok(this_val, data[0]))
+        return JS_ThrowTypeError(ctx,
+            "db.udf.register: called on another connection");
+    return udf_register_impl(ctx, data[0], argc, argv, 1);
+}
+
+static JSValue js_db_owned_udf_unregister(JSContext *ctx,
+                                           JSValueConst this_val,
+                                           int argc, JSValueConst *argv,
+                                           int magic, JSValueConst *data)
+{
+    (void)magic;
+    if (!owned_udf_this_ok(this_val, data[0]))
+        return JS_ThrowTypeError(ctx,
+            "db.udf.unregister: called on another connection");
+    return udf_unregister_impl(ctx, data[0], argc, argv, 1);
+}
+
+/* Attach `udf` to the db.open() connection object @p conn: a sub-object
+ * sharing its owner box, whose methods carry that sub-object as their data.
+ * Strong override of the weak no-op in mod_db.c. Best-effort, as
+ * hl_js_db_attach_udf: on OOM the connection is left without udf. */
+void hl_js_db_attach_owned_udf(JSContext *ctx, JSValue conn)
+{
+    JSValue udf = js_db_owned_subobject(ctx, conn);
+    if (JS_IsException(udf)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return;
+    }
+    JSValue reg = JS_NewCFunctionData(ctx, js_db_owned_udf_register, 3, 0,
+                                      1, (JSValueConst *)&udf);
+    JSValue unreg = JS_NewCFunctionData(ctx, js_db_owned_udf_unregister, 1, 0,
+                                        1, (JSValueConst *)&udf);
+    if (JS_IsException(reg) || JS_IsException(unreg)) {
+        JS_FreeValue(ctx, reg);
+        JS_FreeValue(ctx, unreg);
+        JS_FreeValue(ctx, udf);
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return;
+    }
+    JS_SetPropertyStr(ctx, udf, "register", reg);
+    JS_SetPropertyStr(ctx, udf, "unregister", unreg);
+    JS_SetPropertyStr(ctx, conn, "udf", udf);
+}
 
 /* Attach a `udf` sub-object to the connection object @p conn, each method
  * bound to @p h via a HullDbConnection sub-object opaque (js_call_handle

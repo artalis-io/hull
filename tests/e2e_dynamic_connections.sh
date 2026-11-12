@@ -6,7 +6,10 @@
 # manifest.databases.dynamic (scheme + fs allowlist), opens a caller-owned
 # connection, queries it, and is released by close() (double-close idempotent,
 # use-after-close fails closed). A denied scheme and an out-of-sandbox file path
-# are rejected before any connection. SQLite only, so no Docker; the Postgres
+# are rejected before any connection. conn.udf on a db.open() SQLite handle
+# registers on that handle: its own (sync) queries use it, a worker connection
+# (conn.async) does not have it - as on a registry connection - close() from
+# inside it is refused, and unregister / close() drop it. SQLite only, so no Docker; the Postgres
 # host-allowlist (CIDR) allow/deny variant lives in tests/e2e_postgres.sh and
 # the C unit test tests/hull/cap/test_db_dynamic.c.
 #
@@ -65,6 +68,15 @@ run_case() {
     assert_line "$out" "async_after_big" "1"       "$label: the connection works after an oversized result"
     # wait_notify on a backend with no LISTEN/NOTIFY fails at once (audit 14).
     assert_line "$out" "notify_sqlite"   "refused" "$label: wait_notify on SQLite raises"
+    # db.udf on the db.open() handle.
+    assert_line "$out" "udf_present"     "yes"     "$label: conn.udf present on a db.open SQLite handle"
+    assert_line "$out" "udf_sync"        "14"      "$label: a UDF registered on the handle runs in its query"
+    assert_line "$out" "udf_agg"         "7"       "$label: an aggregate UDF runs on the handle"
+    assert_line "$out" "udf_other"       "absent"  "$label: another connection does not see the UDF"
+    assert_line "$out" "udf_async"       "absent"  "$label: conn.async (worker connection) does not see the UDF"
+    assert_line "$out" "udf_close_in"    "refused" "$label: close() from inside the handle's own UDF is refused"
+    assert_line "$out" "udf_unreg"       "absent"  "$label: unregister drops the UDF"
+    assert_line "$out" "udf_after_close" "denied"  "$label: udf.register after close() fails closed"
 }
 
 # ── Lua ────────────────────────────────────────────────────────────────
@@ -105,7 +117,28 @@ app.main(function()
     local ok_n, err_n = pcall(function() return f.wait_notify("ch", 10) end)
     print("notify_sqlite=" .. ((not ok_n and tostring(err_n):find("LISTEN/NOTIFY", 1, true))
                                and "refused" or "allowed"))
+    print("udf_present=" .. (type(f.udf) == "table" and "yes" or "no"))
+    f.udf.register("hull_twice", function(n) return n * 2 end)
+    print("udf_sync=" .. tostring(f.query("SELECT hull_twice(x) AS y FROM t")[1].y))
+    f.udf.register("hull_total", { step = function(s, v) s.n = (s.n or 0) + v end,
+                                   finalize = function(s) return s.n end })
+    print("udf_agg=" .. tostring(f.query("SELECT hull_total(x) AS y FROM t")[1].y))
+    local o = db.open(":memory:")
+    local ok_o = pcall(function() return o.query("SELECT hull_twice(1) AS y") end)
+    o.close()
+    print("udf_other=" .. (ok_o and "present" or "absent"))
+    local ok_ua, err_ua = pcall(function() return f.async.query("SELECT hull_twice(x) AS y FROM t") end)
+    print("udf_async=" .. ((not ok_ua and tostring(err_ua):find("no such function", 1, true))
+                           and "absent" or "present"))
+    f.udf.register("hull_closer", function() f.close() return 1 end)
+    local ok_ci = pcall(function() return f.query("SELECT hull_closer() AS v") end)
+    print("udf_close_in=" .. ((not ok_ci and pcall(f.query, "SELECT 1 AS v")) and "refused" or "closed"))
+    f.udf.unregister("hull_twice")
+    local ok_ur = pcall(function() return f.query("SELECT hull_twice(x) AS y FROM t") end)
+    print("udf_unreg=" .. (ok_ur and "present" or "absent"))
     f.close()
+    local ok_ac = pcall(function() f.udf.register("hull_late", function() return 1 end) end)
+    print("udf_after_close=" .. (ok_ac and "ok" or "denied"))
     local ok_a = pcall(function() f.async.query("SELECT 1") end)
     print("async_after_close=" .. (ok_a and "ok" or "denied"))
     local w = db.open(":memory:")
@@ -159,6 +192,28 @@ app.main(async () => {
     try { await f.waitNotify("ch", 10); }
     catch (e) { if (String(e && e.message || e).includes("LISTEN/NOTIFY")) ns = "refused"; }
     console.log("notify_sqlite=" + ns);
+    console.log("udf_present=" + (typeof f.udf === "object" ? "yes" : "no"));
+    f.udf.register("hull_twice", (n) => n * 2);
+    console.log("udf_sync=" + f.query("SELECT hull_twice(x) AS y FROM t")[0].y);
+    f.udf.register("hull_total", { step: (s, v) => { s.n = (s.n || 0) + v; },
+                                   finalize: (s) => s.n });
+    console.log("udf_agg=" + f.query("SELECT hull_total(x) AS y FROM t")[0].y);
+    const o = dbMod.open(":memory:");
+    let uo = "present"; try { o.query("SELECT hull_twice(1) AS y"); } catch (e) { uo = "absent"; }
+    o.close();
+    console.log("udf_other=" + uo);
+    let uas = "present";
+    try { await f.async.query("SELECT hull_twice(x) AS y FROM t"); }
+    catch (e) { if (String(e && e.message || e).includes("no such function")) uas = "absent"; }
+    console.log("udf_async=" + uas);
+    f.udf.register("hull_closer", () => { f.close(); return 1; });
+    let uci = "closed";
+    try { f.query("SELECT hull_closer() AS v"); }
+    catch (e) { try { f.query("SELECT 1 AS v"); uci = "refused"; } catch (e2) { uci = "closed"; } }
+    console.log("udf_close_in=" + uci);
+    f.udf.unregister("hull_twice");
+    let uu = "present"; try { f.query("SELECT hull_twice(x) AS y FROM t"); } catch (e) { uu = "absent"; }
+    console.log("udf_unreg=" + uu);
     // The SQL's toString closes the handle while the call converts its
     // arguments: the op must not run on a closed handle (audit 15).
     const g = dbMod.open("shard.db");
@@ -170,6 +225,8 @@ app.main(async () => {
     f.close();
     let aa = "ok"; try { await f.async.query("SELECT 1"); } catch (e) { aa = "denied"; }
     console.log("async_after_close=" + aa);
+    let uac = "ok"; try { f.udf.register("hull_late", () => 1); } catch (e) { uac = "denied"; }
+    console.log("udf_after_close=" + uac);
     const w = dbMod.open(":memory:");
     w.exec("BEGIN");
     let wt = "allowed";

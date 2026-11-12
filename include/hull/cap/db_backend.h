@@ -232,6 +232,13 @@ typedef struct HlDbBackend {
      * still open: the connection was abandoned and the next call
      * reconnects). NULL = no server session (SQLite, DuckDB). */
     int    (*reset_session)(HlDbHandle *h);
+
+    /* Whether one of the connection's statements is running right now, so
+     * the connection must not be closed under it: SQLite while a statement
+     * is stepping (a UDF's callback is app code inside that step). The
+     * caller-owned close (db.open's conn.close()) refuses then. No I/O.
+     * NULL = never (treated as 0). */
+    int    (*in_use)(HlDbHandle *h);
 } HlDbBackend;
 
 struct HlDbHandle {
@@ -261,6 +268,14 @@ static inline int hl_db_in_txn(HlDbHandle *h)
 {
     if (!h || !h->backend || !h->backend->in_txn) return 0;
     return h->backend->in_txn(h) ? 1 : 0;
+}
+
+/* 1 while one of the connection's statements is running (a UDF callback
+ * runs app code inside it), so it must not be closed now; 0 otherwise. */
+static inline int hl_db_in_use(HlDbHandle *h)
+{
+    if (!h || !h->backend || !h->backend->in_use) return 0;
+    return h->backend->in_use(h) ? 1 : 0;
 }
 
 /* Reset the session of a connection used since its last reset
