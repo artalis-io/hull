@@ -212,6 +212,9 @@ typedef struct HlLua {
      * resumed in that window could start another run_main over it (audit 45;
      * JS keeps main_signal set for its whole call). */
     int         test_main_running;
+    /* The handler coroutine of a request test.get dispatched, while it runs
+     * (dispatch.c / sse.c): it may not wait (HlReqLife.no_conn; audit 45). */
+    lua_State  *test_req_co;
 
     /* app.main's final status, set by hl_lua_async_resume when main ends
      * inside the loop: a coroutine closed after it raised reads LUA_OK

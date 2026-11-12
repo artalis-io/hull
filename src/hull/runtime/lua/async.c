@@ -13,7 +13,6 @@
 #include "protected.h"
 #include "hull/http_feature.h"  /* hl_lua_http_error_response (HTTP-feature seam) */
 #include "hull/shared/async.h"
-#include "hull/shared/req_life.h"
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
@@ -924,15 +923,13 @@ void hl_lua_async_cont_set_timer(HlAsyncCont *cont, void *timer)
  * after the op is armed. So check first. Not yieldable: module load (require
  * runs under lua_pcall), a C callback such as string.gsub or table.sort.
  * Yieldable but not active_co: a coroutine the app created itself. */
-/* The handler of a request test.get dispatched (no connection): its
- * response lives on test.get's stack and is gone once test.get returns, so
- * a wait there would resume into a freed response (audit 45). Request
- * entries set active_on_complete to the life's end; tasks clear it. */
-static int lua_in_no_conn_request(const HlLua *lua)
+/* The handler of a request test.get dispatched: its response lives on
+ * test.get's stack and is gone once test.get returns, so a wait there would
+ * resume into a freed response (audit 45). The request entries name that
+ * handler's coroutine (HlLua.test_req_co); a task runs on its own. */
+static int lua_in_no_conn_request(lua_State *L, const HlLua *lua)
 {
-    return lua->active_on_complete == hl_lua_req_life_end_cb &&
-           lua->active_on_complete_ctx &&
-           ((const HlReqLife *)lua->active_on_complete_ctx)->no_conn;
+    return lua->test_req_co != NULL && L == lua->test_req_co;
 }
 
 int hl_lua_can_wait(lua_State *L)
@@ -944,7 +941,7 @@ int hl_lua_can_wait(lua_State *L)
         return 0;
     if (lua->base.shutting_down)   /* audit 29, see hl_lua_check_can_wait */
         return 0;
-    if (lua_in_no_conn_request(lua))   /* audit 45 */
+    if (lua_in_no_conn_request(L, lua))   /* audit 45 */
         return 0;
     if (hl_lua_budget_charge(L, 0) != 0)   /* C audit L1, see below */
         return 0;
@@ -973,7 +970,7 @@ int hl_lua_check_can_wait(lua_State *L, const char *what)
     if (lua->base.shutting_down)
         return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "%s cannot wait: the runtime is shutting down",
                           what);
-    if (lua_in_no_conn_request(lua))
+    if (lua_in_no_conn_request(L, lua))
         return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "%s cannot wait in a request "
                           "test.get dispatches: its response is gone once "
                           "test.get returns; test the waiting code from the "
