@@ -8439,6 +8439,46 @@ UTEST(js_db_async, submit_failure_clears_last_async_cont)
 }
 
 
+/* audit 45: a full thread pool is an admission refusal, coded `busy` like
+ * every other (include/hull/shared/refusal.h) - it was a plain InternalError
+ * on db.async, compute.async, worker.dispatch and gpu.async. */
+UTEST(js_refusal_audit45, thread_pool_full_is_busy)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx  *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    HlAsyncBackendPool *pool = NULL;
+    ASSERT_EQ(be->pool_create(&pool, actx, 1, 1), 0);
+    js.base.thread_pool = pool;
+    js.base.async_ctx   = actx;
+    atomic_store(&g_dbsat_release, 0);
+    atomic_store(&g_dbsat_running, 0);
+    ASSERT_EQ(be->pool_submit(pool, dbsat_block, dbsat_noop, dbsat_noop, NULL), 0);
+    while (atomic_load(&g_dbsat_running) < 1) usleep(500);
+    ASSERT_EQ(be->pool_submit(pool, dbsat_block, dbsat_noop, dbsat_noop, NULL), 0);
+
+    const char *src = "db.async.query('SELECT 1');";
+    JSValue rv = JS_Eval(js.ctx, src, strlen(src), "a45busy", JS_EVAL_TYPE_GLOBAL);
+    ASSERT_TRUE(JS_IsException(rv));
+    JSValue exc = JS_GetException(js.ctx);
+    JSValue code = JS_GetPropertyStr(js.ctx, exc, "code");
+    const char *c = JS_ToCString(js.ctx, code);
+    EXPECT_TRUE(c != NULL && strcmp(c, "busy") == 0);
+    if (c) JS_FreeCString(js.ctx, c);
+    JS_FreeValue(js.ctx, code);
+    JS_FreeValue(js.ctx, exc);
+    JS_FreeValue(js.ctx, rv);
+
+    atomic_store(&g_dbsat_release, 1);
+    be->pool_free(pool);
+    be->free(actx);
+    js.base.thread_pool = NULL;
+    js.base.async_ctx   = NULL;
+    cleanup_js_caps();
+}
+
 /* ── C audit L4: the app's module top level starts no async op ───────
  *
  * Lua's top level cannot wait (`L != active_co`); JS's could: a top level
