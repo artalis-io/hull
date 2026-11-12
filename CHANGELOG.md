@@ -56,6 +56,11 @@ release-artifact layout).
 
 ### Fixed
 
+- **Concurrent `gpu.async.load` of one shader (audit 45).** A second
+  `gpu.async.compile` / `gpu.async.load` of a shader that is still compiling
+  waits for that compile and gets its result, instead of `gpu_busy` - lazily
+  loaded shaders failed under concurrent requests.
+
 - **`gpu.async.compile` / `gpu.async.load` (audit 45).** A request that goes
   away while its shader compiles no longer throws the compile away: the shader
   is still installed. A finished compile is installed by the first GPU call
