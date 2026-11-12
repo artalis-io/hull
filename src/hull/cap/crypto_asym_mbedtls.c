@@ -213,17 +213,29 @@ out:
  * refused. */
 #define HL_RSA_MAX_E_BITS 64
 
-static int rsa_e_bounded(const mbedtls_pk_context *pk)
+static int rsa_e_bits_le(const mbedtls_pk_context *pk, size_t max_bits)
 {
     const mbedtls_rsa_context *rsa = mbedtls_pk_rsa(*pk);
     if (!rsa) return 0;
     mbedtls_mpi e;
     mbedtls_mpi_init(&e);
     int ok = mbedtls_rsa_export(rsa, NULL, NULL, NULL, NULL, &e) == 0
-             && mbedtls_mpi_bitlen(&e) <= HL_RSA_MAX_E_BITS;
+             && mbedtls_mpi_bitlen(&e) <= max_bits;
     mbedtls_mpi_free(&e);
     return ok;
 }
+
+static int rsa_e_bounded(const mbedtls_pk_context *pk)
+{
+    return rsa_e_bits_le(pk, HL_RSA_MAX_E_BITS);
+}
+
+/* The OAEP encrypt's key comes from a MySQL server (get_server_public_key)
+ * and its fixed charge (HL_WORK_DB_RSA_AUTH_UNITS) assumes e = 65537, so the
+ * exponent is held to 17 bits there: a 64-bit e on an RSA-8192 modulus cost
+ * several times the charge, off the event loop where no backstop sees it
+ * (audit 45). MySQL's keys use 65537. */
+#define HL_RSA_OAEP_MAX_E_BITS 17
 
 static int mbed_supports(HlCryptoAsymAlg alg)
 {
@@ -567,7 +579,8 @@ static int mbed_rsa_oaep_sha1_encrypt(const void *pubkey_pem, size_t pubkey_len,
     mbedtls_pk_init(&pk);
     if (mbedtls_pk_parse_public_key(&pk, pem_copy, pem_len_with_nl + 1) != 0)
         goto done;
-    if (mbedtls_pk_get_type(&pk) != MBEDTLS_PK_RSA || !rsa_e_bounded(&pk))
+    if (mbedtls_pk_get_type(&pk) != MBEDTLS_PK_RSA ||
+        !rsa_e_bits_le(&pk, HL_RSA_OAEP_MAX_E_BITS))
         goto done;
     mbedtls_rsa_context *rsa = mbedtls_pk_rsa(pk);
     if (!rsa || mbedtls_pk_get_bitlen(&pk) < HL_CRYPTO_RSA_OAEP_MIN_BITS)
