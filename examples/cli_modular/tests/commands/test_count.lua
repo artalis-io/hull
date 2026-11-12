@@ -1,3 +1,5 @@
-test("count: smoke", function()
-    test.eq(1, 1)
+test("count: prints the number of items", function()
+    local r = test.run_main({ "count", "a", "b", "c" })
+    test.eq(r.code, 0)
+    test.eq(r.stdout, "3\n")
 end)

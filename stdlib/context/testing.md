@@ -59,6 +59,24 @@ local res = test.get("/api/data", { headers = { ["Authorization"] = "Bearer " ..
 - `res.body` - parsed response body (table for JSON, string otherwise)
 - `res.headers` - response headers table
 
+## Testing app.main (CLI apps)
+
+- **`test.run_main(args, opts?)`** (Lua) / **`test.runMain(args, opts?)`**
+  (JS) - run the app's `app.main` once with `ctx.args = args`; returns
+  `{ code, stdout, stderr }` with `ctx.stdout` / `ctx.stderr` captured.
+  `opts`: `stdin` (string; JS also bytes), `env` (exactly `ctx.env`; names
+  must be in the manifest's `env` list), `timeout_ms` / `timeoutMs`
+  (default 10 s). An error in main is `code = 1`, message on `stderr`.
+  Works for an app with no routes; call it as often as needed.
+
+```lua
+test("count prints the number of items", function()
+    local r = test.run_main({ "count", "a", "b" })
+    test.eq(r.code, 0)
+    test.eq(r.stdout, "2\n")
+end)
+```
+
 ## Assertions
 
 - **`test.eq(actual, expected)`** - assert equality

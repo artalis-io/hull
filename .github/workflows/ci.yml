@@ -211,6 +211,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-test-harness
 
+      - name: hull test for CLI apps (test.run_main / runMain) E2E tests
+        timeout-minutes: 2
+        run: make e2e-test-cli
+
       - name: Jobs queue E2E tests
         timeout-minutes: 2
         run: make e2e-jobs

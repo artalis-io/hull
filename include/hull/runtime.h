@@ -304,6 +304,11 @@ struct HlRuntime {
      * of touching KlHttpServer / KlEventCtx directly. NULL means async
      * primitives are unavailable on this runtime (rare). */
     HlAsyncBackendCtx *async_ctx;
+    /* The test runner only (test_runner.c): the manifest's `env` names,
+     * NULL-terminated, borrowed for the run. test.run_main / runMain take
+     * opts.env names only from it, so a test cannot give app.main a
+     * variable the manifest does not declare. NULL elsewhere (no names). */
+    const char *const *test_env_allow;
     /* HlNetBackend context - the HTTP/connection lifecycle layer.
      * Borrowed from HlServerState (which owns the wrap around KlHttpServer).
      * Consumers route connection-bound async-op suspend/complete

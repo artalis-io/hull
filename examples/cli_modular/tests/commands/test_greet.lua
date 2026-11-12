@@ -1,8 +1,22 @@
--- Tests use test.run_main to synthesise argv/stdin/env and capture
--- the exit code + stdout/stderr. As of v0.1.0 the Phase 2 CLI test
--- harness is still being shaped - for now invoke through `hull run`
--- in the project root.
+-- test.run_main(args, opts) runs app.main once with ctx.args = args and
+-- returns { code, stdout, stderr } (ctx.stdout / ctx.stderr captured).
+-- opts: stdin (string), env (names from manifest.env), timeout_ms.
 
-test("greet: smoke", function()
-    test.eq(1, 1)  -- placeholder; replace with test.run_main once shipped
+test("greet: prints a greeting", function()
+    local r = test.run_main({ "greet", "world" })
+    test.eq(r.code, 0)
+    test.eq(r.stdout, "hello world\n")
+    test.eq(r.stderr, "")
+end)
+
+test("greet: a missing name is a usage error", function()
+    local r = test.run_main({ "greet" })
+    test.eq(r.code, 2)
+    test.ok(r.stderr:find("missing NAME", 1, true), r.stderr)
+end)
+
+test("an unknown command prints usage", function()
+    local r = test.run_main({ "nope" })
+    test.eq(r.code, 1)
+    test.ok(r.stderr:find("unknown command", 1, true), r.stderr)
 end)

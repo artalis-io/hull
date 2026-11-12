@@ -1976,11 +1976,40 @@ mytool/
   tests/commands/test_greet.lua
 ```
 
-`hull test` for `app.main`-based apps is a known limitation today (the
-runner expects a registered HTTP server context. Emits "no routes
-registered" otherwise). The scaffolded `tests/` files are placeholders
-until a CLI-mode test harness lands. The commands themselves are
-plain Lua/JS, so they're easy to unit-test in any external harness.
+**`hull test` for CLI apps.** A test file calls `test.run_main(args, opts)`
+(Lua) / `test.runMain(args, opts)` (JS): it runs the loaded app's `app.main`
+once, in-process, with `ctx.args = args` (strings), and returns `{ code,
+stdout, stderr }` - `ctx.stdout` / `ctx.stderr` writes captured, never the
+process's own streams. `opts`: `stdin` (a string; JS also bytes) for
+`ctx.stdin`, `env` (a name -> string map that IS `ctx.env`; a name outside
+the manifest's `env` list is refused - `HlRuntime.test_env_allow`, set by the
+runner from the extracted manifest, so a test cannot widen the allowlist),
+`timeout_ms` / `timeoutMs` (default 10 s, never past the case's deadline). A
+raised error / rejected promise is `code = 1` with the runner's message
+(`[hull:main] error: ...`) on the captured stderr, as the real runner prints
+it; a non-numeric return likewise. Each call is a fresh invocation of the same
+loaded app (a fresh ctx; module state persists, as in one process). The runner
+(`src/hull/test_runner.c`) runs a CLI-only app's tests (no routes to wire), a
+server app's as before, an app with both gets `test.get` & co and `run_main`,
+and one with neither fails with "no routes or app.main registered". main's
+waits (`hull.sleep`, `http.fetch`, `db.async`, `compute.async`) are driven on
+the test run's event loop: `hull test` and `hull agent test` give the app
+context a loop + worker pool (`HlTestRunnerLoop`, the `app.main` runner's
+setup and teardown order; the MCP warm context has none, so a wait there is
+refused). As `test.get`'s request, main runs on the case's time: each of
+main's stretches re-arms the budget as in the real runner, and what they used
+is added to the case's count (`lua_main_run` / `js_main_run` take it off
+between loop ticks), the case's deadline and run tag are put back, and the
+stale-transaction guard is held off while the case has a transaction open
+(main then cannot wait - every wait refuses inside a transaction). A main still
+waiting at the timeout is abandoned - Lua: the coroutine marked abandoned
+(`hl_lua_async_abandon`) and kept referenced; JS: its run tag failed
+(`hl_js_run_tag_abandon`) - and the call raises. The real runner and the test
+share one core (`lua_main_run` / `js_main_run` in each runtime's
+`runtime.c`), parameterised by `HlLuaMainRun` / `HlJsMainRun`. No signal
+reaches a test's main (`ctx.on_interrupt` / `ctx.signal` are there but never
+fire). Covered by `tests/e2e_test_cli.sh` (`make e2e-test-cli`) and the
+`lua_test_run_main` / `js_test_run_main` unit tests.
 
 **Modular TUI** (`hull new --type tui mydash`, Lua-only). `app.lua`
 holds the `tui.run({ draw, on_event })` loop and a single `state`

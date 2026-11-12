@@ -132,7 +132,6 @@ INV-6  src/hull/commands/verify_release.c:read_file  # release / install output:
 INV-6  src/hull/commands/verify_release.c:hl_cmd_verify_release  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
 INV-6  src/hull/commands/verify_self.c:hl_cmd_verify_self  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
 INV-6  src/hull/commands/version.c:hl_cmd_version  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
-INV-6  src/hull/runtime/js/runtime.c:vt_js_run_main  # run trip reason: a Hull constant (hl_js_trip_reason)
 INV-6  src/hull/runtime/lua/mod_tool.c:l_tool_stderr_raw  # tool VM: stdout_raw / stderr_raw are the documented verbatim writers for text the plugin encoded; the rest prints Hull constants
 INV-6  src/hull/runtime/lua/mod_tool.c:l_tool_stdout_raw  # tool VM: stdout_raw / stderr_raw are the documented verbatim writers for text the plugin encoded; the rest prints Hull constants
 INV-6  src/hull/runtime/lua/mod_tool.c:l_tool_platform_verify  # tool VM: stdout_raw / stderr_raw are the documented verbatim writers for text the plugin encoded; the rest prints Hull constants

@@ -918,11 +918,20 @@ static void vt_lua_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *
 }
 
 #ifdef HL_ENABLE_HTTP_SERVER
+static int vt_lua_has_main(HlRuntime *rt);
+
 static int vt_lua_test_setup(HlRuntime *rt, KlHttpRouter *router)
 {
     HlLua *lua = (HlLua *)rt;
-    if (hl_lua_wire_routes(lua, router) != 0)
-        return -1;
+    /* A CLI app (app.main, no routes) has nothing to wire: its tests use
+     * test.run_main. Routes, when there are any, are wired as before. */
+    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    int routes = lua_istable(lua->L, -1) && lua_rawlen(lua->L, -1) > 0;
+    lua_pop(lua->L, 1);
+    if (routes || !vt_lua_has_main(rt)) {
+        if (hl_lua_wire_routes(lua, router) != 0)
+            return -1;
+    }
     hl_lua_test_register(lua->L, router, lua);
     return 0;
 }
@@ -1161,6 +1170,129 @@ static const luaL_Reg cli_writer_methods[] = {
     { NULL, NULL }
 };
 
+/* ── test.run_main's streams (runtime/lua/mod_test.c) ──────────────────
+ *
+ * The same methods over a capture table instead of the process's stdio:
+ * upvalue 1 is the stream id (0/1/2), upvalue 2 the capture table
+ * { out = {chunks}, err = {chunks}, input = "...", pos = n } that
+ * hl_lua_test_run_main reads back. Writes are charged as the stdio
+ * writers' are; the chunks live on the VM heap, under its limit. The table
+ * is reachable only through these closures' upvalues (no debug library). */
+static int cli_cap_write(lua_State *L)
+{
+    int s = (int)lua_tointeger(L, lua_upvalueindex(1));
+    int top = lua_gettop(L);
+    for (int i = 2; i <= top; i++) {  /* arg 1 is self */
+        size_t n = 0;
+        (void)luaL_checklstring(L, i, &n);
+        uint64_t u = HL_WORK_CALL_UNITS + hl_work_bytes_units((uint64_t)n);
+        lua_hlwork(L, u > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)u, 0);
+        if (n == 0) continue;
+        lua_pushstring(L, s == 2 ? "err" : "out");
+        lua_rawget(L, lua_upvalueindex(2));
+        if (!lua_istable(L, -1)) return luaL_error(L, "invalid stream");
+        lua_pushvalue(L, i);
+        lua_rawseti(L, -2, (lua_Integer)lua_rawlen(L, -2) + 1);
+        lua_pop(L, 1);
+    }
+    return 0;
+}
+
+static int cli_cap_flush(lua_State *L)
+{
+    lua_hlwork(L, HL_WORK_CLI_FLUSH_UNITS, 0);
+    return 0;
+}
+
+static int cli_cap_read(lua_State *L)
+{
+    /* As cli_stdin_read: only app.main's own runs read. */
+    HlLua *lua = get_hl_lua_from_L(L);
+    if (!lua || !lua->cli_main_co || lua->active_co != lua->cli_main_co)
+        return luaL_error(L, "ctx.stdin:read() is only available in app.main's "
+                             "own code (it blocks the event loop)");
+    lua_hlwork(L, HL_WORK_CLI_FLUSH_UNITS, 0);
+
+    const char *fmt = "*l";
+    lua_Integer nbytes = 0;
+    int want_bytes = 0;
+    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
+        if (lua_isnumber(L, 2)) {
+            nbytes = lua_tointeger(L, 2);
+            if (nbytes < 0) return luaL_error(L, "read: negative byte count");
+            want_bytes = 1;
+        } else {
+            fmt = luaL_checkstring(L, 2);
+        }
+    }
+
+    int cap = lua_upvalueindex(2);
+    lua_pushliteral(L, "input");
+    lua_rawget(L, cap);
+    size_t len = 0;
+    const char *in = lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &len)
+                                                     : NULL;
+    lua_pushliteral(L, "pos");
+    lua_rawget(L, cap);
+    lua_Integer pos = lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    if (!in) { in = ""; len = 0; }
+    if (pos < 0 || (size_t)pos > len) pos = (lua_Integer)len;
+    size_t avail = len - (size_t)pos;
+    const char *p = in + pos;
+
+    size_t take;
+    int got;
+    size_t skip = 0;   /* the newline a line read consumes */
+    if (want_bytes) {
+        if (nbytes == 0) { lua_pushliteral(L, ""); return 1; }
+        take = (uint64_t)nbytes < (uint64_t)avail ? (size_t)nbytes : avail;
+        got = take > 0;
+    } else if (strcmp(fmt, "*a") == 0 || strcmp(fmt, "a") == 0) {
+        take = avail;
+        got = 1;                       /* "*a" at EOF is "", as stdio's */
+    } else if (strcmp(fmt, "*l") == 0 || strcmp(fmt, "l") == 0) {
+        const char *nl = avail ? memchr(p, '\n', avail) : NULL;
+        take = nl ? (size_t)(nl - p) : avail;
+        skip = nl ? 1 : 0;
+        got = avail > 0;
+    } else {
+        return luaL_error(L, "read: unsupported format '%s' (use '*l', '*a', "
+                             "or n bytes)", fmt);
+    }
+
+    if (!got) lua_pushnil(L);
+    else lua_pushlstring(L, p, take);
+    lua_pushliteral(L, "pos");
+    lua_pushinteger(L, pos + (lua_Integer)(take + skip));
+    lua_rawset(L, cap);
+    return 1;
+}
+
+static const luaL_Reg cli_cap_stdin_methods[] = {
+    { "read",  cli_cap_read    },
+    { "close", cli_stdin_close },
+    { NULL, NULL }
+};
+static const luaL_Reg cli_cap_writer_methods[] = {
+    { "write", cli_cap_write },
+    { "flush", cli_cap_flush },
+    { NULL, NULL }
+};
+
+/* As cli_push_stream, over the capture table at absolute index @p cap. */
+static void cli_push_cap_stream(lua_State *L, int stream_id, int cap,
+                                const luaL_Reg *methods)
+{
+    lua_newtable(L);
+    for (const luaL_Reg *m = methods; m->name; m++) {
+        lua_pushinteger(L, stream_id);
+        lua_pushvalue(L, cap);
+        hl_lua_pushcclosure(L, m->func, 2);
+        lua_setfield(L, -2, m->name);
+    }
+}
+
 static int vt_lua_has_main(HlRuntime *rt)
 {
     if (!rt) return 0;
@@ -1194,8 +1326,44 @@ static int vt_lua_has_server_handlers(HlRuntime *rt)
     return 0;
 }
 
+/* One app.main invocation: the real runner's (vt_lua_run_main) or a test's
+ * (hl_lua_test_run_main, test.run_main). The two differ only in where ctx's
+ * streams and env come from, where the runner's own messages go, and how the
+ * loop is driven while main waits. */
+typedef struct HlLuaMainRun {
+    /* The real runner: argv, the env allowlist (values from getenv). */
+    int                argc;
+    char             **argv;
+    const char *const *env;
+    /* test.run_main: ctx's args, the capture table and the env table are
+     * these absolute indices of @c from's stack (0 = absent); the loop runs
+     * until main ends or @c timeout_ms passes (0 = no bound). */
+    int                test;
+    int                args_idx, cap_idx, env_idx;
+    uint32_t           timeout_ms;
+    int64_t            case_used;   /* the calling case's count so far */
+    lua_State         *from;        /* the resumer */
+    /* out (test): instructions main's stretches used in all, whether the
+     * wait was given up (timed out / over budget), and the message the real
+     * runner would have printed (main's error, a non-numeric return). */
+    int64_t            used;
+    int                gave_up;     /* 1 timed out, 2 over the case's budget */
+    char               msg[512];
+} HlLuaMainRun;
+
+/* A message the real runner prints on stderr; a test's run keeps it for
+ * its captured stderr. */
+static void main_report(HlLuaMainRun *r, const char *prefix, const char *arg)
+{
+    if (r && r->test) {
+        snprintf(r->msg, sizeof r->msg, "%s%s", prefix, arg);
+        return;
+    }
+    hl_eprintf_line("%s%s", prefix, arg);
+}
+
 /* Coerce the value on top of `co`'s stack to an exit code in [0..255]. */
-static int lua_coerce_exit_code(lua_State *co)
+static int lua_coerce_exit_code(lua_State *co, HlLuaMainRun *r)
 {
     int t = lua_type(co, -1);
     if (t == LUA_TNONE || t == LUA_TNIL) return 0;
@@ -1214,8 +1382,8 @@ static int lua_coerce_exit_code(lua_State *co)
         return ((int)d) & 0xff;
     }
     const char *s = lua_tostring(co, -1);
-    hl_eprintf_line("[hull:main] non-numeric return: %s",
-            s ? s : "(unprintable)");
+    main_report(r, "[hull:main] non-numeric return: ",
+                s ? s : "(unprintable)");
     return 1;
 }
 
@@ -1413,19 +1581,20 @@ static int vt_lua_main_interrupt_impl(HlRuntime *rt, int sig)
 }
 
 /* main's coroutine, main itself and its ctx table, under lua_pcall
- * (vt_lua_run_main, audit 9 L2). Returns main and ctx on L. */
+ * (lua_main_run, audit 9 L2). Arguments: the HlLuaMainPrep, then - for
+ * test.run_main - the args table, the capture table and the env table
+ * (nils for the real runner). Returns main and ctx. */
 typedef struct {
-    int                argc;
-    char             **argv;
-    const char *const *env;
-    lua_State         *co;
-    int                ref;
+    const HlLuaMainRun *r;
+    lua_State          *co;
+    int                 ref;
 } HlLuaMainPrep;
 
 static int main_prepare_k(lua_State *L)
 {
     HlLuaMainPrep *p = (HlLuaMainPrep *)lua_touserdata(L, 1);
-    lua_settop(L, 0);
+    const HlLuaMainRun *r = p->r;
+    lua_settop(L, 4);                   /* 2 args, 3 capture, 4 env */
     lua_State *co = lua_newthread(L);
     p->ref = luaL_ref(L, LUA_REGISTRYINDEX);
     p->co = co;
@@ -1438,16 +1607,38 @@ static int main_prepare_k(lua_State *L)
     lua_newtable(L);                    /* ctx */
 
     lua_newtable(L);
-    for (int i = 0; i < p->argc; i++) {
-        lua_pushstring(L, p->argv[i] ? p->argv[i] : "");
-        lua_rawseti(L, -2, i + 1);
+    if (r->test) {
+        /* Checked by hl_lua_test_run_main: a sequence of strings. */
+        if (lua_istable(L, 2)) {
+            lua_Integer n = (lua_Integer)lua_rawlen(L, 2);
+            for (lua_Integer i = 1; i <= n; i++) {
+                lua_rawgeti(L, 2, i);
+                lua_rawseti(L, -2, i);
+            }
+        }
+    } else {
+        for (int i = 0; i < r->argc; i++) {
+            lua_pushstring(L, r->argv[i] ? r->argv[i] : "");
+            lua_rawseti(L, -2, i + 1);
+        }
     }
     lua_setfield(L, -2, "args");
 
     lua_newtable(L);
-    if (p->env) {
-        for (int i = 0; p->env[i]; i++) {
-            const char *name = p->env[i];
+    if (r->test) {
+        /* Checked by hl_lua_test_run_main: names the manifest allows,
+         * string values. A test's ctx.env is exactly opts.env. */
+        if (lua_istable(L, 4)) {
+            lua_pushnil(L);
+            while (lua_next(L, 4) != 0) {
+                lua_pushvalue(L, -2);
+                lua_insert(L, -2);
+                lua_rawset(L, -4);
+            }
+        }
+    } else if (r->env) {
+        for (int i = 0; r->env[i]; i++) {
+            const char *name = r->env[i];
             const char *val = getenv(name);
             if (val) {
                 lua_pushstring(L, val);
@@ -1457,9 +1648,18 @@ static int main_prepare_k(lua_State *L)
     }
     lua_setfield(L, -2, "env");
 
-    cli_push_stream(L, 0, cli_stdin_methods);   lua_setfield(L, -2, "stdin");
-    cli_push_stream(L, 1, cli_writer_methods);  lua_setfield(L, -2, "stdout");
-    cli_push_stream(L, 2, cli_writer_methods);  lua_setfield(L, -2, "stderr");
+    if (r->test && lua_istable(L, 3)) {
+        cli_push_cap_stream(L, 0, 3, cli_cap_stdin_methods);
+        lua_setfield(L, -2, "stdin");
+        cli_push_cap_stream(L, 1, 3, cli_cap_writer_methods);
+        lua_setfield(L, -2, "stdout");
+        cli_push_cap_stream(L, 2, 3, cli_cap_writer_methods);
+        lua_setfield(L, -2, "stderr");
+    } else {
+        cli_push_stream(L, 0, cli_stdin_methods);   lua_setfield(L, -2, "stdin");
+        cli_push_stream(L, 1, cli_writer_methods);  lua_setfield(L, -2, "stdout");
+        cli_push_stream(L, 2, cli_writer_methods);  lua_setfield(L, -2, "stderr");
+    }
     for (const luaL_Reg *m = cli_signal_methods; m->name; m++) {
         hl_lua_pushcfunction(L, m->func);
         lua_setfield(L, -2, m->name);
@@ -1467,50 +1667,85 @@ static int main_prepare_k(lua_State *L)
     return 2;
 }
 
-static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
-                            int argc, char **argv,
-                            const char *const *env_allowlist,
-                            int *exit_code_out)
-{
-    if (exit_code_out) *exit_code_out = 1;
-    if (!rt || !exit_code_out) return -1;
-    HlLua *lua = (HlLua *)rt;
-    lua_State *L = lua->L;
+/* test.run_main's wait (run_until's predicate): each of main's resumes
+ * re-arms the budget, so what a stretch used is taken off the budget here,
+ * between ticks, and added up; the wait ends when main has, when the case's
+ * budget is spent, or when the run's time bound passes. */
+typedef struct {
+    HlLua        *lua;
+    lua_State    *co;
+    HlLuaMainRun *r;
+    uint64_t      deadline;    /* backend->monotonic_ms(); 0 = none */
+} HlLuaMainWait;
 
-    /* CLI mode bypasses wire_routes_server, so the server pointer
-     * normally set there isn't wired. Set it now so async ops
-     * (hull.sleep, compute.async, gpu.async, http.fetch) can find it. */
-    if (server) lua->server = server;
+/* Add what main's last stretch used to r->used, and start counting anew. */
+static void main_test_take_used(HlLua *lua, HlLuaMainRun *r)
+{
+    int64_t u = lua->budget.used;
+    r->used = u > INT64_MAX - r->used ? INT64_MAX : r->used + u;
+    lua->budget.used = 0;
+}
+
+static int main_test_wait_done(void *user)
+{
+    HlLuaMainWait *w = (HlLuaMainWait *)user;
+    HlLua *lua = w->lua;
+    main_test_take_used(lua, w->r);
+    if (lua->cli_main_co != w->co) return 1;            /* main ended */
+    int64_t limit = lua->max_instructions;
+    if (limit > 0 && (w->r->used >= limit - w->r->case_used ||
+                      w->r->used > INT64_MAX - w->r->case_used)) {
+        w->r->gave_up = 2;
+        return 1;
+    }
+    if (w->deadline && hl_async_backend()->monotonic_ms() >= w->deadline) {
+        w->r->gave_up = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* Run app.main once (the real runner, or test.run_main). The exit code in
+ * *exit_code_out; 0 when main returned, -1 when it could not start, raised,
+ * or (test) was given up. */
+static int lua_main_run(HlLua *lua, HlLuaMainRun *r, int *exit_code_out)
+{
+    lua_State *L = lua->L;
+    lua_State *from = r->from ? r->from : L;
+    *exit_code_out = 1;
 
     /* Wrap main in a coroutine so async ops (compute.async, gpu.async,
      * http.fetch, hull.sleep) can yield via the existing infrastructure.
      * The same machinery the HTTP dispatch uses applies here - only the
      * "what to do when the coroutine finally terminates" differs.
      *
-     * The coroutine, main and its ctx table are made under one lua_pcall on
-     * the main state (audit 9 L2), as hl_lua_entry_prepare does for the
-     * other entries: built straight onto the not-yet-running coroutine, a
-     * memory error had no handler and Lua aborted the process. */
-    HlLuaMainPrep prep = { argc, argv, env_allowlist, NULL, LUA_NOREF };
-    if (!lua_checkstack(L, 4))
+     * The coroutine, main and its ctx table are made under one lua_pcall
+     * (audit 9 L2), as hl_lua_entry_prepare does for the other entries:
+     * built straight onto the not-yet-running coroutine, a memory error had
+     * no handler and Lua aborted the process. */
+    HlLuaMainPrep prep = { r, NULL, LUA_NOREF };
+    if (!lua_checkstack(from, 6))
         return -1;
     lua->main_sig         = 0;
     lua->main_sig_ref     = LUA_NOREF;
     lua->main_sig_watched = 0;
-    int base = lua_gettop(L);
-    lua_pushcfunction(L, main_prepare_k);
-    lua_pushlightuserdata(L, &prep);
-    if (lua_pcall(L, 1, 2, 0) != LUA_OK) {
+    int base = lua_gettop(from);
+    lua_pushcfunction(from, main_prepare_k);
+    lua_pushlightuserdata(from, &prep);
+    if (r->args_idx) lua_pushvalue(from, r->args_idx); else lua_pushnil(from);
+    if (r->cap_idx)  lua_pushvalue(from, r->cap_idx);  else lua_pushnil(from);
+    if (r->env_idx)  lua_pushvalue(from, r->env_idx);  else lua_pushnil(from);
+    if (lua_pcall(from, 4, 2, 0) != LUA_OK) {
         char ebuf[256];
-        hl_eprintf_line("[hull:main] cannot start main: %s",
-                hl_lua_error_text(lua, L, -1, ebuf, sizeof ebuf));
-        lua_settop(L, base);
+        main_report(r, "[hull:main] cannot start main: ",
+                    hl_lua_error_text(lua, from, -1, ebuf, sizeof ebuf));
+        lua_settop(from, base);
         if (prep.ref != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, prep.ref);
         return -1;
     }
     lua_State *co = prep.co;
     int co_ref = prep.ref;
-    lua_xmove(L, co, 2);  /* co: [main_fn, ctx] */
+    lua_xmove(from, co, 2);  /* co: [main_fn, ctx] */
 
     /* Set active state so async ops see the right coroutine/conn. */
     lua_State *saved_co       = lua->active_co;
@@ -1529,17 +1764,24 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 9 L1: an entry */
     HL_LUA_ARM_KIND(lua, co, HL_RUN_MAIN);   /* app.main's own deadline */
     int nres = 0;
-    int status = lua_resume(co, L, 1, &nres);
-    status = hl_lua_resume_status(co, L, status);
+    int status = lua_resume(co, from, 1, &nres);
+    status = hl_lua_resume_status(co, from, status);
     hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 9 L1: any open txn is stale now */
+    if (r->test)
+        main_test_take_used(lua, r);
 
     if (status == LUA_YIELD) {
         /* Main yielded - async op in flight. cli_main_co (set above) tells
-         * hl_lua_async_resume to stop the server when it eventually
+         * hl_lua_async_resume to stop the loop when it eventually
          * completes; enter the event loop. */
         if (!lua->base.async_ctx) {
-            fprintf(stderr, "[hull:main] internal: no event loop available\n");
-            luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
+            main_report(r, "[hull:main] ", "internal: no event loop available");
+            if (r->test) {
+                /* Kept referenced: its continuation may still name it. */
+                hl_lua_async_abandon(co);
+            } else {
+                luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
+            }
             lua->active_co         = saved_co;
             lua->active_conn       = saved_conn;
             lua->active_thread_ref = saved_thread_ref;
@@ -1551,12 +1793,40 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
          * builds this is a wrap around KlHttpServer's KlEventCtx (same loop
          * the HTTP server uses); on HTTP=0 it's the poll backend's
          * standalone loop. hl_lua_async_resume calls backend->stop when
-         * main terminates, which returns us here. */
+         * main terminates, which returns us here. A test's wait is bounded
+         * (main_test_wait_done). */
         lua->cli_main_status = LUA_YIELD;
-        int srv_rc = hl_async_backend()->run(lua->base.async_ctx);
-        if (srv_rc < 0) {
-            fprintf(stderr, "[hull:main] event loop error\n");
+        int srv_rc;
+        if (r->test) {
+            HlLuaMainWait w = { lua, co, r, 0 };
+            if (r->timeout_ms)
+                w.deadline = hl_async_backend()->monotonic_ms() + r->timeout_ms;
+            srv_rc = hl_async_backend()->run_until(lua->base.async_ctx,
+                                                   main_test_wait_done, &w);
+            main_test_take_used(lua, r);   /* the last stretch */
+            if (lua->cli_main_co == co) {
+                /* Given up while main still waits. It cannot be resumed
+                 * now: abandoned, so its op's completion (a later tick, or
+                 * the teardown's cancel) ends it without running it. Its
+                 * registry ref is kept - that continuation still names the
+                 * coroutine - and dies with the VM. */
+                if (!r->gave_up) r->gave_up = 1;
+                hl_lua_async_abandon(co);
+                lua->active_co         = saved_co;
+                lua->active_conn       = saved_conn;
+                lua->active_thread_ref = saved_thread_ref;
+                lua->cli_main_co       = NULL;
+                if (lua->main_sig_ref != LUA_NOREF) {
+                    luaL_unref(L, LUA_REGISTRYINDEX, lua->main_sig_ref);
+                    lua->main_sig_ref = LUA_NOREF;
+                }
+                return -1;
+            }
+        } else {
+            srv_rc = hl_async_backend()->run(lua->base.async_ctx);
         }
+        if (srv_rc < 0)
+            main_report(r, "[hull:main] ", "event loop error");
 
         /* After run() returns, the coroutine status reflects main's
          * terminal state. */
@@ -1569,18 +1839,18 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
      * message (LUA_ERRRUN etc.) - either way, the top of the stack is
      * what we read. Unless an interrupt ended main (shared/main_signal.h):
      * then main is still parked, nothing on its stack is a result, and the
-     * exit status is 128 + the signal. */
+     * exit status is 128 + the signal. A test's main sees no signal. */
     int rc;
-    int ended = hl_main_signal_ended();
+    int ended = r->test ? 0 : hl_main_signal_ended();
     if (ended && status == LUA_YIELD) {
         rc = 128 + ended;
         status = LUA_ERRRUN;   /* not main's own return: the caller reads rc */
     } else if (status == LUA_OK) {
-        rc = lua_coerce_exit_code(co);
+        rc = lua_coerce_exit_code(co, r);
     } else {
         char ebuf[512];
-        hl_eprintf_line("[hull:main] error: %s",
-                hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
+        main_report(r, "[hull:main] error: ",
+                    hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
         rc = 1;
     }
 
@@ -1598,8 +1868,9 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     /* Tasks started with hull.async and never joined are abandoned when the
      * process ends here - it does unless main returned 0 and routes are
      * registered, in which case the serve loop keeps them running. Say so
-     * rather than letting their work vanish silently. */
-    if (rc != 0 || !vt_lua_has_server_handlers(rt)) {
+     * rather than letting their work vanish silently. (A test's VM lives
+     * on, so its tasks are not abandoned.) */
+    if (!r->test && (rc != 0 || !vt_lua_has_server_handlers((HlRuntime *)lua))) {
         lua_Integer n = 0;
         if (lua_checkstack(L, 2)) {
             lua_pushcfunction(L, run_main_running_k);
@@ -1615,6 +1886,236 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
 
     *exit_code_out = rc;
     return (status == LUA_OK) ? 0 : -1;
+}
+
+static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
+                            int argc, char **argv,
+                            const char *const *env_allowlist,
+                            int *exit_code_out)
+{
+    if (exit_code_out) *exit_code_out = 1;
+    if (!rt || !exit_code_out) return -1;
+    HlLua *lua = (HlLua *)rt;
+
+    /* CLI mode bypasses wire_routes_server, so the server pointer
+     * normally set there isn't wired. Set it now so async ops
+     * (hull.sleep, compute.async, gpu.async, http.fetch) can find it. */
+    if (server) lua->server = server;
+
+    HlLuaMainRun r = {0};
+    r.argc = argc;
+    r.argv = argv;
+    r.env  = env_allowlist;
+    r.from = lua->L;
+    return lua_main_run(lua, &r, exit_code_out);
+}
+
+/* ── test.run_main(args?, opts?) ───────────────────────────────────────
+ *
+ * Runs the loaded app's app.main once, inside the calling test case, and
+ * returns { code = n, stdout = "...", stderr = "..." }. ctx.args is @p args
+ * (strings), ctx.stdin reads opts.stdin, ctx.stdout / ctx.stderr are
+ * captured (the process's own streams are not touched), and ctx.env is
+ * exactly opts.env, whose names must be in the manifest's `env` list - the
+ * test cannot widen it. main's waits (hull.sleep, http.fetch, db.async,
+ * compute.async) are driven on the test's event loop until main ends, at
+ * most opts.timeout_ms (default HL_TEST_MAIN_TIMEOUT_MS, and never past the
+ * case's own deadline); a main given up then raises. A raised error is code
+ * 1 with the runner's message on the captured stderr, as the real runner
+ * prints it. As test.get's request, main runs on the case's time: the
+ * case's instruction count is kept and charged with main's, its deadline
+ * put back, and the stale-transaction guard held off while the case has a
+ * transaction open (main can then not wait: every wait is refused inside a
+ * transaction). Each call is a fresh invocation of the same loaded app. */
+#define HL_TEST_MAIN_TIMEOUT_MS  10000u
+#define HL_TEST_MAIN_MAX_ARGS    1024
+
+static int test_main_result_k(lua_State *L)
+{
+    /* 1: capture table, 2: code, 3: runner message or nil */
+    lua_newtable(L);
+    lua_pushvalue(L, 2);
+    lua_setfield(L, -2, "code");
+    static const char *const keys[2] = { "out", "err" };
+    static const char *const names[2] = { "stdout", "stderr" };
+    for (int k = 0; k < 2; k++) {
+        luaL_Buffer b;
+        luaL_buffinit(L, &b);
+        lua_pushstring(L, keys[k]);
+        lua_rawget(L, 1);
+        int t = lua_gettop(L);
+        if (lua_istable(L, t)) {
+            lua_Integer n = (lua_Integer)lua_rawlen(L, t);
+            for (lua_Integer i = 1; i <= n; i++) {
+                lua_rawgeti(L, t, i);
+                luaL_addvalue(&b);
+            }
+        }
+        lua_remove(L, t);
+        if (k == 1 && lua_isstring(L, 3)) {
+            lua_pushvalue(L, 3);
+            luaL_addvalue(&b);
+            luaL_addchar(&b, '\n');
+        }
+        luaL_pushresult(&b);
+        lua_setfield(L, -2, names[k]);
+    }
+    return 1;
+}
+
+int hl_lua_test_run_main(lua_State *L)
+{
+    HlLua *lua = get_hl_lua_from_L(L);
+    if (!lua) return luaL_error(L, "test module not initialized");
+    if (!vt_lua_has_main((HlRuntime *)lua))
+        return luaL_error(L, "test.run_main: the app did not register app.main");
+    if (lua->cli_main_co)
+        return luaL_error(L, "test.run_main: app.main is already running");
+
+    lua_settop(L, 2);
+    /* 1: args, 2: opts, 3: capture, 4: env */
+    if (!lua_isnil(L, 1)) {
+        luaL_checktype(L, 1, LUA_TTABLE);
+        lua_Integer n = (lua_Integer)lua_rawlen(L, 1);
+        if (n > HL_TEST_MAIN_MAX_ARGS)
+            return luaL_error(L, "test.run_main: more than %d args",
+                              HL_TEST_MAIN_MAX_ARGS);
+        for (lua_Integer i = 1; i <= n; i++) {
+            if (lua_rawgeti(L, 1, i) != LUA_TSTRING)
+                return luaL_error(L, "test.run_main: args[%d] is not a string",
+                                  (int)i);
+            lua_pop(L, 1);
+        }
+    }
+    if (!lua_isnil(L, 2)) luaL_checktype(L, 2, LUA_TTABLE);
+
+    lua_newtable(L);                    /* 3: capture */
+    lua_newtable(L); lua_setfield(L, 3, "out");
+    lua_newtable(L); lua_setfield(L, 3, "err");
+    lua_pushinteger(L, 0); lua_setfield(L, 3, "pos");
+    lua_pushnil(L);                     /* 4: env */
+
+    uint32_t timeout_ms = HL_TEST_MAIN_TIMEOUT_MS;
+    if (lua_istable(L, 2)) {
+        lua_pushliteral(L, "stdin");
+        lua_rawget(L, 2);
+        if (lua_type(L, -1) == LUA_TSTRING) lua_setfield(L, 3, "input");
+        else if (!lua_isnil(L, -1))
+            return luaL_error(L, "test.run_main: opts.stdin must be a string");
+        else lua_pop(L, 1);
+
+        lua_pushliteral(L, "timeout_ms");
+        lua_rawget(L, 2);
+        if (!lua_isnil(L, -1)) {
+            if (!lua_isinteger(L, -1) || lua_tointeger(L, -1) <= 0 ||
+                lua_tointeger(L, -1) > 24 * 3600 * 1000)
+                return luaL_error(L, "test.run_main: opts.timeout_ms must be "
+                                     "a positive integer");
+            timeout_ms = (uint32_t)lua_tointeger(L, -1);
+        }
+        lua_pop(L, 1);
+
+        lua_pushliteral(L, "env");
+        lua_rawget(L, 2);
+        if (lua_istable(L, -1)) {
+            lua_replace(L, 4);
+            lua_pushnil(L);
+            while (lua_next(L, 4) != 0) {
+                if (lua_type(L, -2) != LUA_TSTRING || lua_type(L, -1) != LUA_TSTRING)
+                    return luaL_error(L, "test.run_main: opts.env maps names "
+                                         "to strings");
+                const char *name = lua_tostring(L, -2);
+                int allowed = 0;
+                const char *const *al = lua->base.test_env_allow;
+                for (int i = 0; al && al[i]; i++)
+                    if (strcmp(al[i], name) == 0) { allowed = 1; break; }
+                if (!allowed)
+                    return luaL_error(L, "test.run_main: env '%s' is not in the "
+                                         "manifest's env list", name);
+                lua_pop(L, 1);
+            }
+        } else if (!lua_isnil(L, -1)) {
+            return luaL_error(L, "test.run_main: opts.env must be a table");
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+
+    /* Never past the case's own deadline (cap/run_watchdog.h). */
+    int64_t left = hl_run_deadline_left_ms();
+    if (left >= 0 && (uint64_t)left < timeout_ms)
+        timeout_ms = left > 0 ? (uint32_t)left : 1;
+
+    /* main runs inside this case, as test.get's request does (audit 10). */
+    HlLuaBudget saved_budget = lua->budget;
+    uint64_t saved_deadline = hl_run_watch_save(&lua->run_watch);
+    lua_State     *saved_co    = lua->active_co;
+    int            saved_ref   = lua->active_thread_ref;
+    KlHttpConn    *saved_conn  = lua->active_conn;
+    KlHttpRequest *saved_req   = lua->active_req;
+    void          *saved_timer = lua->active_timer;
+    void (*saved_oc)(struct HlLua *, void *) = lua->active_on_complete;
+    void          *saved_oc_ctx = lua->active_on_complete_ctx;
+    int            saved_kind  = lua->run_kind;
+    lua->active_req             = NULL;
+    lua->active_timer           = NULL;
+    lua->active_on_complete     = NULL;
+    lua->active_on_complete_ctx = NULL;
+    int hold = hl_db_registry_open_txn(lua->base.db_registry) != NULL;
+    if (hold) hl_db_registry_guard_hold(1);
+
+    HlLuaMainRun r = {0};
+    r.test       = 1;
+    r.args_idx   = lua_isnil(L, 1) ? 0 : 1;
+    r.cap_idx    = 3;
+    r.env_idx    = lua_isnil(L, 4) ? 0 : 4;
+    r.timeout_ms = timeout_ms;
+    r.case_used  = saved_budget.used;
+    r.from       = L;
+    int code = 1;
+    (void)lua_main_run(lua, &r, &code);
+
+    if (hold) hl_db_registry_guard_hold(-1);
+    lua->active_co              = saved_co;
+    lua->active_thread_ref      = saved_ref;
+    lua->active_conn            = saved_conn;
+    lua->active_req             = saved_req;
+    lua->active_timer           = saved_timer;
+    lua->active_on_complete     = saved_oc;
+    lua->active_on_complete_ctx = saved_oc_ctx;
+    lua->run_kind               = saved_kind;
+    int nested_tripped = lua->budget.tripped;
+    int nested_timed_out = lua->budget.timed_out;
+    /* r.used: what main's stretches used in all (lua_main_run). */
+    int64_t nested = r.used;
+    lua->budget = saved_budget;
+    lua->budget.used = nested > INT64_MAX - saved_budget.used
+                       ? INT64_MAX : saved_budget.used + nested;
+    if (nested_tripped ||
+        (lua->budget.limit > 0 && lua->budget.used >= lua->budget.limit))
+        lua->budget.tripped = 1;
+    if (nested_timed_out)
+        lua->budget.timed_out = 1;
+    hl_run_watch_restore(&lua->run_watch, saved_deadline);
+    if (hl_run_watch_stopped(&lua->run_watch) && !lua->budget.tripped) {
+        lua->budget.tripped = 1;
+        lua->budget.timed_out = 1;
+    }
+    if (r.gave_up == 2) lua->budget.tripped = 1;
+    if (lua->budget.tripped)
+        return hl_lua_budget_raise(L);
+    if (r.gave_up)
+        return luaL_error(L, "test.run_main: app.main did not finish within "
+                             "%d ms", (int)timeout_ms);
+
+    if (!lua_checkstack(L, 8)) return luaL_error(L, "not enough memory");
+    lua_settop(L, 3);
+    lua_pushcfunction(L, test_main_result_k);
+    lua_pushvalue(L, 3);
+    lua_pushinteger(L, code);
+    if (r.msg[0]) lua_pushstring(L, r.msg); else lua_pushnil(L);
+    lua_call(L, 3, 1);
+    return 1;
 }
 
 #ifdef HL_ENABLE_HTTP_SERVER

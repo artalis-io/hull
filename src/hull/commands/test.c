@@ -96,16 +96,24 @@ static void stdout_on_summary(void *user,
 /* Run tests for one app entry point (Lua or JS). */
 static int run_tests_for_entry(const char *app_dir, const char *entry)
 {
+    /* An event loop + worker pool for the run, so app.main under
+     * test.run_main (and a JS async test body) can wait. */
+    HlTestRunnerLoop loop;
+    (void)hl_test_runner_loop_init(&loop);
     HlAppContext *ctx = NULL;
     HlAppContextOpts opts = {
         .app_dir      = app_dir,
         .entry_point  = entry,
         .gate_modules = 1,
+        .thread_pool  = loop.pool,
     };
     if (hl_app_context_init(&ctx, &opts) != 0) {
         fprintf(stderr, "hull test: failed to initialize app context\n");
+        hl_test_runner_loop_detach(&loop, NULL);
+        hl_test_runner_loop_free(&loop);
         return 1;
     }
+    hl_test_runner_loop_attach(&loop, hl_app_context_runtime(ctx));
 
     StdoutWriterState state = {0};
     HlTestRunnerWriter writer = {
@@ -116,7 +124,9 @@ static int run_tests_for_entry(const char *app_dir, const char *entry)
         .on_summary          = stdout_on_summary,
     };
     int rc = hl_test_runner_run(ctx, &writer);
+    hl_test_runner_loop_detach(&loop, hl_app_context_runtime(ctx));
     hl_app_context_free(ctx);
+    hl_test_runner_loop_free(&loop);
     if (rc < 0) {
         /* Runner-level failure (no routes / no test files); load_error already emitted */
         return 1;

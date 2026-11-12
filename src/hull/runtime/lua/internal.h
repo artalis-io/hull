@@ -236,6 +236,17 @@ int hl_lua_async_k_ok(lua_State *L);
  * closed task's handlers ran up to a hook stride uncharged (audit 39). */
 int hl_lua_resume_status(lua_State *co, lua_State *from, int status);
 
+/* Mark @p co abandoned (async.c): a wait it is parked on that completes or
+ * is cancelled later ends it without resuming it, and coroutine.resume /
+ * close refuse it. For an app.main test.run_main gave up on (runtime.c);
+ * the caller keeps @p co referenced, since its continuation still names it. */
+void hl_lua_async_abandon(lua_State *co);
+
+/* test.run_main(args?, opts?) (runtime.c, registered by mod_test.c): run the
+ * app's app.main once inside the calling test case, ctx.stdout / stderr
+ * captured, and return { code, stdout, stderr }. */
+int hl_lua_test_run_main(lua_State *L);
+
 /* Start an event-loop entry protected (runtime.c): a new coroutine holding
  * the handler from registry table @p table at @p handler_id, then the
  * arguments @p push builds on the (main) state it is given - all under one

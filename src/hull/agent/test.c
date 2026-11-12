@@ -148,13 +148,21 @@ int hl_agent_test(const char *app_dir, ShJsonBuf *out)
     /* Gated as `hull test` is (commands/test.c): the tests run app code, so
      * they get the module gate, the "$VAR" check and the WASM ceilings. They
      * ran with none of them (audit 19). */
+    HlTestRunnerLoop loop;   /* as hull test's (commands/test.c) */
+    (void)hl_test_runner_loop_init(&loop);
     HlAppContextOpts opts = { .app_dir = app_dir, .entry_point = entry,
-                              .gate_modules = 1 };
-    if (hl_app_context_init(&ctx, &opts) != 0)
+                              .gate_modules = 1, .thread_pool = loop.pool };
+    if (hl_app_context_init(&ctx, &opts) != 0) {
+        hl_test_runner_loop_detach(&loop, NULL);
+        hl_test_runner_loop_free(&loop);
         return hl_agent_write_error(out, "runtime init failed");
+    }
+    hl_test_runner_loop_attach(&loop, hl_app_context_runtime(ctx));
 
     int rc = hl_agent_test_ctx(ctx, out);
+    hl_test_runner_loop_detach(&loop, hl_app_context_runtime(ctx));
     hl_app_context_free(ctx);
+    hl_test_runner_loop_free(&loop);
     return rc;
 }
 

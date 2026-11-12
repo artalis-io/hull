@@ -496,6 +496,11 @@ static void hl_js_run_tag_fail(HlJS *js, uint64_t tag)
     js->txn_dead_len++;
 }
 
+void hl_js_run_tag_abandon(HlJS *js, uint64_t tag)
+{
+    hl_js_run_tag_fail(js, tag);
+}
+
 int hl_js_run_tag_failed(const HlJS *js, uint64_t tag)
 {
     if (!js || tag == 0) return 0;
@@ -751,6 +756,16 @@ static void hl_js_async_resume_impl(HlAsyncCont *self, void *driver)
 
     if (!ctx) return;
 
+    /* An op of an app.main that is no longer the one running (test.runMain
+     * gave up on it and has started main again since: each invocation is a
+     * run of its own, cli_main_tag) is not main's: it must not end, or be
+     * reported as, the current one. */
+    int stale_main = 0;
+    if (jc->cli_main && jc->link.run_tag != js->cli_main_tag) {
+        jc->cli_main = 0;
+        stale_main = 1;
+    }
+
     /* An entry point: the resumed run gets a budget of its own (it used to
      * inherit whatever count the last entry left - and after one trip,
      * every resume failed at its first poll until the next dispatch). A
@@ -820,6 +835,11 @@ static void hl_js_async_resume_impl(HlAsyncCont *self, void *driver)
      * without continuing the handler (hl_js_run_yield_check). */
     int aborted = (jc->link.once && jc->link.once->txn_held) ||
                   hl_js_run_tag_failed(js, jc->link.run_tag);   /* audit 31 */
+    /* Why it is dropped: an abandoned app.main's run (its tag failed by
+     * test.runMain giving up on it) is not a transaction held across a wait. */
+    const char *abort_why = stale_main
+        ? "an abandoned test.runMain run resumed; dropped"
+        : "waited holding a database transaction";
 
     if (aborted) {
         /* resolve / reject are freed below, uncalled */
@@ -907,10 +927,13 @@ static void hl_js_async_resume_impl(HlAsyncCont *self, void *driver)
     if (aborted && !wired) {
         /* Its run held a transaction across a wait: the code after this
          * await is dropped, not continued (audit 31). */
-        log_error("[hull:js] async code whose run waited holding a database "
-                  "transaction is not continued");
+        if (stale_main)
+            log_error("[hull:js] %s", abort_why);
+        else
+            log_error("[hull:js] async code whose run waited holding a database "
+                      "transaction is not continued");
         if (jc->cli_main)
-            hl_js_cli_main_trip(js, "waited holding a database transaction");
+            hl_js_cli_main_trip(js, abort_why);
     }
     /* The handler waits again (not a settled one deferred to its holder,
      * below): checked whether or not this resume started a new op - one made
@@ -1029,7 +1052,7 @@ static void hl_js_async_resume_impl(HlAsyncCont *self, void *driver)
         }
         const char *shown = msg ? msg : tripped
             ? hl_js_trip_reason(js)
-            : aborted ? "waited holding a database transaction" : "(unknown)";
+            : aborted ? abort_why : "(unknown)";
         if (conn)
             log_error("[hull:c] async js handler error: %s", shown);
         else if (jc->timer_ctx)

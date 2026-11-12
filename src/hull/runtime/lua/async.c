@@ -181,6 +181,11 @@ static void hl_lua_set_abandoned(lua_State *co)
     if (co) *hl_lua_co_mark(co) = &hl_lua_abandoned_marker;
 }
 
+void hl_lua_async_abandon(lua_State *co)
+{
+    hl_lua_set_abandoned(co);
+}
+
 static int hl_lua_thread_is_parked(lua_State *co)
 {
     return co && (*hl_lua_co_mark(co) == &hl_lua_parked_marker ||
