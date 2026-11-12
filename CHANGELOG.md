@@ -73,6 +73,8 @@ release-artifact layout).
   follows the link; one that cannot be made absolute is used as given
   instead of failing.
 - **`hull update`** escapes a release tag it refuses before printing it.
+- **A `db.open` UDF's destructor** (JS) drops its function from a job rather
+  than inside SQLite (audit 45, defence in depth).
 
 - **`hull test` (audit 45).** A route handler that waits inside a `test.get`
   (`hull.sleep`, `http.fetch`, `db.async`, ...) is refused with `wait_refused`

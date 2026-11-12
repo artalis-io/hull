@@ -20092,6 +20092,7 @@ UTEST(js_test_run_main, test_setup_accepts_a_cli_app)
 
 #if defined(HL_ENABLE_DB) && defined(HL_ENABLE_SQLITE)
 #include "hull/cap/db_dynamic.h"
+#include "../../../../src/hull/runtime/js/mod_db.h"   /* hl_js_db_owned_handle */
 /* ── db.udf on a db.open() connection ─────────────────────────────────
  * conn.udf is present on a dynamic SQLite handle as on a registry one. Its
  * methods are bound to their own connection (not to `this`): called on
@@ -20161,6 +20162,55 @@ UTEST(js_db_open_udf, register_query_unregister)
                     "err:database not available|err:database not available");
     free(s);
     EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    db_open_udf_done(reg);
+    cleanup_js_caps();
+}
+
+/* audit 45 (defence in depth): a db.open UDF's destructor runs inside
+ * SQLite (a re-registration, or closing the old connection when a stuck
+ * transaction is reopened), so it drops the function from a job: if that
+ * function ever held the last reference to its own connection, the
+ * connection's finalizer would close the handle SQLite was still working
+ * on. Today the connection's own udf methods keep it in a cycle only the
+ * collector frees, so this pins the contract rather than a reachable bug. */
+UTEST(js_db_open_udf_audit45, destructor_defers_the_last_reference)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static HlManifest m;
+    HlDbRegistry *reg = db_open_udf_registry(&m);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "(() => {\n"
+        "  const c = dbMod.open(':memory:');\n"
+        "  c.udf.register('hull_cyc', () => (c ? 1 : 0));\n"
+        "  globalThis.__cyc = c;\n"
+        "})();\n"), 0);
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JSValue c = JS_GetPropertyStr(js.ctx, g, "__cyc");
+    HlDbHandle *h = hl_js_db_owned_handle(js.ctx, c);
+    ASSERT_TRUE(h != NULL);
+    sqlite3 *raw = hl_db_sqlite_raw(h);
+    ASSERT_TRUE(raw != NULL);
+    /* Only the function's closure keeps the connection now. */
+    JSAtom a = JS_NewAtom(js.ctx, "__cyc");
+    JS_DeleteProperty(js.ctx, g, a, 0);
+    JS_FreeAtom(js.ctx, a);
+    JS_FreeValue(js.ctx, c);
+    JS_FreeValue(js.ctx, g);
+    hl_js_run_jobs(&js);
+    EXPECT_EQ(hl_db_dynamic_open_count(), 1);
+    /* SQLite runs the destructor here: the connection must outlive it. */
+    EXPECT_EQ(SQLITE_OK, sqlite3_create_function_v2(raw, "hull_cyc", -1,
+                                                    SQLITE_UTF8, NULL, NULL,
+                                                    NULL, NULL, NULL));
+    EXPECT_EQ(hl_db_dynamic_open_count(), 1);
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(raw, "SELECT 1", NULL, NULL, NULL));
+    /* At the next drain the function goes, then the connection with it. */
+    hl_js_run_jobs(&js);
+    JS_RunGC(js.rt);
     EXPECT_EQ(hl_db_dynamic_open_count(), 0);
     db_open_udf_done(reg);
     cleanup_js_caps();
