@@ -11,6 +11,8 @@
 #      error, a timeout and repeated invocations - both runtimes.
 #   4. An app with routes AND app.main gets test.get and run_main; an app
 #      with neither is a clear error.
+#   5. An app named by a RELATIVE directory (`hull test app`, `hull test ..`)
+#      keeps its relative imports working - both runtimes.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -247,6 +249,45 @@ elif echo "$out" | grep -q "no routes or app.main registered"; then
 else
     fail "no routes and no app.main: message" "$out"
 fi
+
+echo "=== relative app directory keeps relative imports ==="
+mkdir -p "$TMP/rel/js/lib" "$TMP/rel/js/tests" "$TMP/rel/lua/lib" "$TMP/rel/lua/tests"
+cat > "$TMP/rel/js/app.js" <<'JS'
+import { app } from "hull:app";
+import { greeting } from "./lib/a.js";
+app.manifest({});
+app.main((ctx) => { ctx.stdout.write(greeting + "\n"); return 0; });
+JS
+printf 'export const greeting = "hi";\n' > "$TMP/rel/js/lib/a.js"
+cat > "$TMP/rel/js/tests/test_rel.js" <<'JS'
+test("relative import", async () => {
+    test.eq((await test.runMain([])).stdout, "hi\n");
+});
+JS
+cat > "$TMP/rel/lua/app.lua" <<'LUA'
+local a = require("./lib/a")
+app.manifest({})
+app.main(function(ctx) ctx.stdout:write(a.greeting .. "\n"); return 0 end)
+LUA
+printf 'return { greeting = "hi" }\n' > "$TMP/rel/lua/lib/a.lua"
+cat > "$TMP/rel/lua/tests/test_rel.lua" <<'LUA'
+test("relative require", function()
+    test.eq(test.run_main({}).stdout, "hi\n")
+end)
+LUA
+# Each case: the directory hull test runs from, then the app argument.
+rel_case() {
+    if out=$(cd "$TMP/$1" && "$HULL" test "$2" 2>&1); then
+        pass "hull test $2 (from $1)"
+    else
+        fail "hull test $2 (from $1)" "$out"
+    fi
+}
+for rt in js lua; do
+    rel_case rel "$rt"
+    rel_case "rel/$rt/tests" ..
+    rel_case "rel/$rt/lib" "../../$rt"
+done
 
 echo ""
 echo "e2e_test_cli: $PASS passed, $FAIL failed"

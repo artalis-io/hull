@@ -56,6 +56,15 @@ release-artifact layout).
 
 ### Fixed
 
+- **`hull test`, `hull agent` and `hull mcp` accept a relative app
+  directory.** `hull test app` (or `hull test ..`) failed an app's relative
+  imports - JS `module not found: app/lib/a.js`, Lua `module not found:
+  ./lib/a` - because the entry was named relative to the working directory
+  and its imports resolved against that name as if it were app-relative; an
+  absolute directory worked. The app context now makes a development app's
+  directory and entry absolute. `examples/cli_modular` joins
+  `make hull-test-examples`.
+
 - **`docs/app_api_reference.md` no longer says WASM UDFs work with
   `db.async.query()`** (#1065). No connection's UDFs reach the worker pool.
 
