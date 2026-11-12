@@ -282,8 +282,8 @@ LUA
         wait "$_pid" 2>/dev/null || true
         echo "$_c|$_p"
     }
-    # The failures first: an OK verdict is cached on disk, so the hooks
-    # would not be reached for the same source afterwards.
+    # Each case is its own server: verdicts for runtime source live in that
+    # process's memory only (C audit L6), so every case asks the helper.
     OUT=$(helper_case 19931 slow)
     [ "$OUT" = "error:compile_timeout|pong" ] \
         || { cat "$HAPP/srv-19931.log"; echo "got: $OUT"; echo "FAIL: helper past its deadline"; exit 1; }
@@ -312,14 +312,17 @@ LUA
     [ "$OUT" = "compiled|pong" ] \
         || { cat "$HAPP/srv-19938.log"; echo "got: $OUT"; echo "FAIL: gpu.async.compile in a handler"; exit 1; }
     echo "ok  gpu.async.compile from a request handler"
-    ls "$HCACHE"/gpu-shaders/blobs/*/* >/dev/null 2>&1 \
-        || { ls -R "$HCACHE"; echo "FAIL: no sealed verdict cached"; exit 1; }
-    # A restart finds the verdict in the sealed cache: the helper is not
-    # asked (its crash hook would refuse the compile otherwise).
+    # Runtime source never reaches the sealed disk cache (C audit L6: one
+    # file per distinct source, possibly request text), so a restart asks
+    # the helper again and its crash hook refuses the compile.
+    if ls "$HCACHE"/gpu-shaders/blobs/*/* >/dev/null 2>&1; then
+        ls -R "$HCACHE"; echo "FAIL: a runtime-source verdict was written to disk"; exit 1
+    fi
+    echo "ok  no runtime-source verdict on disk"
     OUT=$(helper_case 19935 crash)
-    [ "$OUT" = "compiled|pong" ] \
-        || { cat "$HAPP/srv-19935.log"; echo "got: $OUT"; echo "FAIL: cached verdict not used"; exit 1; }
-    echo "ok  a cached verdict skips the helper after a restart"
+    [ "$OUT" = "error:shader_helper_failed|pong" ] \
+        || { cat "$HAPP/srv-19935.log"; echo "got: $OUT"; echo "FAIL: a restart skipped the helper"; exit 1; }
+    echo "ok  a restart asks the helper again"
     rm -rf "$HAPP" "$HCACHE"
 else
     echo "skip  compile helper cases (no GPU device)"
