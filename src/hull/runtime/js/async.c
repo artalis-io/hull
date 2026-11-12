@@ -704,6 +704,14 @@ int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what)
         hl_js_refusal_tag(ctx, HL_REFUSAL_WAIT);
         return -1;
     }
+    if (js->active_life && js->active_life->no_conn) {
+        JS_ThrowTypeError(ctx,
+            "%s cannot wait in a request test.get dispatches: its response "
+            "is gone once test.get returns; test the waiting code from the "
+            "test case itself, or through test.run_main", what);
+        hl_js_refusal_tag(ctx, HL_REFUSAL_WAIT);
+        return -1;
+    }
     if (js->active_conn && js->active_life && js->active_life->parked > 0) {
         JS_ThrowTypeError(ctx,
             "%s cannot start while req.multipart() is waiting for more of "

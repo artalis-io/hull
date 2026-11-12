@@ -13,6 +13,7 @@
 #include "protected.h"
 #include "hull/http_feature.h"  /* hl_lua_http_error_response (HTTP-feature seam) */
 #include "hull/shared/async.h"
+#include "hull/shared/req_life.h"
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
@@ -923,6 +924,17 @@ void hl_lua_async_cont_set_timer(HlAsyncCont *cont, void *timer)
  * after the op is armed. So check first. Not yieldable: module load (require
  * runs under lua_pcall), a C callback such as string.gsub or table.sort.
  * Yieldable but not active_co: a coroutine the app created itself. */
+/* The handler of a request test.get dispatched (no connection): its
+ * response lives on test.get's stack and is gone once test.get returns, so
+ * a wait there would resume into a freed response (audit 45). Request
+ * entries set active_on_complete to the life's end; tasks clear it. */
+static int lua_in_no_conn_request(const HlLua *lua)
+{
+    return lua->active_on_complete == hl_lua_req_life_end_cb &&
+           lua->active_on_complete_ctx &&
+           ((const HlReqLife *)lua->active_on_complete_ctx)->no_conn;
+}
+
 int hl_lua_can_wait(lua_State *L)
 {
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
@@ -931,6 +943,8 @@ int hl_lua_can_wait(lua_State *L)
     if (!lua || !lua_isyieldable(L) || L != lua->active_co)
         return 0;
     if (lua->base.shutting_down)   /* audit 29, see hl_lua_check_can_wait */
+        return 0;
+    if (lua_in_no_conn_request(lua))   /* audit 45 */
         return 0;
     if (hl_lua_budget_charge(L, 0) != 0)   /* C audit L1, see below */
         return 0;
@@ -959,6 +973,11 @@ int hl_lua_check_can_wait(lua_State *L, const char *what)
     if (lua->base.shutting_down)
         return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "%s cannot wait: the runtime is shutting down",
                           what);
+    if (lua_in_no_conn_request(lua))
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "%s cannot wait in a request "
+                          "test.get dispatches: its response is gone once "
+                          "test.get returns; test the waiting code from the "
+                          "test case itself, or through test.run_main", what);
     /* A run that is over - its deadline passed, its budget spent - does not
      * park (C audit L1). The trip lands at the next instruction, but a
      * binding that parks runs none: under --vm-thread an abandoned run

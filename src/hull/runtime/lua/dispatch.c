@@ -99,6 +99,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
         lua->active_req = NULL;
         return -1;
     }
+    life->no_conn = lua->base.test_dispatching > 0;   /* test.get (audit 45) */
 
     /* The coroutine with handler(req, res) on it, built protected. */
     HlReqArgs args = { req, res, life };

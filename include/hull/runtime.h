@@ -367,6 +367,10 @@ struct HlRuntime {
      * closed by that teardown runs no on_close handler - the event loop is
      * going away under it (audit 15). */
     int shutting_down;
+    /* > 0 while test.get / test.post / ... dispatches a synthetic request:
+     * its response lives on that call's stack, so the request's handler may
+     * not wait (HlReqLife.no_conn; audit 45). */
+    int test_dispatching;
     /* --vm-thread (cap/vm_thread.h): the thread the VM's offloaded entries
      * run on, set by serve.c once the server is about to run and cleared
      * before it is joined. NULL (the default, and always under hull test /

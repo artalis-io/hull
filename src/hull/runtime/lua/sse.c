@@ -121,6 +121,7 @@ static void hl_lua_sse_handler_impl(KlHttpRequest *req, KlHttpResponse *res,
         lua->active_req = NULL;
         return;
     }
+    life->no_conn = lua->base.test_dispatching > 0;   /* test.get (audit 45) */
 
     /* The coroutine with handler(req, stream) on it, built protected. */
     HlSseArgs args = { req, res, life, NULL, LUA_NOREF };

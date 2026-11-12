@@ -56,6 +56,15 @@ release-artifact layout).
 
 ### Fixed
 
+- **`hull test` (audit 45).** A route handler that waits inside a `test.get`
+  (`hull.sleep`, `http.fetch`, `db.async`, ...) is refused with `wait_refused`
+  and answers 500, as in 0.20.1. Since `hull test` gained an event loop for
+  `test.run_main`, it parked and resumed after `test.get` had freed its
+  response (a crash, both runtimes). Lua `test.run_main` returned truncated
+  output, and wrote into freed memory, once a stream passed 1 KiB; and a
+  `test.run_main` started from a task while another was finishing reported
+  the wrong status.
+
 - **`hull test`, `hull agent` and `hull mcp` accept a relative app
   directory.** `hull test app` (or `hull test ..`) failed an app's relative
   imports - JS `module not found: app/lib/a.js`, Lua `module not found:
