@@ -1676,7 +1676,16 @@ typedef struct {
     lua_State    *co;
     HlLuaMainRun *r;
     uint64_t      deadline;    /* backend->monotonic_ms(); 0 = none */
+    int           expired;     /* the wake timer at `deadline` fired */
 } HlLuaMainWait;
+
+/* A timer at the wait's deadline: the loop's tick is up to 100 ms, so a
+ * shorter timeout went unnoticed while main finished within the tick
+ * (audit 45). */
+static void main_test_wait_expired(void *user)
+{
+    ((HlLuaMainWait *)user)->expired = 1;
+}
 
 /* Add what main's last stretch used to r->used, and start counting anew. */
 static void main_test_take_used(HlLua *lua, HlLuaMainRun *r)
@@ -1698,7 +1707,8 @@ static int main_test_wait_done(void *user)
         w->r->gave_up = 2;
         return 1;
     }
-    if (w->deadline && hl_async_backend()->monotonic_ms() >= w->deadline) {
+    if (w->expired ||
+        (w->deadline && hl_async_backend()->monotonic_ms() >= w->deadline)) {
         w->r->gave_up = 1;
         return 1;
     }
@@ -1798,20 +1808,26 @@ static int lua_main_run(HlLua *lua, HlLuaMainRun *r, int *exit_code_out)
         lua->cli_main_status = LUA_YIELD;
         int srv_rc;
         if (r->test) {
-            HlLuaMainWait w = { lua, co, r, 0 };
-            if (r->timeout_ms)
-                w.deadline = hl_async_backend()->monotonic_ms() + r->timeout_ms;
-            srv_rc = hl_async_backend()->run_until(lua->base.async_ctx,
-                                                   main_test_wait_done, &w);
+            const HlAsyncBackend *be = hl_async_backend();
+            HlLuaMainWait w = { lua, co, r, 0, 0 };
+            uint64_t wake = 0;
+            if (r->timeout_ms) {
+                w.deadline = be->monotonic_ms() + r->timeout_ms;
+                wake = be->timer_add(lua->base.async_ctx, r->timeout_ms,
+                                     main_test_wait_expired, &w);
+            }
+            srv_rc = be->run_until(lua->base.async_ctx, main_test_wait_done, &w);
+            if (wake) be->timer_cancel(lua->base.async_ctx, wake);
             main_test_take_used(lua, r);   /* the last stretch */
             if (lua->cli_main_co == co) {
                 /* Given up while main still waits. It cannot be resumed
                  * now: abandoned, so its op's completion (a later tick, or
                  * the teardown's cancel) ends it without running it. Its
-                 * registry ref is kept - that continuation still names the
-                 * coroutine - and dies with the VM. */
+                 * registry ref goes to that continuation - which still
+                 * names the coroutine - and is released with it (audit 45:
+                 * kept until the VM ended). */
                 if (!r->gave_up) r->gave_up = 1;
-                hl_lua_async_abandon(co);
+                hl_lua_async_abandon_owned(co);
                 lua->active_co         = saved_co;
                 lua->active_conn       = saved_conn;
                 lua->active_thread_ref = saved_thread_ref;
@@ -2078,10 +2094,31 @@ int hl_lua_test_run_main(lua_State *L)
     r.timeout_ms = timeout_ms;
     r.case_used  = saved_budget.used;
     r.from       = L;
+    /* Every arm while main runs adds the run before it to r.used and holds
+     * the new one to what the case has left (HlLuaBudget.sink; audit 45:
+     * each stretch got a fresh budget and a 10-minute deadline, and a second
+     * stretch in one tick lost the first one's count). */
+    lua->budget.used          = 0;
+    lua->budget.sink          = &r.used;
+    lua->budget.sink_cap      = saved_budget.limit > 0
+                                ? saved_budget.limit - saved_budget.used : 0;
+    if (saved_budget.limit > 0 && lua->budget.sink_cap < 1)
+        lua->budget.sink_cap = 1;
+    lua->budget.sink_deadline = saved_deadline;
+    /* Main's time is accounted through r.used (its own runs' charges): the
+     * binding call around it must not measure it again (audit 45: a CPU
+     * loop that passed in the case tripped through test.run_main). */
+    uint64_t mt0 = hl_meter_ticks();
+    uint64_t mx0 = hl_meter_excluded;
     int code = 1;
     lua->test_main_running = 1;
     (void)lua_main_run(lua, &r, &code);
     lua->test_main_running = 0;
+    if (hl_meter_exclude_depth == 0) {
+        uint64_t el = hl_meter_ticks() - mt0;
+        if (hl_meter_excluded - mx0 < el) hl_meter_excluded = mx0 + el;
+    }
+    lua->budget.sink = NULL;
 
     if (hold) hl_db_registry_guard_hold(-1);
     lua->active_co              = saved_co;
@@ -2096,7 +2133,13 @@ int hl_lua_test_run_main(lua_State *L)
     int nested_timed_out = lua->budget.timed_out;
     /* r.used: what main's stretches used in all (lua_main_run). */
     int64_t nested = r.used;
+    /* The charge meter only goes forward (HlLuaBudget.charged): keep what
+     * main charged, and the meter's live state. */
+    uint64_t     live_charged = lua->budget.charged;
+    HlMeterState live_meter   = lua->budget.meter;
     lua->budget = saved_budget;
+    lua->budget.charged = live_charged;
+    lua->budget.meter   = live_meter;
     lua->budget.used = nested > INT64_MAX - saved_budget.used
                        ? INT64_MAX : saved_budget.used + nested;
     if (nested_tripped ||

@@ -16,6 +16,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/term_escape.h"   /* hl_eprintf_line */
 #include "hull/commands/update.h"
 #include "hull/release.h"
 #include "hull/release_io.h"
@@ -121,8 +122,9 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     /* The tag names every URL below: "../", "?" or "%" in it would point
      * them elsewhere. Only the shape Hull publishes is used. */
     if (!hl_release_io_tag_valid(latest_tag)) {
-        fprintf(stderr, "hull update: release tag '%s' is not a version tag; refusing\n",
-                latest_tag);
+        /* The tag is the server's text: escaped (audit 45). */
+        hl_eprintf_line("hull update: release tag '%s' is not a version tag; "
+                        "refusing", latest_tag);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }

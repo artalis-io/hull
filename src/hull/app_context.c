@@ -200,6 +200,52 @@ static char *abs_normalized(const char *path)
     return out;
 }
 
+/* A directory made absolute the way the kernel resolves it - realpath, so a
+ * symlink before a `..` (`link/../app`) leads where the kernel would take
+ * it, as the serve path names it - else lexically (abs_normalized). NULL
+ * when neither works (audit 45: a path past 128 components, or with no
+ * working directory, failed init; the caller keeps the path as given). */
+static char *abs_dir_path(const char *path)
+{
+    char *rp = realpath(path, NULL);
+    if (rp) return rp;
+    return abs_normalized(path);
+}
+
+/* An entry file: its directory made absolute as the app directory is, so
+ * the loader matches the two; the file name itself is kept (a symlinked
+ * entry is the loaders' to judge). NULL on failure. */
+static char *abs_entry_path(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    char *dir;
+    const char *base;
+    if (slash) {
+        size_t dl = (size_t)(slash - path);
+        char *d = malloc(dl + 2);
+        if (!d) return NULL;
+        if (dl == 0) { d[0] = '/'; d[1] = '\0'; }
+        else { memcpy(d, path, dl); d[dl] = '\0'; }
+        dir = abs_dir_path(d);
+        free(d);
+        base = slash + 1;
+    } else {
+        dir = abs_dir_path(".");
+        base = path;
+    }
+    if (!dir) return NULL;
+    size_t dl = strlen(dir), bl = strlen(base);
+    if (dl > SIZE_MAX / 2 || bl > SIZE_MAX / 2) { free(dir); return NULL; }
+    char *out = malloc(dl + 1 + bl + 1);
+    if (!out) { free(dir); return NULL; }
+    memcpy(out, dir, dl);
+    size_t o = dl;
+    if (o == 0 || out[o - 1] != '/') out[o++] = '/';
+    memcpy(out + o, base, bl + 1);
+    free(dir);
+    return out;
+}
+
 /* ── Internal: determine runtime type from entry point ─────────────── */
 
 static int resolve_entry_and_runtime(HlAppContext *ctx,
@@ -231,11 +277,14 @@ static int resolve_entry_and_runtime(HlAppContext *ctx,
         /* A disk entry is named absolutely, as the directory is (see
          * abs_normalized); an embedded one is a VFS key and left alone. */
         if (ctx->app_dir_abs && entry[0] != '/') {
-            char *abs = abs_normalized(entry);
-            if (!abs || strlen(abs) >= buf_size) { free(abs); return -1; }
-            memcpy(entry_buf, abs, strlen(abs) + 1);
+            /* Kept as given when it cannot be made absolute (as the
+             * directory is, below). */
+            char *abs = abs_entry_path(entry);
+            if (abs && strlen(abs) < buf_size) {
+                memcpy(entry_buf, abs, strlen(abs) + 1);
+                entry = entry_buf;
+            }
             free(abs);
-            entry = entry_buf;
         }
     }
 
@@ -500,11 +549,11 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     HlVfs probe;
     hl_vfs_init(&probe, hl_app_entries, NULL);
     if (!hl_vfs_embedded(&probe)) {
-        ctx->app_dir_copy = abs_normalized(opts->app_dir);
-        ctx->app_dir_abs = 1;
-    } else {
-        ctx->app_dir_copy = strdup(opts->app_dir);
+        ctx->app_dir_copy = abs_dir_path(opts->app_dir);
+        ctx->app_dir_abs = ctx->app_dir_copy != NULL;
     }
+    if (!ctx->app_dir_copy)
+        ctx->app_dir_copy = strdup(opts->app_dir);
     if (!ctx->app_dir_copy) { free(ctx); return -1; }
 
     /* `.hull` is reserved from the disk loaders whether or not a policy

@@ -56,6 +56,24 @@ release-artifact layout).
 
 ### Fixed
 
+- **`test.run_main` / `test.runMain` and `test.get` accounting (audit 45).**
+  The runs they start get only what the calling case has left of its
+  instruction budget and deadline (each had a fresh budget and app.main's
+  10-minute deadline), several runs in one loop tick all count (the earlier
+  ones' counts were lost), and their time is no longer measured a second
+  time around the call (a Lua CPU loop that passed in a case tripped through
+  `test.run_main`). A `timeout_ms` shorter than the loop's 100 ms tick is
+  honoured. A main given up on is released once its op ends (Lua kept it
+  until the VM ended); in JS, work queued while main's result is read (an
+  error's getter) ends with main instead of running in a later case, and an
+  abandoned main's late resume is logged as such. JS `test.runMain` also
+  returns `stdoutBytes` / `stderrBytes` for binary output.
+- **`hull test` / `hull agent` with a relative app path (audit 45).** The path
+  is resolved as the kernel resolves it (`realpath`), so `link/../app`
+  follows the link; one that cannot be made absolute is used as given
+  instead of failing.
+- **`hull update`** escapes a release tag it refuses before printing it.
+
 - **`hull test` (audit 45).** A route handler that waits inside a `test.get`
   (`hull.sleep`, `http.fetch`, `db.async`, ...) is refused with `wait_refused`
   and answers 500, as in 0.20.1. Since `hull test` gained an event loop for

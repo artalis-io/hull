@@ -9226,7 +9226,7 @@ UTEST(js_audit4, instruction_limit_is_not_ten_thousand_times_weaker)
     HlJS lim;
     memset(&lim, 0, sizeof lim);
     ASSERT_EQ(hl_js_init(&lim, &cfg), 0);
-    const char *code = "let i = 0; while (i < 50000000) i++; i";
+    const char *code = "let i = 0; while (i < 10000000) i++; i";
     JSValue v = JS_Eval(lim.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_GLOBAL);
     EXPECT_TRUE(JS_IsException(v));
     JS_FreeValue(lim.ctx, v);
@@ -11346,7 +11346,7 @@ UTEST(js_audit9, crypto_work_is_charged_to_the_budget)
     EXPECT_EQ(js.budget_tripped, 1);
 
     /* An ordinary hash-and-verify fits a normal budget. */
-    js.max_instructions = 100000000;
+    js.max_instructions = 25000000;
     hl_js_reset_request(&js);
     EXPECT_EQ(eval_int(
         "crypto.verifyPassword('pw', crypto.hashPassword('pw')) ? 1 : 0"), 1);
@@ -12792,7 +12792,7 @@ UTEST(js_audit11, rsa_verify_is_charged_by_the_key)
     /* 100 verifies of a 1024-byte signature against a 300-byte PEM (at most
      * 1800 bits: 2^3 * 2^14 units each, 13M in all) fit a 100M budget; at
      * the signature's 8192 bits they were 860M. */
-    js.max_instructions = 100000000;
+    js.max_instructions = 25000000;
     hl_js_reset_request(&js);
     EXPECT_EQ(eval_int(
         "(() => { const pem = 'A'.repeat(300), sig = 's'.repeat(1024);"
@@ -19890,6 +19890,128 @@ UTEST(js_test_run_main, abandoned_main_does_not_end_the_next)
      * transaction held across a wait. */
     EXPECT_NE(strstr(g_task_log, "an abandoned test.runMain run resumed; dropped"), NULL);
     EXPECT_EQ(strstr(g_task_log, "database transaction"), NULL);
+    js_run_main_close(&f);
+}
+
+/* audit 45 (JS L3 / overshoot): a main given up on whose op resumes before
+ * any other runMain is logged as abandoned, and a timeout shorter than the
+ * loop's 100 ms tick is honoured (main used to settle within the tick). */
+UTEST(js_test_run_main_audit45, short_timeout_and_abandoned_resume)
+{
+    JsRunMainFix f;
+    ASSERT_EQ(js_run_main_open(&f, JS_RUN_MAIN_APP), 0);
+    task_log_reset();
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(js_run_main_cases(
+        "test('short', async () => {\n"
+        "  let msg = '';\n"
+        "  try { test.runMain(['nap', '40'], { timeoutMs: 10 }); } catch (e) { msg = String(e); }\n"
+        "  if (!msg.includes('did not finish')) throw new Error('no timeout: ' + msg);\n"
+        "  await hull.sleep(80);\n"
+        "});\n", r, &passed), 1);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    EXPECT_NE(strstr(g_task_log, "an abandoned test.runMain run resumed; dropped"), NULL);
+    EXPECT_EQ(strstr(g_task_log, "database transaction"), NULL);
+    js_run_main_close(&f);
+}
+
+/* audit 45 (JS L4): binary output comes back as bytes too. */
+UTEST(js_test_run_main_audit45, binary_output_as_bytes)
+{
+    JsRunMainFix f;
+    ASSERT_EQ(js_run_main_open(&f,
+        "import { app } from 'hull:app';\n"
+        "app.manifest({});\n"
+        "app.main((ctx) => { ctx.stdout.write(new Uint8Array([0xff, 0x00, 0x41])); return 0; });\n"), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(js_run_main_cases(
+        "test('bytes', () => {\n"
+        "  const x = test.runMain([]);\n"
+        "  const b = new Uint8Array(x.stdoutBytes);\n"
+        "  if (b.length !== 3 || b[0] !== 0xff || b[1] !== 0 || b[2] !== 0x41)\n"
+        "    throw new Error('bytes ' + Array.from(b));\n"
+        "  if (x.stderrBytes.byteLength !== 0) throw new Error('stderr');\n"
+        "});\n", r, &passed), 1);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    js_run_main_close(&f);
+}
+
+/* audit 45 (JS L2): app code run while main's result is read (an error's
+ * getter) is main's: what it queues is dropped with main, not run inside
+ * a later case. */
+UTEST(js_test_run_main_audit45, result_getter_work_ends_with_main)
+{
+    JsRunMainFix f;
+    ASSERT_EQ(js_run_main_open(&f,
+        "import { app } from 'hull:app';\n"
+        "app.manifest({});\n"
+        "app.main(() => { throw { get message() {\n"
+        "  hull.sleep(1).then(() => { globalThis.leaked = 1; }); return 'm'; } }; });\n"), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(js_run_main_cases(
+        "test('throw', () => { test.runMain([]); });\n"
+        "test('later', async () => {\n"
+        "  await hull.sleep(30);\n"
+        "  if (globalThis.leaked) throw new Error('main work ran in a later case');\n"
+        "});\n", r, &passed), 2);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    EXPECT_TRUE_MSG(r[1].passed, r[1].error);
+    js_run_main_close(&f);
+}
+
+/* audit 45: main's CPU work costs through runMain what it costs in the
+ * case (the binding call around main measured its time again). */
+UTEST(js_test_run_main_audit45, cpu_work_is_charged_once)
+{
+    JsRunMainFix f;
+    ASSERT_EQ(js_run_main_open(&f,
+        "import { app } from 'hull:app';\n"
+        "app.manifest({});\n"
+        "app.main((ctx) => { const n = Number(ctx.args[0]); let t = 0; for (let i = 0; i < n; i++) t++; return 0; });\n"), 0);
+    int64_t saved = js.max_instructions;
+    js.max_instructions = 25000000;
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(js_run_main_cases(
+        "test('direct', () => { let t = 0; for (let i = 0; i < 10000000; i++) t++; });\n"
+        "test('through runMain', () => {\n"
+        "  const x = test.runMain([String(10000000)]);\n"
+        "  if (x.code !== 0) throw new Error('code ' + x.code);\n"
+        "});\n", r, &passed), 2);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    EXPECT_TRUE_MSG(r[1].passed, r[1].error);
+    js.max_instructions = saved;
+    js_run_main_close(&f);
+}
+
+/* audit 45: main's first stretch gets only what the case has left. */
+UTEST(js_test_run_main_audit45, stretch_is_held_to_the_case_budget)
+{
+    JsRunMainFix f;
+    ASSERT_EQ(js_run_main_open(&f,
+        "import { app } from 'hull:app';\n"
+        "app.manifest({});\n"
+        "app.main(() => { let t = 0; for (let i = 0; i < 10000000; i++) t++;\n"
+        "  globalThis.doneMain = true; return 0; });\n"), 0);
+    int64_t saved = js.max_instructions;
+    js.max_instructions = 25000000;
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(js_run_main_cases(
+        "test('over', () => {\n"
+        "  let t = 0; for (let i = 0; i < 10000000; i++) t++;\n"
+        "  test.runMain([]);\n"
+        "});\n", r, &passed), 1);
+    EXPECT_FALSE(r[0].passed);
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JSValue d = JS_GetPropertyStr(js.ctx, g, "doneMain");
+    EXPECT_FALSE(JS_ToBool(js.ctx, d));
+    JS_FreeValue(js.ctx, d);
+    JS_FreeValue(js.ctx, g);
+    js.max_instructions = saved;
     js_run_main_close(&f);
 }
 

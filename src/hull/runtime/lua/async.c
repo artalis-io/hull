@@ -114,6 +114,12 @@ static int hl_lua_abandoned_marker;
  * coroutine.status reports it dead (audit 38). */
 static int hl_lua_died_marker;
 
+/* Abandoned, as above, by test.run_main giving up on app.main (audit 45):
+ * the coroutine's registry ref then belongs to its pending continuation,
+ * which releases it when the op completes or is cancelled - it was kept
+ * until the VM ended. Read as abandoned everywhere else. */
+static int hl_lua_abandoned_owned_marker;
+
 /* Set by hl_lua_async_resume for the span of its own lua_resume: the one
  * resume a binding's continuation may act on (hl_lua_async_k_ok). */
 static int hl_lua_resuming_marker;
@@ -167,7 +173,20 @@ static void **hl_lua_co_mark(lua_State *co)
 
 static int hl_lua_thread_is_abandoned(lua_State *co)
 {
-    return co && *hl_lua_co_mark(co) == &hl_lua_abandoned_marker;
+    return co && (*hl_lua_co_mark(co) == &hl_lua_abandoned_marker ||
+                  *hl_lua_co_mark(co) == &hl_lua_abandoned_owned_marker);
+}
+
+/* An abandoned test main's continuation releases the coroutine's ref (once:
+ * the mark becomes the plain abandoned one). */
+static void hl_lua_release_owned_main(HlLua *lua, lua_State *co, int *ref)
+{
+    if (co && *hl_lua_co_mark(co) == &hl_lua_abandoned_owned_marker &&
+        *ref != LUA_NOREF) {
+        *hl_lua_co_mark(co) = &hl_lua_abandoned_marker;
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, *ref);
+        *ref = LUA_NOREF;
+    }
 }
 
 static void hl_lua_set_parked(lua_State *co, int on)
@@ -184,6 +203,11 @@ static void hl_lua_set_abandoned(lua_State *co)
 void hl_lua_async_abandon(lua_State *co)
 {
     hl_lua_set_abandoned(co);
+}
+
+void hl_lua_async_abandon_owned(lua_State *co)
+{
+    if (co) *hl_lua_co_mark(co) = &hl_lua_abandoned_owned_marker;
 }
 
 static int hl_lua_thread_is_parked(lua_State *co)
@@ -567,7 +591,12 @@ static void hl_lua_async_resume_impl(HlAsyncCont *self, void *driver)
     lua_State *co = lc->co;
     KlHttpConn *conn = lc->conn;
 
-    if (!co || hl_lua_thread_is_abandoned(co)) return;
+    if (co && hl_lua_thread_is_abandoned(co)) {
+        if (lc->is_main)
+            hl_lua_release_owned_main(lua, co, &lc->thread_ref);
+        return;
+    }
+    if (!co) return;
     /* Defence in depth (audit 39): only a coroutine suspended on this wait
      * is resumed. One that is not suspended (running, dead, closed) or no
      * longer carries the parked mark is not this continuation's to run:
@@ -817,6 +846,8 @@ static void hl_lua_async_cancel(HlAsyncCont *self)
          * only while main is still alive. */
         if (lua->cli_main_co == lc->co)
             hl_lua_set_abandoned(lc->co);   /* audit 33, as below */
+        else
+            hl_lua_release_owned_main(lua, lc->co, &lc->thread_ref);
         lc->thread_ref = LUA_NOREF;
         lc->co = NULL;
     } else {

@@ -2023,7 +2023,15 @@ marks the request's life `no_conn`, and the wait gates refuse it
 (`hl_js_async_gate`; Lua `hl_lua_check_can_wait` / `hl_lua_can_wait` through
 `active_on_complete_ctx`). The connection cannot be the test: an HTTP/2
 stream's request has none either. Lua keeps `test_main_running` for the
-whole of a `test.run_main`, as JS keeps `main_signal`.
+whole of a `test.run_main`, as JS keeps `main_signal`. While a `test.run_main` / `test.get`
+runs, the budget carries a sink (Lua `HlLuaBudget.sink`, JS `HlJS.budget_sink`):
+every arm folds the previous run's count into it and holds the new run to
+the case's remaining budget and deadline, and the binding call around it
+adds the nested time to `hl_meter_excluded` (its work is counted through the
+sink, not measured again; audit 45). A test main's result is read under its
+run tag, and the tag is failed and forgotten after (`js_test_main_abandon`);
+a Lua main given up on hands its registry ref to its pending continuation
+(`hl_lua_async_abandon_owned`).
 
 **Modular TUI** (`hull new --type tui mydash`, Lua-only). `app.lua`
 holds the `tui.run({ draw, on_event })` loop and a single `state`

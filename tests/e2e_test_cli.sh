@@ -288,6 +288,12 @@ for rt in js lua; do
     rel_case "rel/$rt/tests" ..
     rel_case "rel/$rt/lib" "../../$rt"
 done
+# audit 45: a symlink before `..` resolves as the kernel resolves it
+# (`symlib/..` is rel/<rt>, not the directory holding the link).
+for rt in js lua; do
+    ln -s "$TMP/rel/$rt/lib" "$TMP/symlib_$rt"
+    rel_case . "symlib_$rt/.."
+done
 
 # ── test_audit45: a test.get handler that waits ─────────────────────────
 # hull test has a loop since test.run_main; a handler test.get dispatched

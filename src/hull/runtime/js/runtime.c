@@ -173,6 +173,16 @@ const char *hl_js_trip_reason(const HlJS *js)
                                       : "instruction limit exceeded";
 }
 
+void hl_js_budget_sink_fold(HlJS *js)
+{
+    if (!js || !js->budget_sink) return;
+    int64_t u = js->instruction_count - js->budget_sink_base;
+    if (u > 0)
+        *js->budget_sink = u > INT64_MAX - *js->budget_sink
+                           ? INT64_MAX : *js->budget_sink + u;
+    js->budget_sink_base = js->instruction_count;
+}
+
 void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind)
 {
     if (!js) return;
@@ -180,6 +190,13 @@ void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind)
      * run's code (cap/run_watchdog.h). */
     js->run_kind = (int)kind;
     hl_run_watch_arm(&js->run_watch, hl_run_watchdog_limit_ms(kind));
+    if (js->budget_sink && js->budget_sink_deadline) {
+        /* Never past the calling case's deadline (HlJS.budget_sink). */
+        uint64_t d = 0, seq = 0;
+        hl_run_watch_peek(&js->run_watch, &d, &seq);
+        if (d == 0 || d > js->budget_sink_deadline)
+            hl_run_watch_restore(&js->run_watch, js->budget_sink_deadline);
+    }
 #ifdef HL_ENABLE_DB
     (void)hl_db_budget_swap(js_db_budget_charge, js);
 #endif
@@ -194,7 +211,10 @@ void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind)
      * HL_JS_INTERRUPT_WEIGHT, a flush up to 1024 units). */
     if (js->rt)
         JS_ResetRunPhase(js->rt);
-    js->instruction_count = 0;
+    if (js->budget_sink)
+        hl_js_budget_sink_fold(js);   /* counts on from the case's total */
+    else
+        js->instruction_count = 0;
     js->budget_tripped = 0;
     js->budget_timed_out = 0;
     js->budget_txn_failed = 0;
@@ -3036,15 +3056,24 @@ static JSValue js_cli_cap_read(JSContext *ctx, JSValueConst this_val,
     }
     if (want_bytes && nbytes == 0) return JS_NewString(ctx, "");
 
-    uint32_t pos = 0;
-    if (hl_js_get_uint32(ctx, func_data[0], "pos", &pos) < 0) return JS_EXCEPTION;
+    /* A 64-bit position (audit 45: kept as uint32, an input over 4 GiB -
+     * possible with a heap limit above that - wrapped and was read again). */
+    int64_t pos = 0;
+    {
+        JSValue pv = JS_GetPropertyStr(ctx, func_data[0], "pos");
+        if (JS_IsException(pv)) return JS_EXCEPTION;
+        int prc = JS_ToInt64(ctx, &pos, pv);
+        JS_FreeValue(ctx, pv);
+        if (prc < 0) return JS_EXCEPTION;
+        if (pos < 0) pos = 0;
+    }
     JSValue in = JS_GetPropertyStr(ctx, func_data[0], "input");
     if (JS_IsException(in)) return JS_EXCEPTION;
     size_t len = 0;
     const uint8_t *buf = JS_IsUndefined(in) ? NULL : JS_GetArrayBuffer(ctx, &len, in);
     if (!buf) { JS_FreeValue(ctx, JS_GetException(ctx)); len = 0; }
-    if (pos > len) pos = (uint32_t)len;
-    size_t avail = len - pos;
+    if ((uint64_t)pos > len) pos = (int64_t)len;
+    size_t avail = len - (size_t)pos;
     const uint8_t *p = buf ? buf + pos : NULL;
 
     size_t take, skip = 0;
@@ -3068,7 +3097,7 @@ static JSValue js_cli_cap_read(JSContext *ctx, JSValueConst this_val,
     JS_FreeValue(ctx, in);
     if (JS_IsException(r)) return r;
     if (JS_DefinePropertyValueStr(ctx, func_data[0], "pos",
-                                  JS_NewUint32(ctx, pos + (uint32_t)(take + skip)),
+                                  JS_NewInt64(ctx, pos + (int64_t)(take + skip)),
                                   JS_PROP_C_W_E) < 0) {
         JS_FreeValue(ctx, r);
         return JS_EXCEPTION;
@@ -3123,6 +3152,8 @@ typedef struct HlJsMainRun {
     char               msg[512];    /* what the real runner prints on stderr */
 } HlJsMainRun;
 
+static void js_test_main_abandon(HlJS *js);
+
 static void js_main_report(HlJsMainRun *r, const char *prefix, const char *arg)
 {
     if (r && r->test) {
@@ -3144,11 +3175,16 @@ static void js_main_error(HlJS *js, HlJsMainRun *r)
     if (js->budget_tripped) {
         js_main_report(r, "[hull:main] error: ", hl_js_trip_reason(js));
     } else {
+        /* The error's getters are app code: run as main's, and what they
+         * queue dropped with main (js_test_main_abandon; audit 45). */
+        if (js->cli_main_tag)
+            hl_js_run_tag_enter(js, js->cli_main_tag);
         char buf[480];
         extract_main_error(js->ctx, exc, buf, sizeof buf);
         js_main_report(r, "[hull:main] error: ", buf);
     }
     JS_FreeValue(js->ctx, exc);
+    js_test_main_abandon(js);
 }
 
 static int coerce_js_exit_code(JSContext *ctx, JSValue v, HlJsMainRun *r)
@@ -3177,13 +3213,21 @@ typedef struct {
     HlJS        *js;
     HlJsMainRun *r;
     uint64_t     deadline;   /* backend->monotonic_ms(); 0 = none */
+    int          expired;    /* the wake timer at `deadline` fired */
 } HlJsMainWait;
+
+/* A timer at the wait's deadline: the loop's tick is up to 100 ms, so a
+ * shorter timeout went unnoticed while main settled within the tick
+ * (audit 45). */
+static void js_main_test_wait_expired(void *user)
+{
+    ((HlJsMainWait *)user)->expired = 1;
+}
 
 static void js_main_take_used(HlJS *js, HlJsMainRun *r)
 {
-    int64_t u = js->instruction_count;
-    r->used = u > INT64_MAX - r->used ? INT64_MAX : r->used + u;
-    js->instruction_count = 0;
+    (void)r;   /* r->used is js->budget_sink while a test main runs */
+    hl_js_budget_sink_fold(js);
 }
 
 static int js_main_test_wait_done(void *user)
@@ -3199,7 +3243,8 @@ static int js_main_test_wait_done(void *user)
         w->r->gave_up = 2;
         return 1;
     }
-    if (w->deadline && hl_async_backend()->monotonic_ms() >= w->deadline) {
+    if (w->expired ||
+        (w->deadline && hl_async_backend()->monotonic_ms() >= w->deadline)) {
         w->r->gave_up = 1;
         return 1;
     }
@@ -3243,6 +3288,18 @@ static int js_main_streams(JSContext *ctx, JSValueConst ctxobj, HlJsMainRun *r)
         JS_SetPropertyStr(ctx, ctxobj, streams[i].prop, s);
     }
     return 0;
+}
+
+/* A test main is over - given up on, or settled with its result read:
+ * its run tag is failed, so a job it left (an un-awaited chain, or one its
+ * error's getter queued while the result was read) is dropped unrun instead
+ * of running inside a later case (audit 45), and forgotten, so an op of it
+ * that resumes later is told apart as stale, not as a transaction held
+ * across a wait. */
+static void js_test_main_abandon(HlJS *js)
+{
+    hl_js_run_tag_abandon(js, js->cli_main_tag);
+    js->cli_main_tag = 0;
 }
 
 /* Run app.main once (the real runner, or test.runMain). The exit code in
@@ -3424,7 +3481,7 @@ static int js_main_run(HlJS *js, HlJsMainRun *r, int *exit_code_out)
         if (!js->base.async_ctx) {
             js_main_report(r, "[hull:main] ", "no async context to drive event loop");
             hl_js_sleep_cancel_pending(js);
-            if (r->test) hl_js_run_tag_abandon(js, js->cli_main_tag);
+            if (r->test) js_test_main_abandon(js);
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, main_fn);
             JS_FreeValue(ctx, store);
@@ -3484,18 +3541,24 @@ static int js_main_run(HlJS *js, HlJsMainRun *r, int *exit_code_out)
              * bounded (js_main_test_wait_done). */
             int srv_rc;
             if (r->test) {
-                HlJsMainWait w = { js, r, 0 };
-                if (r->timeout_ms)
-                    w.deadline = hl_async_backend()->monotonic_ms() + r->timeout_ms;
-                srv_rc = hl_async_backend()->run_until(js->base.async_ctx,
-                                                       js_main_test_wait_done, &w);
+                const HlAsyncBackend *be = hl_async_backend();
+                HlJsMainWait w = { js, r, 0, 0 };
+                uint64_t wake = 0;
+                if (r->timeout_ms) {
+                    w.deadline = be->monotonic_ms() + r->timeout_ms;
+                    wake = be->timer_add(js->base.async_ctx, r->timeout_ms,
+                                         js_main_test_wait_expired, &w);
+                }
+                srv_rc = be->run_until(js->base.async_ctx,
+                                       js_main_test_wait_done, &w);
+                if (wake) be->timer_cancel(js->base.async_ctx, wake);
                 js_main_take_used(js, r);   /* the last stretch */
                 if (srv_rc >= 0 && js->cli_main_active) {
                     /* Given up while main still waits: its run's later jobs
                      * are dropped unrun (its tag failed), and its settle
                      * callbacks find no slot to write. */
                     if (!r->gave_up) r->gave_up = 1;
-                    hl_js_run_tag_abandon(js, js->cli_main_tag);
+                    js_test_main_abandon(js);
                     js->cli_main_value = NULL;
                     js->cli_main_active = 0;
                     JS_FreeValue(ctx, settled_slot);
@@ -3530,7 +3593,7 @@ static int js_main_run(HlJS *js, HlJsMainRun *r, int *exit_code_out)
                 js->cli_main_value = NULL;
                 js->cli_main_active = 0;
                 hl_js_sleep_cancel_pending(js);
-                if (r->test) hl_js_run_tag_abandon(js, js->cli_main_tag);
+                if (r->test) js_test_main_abandon(js);
                 JS_FreeValue(ctx, settled_slot);
                 JS_FreeValue(ctx, ret);
                 JS_FreeValue(ctx, main_fn);
@@ -3555,6 +3618,11 @@ static int js_main_run(HlJS *js, HlJsMainRun *r, int *exit_code_out)
     }
 
     int rc;
+    /* Reading the result runs app code (an error's getters, toString,
+     * valueOf): under main's own tag, so whatever it queues is main's and
+     * dropped with it below (js_test_main_abandon). */
+    if (r->test && js->cli_main_tag)
+        hl_js_run_tag_enter(js, js->cli_main_tag);
     if (rejected) {
         if (r->test) {
             char buf[480];
@@ -3575,6 +3643,7 @@ static int js_main_run(HlJS *js, HlJsMainRun *r, int *exit_code_out)
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, main_fn);
     JS_FreeValue(ctx, store);
+    if (r->test) js_test_main_abandon(js);
 
     js_main_signal_free(ctx, msig);
     js->main_signal = NULL;
@@ -3625,8 +3694,12 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
 #define HL_TEST_MAIN_TIMEOUT_MS  10000u
 #define HL_TEST_MAIN_MAX_ARGS    1024
 
+/* The captured chunks of @p key (plus @p tail and a newline) as one string
+ * (UTF-8 decoded, invalid bytes replaced) or, with @p as_bytes, as an
+ * ArrayBuffer of the bytes as written (audit 45: binary output came back
+ * only as the decoded string, where Lua returns the raw bytes). */
 static JSValue cap_list_string(JSContext *ctx, JSValueConst cap, const char *key,
-                               const char *tail)
+                               const char *tail, int as_bytes)
 {
     JSValue list = JS_GetPropertyStr(ctx, cap, key);
     if (JS_IsException(list)) return JS_EXCEPTION;
@@ -3655,7 +3728,8 @@ static JSValue cap_list_string(JSContext *ctx, JSValueConst cap, const char *key
     }
     if (tail) { memcpy(buf + off, tail, tlen); off += tlen; buf[off++] = '\n'; }
     JS_FreeValue(ctx, list);
-    JSValue s = JS_NewStringLen(ctx, buf, off);
+    JSValue s = as_bytes ? JS_NewArrayBufferCopy(ctx, (const uint8_t *)buf, off)
+                         : JS_NewStringLen(ctx, buf, off);
     js_free(ctx, buf);
     return s;
 }
@@ -3837,8 +3911,30 @@ JSValue js_test_run_main(JSContext *ctx, JSValueConst this_val,
         r.cap        = cap;
         r.timeout_ms = timeout_ms;
         r.case_used  = saved_count;
+        /* main's runs count on from the case's total and stop at the case's
+         * deadline (HlJS.budget_sink; audit 45: each got a fresh budget and
+         * main's 10-minute deadline, and a second resume in one tick lost
+         * the first one's count). Main's time is accounted that way, so
+         * the binding call around it does not measure it again (a CPU loop
+         * that passed in the case tripped through test.runMain). */
+        int64_t  *prev_sink     = js->budget_sink;
+        int64_t   prev_sink_base = js->budget_sink_base;
+        uint64_t  prev_sink_dl   = js->budget_sink_deadline;
+        js->budget_sink          = &r.used;
+        js->budget_sink_base     = saved_count;
+        js->budget_sink_deadline = saved_deadline;
+        uint64_t mt0 = hl_meter_ticks();
+        uint64_t mx0 = hl_meter_excluded;
         int code = 1;
         (void)js_main_run(js, &r, &code);
+        hl_js_budget_sink_fold(js);
+        js->budget_sink          = prev_sink;   /* a nested call's */
+        js->budget_sink_base     = prev_sink_base;
+        js->budget_sink_deadline = prev_sink_dl;
+        if (hl_meter_exclude_depth == 0) {
+            uint64_t el = hl_meter_ticks() - mt0;
+            if (hl_meter_excluded - mx0 < el) hl_meter_excluded = mx0 + el;
+        }
 
         if (hold) hl_db_registry_guard_hold(-1);
         js->active_conn     = saved_conn;
@@ -3872,17 +3968,26 @@ JSValue js_test_run_main(JSContext *ctx, JSValueConst this_val,
 
         JSValue res = JS_NewObject(ctx);
         if (JS_IsException(res)) goto out;
-        JSValue so = cap_list_string(ctx, cap, "out", NULL);
+        const char *tail = r.msg[0] ? r.msg : NULL;
+        JSValue so = cap_list_string(ctx, cap, "out", NULL, 0);
         JSValue se = JS_IsException(so) ? JS_EXCEPTION
-                   : cap_list_string(ctx, cap, "err", r.msg[0] ? r.msg : NULL);
-        if (JS_IsException(so) || JS_IsException(se)) {
+                   : cap_list_string(ctx, cap, "err", tail, 0);
+        JSValue sob = JS_IsException(se) ? JS_EXCEPTION
+                    : cap_list_string(ctx, cap, "out", NULL, 1);
+        JSValue seb = JS_IsException(sob) ? JS_EXCEPTION
+                    : cap_list_string(ctx, cap, "err", tail, 1);
+        if (JS_IsException(seb)) {
             JS_FreeValue(ctx, so);
+            JS_FreeValue(ctx, se);
+            JS_FreeValue(ctx, sob);
             JS_FreeValue(ctx, res);
             goto out;
         }
         JS_DefinePropertyValueStr(ctx, res, "code", JS_NewInt32(ctx, code), JS_PROP_C_W_E);
         JS_DefinePropertyValueStr(ctx, res, "stdout", so, JS_PROP_C_W_E);
         JS_DefinePropertyValueStr(ctx, res, "stderr", se, JS_PROP_C_W_E);
+        JS_DefinePropertyValueStr(ctx, res, "stdoutBytes", sob, JS_PROP_C_W_E);
+        JS_DefinePropertyValueStr(ctx, res, "stderrBytes", seb, JS_PROP_C_W_E);
         ret = res;
     }
 

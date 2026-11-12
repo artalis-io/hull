@@ -18178,6 +18178,96 @@ UTEST(lua_test_run_main, test_setup_accepts_a_cli_app)
  * raised error's message. The chunk table was pushed above the luaL_Buffer,
  * so its first growth took the table for its box: the output came back
  * truncated, and the error message was written into freed memory. */
+/* audit 45: main's CPU work costs through test.run_main what it costs in
+ * the case. The binding call around main measured main's time again, on
+ * top of the instructions main's runs added to the case. */
+UTEST(lua_test_run_main_audit45, cpu_work_is_charged_once)
+{
+    RunMainFix f;
+    ASSERT_EQ(run_main_open(&f,
+        "app.main(function(ctx)\n"
+        "  local t = 0\n"
+        "  for i = 1, tonumber(ctx.args[1]) do t = t + 1 end\n"
+        "  return 0\n"
+        "end)\n"), 0);
+    lua_rt.max_instructions = 13000000;
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(run_main_cases(
+        "test('direct', function()\n"
+        "  local t = 0\n"
+        "  for i = 1, 6000000 do t = t + 1 end\n"
+        "end)\n"
+        "test('through run_main', function()\n"
+        "  local x = test.run_main({ '6000000' })\n"
+        "  assert(x.code == 0, 'code ' .. tostring(x.code))\n"
+        "end)\n", r, &passed), 2);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    EXPECT_TRUE_MSG(r[1].passed, r[1].error);
+    lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    run_main_close(&f);
+}
+
+/* audit 45: main's first stretch gets only what the case has left: it had
+ * a fresh budget, so main ran to its end past the case's limit. */
+UTEST(lua_test_run_main_audit45, stretch_is_held_to_the_case_budget)
+{
+    RunMainFix f;
+    ASSERT_EQ(run_main_open(&f,
+        "app.main(function(ctx)\n"
+        "  local t = 0\n"
+        "  for i = 1, 3000000 do t = t + 1 end\n"
+        "  done_main = true\n"
+        "  return 0\n"
+        "end)\n"), 0);
+    lua_rt.max_instructions = 20000000;
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(run_main_cases(
+        "test('over', function()\n"
+        "  local t = 0\n"
+        "  for i = 1, 8000000 do t = t + 1 end\n"
+        "  test.run_main({})\n"
+        "end)\n", r, &passed), 1);
+    EXPECT_FALSE(r[0].passed);
+    lua_getglobal(lua_rt.L, "done_main");
+    EXPECT_FALSE(lua_toboolean(lua_rt.L, -1));
+    lua_pop(lua_rt.L, 1);
+    lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    run_main_close(&f);
+}
+
+/* audit 45: a main test.run_main gave up on is released once its op ends:
+ * its coroutine's registry ref was kept until the VM ended. */
+UTEST(lua_test_run_main_audit45, abandoned_main_is_released)
+{
+    RunMainFix f;
+    ASSERT_EQ(run_main_open(&f,
+        "seen = setmetatable({}, { __mode = 'v' })\n"
+        "app.main(function(ctx)\n"
+        "  if ctx.args[1] == 'stuck' then\n"
+        "    seen[1] = coroutine.running()\n"
+        "    hull.sleep(40)\n"
+        "    return 0\n"
+        "  end\n"
+        "  hull.sleep(tonumber(ctx.args[2]))\n"
+        "  return 0\n"
+        "end)\n"), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(run_main_cases(
+        "test('abandon', function()\n"
+        "  local ok = pcall(test.run_main, { 'stuck' }, { timeout_ms = 10 })\n"
+        "  assert(not ok, 'gave up')\n"
+        "  assert(seen[1] ~= nil, 'parked')\n"
+        "  test.run_main({ 'nap', '120' })\n"
+        "  collectgarbage() collectgarbage()\n"
+        "  assert(seen[1] == nil, 'still referenced')\n"
+        "end)\n", r, &passed), 1);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    run_main_close(&f);
+}
+
 /* audit 45: a task resumed after main ended, while run_main still had
  * main's status to read, started another run_main over it: the outer call
  * reported the inner run's status. Refused for the whole call now. */

@@ -2872,7 +2872,9 @@ the manifest's `env` list (else the call raises); `opts.timeout_ms` /
 `timeoutMs` bounds main's waits (default 10 s, never past the case's
 deadline; a main still waiting is abandoned and the call raises). An error
 or rejected promise in main is `code = 1` with `[hull:main] error: ...` on
-the captured stderr. main's waits (`hull.sleep`, `http.fetch`, `db.async`,
+the captured stderr. JS also returns `stdoutBytes` / `stderrBytes`, the
+captured bytes as written (`stdout` / `stderr` decode them as UTF-8). main's
+waits (`hull.sleep`, `http.fetch`, `db.async`,
 `compute.async`) are driven on the test run's event loop. main runs on the
 case's instruction budget, as a `test.get` request does, and inside the
 case's transaction if it has one open (main cannot wait then). Each call is

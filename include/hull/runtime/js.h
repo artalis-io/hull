@@ -85,6 +85,16 @@ typedef struct HlJS {
     int64_t         instruction_count;
     int64_t         max_instructions;
     int             budget_tripped;
+    /* test.runMain / test.get in progress (audit 45): the runs they start
+     * run on the calling case's count. Every arm folds what the count grew
+     * by since budget_sink_base into *budget_sink and goes on counting from
+     * there instead of from 0 (so max_instructions bounds the case and its
+     * nested runs together, and a second stretch in one tick keeps the
+     * first's count), and holds the run to budget_sink_deadline (the
+     * case's, monotonic ms, 0 = none). NULL otherwise. */
+    int64_t        *budget_sink;
+    int64_t         budget_sink_base;
+    uint64_t        budget_sink_deadline;
     /* HlRunKind of the run armed last: a continuation keeps it, so the
      * resume gets the same deadline (cap/run_watchdog.h). */
     int             run_kind;
@@ -380,6 +390,9 @@ void hl_js_budget_arm(HlJS *js);
 /* As hl_js_budget_arm, for a run of @p kind (its deadline). */
 void hl_js_budget_arm_as(HlJS *js, HlRunKind kind);
 void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind);
+/* Fold what the count grew by since HlJS.budget_sink_base into
+ * *budget_sink (no-op without one). */
+void hl_js_budget_sink_fold(HlJS *js);
 
 /* Test seam: the @p n-th value the request object is built from (1-based)
  * fails as an allocation failure would; 0 = off (bindings.c). */

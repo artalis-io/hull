@@ -72,6 +72,8 @@ local res = test.get("/api/data", { headers = { ["Authorization"] = "Bearer " ..
   `opts`: `stdin` (string; JS also bytes), `env` (exactly `ctx.env`; names
   must be in the manifest's `env` list), `timeout_ms` / `timeoutMs`
   (default 10 s). An error in main is `code = 1`, message on `stderr`.
+  JS also returns `stdoutBytes` / `stderrBytes` (ArrayBuffers of the bytes
+  as written; `stdout` / `stderr` are them decoded as UTF-8).
   Works for an app with no routes; call it as often as needed.
 
 ```lua

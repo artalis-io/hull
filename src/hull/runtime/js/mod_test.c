@@ -19,6 +19,7 @@
 #include "hull/shared/async_backend.h"
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_hold */
 #include "internal.h"              /* hl_js_budget_throw */
+#include "hull/shared/dispatch_meter.h"   /* hl_meter_ticks */
 
 #include <keel/http_request.h>
 
@@ -255,15 +256,35 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
     int hold = hl_db_registry_open_txn(tjs->base.db_registry) != NULL;
     if (hold) hl_db_registry_guard_hold(1);
     HlTestResult result;
+    /* The request's runs (each middleware and the handler arm their own)
+     * count on from the case's total and stop at its deadline
+     * (HlJS.budget_sink, audit 45); its time is accounted that way, so the
+     * binding call around it does not measure it again. */
+    int64_t nested = 0;
+    int64_t  *prev_sink      = tjs->budget_sink;
+    int64_t   prev_sink_base = tjs->budget_sink_base;
+    uint64_t  prev_sink_dl   = tjs->budget_sink_deadline;
+    tjs->budget_sink          = &nested;
+    tjs->budget_sink_base     = saved_count;
+    tjs->budget_sink_deadline = saved_deadline;
+    uint64_t mt0 = hl_meter_ticks();
+    uint64_t mx0 = hl_meter_excluded;
     tjs->base.test_dispatching++;
     int rc = hl_cap_test_dispatch(state->router, method, path, body_str, body_len,
                            header_names, header_values, num_headers,
                            ctx_json, tjs->base.alloc, run_middleware,
                            &result);
     tjs->base.test_dispatching--;
+    hl_js_budget_sink_fold(tjs);
+    tjs->budget_sink          = prev_sink;   /* a nested call's */
+    tjs->budget_sink_base     = prev_sink_base;
+    tjs->budget_sink_deadline = prev_sink_dl;
+    if (hl_meter_exclude_depth == 0) {
+        uint64_t el = hl_meter_ticks() - mt0;
+        if (hl_meter_excluded - mx0 < el) hl_meter_excluded = mx0 + el;
+    }
     if (hold) hl_db_registry_guard_hold(-1);
     {
-        int64_t nested = tjs->instruction_count;
         tjs->instruction_count = nested > INT64_MAX - saved_count
                                  ? INT64_MAX : saved_count + nested;
         if (tjs->max_instructions > 0 &&
