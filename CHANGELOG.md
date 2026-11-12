@@ -8,6 +8,27 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-12
+
+New features (MariaDB `client_ed25519`, MySQL `caching_sha2_password` full authentication over the
+RSA key exchange, `gpu.async.compile` / `gpu.async.load`, `conn.udf` on a `db.open` connection,
+and `hull test` for CLI apps through `test.run_main` / `test.runMain`), then audit round 45 (C, JS
+and Lua) over them, with every finding fixed. Most of the findings were in the new code (the
+`hull test` event loop, the async GPU compile, the MySQL auth exchange). Read the upgrade notes:
+two changes alter an error or output that app code or scripts may match.
+
+### Upgrade notes
+
+- **MySQL: a server's FULL_AUTH request is refused unless `caching_sha2_password` is the active
+  plugin.** Under `mysql_native_password` or `client_ed25519` a real server never sends one, so
+  only an on-path party asking for the password is affected.
+- **A full worker-pool queue is a `busy` refusal.** `db.async`, `compute.async`,
+  `worker.dispatch` and `gpu.async.*` raised a plain error there; the error now carries the
+  `busy` code, so app code matching the old message text should test `e.code` (JS) or the
+  `[hull:busy]` prefix (Lua) instead. The stdlib (jobs, outbox) now hands such work back.
+- **`hull update` prints every version without a `v`** (`current  0.20.1`, `latest   0.21.0`), as
+  `hull version` does; a script parsing its output may need adjusting.
+
 ### Added
 
 - **MariaDB `client_ed25519` authentication** (`IDENTIFIED VIA ed25519`, #1062).
@@ -68,14 +89,9 @@ release-artifact layout).
   error's getter) ends with main instead of running in a later case, and an
   abandoned main's late resume is logged as such. JS `test.runMain` also
   returns `stdoutBytes` / `stderrBytes` for binary output.
-- **`hull test` / `hull agent` with a relative app path (audit 45).** The path
-  is resolved as the kernel resolves it (`realpath`), so `link/../app`
-  follows the link; one that cannot be made absolute is used as given
-  instead of failing.
 - **`hull update`** escapes a release tag it refuses before printing it.
 - **A `db.open` UDF's destructor** (JS) drops its function from a job rather
   than inside SQLite (audit 45, defence in depth).
-
 - **`hull test` (audit 45).** A route handler that waits inside a `test.get`
   (`hull.sleep`, `http.fetch`, `db.async`, ...) is refused with `wait_refused`
   and answers 500, as in 0.20.1. Since `hull test` gained an event loop for
@@ -84,19 +100,16 @@ release-artifact layout).
   output, and wrote into freed memory, once a stream passed 1 KiB; and a
   `test.run_main` started from a task while another was finishing reported
   the wrong status.
-
 - **Concurrent `gpu.async.load` of one shader (audit 45).** A second
   `gpu.async.compile` / `gpu.async.load` of a shader that is still compiling
   waits for that compile and gets its result, instead of `gpu_busy` - lazily
   loaded shaders failed under concurrent requests.
-
 - **`gpu.async.compile` / `gpu.async.load` (audit 45).** A request that goes
   away while its shader compiles no longer throws the compile away: the shader
   is still installed. A finished compile is installed by the first GPU call
   after it instead of waiting for a pool thread, so a busy pool no longer keeps
   the device `gpu_busy`, and a finisher that runs late reports the result
   instead of `compile_timeout`.
-
 - **A full thread pool is a `busy` refusal (audit 45).** `db.async`,
   `compute.async`, `worker.dispatch` and `gpu.async.*` raised a plain error
   when the worker pool's queue was full; it now carries the `busy` refusal
@@ -109,19 +122,18 @@ release-artifact layout).
   key's exponent is held to 17 bits (65537), as its fixed charge assumes, and
   a client_ed25519 signature is charged its measured cost (~3.4 ms), 8x the
   old charge.
-
 - **`hull test`, `hull agent` and `hull mcp` accept a relative app
   directory.** `hull test app` (or `hull test ..`) failed an app's relative
   imports - JS `module not found: app/lib/a.js`, Lua `module not found:
   ./lib/a` - because the entry was named relative to the working directory
   and its imports resolved against that name as if it were app-relative; an
   absolute directory worked. The app context now makes a development app's
-  directory and entry absolute. `examples/cli_modular` joins
+  directory and entry absolute, resolving the path as the kernel does
+  (`realpath`, so `link/../app` follows the link; audit 45); one that cannot
+  be made absolute is used as given. `examples/cli_modular` joins
   `make hull-test-examples`.
-
 - **`docs/app_api_reference.md` no longer says WASM UDFs work with
   `db.async.query()`** (#1065). No connection's UDFs reach the worker pool.
-
 - **`hull update` spells every version the same way.** It printed the
   running version without a `v` (`current  0.20.0`) and the release's with
   one (`latest   v0.20.1`, `installed v0.20.1`); every line now prints the
