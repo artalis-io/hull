@@ -382,31 +382,203 @@ UTEST(mysql_conn, auth_exchange_is_charged)
     close(sv[0]);
 }
 
-/* An AuthSwitchRequest to client_ed25519 (MariaDB) is rejected with a hint
- * pointing at a supported plugin (ed25519 is deferred). */
-UTEST(mysql_conn, ed25519_unsupported)
+/* ── client_ed25519 (MariaDB auth_ed25519) ─────────────────────────── */
+
+/* The signature of nonce 0x20..0x3f under PASSWORD('secret'), from an
+ * independent model of MariaDB's ref10 sign.c (also test_mysqlwire). */
+static const uint8_t ed_want_secret[HL_MY_ED25519_SIG_LEN] = {
+    0x86,0x72,0x1b,0x47,0x9a,0x77,0x5d,0x0f,0x25,0x70,0xc4,0xc2,0xf4,0x1b,0x84,0x88,
+    0xd7,0x72,0x77,0x19,0x88,0x1b,0x58,0x54,0xae,0x4e,0x97,0x94,0x11,0xa9,0xc4,0x0c,
+    0x12,0xa3,0x9e,0xe0,0xc4,0x1b,0x0a,0x37,0x4e,0xf1,0x44,0x08,0xc8,0x8f,0x72,0xa2,
+    0x10,0x32,0x0f,0x6f,0x35,0x34,0x4a,0x83,0x8e,0xc7,0x2e,0xa6,0xd7,0x08,0xae,0x07,
+};
+
+/* An AuthSwitchRequest to client_ed25519 carrying @p n nonce bytes
+ * 0x20, 0x21, ... (a real server sends exactly 32, no NUL). */
+static void ed_switch(HlMyWriter *s, uint8_t seq, int n)
+{
+    size_t m = hl_my_packet_begin(s, seq);
+    hl_my_put_u8(s, HL_MY_PKT_EOF);
+    hl_my_put_cstr(s, HL_MY_ED25519_PLUGIN);
+    for (int i = 0; i < n; i++) hl_my_put_u8(s, (uint8_t)(0x20 + i));
+    hl_my_packet_end(s, m);
+}
+
+/* Read the client's packets from @p fd into @p got; return the frames. */
+static int ed_client_frames(int fd, uint8_t *got, size_t cap, HlMyFrame *out,
+                            int max)
+{
+    size_t n = 0;
+    ssize_t r;
+    while (n < cap && (r = recv(fd, got + n, cap - n, MSG_DONTWAIT)) > 0)
+        n += (size_t)r;
+    int k = 0;
+    size_t off = 0;
+    while (k < max) {
+        size_t used = 0;
+        if (hl_my_frame_next(got + off, n - off, &out[k], &used) != HL_MY_OK)
+            break;
+        off += used;
+        k++;
+    }
+    return k;
+}
+
+/* A MariaDB server greets with mysql_native_password and moves an ed25519
+ * account over with an AuthSwitchRequest carrying the 32-byte nonce; the
+ * client answers with the 64-byte signature (it was refused as unsupported). */
+UTEST(mysql_conn, ed25519_auth_switch)
+{
+    const char *dsns[] = { "mariadb://alice:secret@localhost/db?sslmode=disable",
+                           "mariadb://alice:secret@localhost/db" };
+    for (int d = 0; d < 2; d++) {
+        int sv[2];
+        ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+        HlMyWriter s; hl_my_writer_init(&s);
+        build_handshake(&s, 0);                        /* offers native */
+        ed_switch(&s, 2, HL_MY_ED25519_NONCE_LEN);
+        build_ok(&s, 4);
+        ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+        HlMyDsn dsn; char err[128];
+        ASSERT_EQ(0, hl_my_dsn_parse(dsns[d], &dsn, err, sizeof err));
+        HlMyConn conn;
+        ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+        uint8_t got[1024]; HlMyFrame f[4];
+        ASSERT_EQ(2, ed_client_frames(sv[0], got, sizeof got, f, 4));
+        EXPECT_EQ(3, f[1].seq);
+        ASSERT_EQ((size_t)HL_MY_ED25519_SIG_LEN, f[1].body_len);
+        EXPECT_EQ(0, memcmp(f[1].body, ed_want_secret, HL_MY_ED25519_SIG_LEN));
+
+        hl_my_conn_close(&conn);
+        hl_my_writer_free(&s);
+        close(sv[0]);
+    }
+}
+
+/* A greeting that names client_ed25519 itself has only the 20-byte
+ * scramble: the client answers it with an empty response under that plugin
+ * and signs the nonce the server sends next - escaped with a leading 0x01
+ * (MariaDB prefixes plugin data starting 0x01 / 0xFE / 0xFF) or raw. */
+UTEST(mysql_conn, ed25519_from_greeting)
+{
+    for (int escaped = 0; escaped < 2; escaped++) {
+        int sv[2];
+        ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+        HlMyWriter s; hl_my_writer_init(&s);
+        build_handshake_plugin(&s, 0, HL_MY_ED25519_PLUGIN);
+        { size_t m = hl_my_packet_begin(&s, 2);
+          if (escaped) hl_my_put_u8(&s, HL_MY_AUTH_MORE_DATA);
+          for (int i = 0; i < HL_MY_ED25519_NONCE_LEN; i++)
+              hl_my_put_u8(&s, (uint8_t)(0x20 + i));
+          hl_my_packet_end(&s, m); }
+        build_ok(&s, 4);
+        ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+        HlMyDsn dsn; char err[128];
+        ASSERT_EQ(0, hl_my_dsn_parse("mariadb://alice:secret@localhost/db",
+                                     &dsn, err, sizeof err));
+        HlMyConn conn;
+        ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+        uint8_t got[1024]; HlMyFrame f[4];
+        ASSERT_EQ(2, ed_client_frames(sv[0], got, sizeof got, f, 4));
+        /* The HandshakeResponse41: empty auth response, plugin named. */
+        HlMyCursor c; hl_my_cursor_init(&c, &f[0]);
+        (void)hl_my_get_u32(&c);
+        (void)hl_my_get_u32(&c);
+        (void)hl_my_get_u8(&c);
+        (void)hl_my_get_bytes(&c, HL_MY_HANDSHAKE_RESERVED);
+        ASSERT_STREQ(hl_my_get_cstr(&c), "alice");
+        ASSERT_EQ(0, hl_my_get_u8(&c));                   /* no response yet */
+        ASSERT_STREQ(hl_my_get_cstr(&c), "db");
+        ASSERT_STREQ(hl_my_get_cstr(&c), HL_MY_ED25519_PLUGIN);
+        /* Then the signature. */
+        EXPECT_EQ(3, f[1].seq);
+        ASSERT_EQ((size_t)HL_MY_ED25519_SIG_LEN, f[1].body_len);
+        EXPECT_EQ(0, memcmp(f[1].body, ed_want_secret, HL_MY_ED25519_SIG_LEN));
+
+        hl_my_conn_close(&conn);
+        hl_my_writer_free(&s);
+        close(sv[0]);
+    }
+}
+
+/* The nonce is exactly 32 bytes, as MariaDB's client requires: a short or
+ * long one (a native-style 20 + NUL, or trailing bytes) signs nothing. */
+UTEST(mysql_conn, ed25519_malformed_nonce_refused)
+{
+    const int lens[] = { 0, 21, 31, 33 };
+    for (size_t i = 0; i < sizeof lens / sizeof lens[0]; i++) {
+        int sv[2];
+        ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+        HlMyWriter s; hl_my_writer_init(&s);
+        build_handshake(&s, 0);
+        ed_switch(&s, 2, lens[i]);
+        build_ok(&s, 4);
+        ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+        HlMyDsn dsn; char err[128];
+        ASSERT_EQ(0, hl_my_dsn_parse("mariadb://u:p@localhost/db",
+                                     &dsn, err, sizeof err));
+        HlMyConn conn;
+        EXPECT_EQ(-1, hl_my_conn_start(&conn, sv[1], &dsn));
+        EXPECT_TRUE(strstr(conn.errmsg, "malformed client_ed25519") != NULL);
+        uint8_t got[1024]; HlMyFrame f[4];
+        EXPECT_EQ(1, ed_client_frames(sv[0], got, sizeof got, f, 4));
+        hl_my_writer_free(&s);
+        close(sv[0]);
+    }
+}
+
+/* The signature (two scalar multiplications) is charged before it runs: a
+ * run that cannot pay stops without computing it. */
+UTEST(mysql_conn, ed25519_is_charged)
 {
     int sv[2];
     ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
-
     HlMyWriter s; hl_my_writer_init(&s);
-    build_handshake(&s, 0);                            /* offers native */
-    /* AuthSwitchRequest: 0xFE, plugin name, 32-byte scramble */
+    build_handshake(&s, 0);
+    ed_switch(&s, 2, HL_MY_ED25519_NONCE_LEN);
+    build_ok(&s, 4);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mariadb://u:p@localhost/db",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    HlDbOpBudget budget = { .limit = 1000, .used = 0, .tripped = 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_my_conn_start(&conn, sv[1], &dsn);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+    uint8_t got[1024]; HlMyFrame f[4];
+    EXPECT_EQ(1, ed_client_frames(sv[0], got, sizeof got, f, 4));
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* An unknown plugin still fails with a message naming the three Hull speaks. */
+UTEST(mysql_conn, unknown_auth_plugin_refused)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
     { size_t m = hl_my_packet_begin(&s, 2);
       hl_my_put_u8(&s, HL_MY_PKT_EOF);
-      hl_my_put_cstr(&s, "client_ed25519");
-      for (int i = 0; i < 32; i++) hl_my_put_u8(&s, (uint8_t)i);
+      hl_my_put_cstr(&s, "dialog");
       hl_my_packet_end(&s, m); }
     ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
-
     HlMyDsn dsn; char err[128];
     ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
     HlMyConn conn;
     ASSERT_EQ(-1, hl_my_conn_start(&conn, sv[1], &dsn));
-    ASSERT_TRUE(strstr(conn.errmsg, "ed25519") != NULL);
-
+    EXPECT_TRUE(strstr(conn.errmsg, "unsupported auth plugin 'dialog'") != NULL);
+    EXPECT_TRUE(strstr(conn.errmsg, "client_ed25519") != NULL);
     hl_my_writer_free(&s);
-    close(sv[0]);   /* sv[1] closed by the failed handshake */
+    close(sv[0]);
 }
 
 /* ── COM_QUERY result set over a socketpair ───────────────────────── */

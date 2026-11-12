@@ -292,6 +292,20 @@ int hl_my_caching_sha2_scramble(const char *password,
     return D;
 }
 
+int hl_my_ed25519_scramble(const char *password,
+                           const uint8_t nonce[HL_MY_ED25519_NONCE_LEN],
+                           uint8_t out[HL_MY_ED25519_SIG_LEN])
+{
+    /* MariaDB's client signs whatever the password is, "" included
+     * (client_ed25519.c: crypto_sign(reply, nonce, 32, passwd,
+     * strlen(passwd))): the account's public key is PASSWORD('') then. */
+    const char *pw = password ? password : "";
+    if (hl_cap_crypto_ed25519_password_sign(pw, strlen(pw), nonce,
+                                            HL_MY_ED25519_NONCE_LEN, out) != 0)
+        return -1;
+    return HL_MY_ED25519_SIG_LEN;
+}
+
 /* ── Connection layer (Keel v3 transport) ─────────────────────────────
  * From here through hl_my_conn_close all bytes ride the HlDbTransport byte
  * transport, which pulls in Keel + tls_client + mbedTLS. The pure-parser fuzzers
@@ -574,33 +588,67 @@ static int my_sslmode_parse(const char *s)
     return -1;
 }
 
-/* Compute the auth response for @p plugin into @p out (>= 32 bytes). Returns
- * the response length, 0 for an empty password, or -1 for an unsupported
- * plugin. */
+/* What one client_ed25519 signature is charged to the run before it is
+ * computed: two scalar multiplications (the nonce point R and the public key
+ * A) at the 2^14 units the crypto bindings charge one (audit 10). */
+#define HL_MY_ED25519_UNITS ((int64_t)2 << 14)
+
+/* compute_plugin_auth failures besides -1 (an unsupported plugin). */
+#define HL_MY_AUTH_BAD_CHALLENGE (-2)   /* the server's nonce is malformed */
+#define HL_MY_AUTH_INTERRUPTED   (-3)   /* the run's budget is spent */
+#define HL_MY_AUTH_CRYPTO_FAILED (-4)
+
+/* Compute the auth response for @p plugin to the server's challenge @p data
+ * (@p dlen bytes) into @p out. Returns the response length, 0 for an empty
+ * password (native / caching_sha2), -1 for an unsupported plugin, or one of
+ * the HL_MY_AUTH_* failures above. native / caching_sha2 take the first
+ * HL_MY_SCRAMBLE_LEN bytes (zero-padded, as before); client_ed25519 takes
+ * exactly HL_MY_ED25519_NONCE_LEN bytes, as MariaDB's client does. */
 static int compute_plugin_auth(const char *plugin, const char *password,
-                               const uint8_t nonce[HL_MY_SCRAMBLE_LEN],
-                               uint8_t out[HL_MY_CACHING_SHA2_DIGEST_LEN])
+                               const uint8_t *data, size_t dlen,
+                               uint8_t out[HL_MY_AUTH_RESP_MAX])
 {
+    if (strcmp(plugin, HL_MY_ED25519_PLUGIN) == 0) {
+        if (!data || dlen != HL_MY_ED25519_NONCE_LEN)
+            return HL_MY_AUTH_BAD_CHALLENGE;
+        if (hl_db_budget_charge(HL_MY_ED25519_UNITS) != 0)
+            return HL_MY_AUTH_INTERRUPTED;
+        int n = hl_my_ed25519_scramble(password, data, out);
+        return n < 0 ? HL_MY_AUTH_CRYPTO_FAILED : n;
+    }
+    uint8_t nonce[HL_MY_SCRAMBLE_LEN];
+    memset(nonce, 0, sizeof nonce);
+    if (data)
+        memcpy(nonce, data, dlen >= HL_MY_SCRAMBLE_LEN
+                            ? (size_t)HL_MY_SCRAMBLE_LEN : dlen);
+    int n;
     if (strcmp(plugin, "mysql_native_password") == 0)
-        return hl_my_native_password_scramble(password, nonce, out);
-    if (strcmp(plugin, "caching_sha2_password") == 0)
-        return hl_my_caching_sha2_scramble(password, nonce, out);
-    return -1;
+        n = hl_my_native_password_scramble(password, nonce, out);
+    else if (strcmp(plugin, "caching_sha2_password") == 0)
+        n = hl_my_caching_sha2_scramble(password, nonce, out);
+    else
+        return -1;
+    return n < 0 ? HL_MY_AUTH_CRYPTO_FAILED : n;
 }
 
-/* Set the error for a plugin compute_plugin_auth rejected. MariaDB's
- * client_ed25519 derives its ed25519 scalar from SHA512(password) directly,
- * which needs curve group-ops TweetNaCl keeps private; it is not yet supported,
- * so point the operator at a plugin Hull does implement. */
-static void set_unsupported_plugin_err(HlMyConn *conn, const char *plugin)
+/* Set the error for a compute_plugin_auth failure @p rc. */
+static void set_plugin_auth_err(HlMyConn *conn, const char *plugin, int rc)
 {
-    if (plugin && strcmp(plugin, "client_ed25519") == 0)
+    if (rc == HL_MY_AUTH_BAD_CHALLENGE)
         snprintf(conn->errmsg, sizeof conn->errmsg,
-                 "client_ed25519 auth is not supported yet; create the user with "
-                 "mysql_native_password or caching_sha2_password");
+                 "malformed %s challenge from the server (expected %d bytes)",
+                 plugin, HL_MY_ED25519_NONCE_LEN);
+    else if (rc == HL_MY_AUTH_INTERRUPTED)
+        snprintf(conn->errmsg, sizeof conn->errmsg,
+                 "interrupted (instruction limit exceeded) before the %s "
+                 "signature", plugin);
+    else if (rc == HL_MY_AUTH_CRYPTO_FAILED)
+        snprintf(conn->errmsg, sizeof conn->errmsg,
+                 "%s auth response could not be computed", plugin);
     else
         snprintf(conn->errmsg, sizeof conn->errmsg,
-                 "unsupported auth plugin '%s' (native / caching_sha2 only)",
+                 "unsupported auth plugin '%s' (mysql_native_password, "
+                 "caching_sha2_password and client_ed25519 only)",
                  plugin ? plugin : "?");
 }
 
@@ -617,7 +665,8 @@ static int my_auth_unverified(int tls_verified, int sslmode)
 }
 
 /* WARN once per DSN that a password-derived response (a native SHA-1 or
- * caching_sha2 scramble of the server's nonce) went over a connection whose
+ * caching_sha2 scramble, or a client_ed25519 signature, of the server's
+ * nonce) went over a connection whose
  * server certificate was not verified: whoever answered can test passwords
  * against it offline (audit 44, the MySQL twin of audit 29). */
 /* 1 the first time a WARN of @p kind is asked for this DSN's user@host:port
@@ -880,10 +929,24 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
     /* The server names its default auth plugin in the handshake (MySQL 8:
      * caching_sha2_password; older / MariaDB: mysql_native_password). */
     const char *plugin = hs.auth_plugin[0] ? hs.auth_plugin : "mysql_native_password";
-    uint8_t auth[HL_MY_CACHING_SHA2_DIGEST_LEN];
-    int authlen = compute_plugin_auth(plugin, dsn->password, hs.scramble, auth);
+    uint8_t auth[HL_MY_AUTH_RESP_MAX];
+    int authlen;
+    /* client_ed25519 signs a 32-byte nonce the server sends AFTER this
+     * response (the greeting's scramble is 20 bytes): answer the greeting
+     * with an empty response under that plugin and wait for the nonce. A
+     * MariaDB server names its default plugin in the greeting
+     * (mysql_native_password) and moves an ed25519 account over with an
+     * AuthSwitchRequest carrying the nonce, the usual path. */
+    int ed25519_pending = 0;
+    if (strcmp(plugin, HL_MY_ED25519_PLUGIN) == 0) {
+        authlen = 0;
+        ed25519_pending = 1;
+    } else {
+        authlen = compute_plugin_auth(plugin, dsn->password, hs.scramble,
+                                      HL_MY_SCRAMBLE_LEN, auth);
+    }
     if (authlen < 0) {
-        set_unsupported_plugin_err(conn, plugin);
+        set_plugin_auth_err(conn, plugin, authlen);
         hl_my_conn_close(conn); return -1;
     }
 
@@ -920,6 +983,32 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
         if (awaiting_key && hdr != HL_MY_AUTH_MORE_DATA && hdr != HL_MY_PKT_ERR) {
             conn_set_err(conn, "server did not send its public key when asked");
             hl_my_conn_close(conn); return -1;
+        }
+
+        /* The client_ed25519 nonce the greeting's plugin left owed. Inside
+         * the plugin every packet but an ERR or an AuthSwitchRequest is its
+         * data, a leading 0x01 the server's escape (MariaDB's
+         * server_mpvio_write_packet prefixes data starting 0x01 / 0xFE /
+         * 0xFF; libmariadb strips it): an OK-looking 0x00 is a nonce here,
+         * and anything but exactly 32 bytes is refused. */
+        if (ed25519_pending && hdr != HL_MY_PKT_ERR && hdr != HL_MY_PKT_EOF) {
+            const uint8_t *data = f.body;
+            size_t dlen = f.body_len;
+            if (hdr == HL_MY_AUTH_MORE_DATA) { data++; dlen--; }
+            ed25519_pending = 0;
+            int n = compute_plugin_auth(HL_MY_ED25519_PLUGIN, dsn->password,
+                                        data, dlen, auth);
+            if (n < 0) {
+                set_plugin_auth_err(conn, HL_MY_ED25519_PLUGIN, n);
+                hl_my_conn_close(conn); return -1;
+            }
+            if (send_auth_data(conn, (uint8_t)(f.seq + 1), auth, n) != 0) {
+                conn_set_err(conn, "client_ed25519 response failed");
+                hl_my_conn_close(conn); return -1;
+            }
+            if (my_auth_unverified(tls_verified, sslmode))
+                my_warn_unverified_auth(dsn, HL_MY_ED25519_PLUGIN, sslmode);
+            continue;   /* read the OK / ERR result */
         }
 
         if (hdr == HL_MY_PKT_OK) {           /* authenticated */
@@ -966,15 +1055,23 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
                     "to caching_sha2_password");
                 hl_my_conn_close(conn); return -1;
             }
-            uint8_t nonce[HL_MY_SCRAMBLE_LEN];
-            memset(nonce, 0, sizeof nonce);
+            /* A switch to client_ed25519 is answered on any sslmode, as the
+             * greeting's plugin is: its response is a signature of the
+             * server's nonce under a key derived from the password, which
+             * an on-path party can test password guesses against offline -
+             * as it can native's or caching_sha2's scramble, at a higher
+             * cost per guess - so an unverified channel is WARNed below,
+             * not refused. */
+            ed25519_pending = 0;
+            /* The RSA exchange below XORs the password with the nonce of
+             * the switch, not the greeting's. */
+            memset(cur_nonce, 0, sizeof cur_nonce);
             if (data)
-                memcpy(nonce, data, dlen >= HL_MY_SCRAMBLE_LEN
-                                    ? (size_t)HL_MY_SCRAMBLE_LEN : dlen);
-            memcpy(cur_nonce, nonce, sizeof cur_nonce);
-            int n2 = compute_plugin_auth(sw, dsn->password, nonce, auth);
+                memcpy(cur_nonce, data, dlen >= HL_MY_SCRAMBLE_LEN
+                                        ? (size_t)HL_MY_SCRAMBLE_LEN : dlen);
+            int n2 = compute_plugin_auth(sw, dsn->password, data, dlen, auth);
             if (n2 < 0) {
-                set_unsupported_plugin_err(conn, sw);
+                set_plugin_auth_err(conn, sw, n2);
                 hl_my_conn_close(conn); return -1;
             }
             if (send_auth_data(conn, (uint8_t)(f.seq + 1), auth, n2) != 0) {

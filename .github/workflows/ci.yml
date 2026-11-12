@@ -399,7 +399,7 @@ jobs:
       # hiccup from failing a job whose subject is not apt.
       - name: Install openssh-server (for the SSH tunnel e2e)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y openssh-server || true
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y openssh-server || true
 
       # hull/ssh through a REAL WebSocket relay: the leg with sockets in it.
       # The unit suites drive ssh.connect against a fake relay, so this is
@@ -430,7 +430,7 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then
             brew install zbar
           else
-            sudo apt-get update && sudo apt-get install -y zbar-tools
+            sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y zbar-tools
           fi
 
       - name: TOTP + QR round-trip E2E tests
@@ -693,7 +693,7 @@ jobs:
           persist-credentials: false
           submodules: true
       - name: Install LLVM + cmake
-        run: sudo apt-get update && sudo apt-get install -y llvm-18-dev cmake
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y llvm-18-dev cmake
       - name: Build wamrc (the WAMR patch carriage)
         timeout-minutes: 12
         run: |
@@ -735,7 +735,7 @@ jobs:
           persist-credentials: false
           submodules: true
       - name: Install LLVM + cmake
-        run: sudo apt-get update && sudo apt-get install -y llvm-18-dev cmake
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y llvm-18-dev cmake
       - name: Download wamrc artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -824,7 +824,7 @@ jobs:
 
       - name: Install LLVM + cmake
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y llvm-18-dev cmake
 
       - name: Download verified wamrc artifact
@@ -1002,7 +1002,7 @@ jobs:
 
       - name: Install LLVM + cmake + wabt + clang/lld
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           # clang + lld give the G1 drift guard a real wasm32 toolchain (wasm-ld);
           # wabt provides wasm-objdump for the G4 static bytecode gate.
           sudo apt-get install -y llvm-18-dev cmake wabt clang lld
@@ -1058,7 +1058,7 @@ jobs:
 
       - name: Install LLVM + cmake
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y llvm-18-dev cmake
 
       - name: Download verified wamrc artifact
@@ -1178,7 +1178,7 @@ jobs:
 
       - name: Install clang + lld + wabt + LLVM + cmake
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           # clang + lld give `hull compute build` a wasm32 clang and wasm-ld;
           # wabt provides wasm-objdump for the import scan; llvm-18-dev + cmake
           # are for building wamrc.
@@ -1235,7 +1235,7 @@ jobs:
 
       - name: Install clang + lld + LLVM + cmake
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y clang lld llvm-18-dev cmake
 
       - name: Download verified wamrc artifact
@@ -1287,7 +1287,7 @@ jobs:
 
       - name: Install clang + lld + LLVM + cmake
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y clang lld llvm-18-dev cmake
 
       - name: Download verified wamrc artifact
@@ -1341,7 +1341,7 @@ jobs:
 
       - name: Install clang + lld + LLVM + cmake
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y clang lld llvm-18-dev cmake
 
       - name: Download verified wamrc artifact
@@ -1394,7 +1394,7 @@ jobs:
 
       - name: Install clang + lld + LLVM + cmake
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y clang lld llvm-18-dev cmake
 
       - name: Download verified wamrc artifact
@@ -1448,7 +1448,7 @@ jobs:
 
       - name: Install LLVM + cmake
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y llvm-18-dev cmake
 
       - name: Build wamrc (applies the WAMR patch carriage)
@@ -1950,7 +1950,7 @@ jobs:
 
       - name: Install clang
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y clang
 
       - name: WAMR MSan shadow-gap annotation policy fixture (patch 0006)
@@ -1990,7 +1990,7 @@ jobs:
 
       - name: Install clang
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y clang
 
       - name: TSan test (worker-pool / shared-state paths)
@@ -2025,7 +2025,7 @@ jobs:
 
       - name: Install clang
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y clang
 
       - name: WAMR-instrumented TSan (destroy + guarded-subrange + span lifecycle)
@@ -2053,7 +2053,7 @@ jobs:
           persist-credentials: false
           submodules: true
       - name: Install clang
-        run: sudo apt-get update && sudo apt-get install -y clang
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y clang
       - name: Build core fuzz targets
         run: |
           make CC=clang \
@@ -2081,7 +2081,7 @@ jobs:
           persist-credentials: false
           submodules: true
       - name: Install clang
-        run: sudo apt-get update && sudo apt-get install -y clang
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y clang
       - name: Build DB wire fuzz targets
         run: |
           make CC=clang \
@@ -2109,7 +2109,7 @@ jobs:
           persist-credentials: false
           submodules: true
       - name: Install clang
-        run: sudo apt-get update && sudo apt-get install -y clang
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y clang
       - name: Build compute fuzz targets
         run: |
           make CC=clang fuzz/fuzz_span_sdk fuzz/fuzz_span_window
@@ -2133,7 +2133,7 @@ jobs:
           persist-credentials: false
           submodules: true
       - name: Install clang
-        run: sudo apt-get update && sudo apt-get install -y clang
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y clang
       - name: Fuzz Lua source parser (60s)
         # hull.source.lua: adversarial bytes -> lua.parse() over a bounded lua_State,
         # ASan/UBSan on the instrumented VM; corpus staged from the repo root.
@@ -2151,7 +2151,7 @@ jobs:
           persist-credentials: false
           submodules: true
       - name: Install clang
-        run: sudo apt-get update && sudo apt-get install -y clang
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y clang
       - name: Fuzz JS source parser (60s)
         # hull:source:parser through the restricted QuickJS session (fuzz_parse entry);
         # sanitizer split keeps UBSan off vendored QuickJS. Corpus staged first.
@@ -2358,7 +2358,7 @@ jobs:
 
       - name: Install redis-server
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y redis-server
           # Ship the daemon disabled; the e2e scripts start their own on a test port.
           sudo systemctl disable --now redis-server || true
@@ -2389,7 +2389,7 @@ jobs:
 
       - name: Install tools
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y clang-tools cppcheck
 
       - name: scan-build
@@ -2757,7 +2757,7 @@ jobs:
           persist-credentials: false
           submodules: true
       - name: Install Vulkan loader + dev headers (compose links -lvulkan)
-        run: sudo apt-get update && sudo apt-get install -y libvulkan-dev
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y libvulkan-dev
       - name: Fetch wgpu-native static lib
         run: make fetch-wgpu
       - name: Compose the GPU feature into an app binary (e2e)
@@ -2860,7 +2860,7 @@ jobs:
           submodules: true
 
       - name: Install lcov
-        run: sudo apt-get update && sudo apt-get install -y lcov
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y lcov
 
       - name: Generate coverage
         timeout-minutes: 10
@@ -2883,7 +2883,7 @@ jobs:
           submodules: true
 
       - name: Install luacheck
-        run: sudo apt-get update && sudo apt-get install -y luarocks && sudo luarocks install luacheck
+        run: sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y luarocks && sudo luarocks install luacheck
 
       - name: Lua lint
         run: make lint-lua
@@ -3061,7 +3061,7 @@ jobs:
 
       - name: Install wrk
         run: |
-          sudo apt-get update
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update
           sudo apt-get install -y wrk
 
       - name: Build

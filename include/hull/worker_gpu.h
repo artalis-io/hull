@@ -1,7 +1,8 @@
 /*
  * worker_gpu.h - Runtime-agnostic GPU worker capability
  *
- * Offloads gpu.async.dispatch to the thread pool.
+ * Offloads gpu.async.dispatch / pipeline to the thread pool, and waits
+ * there for a gpu.async.compile / load the event loop began.
  * Follows the same pattern as worker_wasm.h.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -33,6 +34,11 @@ typedef struct HlWorkerGpuOp {
     /* Input */
     HlGpuCtx      *gpu_ctx;          /* GPU context (borrowed) */
     int             is_pipeline;      /* 0 = dispatch, 1 = pipeline */
+    /* gpu.async.compile / load (HL_WORKER_GPU_COMPILE / _LOAD): the
+     * compile begun on the event loop; the worker waits for it and
+     * installs its pipeline (hl_cap_gpu_compile_async_finish). */
+    int             is_compile;
+    HlGpuCompileAsync *compile;
 
     /* Dispatch mode (is_pipeline == 0) */
     char            shader_name[HL_GPU_NAME_MAX];
@@ -64,6 +70,9 @@ typedef struct HlWorkerGpuOp {
     char           error_msg[HL_WORKER_ERR_SIZE];
     atomic_int     cancelled;
 } HlWorkerGpuOp;
+
+#define HL_WORKER_GPU_COMPILE 1
+#define HL_WORKER_GPU_LOAD    2
 
 /* Submit a gpu.async.dispatch operation to the thread pool.
  * Returns 0 on success, -1 on error (pool full or NULL). */

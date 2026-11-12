@@ -211,6 +211,18 @@ int hl_cap_crypto_hmac_sha256(const void *key, size_t key_len,
     return 0;
 }
 
+int hl_cap_crypto_ed25519_password_sign(const void *password, size_t pw_len,
+                                        const uint8_t *msg, size_t msg_len,
+                                        uint8_t out_sig[64]);
+int hl_cap_crypto_ed25519_password_sign(const void *password, size_t pw_len,
+                                        const uint8_t *msg, size_t msg_len,
+                                        uint8_t out_sig[64])
+{
+    if (msg_len > 64) return -1;
+    fz_mix(password, pw_len, msg, msg_len, out_sig, 64);
+    return 0;
+}
+
 int hl_cap_crypto_random(void *buf, size_t len);
 int hl_cap_crypto_random(void *buf, size_t len)
 {

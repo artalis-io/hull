@@ -633,4 +633,27 @@ UTEST(release_io_audit4, repo_names_are_checked)
     EXPECT_FALSE(hl_release_io_tag_valid("v1.0.0/../../x"));
 }
 
+UTEST(release_io_display, version_without_the_tag_v)
+{
+    /* `hull update` printed "current  0.20.0" beside "latest   v0.20.1". */
+    EXPECT_STREQ("0.20.1", hl_release_io_display_version("v0.20.1"));
+    EXPECT_STREQ("1.0.0-rc1", hl_release_io_display_version("v1.0.0-rc1"));
+    EXPECT_STREQ("0.20.1", hl_release_io_display_version("0.20.1"));
+    EXPECT_STREQ("vx", hl_release_io_display_version("vx"));
+    EXPECT_STREQ("", hl_release_io_display_version(NULL));
+}
+
+UTEST(release_io_display, message_prefix_is_the_command)
+{
+    char b[64];
+    hl_release_io_msg_prefix("hull-update", b, sizeof b);
+    EXPECT_STREQ("hull update", b);
+    hl_release_io_msg_prefix("hull-feature", b, sizeof b);
+    EXPECT_STREQ("hull feature", b);
+    hl_release_io_msg_prefix("hull", b, sizeof b);
+    EXPECT_STREQ("hull", b);
+    hl_release_io_msg_prefix(NULL, b, sizeof b);
+    EXPECT_STREQ("hull", b);
+}
+
 UTEST_MAIN()

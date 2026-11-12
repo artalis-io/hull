@@ -161,6 +161,16 @@ Submits to thread pool, yields the coroutine (Lua) or returns Promise
 (JS). Other requests are served while the GPU runs. Deep-copies all
 buffer data before submission for thread safety.
 
+```lua
+local ok, err = gpu.async.load("score")           -- parks while it compiles
+local ok, err = gpu.async.compile("tmp", src)     -- same results as gpu.compile
+```
+
+The shader compile without blocking the event loop (JS: a Promise that
+resolves `true` or rejects as `gpu.compile` throws). Same checks, policy
+and errors as the synchronous calls; while it compiles the device answers
+other GPU calls with `gpu_busy`. Only in a handler, task or `app.main`.
+
 ## Inspecting GPU state
 
 ```bash

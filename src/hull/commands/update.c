@@ -127,14 +127,16 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         return 1;
     }
 
-    /* Strip leading 'v' from tag for comparison */
-    const char *latest_ver = latest_tag;
-    if (latest_ver[0] == 'v') latest_ver++;
+    /* Both versions without the tag's "v" (a source build's HL_VERSION is a
+     * `git describe`, "v0.20.1-3-gabc"), compared and printed side by side;
+     * the tag itself names the download URLs. */
+    const char *latest_ver = hl_release_io_display_version(latest_tag);
+    const char *cur_ver = hl_release_io_display_version(HL_VERSION);
 
-    fprintf(stdout, "hull update: current  %s\n", HL_VERSION);
-    fprintf(stdout, "hull update: latest   %s\n", latest_tag);
+    fprintf(stdout, "hull update: current  %s\n", cur_ver);
+    fprintf(stdout, "hull update: latest   %s\n", latest_ver);
 
-    if (!force && strcmp(HL_VERSION, latest_ver) == 0) {
+    if (!force && strcmp(cur_ver, latest_ver) == 0) {
         fprintf(stdout, "hull update: already up to date\n");
         kl_tls_mbedtls_ctx_destroy(tls);
         return 0;
@@ -148,7 +150,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     int order = hl_release_io_version_cmp(HL_VERSION, latest_tag, &comparable);
     if (!force && comparable && order >= 0) {
         fprintf(stdout, "hull update: %s is not newer than this hull; nothing to do "
-                        "(--force installs it anyway)\n", latest_tag);
+                        "(--force installs it anyway)\n", latest_ver);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 0;
     }
@@ -157,13 +159,13 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     if (!force && !comparable && check_only) {
         fprintf(stdout, "hull update: update available (this build, '%s', is not "
                         "a release; `hull update --force` installs %s)\n",
-                HL_VERSION, latest_tag);
+                cur_ver, latest_ver);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 0;
     }
     if (!force && !comparable) {
         fprintf(stderr, "hull update: cannot order versions '%s' and '%s'; "
-                        "pass --force to install %s\n", HL_VERSION, latest_tag, latest_tag);
+                        "pass --force to install %s\n", cur_ver, latest_ver, latest_ver);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }
@@ -339,6 +341,6 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     }
     hl_release_io_free(&alloc, binary, binary_len);
 
-    fprintf(stdout, "hull update: installed %s → %s\n", latest_tag, self_path);
+    fprintf(stdout, "hull update: installed %s → %s\n", latest_ver, self_path);
     return 0;
 }

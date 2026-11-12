@@ -215,6 +215,9 @@ extern int crypto_sign_ed25519_tweet_open(unsigned char *,unsigned long long *,c
 /* HULL PATCH: crypto_sign_ed25519_tweet_keypair (randombytes-based) is gone;
  * derive the keypair from a caller-supplied seed instead. */
 extern int crypto_sign_ed25519_tweet_seed_keypair(unsigned char *,unsigned char *,const unsigned char *);
+/* HULL PATCH: sign (R || S only, message <= 64 bytes) from an expanded key
+ * az = SHA-512(seed or password); see tweetnacl.c. */
+extern int crypto_sign_ed25519_tweet_sign_expanded(unsigned char *,const unsigned char *,unsigned long long,const unsigned char *);
 #define crypto_sign_ed25519_tweet_VERSION "-"
 #define crypto_sign_ed25519 crypto_sign_ed25519_tweet
 #define crypto_sign_ed25519_open crypto_sign_ed25519_tweet_open
