@@ -5151,6 +5151,44 @@ UTEST(gpu_audit45, teardown_frees_a_kept_compile)
     free(ctx);
 }
 
+/* audit 45: a second gpu.async.load of a shader still compiling waits for
+ * that compile instead of being refused gpu_busy; a joined wait that gives
+ * up never abandons the owner's compile. */
+UTEST(gpu_audit45, same_name_load_joins_the_running_compile)
+{
+    HlGpuBackend be;
+    HlGpuCtx *ctx = aac_ctx(&be);
+    ASSERT_TRUE(ctx != NULL);
+    hl_gpu_test_set_compile_timeout_ms(0);
+    const char *src = "@compute @workgroup_size(1) fn main() {}";
+    HlGpuCompileAsync *a = NULL, *b = NULL, *c = NULL;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "lazy", src,
+                                                        strlen(src), 0, &a));
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "lazy", src,
+                                                        strlen(src), 0, &b));
+    EXPECT_TRUE(b != NULL);
+    /* Another name is still refused while the device compiles. */
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_compile_async_begin(ctx, -1, "other",
+                                                              src, strlen(src), 0, &c));
+    /* A joined wait cancelled leaves the owner's compile alone. */
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "lazy", src,
+                                                        strlen(src), 0, &c));
+    atomic_int cancelled = 1;
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_compile_async_finish(c, &cancelled));
+    hl_cap_gpu_compile_async_free(c);
+    a40_release_now();
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_finish(b, NULL));
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_finish(a, NULL));
+    hl_cap_gpu_compile_async_free(b);
+    hl_cap_gpu_compile_async_free(a);
+    EXPECT_EQ(1, ctx->devices[0].pipeline_count);
+    EXPECT_EQ(1, a40_finished);                 /* compiled once */
+    EXPECT_TRUE(ctx->devices[0].compile_job == NULL);
+    hl_cap_gpu_destroy(ctx);
+    EXPECT_EQ(1, aac_destroyed());
+    free(ctx);
+}
+
 /* begin refuses exactly what the synchronous compile refuses, before the
  * backend: the WGSL pre-checks, the name, the device, the shader policy. */
 UTEST(hull_cap_gpu_async_compile, begin_refuses_as_sync)

@@ -169,7 +169,8 @@ local ok, err = gpu.async.compile("tmp", src)     -- same results as gpu.compile
 The shader compile without blocking the event loop (JS: a Promise that
 resolves `true` or rejects as `gpu.compile` throws). Same checks, policy
 and errors as the synchronous calls; while it compiles the device answers
-other GPU calls with `gpu_busy`. Only in a handler, task or `app.main`.
+other GPU calls with `gpu_busy` - but another async compile / load of the
+same name waits for it. Only in a handler, task or `app.main`.
 
 ## Inspecting GPU state
 
