@@ -15122,6 +15122,32 @@ static int lgpu_has(int device, const char *kind, const char *name)
     "@group(0) @binding(3) var<storage, read_write> d: array<u32>; " \
     "fn main() {}"
 
+/* output_texture alone reads the texture back: the default buffer 1 came
+ * first, so a texture-only shader failed with
+ * output_buffer_index_out_of_range after it ran, and beside a buffer the
+ * texture was never read back. An explicit output still reads the buffer. */
+#define HL_TEST_GPU_TEX_WGSL \
+    "@group(0) @binding(0) var t: texture_storage_2d<rgba8unorm, write>; fn main() {}"
+#define HL_TEST_GPU_MIX_WGSL \
+    "@group(0) @binding(0) var<storage, read_write> a: array<u32>; " \
+    "@group(0) @binding(1) var t: texture_storage_2d<rgba8unorm, write>; fn main() {}"
+UTEST(lua_gpu, output_texture_alone_reads_the_texture)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    LGPU_EXPECT("assert(gpu.compile('tex', '" HL_TEST_GPU_TEX_WGSL "')) "
+                "assert(gpu.compile('mix', '" HL_TEST_GPU_MIX_WGSL "')) "
+                "assert(gpu.texture('o', 'ABCDEFGH', { width = 2, height = 1, format = 'rgba8', storage = true })) "
+                "local t = { { name = 'o', storage = true } } "
+                "local a, ea = gpu.dispatch('tex', { textures = t, output_texture = 1 }) "
+                "local b, eb = gpu.dispatch('mix', { buffers = { { data = 'xyzw' } }, textures = t, "
+                "  output_texture = 1 }) "
+                "local c, ec = gpu.dispatch('mix', { buffers = { { data = 'xyzw' } }, textures = t, "
+                "  output = 1, output_texture = 1 }) "
+                "R = tostring(a or ea) .. ' ' .. tostring(b or eb) .. ' ' .. tostring(c or ec)",
+                "ABCDEFGH ABCDEFGH xyzw");
+    lgpu_cleanup();
+}
+
 UTEST(lua_gpu, devices_are_listed)
 {
     ASSERT_EQ(lgpu_init(2), 0);

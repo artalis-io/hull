@@ -224,9 +224,23 @@ static int gpu_mock_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
                              void **output, size_t *output_len,
                              const char **err_msg)
 {
-    (void)dev; (void)pipeline; (void)pt; (void)ptc;
+    (void)dev; (void)pipeline;
     gpu_mock_dispatches++;
-    if (!output || opts->output_buffer == HL_GPU_OUTPUT_NONE) return HL_GPU_OK;
+    if (!output) return HL_GPU_OK;
+    /* As the wgpu backend: a buffer read-back wins, else the texture one. */
+    if (opts->output_buffer == HL_GPU_OUTPUT_NONE || opts->output_buffer < 0) {
+        int ti = opts->output_texture;
+        if (ti < 0) return HL_GPU_OK;
+        if (ti >= opts->texture_count || !opts->textures[ti].name) {
+            if (err_msg) *err_msg = "output_texture_not_found";
+            return HL_GPU_ERR_DISPATCH;
+        }
+        for (int i = 0; i < ptc; i++)
+            if (strcmp(pt[i].name, opts->textures[ti].name) == 0)
+                return gpu_mock_store_copy(pt[i].handle, output, output_len);
+        if (err_msg) *err_msg = "texture_not_found";
+        return HL_GPU_ERR_DISPATCH;
+    }
     int oi = opts->output_buffer;
     if (oi < 0 || oi >= opts->buffer_count) {
         if (err_msg) *err_msg = "output_buffer_index_out_of_range";

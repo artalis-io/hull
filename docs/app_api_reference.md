@@ -2655,8 +2655,9 @@ gpu.dispatch("shader_name", {
         { name = "output", storage = true },   -- storage texture (single binding)
     },
     workgroups = { x = 64, y = 1, z = 1 },
-    output = 3,                        -- 1-indexed buffer to read back (Lua)
-    output_texture = 2,                -- 1-indexed texture to read back as HlImage (Lua)
+    output = 3,                        -- 1-indexed buffer to read back (Lua); default 1
+    output_texture = 2,                -- 1-indexed texture to read back as raw bytes (Lua);
+                                       -- alone (no `output`) it replaces the buffer default
     device = -1,                       -- -1 = default device
 })
 ```
@@ -2715,8 +2716,8 @@ gpu.buffer_copy("source", "dest", {
 
 **GPU Textures:**
 - `gpu.texture(name, img)`. Create persistent texture from HlImage.
-- `gpu.texture(name, data, opts)`. Create from raw bytes with `opts.width`, `opts.height`, `opts.format`, `opts.storage`.
-- `gpu.texture(name, nil)`. Destroy persistent texture.
+- `gpu.texture(name, data, opts)`. Create from raw bytes with `opts.width`, `opts.height`, `opts.format`, `opts.storage`. An empty output texture is made from zeroed bytes (`string.rep("\0", w * h * 4)`, JS `new ArrayBuffer(w * h * 4)`) with `storage = true`.
+- `gpu.texture(name, nil)`. Destroy persistent texture (it never creates one).
 - `gpu.texture_read(name)` → HlImage. Read back texture pixels.
 - Dispatch with textures:
   ```lua
@@ -2725,9 +2726,10 @@ gpu.buffer_copy("source", "dest", {
           { name = "input" },                        -- sampled (binding N, N+1)
           { name = "output", storage = true },       -- storage (binding M)
       },
-      output_texture = 2,                            -- readback as HlImage
+      output_texture = 2,                            -- read back as raw bytes
   })
   ```
+  `output_texture` (JS `outputTexture`, 0-indexed) returns the texture's raw pixel bytes (a Lua string, a JS ArrayBuffer); `gpu.texture_read(name)` returns an HlImage instead. Given alone it is the read-back; with an explicit `output` the buffer is read back and the texture is not.
 - Sampled textures get paired bindings (texture view + sampler). Storage textures get single binding.
 - Binding convention: uniforms → buffers → sampled textures → storage textures (all `@group(0)`).
 - A named texture's `storage` flag must match how it was created (`gpu.texture(..., { storage = ... })`): a mismatch fails the dispatch / pipeline with `texture_storage_mismatch` (audit 10 - the bind group was sized from the flag and filled from the texture, writing past it).
@@ -2901,10 +2903,11 @@ under it; `test` is a global in those files.
 | `test.run_main(args, opts?)` | `test.runMain(args, opts?)` | run `app.main` once: `{ code, stdout, stderr }` |
 | `test.eq(a, b, msg?)`, `test.ok(v, msg?)`, `test.err(fn, pattern?)` | same | assertions |
 
-`test.eq` compares numbers, strings, booleans and nil / null / undefined by
-value, and tables / objects by identity, never deeply: two separate tables or
-objects with the same contents are not equal (Lua raw equality, so no `__eq`).
-Compare fields one at a time.
+`test.eq` is strict equality - Lua raw equality (no `__eq`), JS `===`: values
+of different types are never equal (`0` is not `null` or `false`, `null` is not
+`undefined`), numbers, strings and booleans compare by value, and tables /
+objects by identity, never deeply: two separate tables or objects with the same
+contents are not equal. Compare fields one at a time.
 
 `test.run_main` / `runMain` (for an app that registers `app.main`, with or
 without routes): `args` becomes `ctx.args` (strings); `ctx.stdout` /

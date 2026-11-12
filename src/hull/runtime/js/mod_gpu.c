@@ -692,9 +692,11 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     /* Parse output buffer index (0-indexed in JS).
      * output = N     → read back buffer N
      * output = false → fire-and-forget (skip readback)
-     * output absent  → default to 0 (backward compat) */
+     * output absent  → buffer 0 (backward compat), unless outputTexture
+     *                  asks for a texture read-back (below) */
     JSValue out_val = JS_GetPropertyStr(ctx, opts_val, "output");
     if (JS_IsException(out_val)) { perr = 1; goto parsed; }
+    int out_given = !JS_IsUndefined(out_val);
     if (JS_IsBool(out_val) && !JS_ToBool(ctx, out_val)) {
         opts.output_buffer = HL_GPU_OUTPUT_NONE;
     } else if (!JS_IsUndefined(out_val)) {
@@ -850,6 +852,12 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     r = hl_js_opt_int32(ctx, opts_val, "outputTexture", &ot);
     if (r < 0) { perr = 1; goto parsed; }
     if (r) opts.output_texture = ot;
+    /* outputTexture alone reads that texture back. The default buffer 0 took
+     * precedence: a texture-only shader (no buffers) failed with
+     * output_buffer_index_out_of_range after it ran, and with buffers the
+     * texture was never read back. */
+    if (!out_given && opts.output_texture >= 0)
+        opts.output_buffer = HL_GPU_OUTPUT_NONE;
 
 parsed:;
     void *output = NULL;

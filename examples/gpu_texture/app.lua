@@ -73,10 +73,12 @@ app.get("/process", function(req, res)
         return
     end
 
-    -- Create output storage texture (same dimensions)
-    _, err = gpu.texture("output", nil, {
-        width = img:width(),
-        height = img:height(),
+    -- Create the output storage texture (same dimensions) from zeroed
+    -- bytes: gpu.texture(name, nil) destroys a texture, it does not make one.
+    local w, h = img:width(), img:height()
+    _, err = gpu.texture("output", string.rep("\0", w * h * 4), {
+        width = w,
+        height = h,
         format = "rgba8",
         storage = true,
     })
@@ -86,13 +88,14 @@ app.get("/process", function(req, res)
         return
     end
 
-    -- Dispatch the invert shader
-    local _result, dispatch_err = gpu.dispatch("invert", {
+    -- Dispatch the invert shader; output_texture reads the 2nd texture back
+    -- as raw RGBA8 bytes.
+    local out_pixels, dispatch_err = gpu.dispatch("invert", {
         textures = {
             { name = "input" },                     -- sampled (binding 0, 1)
             { name = "output", storage = true },    -- storage (binding 2)
         },
-        workgroups = { x = img:width(), y = img:height(), z = 1 },
+        workgroups = { x = w, y = h, z = 1 },
         output_texture = 2,  -- 1-indexed: read back the 2nd texture
     })
 
@@ -102,16 +105,7 @@ app.get("/process", function(req, res)
         return
     end
 
-    -- Read back result
-    local out_img = gpu.texture_read("output")
-    if not out_img then
-        img:close()
-        res:status(500):json({ error = "texture readback failed" })
-        return
-    end
-
     -- Compare first pixel: original (0, 0, 128, 255) -> inverted (255, 255, 127, 255)
-    local out_pixels = out_img:pixels()
     local r = string.byte(out_pixels, 1)
     local g = string.byte(out_pixels, 2)
     local b = string.byte(out_pixels, 3)
@@ -120,19 +114,18 @@ app.get("/process", function(req, res)
     res:json({
         ok = true,
         input = {
-            width = img:width(),
-            height = img:height(),
+            width = w,
+            height = h,
             format = img:format(),
             first_pixel = { r = 0, g = 0, b = 128, a = 255 },
         },
         output = {
-            width = out_img:width(),
-            height = out_img:height(),
-            format = out_img:format(),
+            width = w,
+            height = h,
+            format = "rgba8",
             first_pixel = { r = r, g = g, b = b, a = a },
         },
     })
 
     img:close()
-    out_img:close()
 end)
