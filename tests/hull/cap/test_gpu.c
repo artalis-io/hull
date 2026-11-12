@@ -4978,12 +4978,9 @@ UTEST(hull_cap_gpu_async_compile, begin_does_not_wait_and_finish_installs)
     EXPECT_TRUE(b == NULL);
     unsigned char data[16] = { 0 };
     EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_buffer_write(ctx, -1, "b", data, 16, 0));
-    /* Even with the compile thread done, until the finisher settles it. */
+    atomic_int cancelled = 0;
     a40_release_now();
     EXPECT_TRUE(a40_wait_settled(ctx));
-    a40_sleep_ms(20);
-    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_buffer_write(ctx, -1, "b", data, 16, 0));
-    atomic_int cancelled = 0;
     EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_finish(a, &cancelled));
     EXPECT_EQ(1, ctx->devices[0].pipeline_count);
     EXPECT_STREQ("slow", ctx->devices[0].pipelines[0].name);
@@ -5034,7 +5031,40 @@ UTEST(hull_cap_gpu_async_compile, deadline_abandons_and_device_recovers)
     mock_free(ctx);
 }
 
-UTEST(hull_cap_gpu_async_compile, cancel_abandons_at_once)
+/* audit 45: the first holder of the device mutex once the compile is done
+ * installs it - a busy pool no longer holds the device past the compile -
+ * and a finisher that comes after the deadline reports the result. */
+UTEST(gpu_audit45, done_compile_installs_before_the_finisher)
+{
+    HlGpuBackend be;
+    HlGpuCtx *ctx = aac_ctx(&be);
+    ASSERT_TRUE(ctx != NULL);
+    hl_gpu_test_set_compile_timeout_ms(100);
+    const char *src = "@compute @workgroup_size(1) fn main() {}";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", 16, HL_GPU_USAGE_READWRITE));
+    HlGpuCompileAsync *a = NULL;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "slow", src,
+                                                        strlen(src), 0, &a));
+    hl_gpu_test_set_compile_timeout_ms(0);
+    a40_release_now();
+    EXPECT_TRUE(a40_wait_settled(ctx));
+    EXPECT_TRUE(aac_device_free(ctx));        /* installed by that call */
+    EXPECT_EQ(1, ctx->devices[0].pipeline_count);
+    a40_sleep_ms(150);                        /* past the deadline */
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_finish(a, NULL));
+    hl_cap_gpu_compile_async_free(a);
+    EXPECT_EQ(0, aac_destroyed());
+    EXPECT_EQ(1, ctx->devices[0].pipeline_count);
+    hl_cap_gpu_buffer_destroy(ctx, -1, "b");
+    hl_cap_gpu_destroy(ctx);
+    EXPECT_EQ(1, aac_destroyed());
+    free(ctx);
+}
+
+/* audit 45: a cancelled op (its client hung up) drops only its wait; the
+ * compile is kept and installed once done, so a client cannot keep a
+ * lazily loaded shader from ever installing. */
+UTEST(gpu_audit45, cancel_keeps_the_compile)
 {
     HlGpuBackend be;
     HlGpuCtx *ctx = aac_ctx(&be);
@@ -5053,16 +5083,23 @@ UTEST(hull_cap_gpu_async_compile, cancel_abandons_at_once)
     a40_release_now();
     EXPECT_TRUE(a40_wait_settled(ctx));
     EXPECT_TRUE(aac_device_free(ctx));
-    EXPECT_EQ(1, aac_destroyed());
-    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+    EXPECT_EQ(0, aac_destroyed());
+    EXPECT_EQ(1, ctx->devices[0].pipeline_count);
+    /* A later load of it answers from the cache. */
+    a = NULL;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "slow", src,
+                                                        strlen(src), 0, &a));
+    EXPECT_TRUE(a == NULL);
     hl_cap_gpu_buffer_destroy(ctx, -1, "b");
-    mock_free(ctx);
+    hl_cap_gpu_destroy(ctx);
+    EXPECT_EQ(1, aac_destroyed());
+    free(ctx);
 }
 
 /* A finisher that never ran (cancelled in the pool's queue, or the binding
- * failed after begin): free abandons the job, touching only the job, and
- * releases a pipeline the thread had already made. */
-UTEST(hull_cap_gpu_async_compile, free_without_finish_abandons)
+ * failed after begin): free leaves the compile to be installed once done,
+ * whether the thread finished first or not (audit 45). */
+UTEST(gpu_audit45, free_without_finish_keeps_the_compile)
 {
     HlGpuBackend be;
     HlGpuCtx *ctx = aac_ctx(&be);
@@ -5070,7 +5107,6 @@ UTEST(hull_cap_gpu_async_compile, free_without_finish_abandons)
     hl_gpu_test_set_compile_timeout_ms(0);
     const char *src = "@compute @workgroup_size(1) fn main() {}";
     ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", 16, HL_GPU_USAGE_READWRITE));
-    /* Thread done first: free releases its pipeline. */
     HlGpuCompileAsync *a = NULL;
     ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "one", src,
                                                         strlen(src), 0, &a));
@@ -5078,8 +5114,7 @@ UTEST(hull_cap_gpu_async_compile, free_without_finish_abandons)
     EXPECT_TRUE(a40_wait_settled(ctx));
     hl_cap_gpu_compile_async_free(a);
     EXPECT_TRUE(aac_device_free(ctx));
-    EXPECT_EQ(1, aac_destroyed());
-    /* Thread still running: it releases its own pipeline when done. */
+    EXPECT_EQ(1, ctx->devices[0].pipeline_count);
     a40_reset();
     a = NULL;
     ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "two", src,
@@ -5088,10 +5123,32 @@ UTEST(hull_cap_gpu_async_compile, free_without_finish_abandons)
     a40_release_now();
     EXPECT_TRUE(a40_wait_settled(ctx));
     EXPECT_TRUE(aac_device_free(ctx));
-    EXPECT_EQ(1, aac_destroyed());
-    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+    EXPECT_EQ(0, aac_destroyed());
+    EXPECT_EQ(2, ctx->devices[0].pipeline_count);
     hl_cap_gpu_buffer_destroy(ctx, -1, "b");
-    mock_free(ctx);
+    hl_cap_gpu_destroy(ctx);
+    EXPECT_EQ(2, aac_destroyed());
+    free(ctx);
+}
+
+/* Teardown with a kept (cancelled) compile frees its pipeline exactly once,
+ * installed or released by its thread. */
+UTEST(gpu_audit45, teardown_frees_a_kept_compile)
+{
+    HlGpuBackend be;
+    HlGpuCtx *ctx = aac_ctx(&be);
+    ASSERT_TRUE(ctx != NULL);
+    hl_gpu_test_set_compile_timeout_ms(0);
+    const char *src = "@compute @workgroup_size(1) fn main() {}";
+    HlGpuCompileAsync *a = NULL;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "slow", src,
+                                                        strlen(src), 0, &a));
+    hl_cap_gpu_compile_async_free(a);
+    a40_release_now();
+    hl_cap_gpu_destroy(ctx);
+    for (int k = 0; k < 300 && aac_destroyed() == 0; k++) a40_sleep_ms(10);
+    EXPECT_EQ(1, aac_destroyed());
+    free(ctx);
 }
 
 /* begin refuses exactly what the synchronous compile refuses, before the
