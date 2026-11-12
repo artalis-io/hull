@@ -56,6 +56,13 @@ release-artifact layout).
 
 ### Fixed
 
+- **`gpu.async.compile` / `gpu.async.load` (audit 45).** A request that goes
+  away while its shader compiles no longer throws the compile away: the shader
+  is still installed. A finished compile is installed by the first GPU call
+  after it instead of waiting for a pool thread, so a busy pool no longer keeps
+  the device `gpu_busy`, and a finisher that runs late reports the result
+  instead of `compile_timeout`.
+
 - **A full thread pool is a `busy` refusal (audit 45).** `db.async`,
   `compute.async`, `worker.dispatch` and `gpu.async.*` raised a plain error
   when the worker pool's queue was full; it now carries the `busy` refusal
