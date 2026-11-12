@@ -18500,4 +18500,46 @@ UTEST(lua_db_open_udf, cap_refusal_is_busy)
 
 #endif /* HL_ENABLE_DB && HL_ENABLE_SQLITE */
 
+/* ── test.get on an empty-body response ───────────────────────────────── */
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* hl_cap_test_dispatch left Keel's own pointer in the result when the body
+ * (or header block) was empty - a string literal for a redirect / bare status
+ * / res:text("") - and test_result_free freed it: malloc abort on the first
+ * such test.get, in every Lua `hull test` run that requested one. */
+UTEST(lua_test_harness, empty_body_responses_are_not_freed)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "app.get('/empty', function(req, res) res:text('') end)\n"
+        "app.get('/redir', function(req, res) res:redirect('/x') end)\n"
+        "app.get('/bare', function(req, res) res:status(204) end)\n"),
+        LUA_OK);
+    KlHttpRouter router;
+    KlAllocator kalloc = kl_allocator_default();
+    kl_http_router_init(&router, &kalloc);
+    ASSERT_EQ(hl_lua_wire_routes(&lua_rt, &router), 0);
+    hl_lua_test_register(L, &router, &lua_rt);
+    ASSERT_EQ(luaL_dostring(L,
+        "test('empty bodies', function() "
+        "  local r = test.get('/empty') assert(r.status == 200, r.status) "
+        "  assert(r.body == '' or r.body == nil, tostring(r.body)) "
+        "  r = test.get('/redir') assert(r.status == 302, r.status) "
+        "  r = test.get('/bare') assert(r.status == 204, r.status) "
+        "  for i = 1, 20 do test.get('/bare') end end)\n"), LUA_OK);
+    int total = 0, passed = 0, failed = 0;
+    HlTestCaseResult results[1];
+    memset(results, 0, sizeof results);
+    hl_lua_test_run(L, &total, &passed, &failed, NULL, results, 1);
+    EXPECT_EQ(total, 1);
+    EXPECT_TRUE_MSG(results[0].passed, results[0].error);
+
+    kl_http_router_free(&router);
+    cleanup_lua_caps();
+}
+#endif
+
 UTEST_MAIN();

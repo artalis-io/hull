@@ -194,31 +194,29 @@ int hl_cap_test_dispatch(KlHttpRouter *router, const char *method,
     if (mp_wrapper && mp_wrapper->destroy)
         mp_wrapper->destroy(mp_wrapper);
 
-    /* Extract results - copy body and headers into hl_alloc-owned
-     * storage before freeing the response (kl_http_response_free releases
-     * hdr_buf, and body may live in runtime-managed memory). */
+    /* The result holds ONLY hl_alloc-owned copies, or NULL: the callers free
+     * every non-NULL pointer in it. Set from the response first, an empty
+     * body or header block (a redirect, a bare status, res:text("")) left
+     * Keel's pointer in the result - a string literal or a buffer
+     * kl_http_response_free releases below - and the Lua harness freed it
+     * (malloc abort on every empty-body test.get). */
     result->status = res.status;
-    result->body = res.body;
-    result->body_len = res.body_len;
-    result->hdr_buf = res.hdr_buf;
-    result->hdr_len = res.hdr_len;
+    result->body = NULL;
+    result->body_len = 0;
+    result->hdr_buf = NULL;
+    result->hdr_len = 0;
 
     /* Copy body / headers into hl_alloc-owned storage before
-     * kl_http_response_free runs. On allocation failure we explicitly NULL
-     * the result pointer (and zero the matching length) so the caller
-     * can never dereference Keel-managed memory that's about to be
-     * freed two lines below. Callers already null-check body/hdr_buf
-     * to handle empty-response cases, so collapsing alloc-failure
-     * into the same "no body" branch keeps the contract simple.  */
+     * kl_http_response_free runs. On allocation failure the result keeps
+     * NULL, the same "no body" branch the callers take for an empty
+     * response. */
     if (res.body && res.body_len > 0) {
         char *body_copy = hl_alloc_malloc(hl_alloc, res.body_len + 1);
         if (body_copy) {
             memcpy(body_copy, res.body, res.body_len);
             body_copy[res.body_len] = '\0';
             result->body = body_copy;
-        } else {
-            result->body = NULL;
-            result->body_len = 0;
+            result->body_len = res.body_len;
         }
     }
     if (res.hdr_buf && res.hdr_len > 0) {
@@ -228,9 +226,6 @@ int hl_cap_test_dispatch(KlHttpRouter *router, const char *method,
             hdr_copy[res.hdr_len] = '\0';
             result->hdr_buf = hdr_copy;
             result->hdr_len = res.hdr_len;
-        } else {
-            result->hdr_buf = NULL;
-            result->hdr_len = 0;
         }
     }
 
