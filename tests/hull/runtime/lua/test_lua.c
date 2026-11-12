@@ -18173,6 +18173,67 @@ UTEST(lua_test_run_main, test_setup_accepts_a_cli_app)
     kl_http_router_free(&router);
     cleanup_lua();
 }
+
+/* audit 45: stdout / stderr past LUAL_BUFFERSIZE, stderr followed by a
+ * raised error's message. The chunk table was pushed above the luaL_Buffer,
+ * so its first growth took the table for its box: the output came back
+ * truncated, and the error message was written into freed memory. */
+/* audit 45: a task resumed after main ended, while run_main still had
+ * main's status to read, started another run_main over it: the outer call
+ * reported the inner run's status. Refused for the whole call now. */
+UTEST(lua_test_run_main_audit45, nested_from_a_task_is_refused)
+{
+    RunMainFix f;
+    ASSERT_EQ(run_main_open(&f,
+        "app.main(function(ctx)\n"
+        "  if ctx.args[1] == 'inner' then hull.sleep(1) error('x') end\n"
+        "  hull.async(function()\n"
+        "    hull.sleep(3)\n"
+        "    _G.nested_ok, _G.nested_err = pcall(test.run_main, { 'inner' })\n"
+        "  end)\n"
+        "  hull.sleep(2)\n"
+        "  local t = 0\n"
+        "  for i = 1, 2000000 do t = t + 1 end\n"
+        "  return 0\n"
+        "end)\n"), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(run_main_cases(
+        "test('nested', function()\n"
+        "  local x = test.run_main({})\n"
+        "  assert(x.code == 0, 'code ' .. tostring(x.code) .. ' ' .. x.stderr)\n"
+        "end)\n", r, &passed), 1);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    run_main_close(&f);
+}
+
+UTEST(lua_test_run_main_audit45, large_output_and_error)
+{
+    RunMainFix f;
+    ASSERT_EQ(run_main_open(&f,
+        "app.main(function(ctx)\n"
+        "  for i = 1, 11 do ctx.stdout:write(('o'):rep(100) .. '\\n') end\n"
+        "  ctx.stderr:write(('e'):rep(600))\n"
+        "  ctx.stderr:write(('f'):rep(600))\n"
+        "  error('boom', 0)\n"
+        "end)\n"), 0);
+    HlTestCaseResult r[4];
+    int passed = 0;
+    EXPECT_EQ(run_main_cases(
+        "test('big', function()\n"
+        "  local x = test.run_main({})\n"
+        "  assert(x.code == 1, 'code ' .. tostring(x.code))\n"
+        "  assert(#x.stdout == 1111, 'stdout ' .. #x.stdout)\n"
+        "  assert(x.stdout == (('o'):rep(100) .. '\\n'):rep(11), 'stdout bytes')\n"
+        "  local want = ('e'):rep(600) .. ('f'):rep(600)\n"
+        "  assert(x.stderr:sub(1, 1200) == want, 'stderr head')\n"
+        "  assert(x.stderr:find('boom', 1201, true), 'stderr ' .. #x.stderr)\n"
+        "  assert(x.stderr:sub(-1) == '\\n', 'trailing newline')\n"
+        "end)\n", r, &passed), 1);
+    EXPECT_TRUE_MSG(r[0].passed, r[0].error);
+    run_main_close(&f);
+}
+
 #endif /* HL_ENABLE_HTTP_SERVER */
 
 #if defined(HL_ENABLE_DB) && defined(HL_ENABLE_SQLITE)

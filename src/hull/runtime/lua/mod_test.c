@@ -293,10 +293,12 @@ static int l_test_http(lua_State *L, const char *method)
     int hold = hl_db_registry_open_txn(lua->base.db_registry) != NULL;
     if (hold) hl_db_registry_guard_hold(1);
     HlTestResult result;
+    lua->base.test_dispatching++;
     int drc = hl_cap_test_dispatch(router, method, path, body_str, body_len,
                       header_names, header_values, num_headers,
                       ctx_json, lua->base.alloc, run_middleware,
                       &result);
+    lua->base.test_dispatching--;
     if (hold) hl_db_registry_guard_hold(-1);
     test_budget_rejoin(lua, &saved_budget);
     hl_run_watch_restore(&lua->run_watch, saved_deadline);

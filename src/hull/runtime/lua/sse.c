@@ -121,6 +121,7 @@ static void hl_lua_sse_handler_impl(KlHttpRequest *req, KlHttpResponse *res,
         lua->active_req = NULL;
         return;
     }
+    life->no_conn = lua->base.test_dispatching > 0;   /* test.get (audit 45) */
 
     /* The coroutine with handler(req, stream) on it, built protected. */
     HlSseArgs args = { req, res, life, NULL, LUA_NOREF };
@@ -158,8 +159,11 @@ static void hl_lua_sse_handler_impl(KlHttpRequest *req, KlHttpResponse *res,
 
     /* Resume: handler(req, stream) */
     int nres = 0;
+    lua_State *saved_test_req_co = lua->test_req_co;
+    if (life->no_conn) lua->test_req_co = co;
     int status = lua_resume(co, lua->L, nargs, &nres);
     status = hl_lua_resume_status(co, lua->L, status);
+    lua->test_req_co = saved_test_req_co;
     hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
 
     lua->active_on_complete     = NULL;

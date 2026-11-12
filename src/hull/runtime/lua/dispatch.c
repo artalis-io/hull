@@ -99,6 +99,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
         lua->active_req = NULL;
         return -1;
     }
+    life->no_conn = lua->base.test_dispatching > 0;   /* test.get (audit 45) */
 
     /* The coroutine with handler(req, res) on it, built protected. */
     HlReqArgs args = { req, res, life };
@@ -120,6 +121,8 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     /* Set coroutine state for async C functions */
     lua->active_co = co;
     lua->active_thread_ref = thread_ref;
+    lua_State *saved_test_req_co = lua->test_req_co;
+    if (life->no_conn) lua->test_req_co = co;
 
     /* Arm the instruction budget for this run (an HTTP handler's deadline) */
     HL_LUA_ARM_KIND(lua, co, HL_RUN_HTTP);
@@ -133,6 +136,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     int nres = 0;
     int status = lua_resume(co, lua->L, nargs, &nres);
     status = hl_lua_resume_status(co, lua->L, status);
+    lua->test_req_co = saved_test_req_co;
     hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
 
     lua->active_on_complete     = NULL;

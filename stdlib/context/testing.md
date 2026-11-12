@@ -48,6 +48,11 @@ hull agent test     # JSON output for AI agents
 - **`test.put(path, body?, opts?)`** - PUT with JSON body
 - **`test.delete(path, opts?)`** - DELETE request
 
+The request runs synchronously: a handler that waits (`hull.sleep`,
+`http.fetch`, `db.async`, ...) is refused with `wait_refused` and the request
+answers 500. Test the waiting code from the case itself, or through
+`test.run_main`.
+
 `opts` can include `headers` table for custom headers:
 ```lua
 local res = test.get("/api/data", { headers = { ["Authorization"] = "Bearer " .. token } })

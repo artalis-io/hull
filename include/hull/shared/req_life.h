@@ -37,6 +37,12 @@ typedef struct HlReqLife {
     int attached;
     int held;
     int parked;
+    /* 1 for a request test.get dispatches (HlRuntime.test_dispatching),
+     * whose response lives on its caller's stack and is gone when the call
+     * returns (an HTTP/2 stream's request has no connection either, so the
+     * connection does not tell). Its handler may not wait: a continuation would resume after
+     * that and write through the freed response (audit 45). */
+    int no_conn;
 } HlReqLife;
 
 /* A new live record, holding the request's reference. NULL on OOM. */
@@ -49,6 +55,7 @@ static inline HlReqLife *hl_req_life_new(void)
     l->attached = 0;
     l->held = 0;
     l->parked = 0;
+    l->no_conn = 0;
     return l;
 }
 

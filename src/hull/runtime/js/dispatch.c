@@ -153,6 +153,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     /* The life is active from here on, before any app code can run: an op
      * made while the connection is active and its life is not suspended the
      * connection unaccounted for (audit 8 H1). */
+    life->no_conn = js->base.test_dispatching > 0;   /* test.get */
     js->active_life = life;
 
     /* Build JS request and response objects */

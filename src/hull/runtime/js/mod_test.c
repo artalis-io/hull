@@ -255,10 +255,12 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
     int hold = hl_db_registry_open_txn(tjs->base.db_registry) != NULL;
     if (hold) hl_db_registry_guard_hold(1);
     HlTestResult result;
+    tjs->base.test_dispatching++;
     int rc = hl_cap_test_dispatch(state->router, method, path, body_str, body_len,
                            header_names, header_values, num_headers,
                            ctx_json, tjs->base.alloc, run_middleware,
                            &result);
+    tjs->base.test_dispatching--;
     if (hold) hl_db_registry_guard_hold(-1);
     {
         int64_t nested = tjs->instruction_count;

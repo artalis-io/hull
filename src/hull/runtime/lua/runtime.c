@@ -1939,11 +1939,17 @@ static int test_main_result_k(lua_State *L)
     static const char *const keys[2] = { "out", "err" };
     static const char *const names[2] = { "stdout", "stderr" };
     for (int k = 0; k < 2; k++) {
-        luaL_Buffer b;
-        luaL_buffinit(L, &b);
+        /* The chunk table goes BELOW the buffer: luaL_Buffer owns the top
+         * of the stack from buffinit to pushresult (its box sits there once
+         * it grows past LUAL_BUFFERSIZE), so nothing may be pushed or
+         * removed under it in between but the value being added. Pushed
+         * after buffinit, the table was taken for the box and the box freed
+         * under the buffer (audit 45). */
         lua_pushstring(L, keys[k]);
         lua_rawget(L, 1);
         int t = lua_gettop(L);
+        luaL_Buffer b;
+        luaL_buffinit(L, &b);
         if (lua_istable(L, t)) {
             lua_Integer n = (lua_Integer)lua_rawlen(L, t);
             for (lua_Integer i = 1; i <= n; i++) {
@@ -1951,13 +1957,13 @@ static int test_main_result_k(lua_State *L)
                 luaL_addvalue(&b);
             }
         }
-        lua_remove(L, t);
         if (k == 1 && lua_isstring(L, 3)) {
             lua_pushvalue(L, 3);
             luaL_addvalue(&b);
             luaL_addchar(&b, '\n');
         }
         luaL_pushresult(&b);
+        lua_remove(L, t);
         lua_setfield(L, -2, names[k]);
     }
     return 1;
@@ -1969,7 +1975,7 @@ int hl_lua_test_run_main(lua_State *L)
     if (!lua) return luaL_error(L, "test module not initialized");
     if (!vt_lua_has_main((HlRuntime *)lua))
         return luaL_error(L, "test.run_main: the app did not register app.main");
-    if (lua->cli_main_co)
+    if (lua->cli_main_co || lua->test_main_running)
         return luaL_error(L, "test.run_main: app.main is already running");
 
     lua_settop(L, 2);
@@ -2073,7 +2079,9 @@ int hl_lua_test_run_main(lua_State *L)
     r.case_used  = saved_budget.used;
     r.from       = L;
     int code = 1;
+    lua->test_main_running = 1;
     (void)lua_main_run(lua, &r, &code);
+    lua->test_main_running = 0;
 
     if (hold) hl_db_registry_guard_hold(-1);
     lua->active_co              = saved_co;

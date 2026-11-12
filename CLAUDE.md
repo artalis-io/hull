@@ -2014,7 +2014,16 @@ share one core (`lua_main_run` / `js_main_run` in each runtime's
 `runtime.c`), parameterised by `HlLuaMainRun` / `HlJsMainRun`. No signal
 reaches a test's main (`ctx.on_interrupt` / `ctx.signal` are there but never
 fire). Covered by `tests/e2e_test_cli.sh` (`make e2e-test-cli`) and the
-`lua_test_run_main` / `js_test_run_main` unit tests.
+`lua_test_run_main` / `js_test_run_main` unit tests. A request `test.get`
+dispatches may not wait (audit 45): its `KlHttpResponse` is on
+`hl_cap_test_dispatch`'s stack, and since `hull test` has a loop a parked
+handler resumed after the call returned and wrote through the freed response.
+`test.get` raises `HlRuntime.test_dispatching` around the call, the entry
+marks the request's life `no_conn`, and the wait gates refuse it
+(`hl_js_async_gate`; Lua `hl_lua_check_can_wait` / `hl_lua_can_wait` through
+`active_on_complete_ctx`). The connection cannot be the test: an HTTP/2
+stream's request has none either. Lua keeps `test_main_running` for the
+whole of a `test.run_main`, as JS keeps `main_signal`.
 
 **Modular TUI** (`hull new --type tui mydash`, Lua-only). `app.lua`
 holds the `tui.run({ draw, on_event })` loop and a single `state`

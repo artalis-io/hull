@@ -289,6 +289,46 @@ for rt in js lua; do
     rel_case "rel/$rt/lib" "../../$rt"
 done
 
+# ── test_audit45: a test.get handler that waits ─────────────────────────
+# hull test has a loop since test.run_main; a handler test.get dispatched
+# that waited parked and resumed after test.get had freed its response
+# (SIGSEGV). Its wait is refused: the request answers 500, the run goes on.
+echo "--- test_audit45: a waiting test.get handler is refused, not resumed ---"
+mkdir -p "$TMP/a45/js/tests" "$TMP/a45/lua/tests"
+cat > "$TMP/a45/js/app.js" <<'JS'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/http-server@1"] });
+app.get("/p", async (req, res) => { await hull.sleep(5); res.json({ ok: 1 }); });
+app.get("/q", (req, res) => { res.json({ ok: 2 }); });
+JS
+cat > "$TMP/a45/js/tests/test_a45.js" <<'JS'
+test("waiting handler", async () => {
+    const r = await test.get("/p");
+    test.eq(r.status, 500);
+    await hull.sleep(20);
+    test.eq((await test.get("/q")).status, 200);
+});
+JS
+cat > "$TMP/a45/lua/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/http-server@1" } })
+app.get("/p", function(req, res) hull.sleep(5); res:json({ ok = 1 }) end)
+app.get("/q", function(req, res) res:json({ ok = 2 }) end)
+LUA
+cat > "$TMP/a45/lua/tests/test_a45.lua" <<'LUA'
+test("waiting handler", function()
+    test.eq(test.get("/p").status, 500)
+    test.eq(test.get("/q").status, 200)
+end)
+LUA
+for rt in js lua; do
+    rc=0; out=$(run_test "$TMP/a45/$rt") || rc=$?
+    if [ "$rc" -eq 0 ] && echo "$out" | grep -q "test.get dispatches"; then
+        pass "test_audit45 $rt: waiting test.get handler refused"
+    else
+        fail "test_audit45 $rt: waiting test.get handler refused" "rc=$rc $out"
+    fi
+done
+
 echo ""
 echo "e2e_test_cli: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
