@@ -1509,6 +1509,9 @@ end)
 
 if FEDERATION.enabled then
     local function connect_to_peer(peer)
+        -- One outbound connection per call: its handshake state lives here
+        -- (a ws-client connection has no id to key fed_pending by).
+        local pending = nil
         ws_client.connect(peer.url, {
             on_open = function(conn)
                 -- Send hello
@@ -1517,7 +1520,7 @@ if FEDERATION.enabled then
                     server = FEDERATION.server_name,
                     public_key = FEDERATION.public_key,
                 })
-                fed_pending[conn:id()] = {
+                pending = {
                     state = "awaiting_challenge",
                     public_key = peer.public_key,
                     url = peer.url,
@@ -1527,7 +1530,6 @@ if FEDERATION.enabled then
                 local decode_ok, data = pcall(json.decode, raw)
                 if not decode_ok or not data then return end
 
-                local pending = fed_pending[conn:id()]
                 if pending and pending.state == "awaiting_challenge" then
                     if data.type == "fed_challenge" then
                         -- Sign their challenge and send our own
@@ -1558,7 +1560,7 @@ if FEDERATION.enabled then
                         fed_peers[server_name] = {
                             conn = conn, public_key = pending.public_key, authenticated = true,
                         }
-                        fed_pending[conn:id()] = nil
+                        pending = nil
                         log.info("federation: peer " .. server_name .. " authenticated (outbound)")
                     elseif data.type == "fed_error" then
                         log.error("federation: peer rejected auth: " .. tostring(data.message))
@@ -1570,9 +1572,9 @@ if FEDERATION.enabled then
                 end
             end,
             on_close = function(conn, _code, _reason)
-                fed_pending[conn:id()] = nil
+                pending = nil
                 for name, fp in pairs(fed_peers) do
-                    if fp.conn and fp.conn:id() == conn:id() then
+                    if fp.conn == conn then
                         fed_peers[name] = nil
                         log.info("federation: outbound peer " .. name .. " disconnected")
                         break

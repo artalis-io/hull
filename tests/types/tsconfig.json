@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "exactOptionalPropertyTypes": false,
+    "noUncheckedIndexedAccess": false,
+    "lib": [
+      "es2023"
+    ],
+    "target": "es2023",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "types": [],
+    "skipLibCheck": false,
+    "isolatedModules": true,
+    "noUnusedLocals": false
+  },
+  "include": [
+    "../../types/hull/**/*.d.ts",
+    "../../types/hull-test/**/*.d.ts",
+    "fixtures/**/*.ts",
+    "../../build/types/drift.ts"
+  ]
+}

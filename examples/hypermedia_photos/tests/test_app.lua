@@ -328,6 +328,6 @@ test("POST /entries with too-long title preserves submitted value in re-render",
     test.ok(string.find(res.body, 'value="' .. long_title .. '"', 1, true),
             "submitted (too-long) value should be pre-filled in the input")
     -- Some error message present.
-    test.ok(string.find(res.body, '<small role="alert"', 1, true),
+    test.ok(string.find(res.body, 'class="hull-form-error"', 1, true),
             "should show a per-field error message")
 end)

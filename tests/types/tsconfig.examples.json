@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "useUnknownInCatchVariables": false
+  },
+  "include": [
+    "../../types/hull/**/*.d.ts",
+    "../../types/hull-test/**/*.d.ts",
+    "../../examples/**/*.js"
+  ],
+  "exclude": [
+    "../../examples/**/static/**",
+    "../../examples/**/node_modules/**"
+  ]
+}

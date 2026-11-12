@@ -1,0 +1,8 @@
+{
+  "name": "hull-types-check",
+  "private": true,
+  "description": "Pins the TypeScript compiler that verifies types/hull (make check-types).",
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

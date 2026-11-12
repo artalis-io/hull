@@ -2077,7 +2077,7 @@ for the C binding surface the tool VM exposes.
 Table-driven dispatcher in `src/hull/commands/dispatch.c`. 25 commands:
 
 ```
-hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update | tools | flavor | feature | cache | sign-release | verify-release | help
+hull keygen | build | verify | inspect | manifest | test | new | init | types | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update | tools | flavor | feature | cache | sign-release | verify-release | help
 Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --no-ca-bundle, --ca-bundle PATH, --vm-thread [--vm-thread-grace-ms MS] [--vm-thread-ceiling-ms MS] (serve only; the two limits are downgrade flags), --interrupt-grace-ms MS (how long app.main may go on after SIGINT / SIGTERM; a downgrade flag)
 Every runtime flag also takes the spelling --hull-<name> (--hull-d PATH = -d PATH). In a BUILT binary the flags that weaken
 the process (--no-sandbox, --allow-degraded-sandbox, --no-ca-bundle/--skip-ca-bundle, --ca-bundle, --no-verify-platform,
@@ -2164,6 +2164,8 @@ an ESC / OSC sequence or a newline in a test name forged PASS lines or wrote the
 Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new command = one line in the table + one source file.
 
 **`hull init [dir] [--runtime lua|js]`**. Initialize a hull project in-place. Like `git init`: creates missing files (`app.lua`, `tests/`, `migrations/`, `.gitignore`) without touching existing ones. Detects existing runtime from `app.lua`/`app.js` presence. Implemented as a Lua tool module (`stdlib/cli/lua/hull/init.lua`).
+
+**`hull types [app_dir] [-o DIR] [--force] [--check]`**. Installs the TypeScript declarations for the JS API (`types/hull`, `types/hull-test`, embedded in the hull binary only through `hl_types_entries` / `tool.types_files()`) under `<app_dir>/types/`, plus a `tsconfig.json` where none exists. `make check-types` (CI job `types`, always run) verifies them with the TypeScript compiler pinned in `tests/types/package-lock.json`: a strict compile, a drift check of every registry module's live exports against the declarations (`tests/types/inventory.sh` + `drift.mjs`), the fixtures in `tests/types/fixtures/`, and every example app type-checked as JavaScript. So a change to an app-facing JS export, a C binding's members or the manifest schema fails CI until `types/hull` follows; conventions in `types/hull/README.md`, design in docs/typescript_design.md §2.
 
 **`hull doctor [--json] [--tui] [--fix]`**. Environment check for distribution readiness, and Hull's ONBOARDING surface. Reports hull version/runtime/platform, whether the platform library is embedded (none / single-arch / multi-arch), which system C compilers (`cc`, `gcc`, `clang`, `cosmocc`) are found in PATH (used only for `--compiler=system`, `--with=` features, and cosmo/APE targets - the default `hull build` emit path needs no compiler), and a **Caches** section listing every registered cache kind with status / entries / size / on-disk path (sourced from `hl_cache_registry()` - the same registry that powers `hull cache list`, so doctor and the cache subcommand always agree). Surfaces an active `HULL_CACHE_DIR` override when set. Pure C implementation (`src/hull/commands/doctor.c`). `--json` includes a `"caches"` array and a `"hull_cache_dir"` field for machine-readable output.
 

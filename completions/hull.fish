@@ -26,7 +26,7 @@ end
 
 function __hull_no_subcommand
     set -l cmd (commandline -opc)
-    set -l commands keygen build verify verify-self verify-release sign-release sbom inspect manifest test new init dev eject sign-platform migrate modules agent mcp check compute deploy version doctor update tools help
+    set -l commands keygen build verify verify-self verify-release sign-release sbom inspect manifest test new init types dev eject sign-platform migrate modules agent mcp check compute deploy version doctor update tools help
     for c in $cmd[2..-1]
         if contains -- $c $commands
             return 1
@@ -49,6 +49,7 @@ complete -c hull -n __hull_no_subcommand -f -a manifest       -d 'Extract and pr
 complete -c hull -n __hull_no_subcommand -f -a test           -d 'Run app tests (in-process)'
 complete -c hull -n __hull_no_subcommand -f -a new            -d 'Scaffold a new hull project'
 complete -c hull -n __hull_no_subcommand -f -a init           -d 'Initialize hull in current directory'
+complete -c hull -n __hull_no_subcommand -f -a types          -d 'Install TypeScript declarations'
 complete -c hull -n __hull_no_subcommand -f -a dev            -d 'Development server with hot reload'
 complete -c hull -n __hull_no_subcommand -f -a eject          -d 'Export to standalone Makefile project'
 complete -c hull -n __hull_no_subcommand -f -a sign-platform  -d 'Sign platform library'
@@ -191,6 +192,12 @@ end
 for cmd in new init
     complete -c hull -n "__hull_subcommand $cmd" -l runtime -r -d 'Runtime' -xa 'lua js'
 end
+
+# ── types ────────────────────────────────────────────────────────────
+
+complete -c hull -n '__hull_subcommand types' -s o -l output -r -d 'Write the declarations to DIR'
+complete -c hull -n '__hull_subcommand types' -l force -d 'Replace files edited or not written by hull'
+complete -c hull -n '__hull_subcommand types' -l check -d 'Fail if the installed declarations differ'
 
 # ── agent ────────────────────────────────────────────────────────────
 # Keep in sync with src/hull/commands/agent.c hl_cmd_agent() dispatch table.

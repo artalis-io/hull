@@ -1223,7 +1223,7 @@ static JSValue js_crypto_constant_time_eq(JSContext *ctx, JSValueConst this_val,
  *
  *   const h = crypto.createSha256();
  *   h.update(chunk);     // accepts ArrayBuffer or string; chainable
- *   const hex = h.digest();   // 64-char hex; further calls throw
+ *   const d = h.digest();     // 32-byte ArrayBuffer; further calls throw
  */
 
 static JSClassID hl_js_sha256_hasher_class_id;

@@ -44,6 +44,7 @@
 #include "hull/commands/version.h"
 #include "hull/commands/doctor.h"
 #include "hull/commands/init.h"
+#include "hull/commands/types.h"
 #include "hull/commands/modules.h"
 #ifdef HL_ENABLE_HTTP_CLIENT
 #include "hull/commands/update.h"
@@ -93,6 +94,7 @@ static const HlCommand commands[] = {
     { "version",       hl_cmd_version },
     { "doctor",        hl_cmd_doctor },
     { "init",          hl_cmd_init },
+    { "types",         hl_cmd_types },
     { "modules",       hl_cmd_modules },
 #ifdef HL_ENABLE_HTTP_CLIENT
     { "update",         hl_cmd_update },

@@ -8,7 +8,7 @@
  *   tar.parse(bytes)          -> [ {name,data,size,mode,isDir}, ... ]
  *   tar.create(entries)       -> ArrayBuffer
  *   tar.extract(bytes, dir)   -> true               (writes via fs.write)
- *   tar.pack(files [, opts])  -> ArrayBuffer          (reads via fs.read)
+ *   tar.pack(files)           -> ArrayBuffer          (reads via fs.read)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

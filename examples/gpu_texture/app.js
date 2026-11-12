@@ -72,8 +72,8 @@ app.get("/process", (_req, res) => {
 
     // Create output storage texture (same dimensions)
     gpu.texture("output", null, {
-        width: img.width(),
-        height: img.height(),
+        width: img.width,
+        height: img.height,
         format: "rgba8",
         storage: true,
     });
@@ -84,7 +84,7 @@ app.get("/process", (_req, res) => {
             { name: "input" },                      // sampled (binding 0, 1)
             { name: "output", storage: true },       // storage (binding 2)
         ],
-        workgroups: { x: img.width(), y: img.height(), z: 1 },
+        workgroups: { x: img.width, y: img.height, z: 1 },
         outputTexture: 1,  // 0-indexed: read back the 2nd texture
     });
 
@@ -97,15 +97,15 @@ app.get("/process", (_req, res) => {
     res.json({
         ok: true,
         input: {
-            width: img.width(),
-            height: img.height(),
-            format: img.format(),
+            width: img.width,
+            height: img.height,
+            format: img.format,
             firstPixel: { r: 0, g: 0, b: 128, a: 255 },
         },
         output: {
-            width: outImg.width(),
-            height: outImg.height(),
-            format: outImg.format(),
+            width: outImg.width,
+            height: outImg.height,
+            format: outImg.format,
             firstPixel: {
                 r: outPixels[0],
                 g: outPixels[1],

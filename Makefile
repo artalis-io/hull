@@ -1710,6 +1710,40 @@ $(STDLIB_JS_CLI_TEST_REGISTRY_C): $(STDLIB_JS_CLI_HDRS) $(STDLIB_JS_CLI_TEST_ONL
 $(STDLIB_JS_CLI_TEST_REGISTRY_O): $(STDLIB_JS_CLI_TEST_REGISTRY_C) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
+# ── TypeScript declarations embedding (xxd) ──────────────────────────
+# types/**/*.d.ts (types/hull, types/hull-test) become hl_types_entries[],
+# named by their path under types/ ("hull/modules/db.d.ts"). Tooling-only:
+# linked into the hull binary alone (HULL_LINK_OBJS), never a platform or
+# feature archive, so a built app carries none of it. `hull types` reads it
+# through tool.types_files() (tool_orchestration.c, weak empty default).
+TYPES_FILES := $(shell find types -name '*.d.ts' 2>/dev/null | LC_ALL=C sort)
+types_hdr = $(BUILDDIR)/$(subst /,_,$(subst -,_,$(patsubst types/%.d.ts,types_%_d_ts.h,$(1))))
+TYPES_HDRS := $(foreach f,$(TYPES_FILES),$(call types_hdr,$(f)))
+define TYPES_RULE
+$(call types_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
+endef
+$(foreach f,$(TYPES_FILES),$(eval $(call TYPES_RULE,$(f))))
+
+TYPES_REGISTRY_C := $(BUILDDIR)/types_registry.c
+TYPES_REGISTRY_O := $(BUILDDIR)/types_registry.o
+$(TYPES_REGISTRY_C): $(TYPES_HDRS) Makefile | $(BUILDDIR)
+	@echo "/* Auto-generated TypeScript declarations registry - do not edit */" > $@
+	@( for hdr in $(TYPES_HDRS); do echo "#include \"$$(basename $$hdr)\""; done ) | LC_ALL=C sort >> $@
+	@echo "" >> $@
+	@echo "#include \"hull/entry.h\"" >> $@
+	@echo "static const HlEntry TYPES[] = {" >> $@
+	@( for f in $(TYPES_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.\-]/_/g'); \
+		name=$$(echo "$$f" | sed 's|^types/||'); \
+		echo "$$name	    { \"$$name\", $${varname}, sizeof($${varname}) },"; \
+	done ) | LC_ALL=C sort | cut -f2- >> $@
+	@echo "    { 0, 0, 0 }" >> $@
+	@echo "};" >> $@
+	@echo "const HlEntry *hl_types_entries(void) { return TYPES; }" >> $@
+$(TYPES_REGISTRY_O): $(TYPES_REGISTRY_C) | $(BUILDDIR)
+	$(CC) -std=c11 $(HL_OPT) -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
+
 # The restricted QuickJS tooling runtime (needs QuickJS; lives in the hull binary only).
 FRONTEND_JS_SESSION_OBJ := $(BUILDDIR)/frontend_js_session.o
 $(FRONTEND_JS_SESSION_OBJ): $(SRCDIR)/hull/frontend/js_session.c | $(BUILDDIR)
@@ -2947,6 +2981,9 @@ ifneq ($(RUNTIME),lua)
   FRONTEND_JS_LINK_OBJS := $(FRONTEND_JS_SESSION_OBJ) $(FRONTEND_JS_GEN_OBJ) $(STDLIB_JS_CLI_REGISTRY_O)
 endif
 
+# The embedded TypeScript declarations (hull types) ride in the hull binary only.
+HULL_LINK_OBJS += $(TYPES_REGISTRY_O)
+
 $(BUILDDIR)/hull: $(HULL_LINK_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_ARCHIVE) | $(RUNTIME_FEATURE_LIBS)
 	$(CC) $(LDFLAGS) -o $@ $(HULL_LINK_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_LDFLAGS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
 
@@ -3834,3 +3871,24 @@ DEPS_ALL := $(shell find $(BUILDDIR) -name '*.d' 2>/dev/null)
 -include $(DEPS_ALL)
 
 
+
+# ── TypeScript declarations (types/hull) ────────────────────────────
+# Verifies types/hull with the pinned TypeScript (tests/types/package-lock.json):
+# the declarations compile under strict, match the running hull's exports
+# (drift check), fixtures type-check, and every example app type-checks as JS.
+# Needs node / npm. See types/hull/README.md.
+TYPES_TSC := tests/types/node_modules/.bin/tsc
+
+$(TYPES_TSC): tests/types/package.json tests/types/package-lock.json
+	cd tests/types && npm ci --no-audit --no-fund
+	@touch $@
+
+check-types: $(TYPES_TSC) $(BUILDDIR)/hull
+	@mkdir -p $(BUILDDIR)/types
+	sh tests/types/inventory.sh $(BUILDDIR)/hull > $(BUILDDIR)/types/inventory.jsonl
+	node tests/types/drift.mjs $(BUILDDIR)/types/inventory.jsonl $(BUILDDIR)/types/drift.ts
+	$(TYPES_TSC) -p tests/types/tsconfig.json
+	$(TYPES_TSC) -p tests/types/tsconfig.examples.json
+	@echo "check-types: OK"
+
+.PHONY: check-types

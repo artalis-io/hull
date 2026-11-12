@@ -28,6 +28,7 @@ _hull() {
         'test:Run app tests (in-process, in-memory SQLite)'
         'new:Scaffold a new hull project in a new directory'
         'init:Initialize hull in the current directory (idempotent)'
+        'types:Install TypeScript declarations for the JS API'
         'dev:Run the development server with hot reload'
         'eject:Export to a standalone Makefile project'
         'sign-platform:Sign platform library with per-arch hashes'
@@ -200,6 +201,14 @@ _hull() {
                     _arguments \
                         '--runtime[Runtime]:runtime:('"${runtimes[@]}"')' \
                         '--runtime=[Runtime]:runtime:('"${runtimes[@]}"')' \
+                        '*:dir:_files -/'
+                    ;;
+
+                types)
+                    _arguments \
+                        {-o,--output}'[Write the declarations to DIR]:dir:_files -/' \
+                        '--force[Replace files edited or not written by hull]' \
+                        '--check[Write nothing; fail if the installed declarations differ]' \
                         '*:dir:_files -/'
                     ;;
 

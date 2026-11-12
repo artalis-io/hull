@@ -53,6 +53,7 @@ int hl_cmd_help(int argc, char **argv, const HlCommandEnv *env)
     section(f, "Scaffolding");
     row(f, "init",          "initialise an app in the current dir");
     row(f, "new",           "scaffold a new app in a fresh directory");
+    row(f, "types",         "install TypeScript declarations for the JS API");
 
     section(f, "Build & ship");
     row(f, "build",         "compile an app to a standalone binary");

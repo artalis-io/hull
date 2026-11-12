@@ -682,14 +682,14 @@ reason not to):
 | `tui.enter(opts?)` | `tui.enter(opts?)` | idempotent acquire. Enter alt screen, raw mode |
 | `tui.leave()` | `tui.leave()` | idempotent release. Restore terminal |
 | `tui.size()` → `cols, rows` | `tui.size()` → `{cols, rows}` | current size |
-| `tui.caps()` | `tui.caps()` | capability flags |
+| `tui.caps()` (`kitty_kbd`) | `tui.caps()` (`kittyKbd`) | capability flags |
 | `tui.clear()` | `tui.clear()` | clear screen |
 | `tui.move(x, y)` | `tui.move(x, y)` | move cursor (1-indexed) |
 | `tui.style(opts)` | `tui.style(opts)` | set fg/bg/bold/underline/etc |
 | `tui.print(x, y, str)` | `tui.print(x, y, str)` | move + write |
 | `tui.write(str)` | `tui.write(str)` | append to buffer |
 | `tui.flush()` | `tui.flush()` | emit buffer |
-| `tui.poll(timeout_ms)` | `tui.poll(timeoutMs)` → `Promise<event\|null>` | next event |
+| `tui.poll(timeout_ms)` | `tui.poll(timeoutMs)` → a queued event or, for `poll(0)`, `null` synchronously; else `Promise<event\|null>` | next event |
 
 These are present mainly to make `tui.run` implementable in pure
 Lua/JS. Once they exist for that, exposing them costs nothing. If
