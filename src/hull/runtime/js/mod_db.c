@@ -1391,7 +1391,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         free(op);
         hl_async_ctx_free(actx);
         JS_FreeValue(ctx, promise);
-        return JS_ThrowInternalError(ctx, "db.async: thread pool full");
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowInternalError(ctx, "db.async: thread pool full"));
     }
 
     /* Suspend the FD (attached only). */

@@ -347,7 +347,7 @@ static int lua_worker_dispatch(lua_State *L)
         hl_lua_worker_dispatch_op_free(op);
         free(op);
         hl_async_ctx_free(actx);
-        return luaL_error(L, "worker.dispatch: thread pool full");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "worker.dispatch: thread pool full");
     }
 
     /* Suspend the FD (attached only). */
