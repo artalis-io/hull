@@ -56,6 +56,13 @@ release-artifact layout).
 
 ### Fixed
 
+- **`gpu.async.compile` / `gpu.async.load` (audit 45).** A request that goes
+  away while its shader compiles no longer throws the compile away: the shader
+  is still installed. A finished compile is installed by the first GPU call
+  after it instead of waiting for a pool thread, so a busy pool no longer keeps
+  the device `gpu_busy`, and a finisher that runs late reports the result
+  instead of `compile_timeout`.
+
 - **`hull test`, `hull agent` and `hull mcp` accept a relative app
   directory.** `hull test app` (or `hull test ..`) failed an app's relative
   imports - JS `module not found: app/lib/a.js`, Lua `module not found:
