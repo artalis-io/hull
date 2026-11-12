@@ -2976,6 +2976,24 @@ jobs:
       - name: Invariant lint self-test (negative)
         run: make check-invariants-selftest
 
+  types:
+    name: TypeScript declarations
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+          submodules: true
+      - name: Build
+        run: make -j"$(nproc)"
+      # The pinned TypeScript (tests/types/package-lock.json) checks types/hull:
+      # strict compile, the drift check against this build's live exports, the
+      # fixtures, and every example app as JavaScript (checkJs).
+      - name: Type-check the declarations (make check-types)
+        run: make check-types
+      - name: hull types E2E
+        run: make e2e-types
+
   htmx-browser:
     needs: [classify]
     if: needs.classify.outputs.run_web == 'true'
@@ -3238,6 +3256,7 @@ jobs:
       - coverage
       - lint
       - invariants
+      - types
       - htmx-browser
       - benchmark
       - embed-rust

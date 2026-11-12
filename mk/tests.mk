@@ -2155,3 +2155,6 @@ hull-test-examples: $(BUILDDIR)/hull
 		if echo "$$output" | grep -qE "[0-9]+ failed"; then exit 1; fi; \
 	done
 
+
+e2e-types: $(BUILDDIR)/hull
+	sh tests/e2e_types.sh

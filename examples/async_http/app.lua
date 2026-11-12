@@ -26,7 +26,6 @@ app.manifest({
         "hull/worker@1",
     },
     hosts = {"127.0.0.1"},
-    database = "async_demo.db",
 })
 
 -- ── Routes ─────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@
 #ifdef HL_ENABLE_LUA
 
 #include "hull/agent_lib.h"
+#include "hull/entry.h"
 #include "hull/commands/doctor.h"
 #include "hull/dev_state.h"
 #include "hull/manifest.h"
@@ -376,6 +377,44 @@ static int l_tool_agent_errors(lua_State *L)
 }
 #endif /* HL_ENABLE_HTTP_SERVER */
 
+/* ── tool.types_files() ────────────────────────────────────────────── */
+
+/* The embedded TypeScript declarations (the .d.ts files under types/), generated into
+ * build/types_registry.c and linked into the hull binary only. Weak empty
+ * default so every other link of this object (the Lua runtime tests) needs
+ * no copy of the declarations. */
+__attribute__((weak)) const HlEntry *hl_types_entries(void)
+{
+    return NULL;
+}
+
+#ifndef HL_VERSION
+#define HL_VERSION "dev"
+#endif
+
+/* tool.types_files() -> { { name = "hull/core.d.ts", body = "..." }, ... },
+ * hull_version. The entries are in name order (an empty table when this
+ * binary embeds none); the version is the one they were built with. */
+static int l_tool_types_files(lua_State *L)
+{
+    const HlEntry *e = hl_types_entries();
+    lua_newtable(L);
+    lua_pushstring(L, HL_VERSION);
+    if (!e) return 2;
+    lua_insert(L, -2);
+    lua_Integer i = 1;
+    for (; e->name; e++) {
+        lua_createtable(L, 0, 2);
+        lua_pushstring(L, e->name);
+        lua_setfield(L, -2, "name");
+        lua_pushlstring(L, (const char *)e->data, e->len);
+        lua_setfield(L, -2, "body");
+        lua_rawseti(L, -2, i++);
+    }
+    lua_insert(L, -2);
+    return 2;
+}
+
 static int l_tool_agent_context(lua_State *L)
 {
     const char *task  = luaL_checkstring(L, 1);
@@ -690,6 +729,7 @@ void hl_lua_tool_register_orchestration(lua_State *L)
         { "agent_errors",           l_tool_agent_errors },
 #endif
         { "agent_context",          l_tool_agent_context },
+        { "types_files",            l_tool_types_files },
         { "modules_available",      l_tool_modules_available },
 #if defined(HL_ENABLE_HTTP_SERVER) && defined(HL_TUI_LINKED)
         { "dev_status",             l_tool_dev_status },

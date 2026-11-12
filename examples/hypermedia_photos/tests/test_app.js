@@ -89,7 +89,7 @@ test("plain POST /entries sets session flash; next GET renders it", async () => 
 
 test("GET / paginates with ?page=N (default per_page=3 in this demo)", async () => {
     // Distinctive titles so substring matches don't false-positive.
-    const { db } = await import("hull:db");
+    const db = (await import("hull:db")).db.default();
     db.exec("DELETE FROM entries");
     for (let i = 1; i <= 7; i++) {
         db.exec("INSERT INTO entries (title, done) VALUES (?, 0)",
@@ -121,7 +121,7 @@ test("GET / paginates with ?page=N (default per_page=3 in this demo)", async () 
 });
 
 test("GET /search filters by title (HTMX fragment)", async () => {
-    const { db } = await import("hull:db");
+    const db = (await import("hull:db")).db.default();
     db.exec("DELETE FROM entries");
     db.exec("INSERT INTO entries (title, done) VALUES ('buy milk', 0)");
     db.exec("INSERT INTO entries (title, done) VALUES ('buy eggs', 0)");
@@ -150,7 +150,7 @@ test("GET /search filters by title (HTMX fragment)", async () => {
 });
 
 test("inline edit: GET /entries/:id/edit returns form, PATCH saves + returns row", async () => {
-    const { db } = await import("hull:db");
+    const db = (await import("hull:db")).db.default();
     db.exec("DELETE FROM entries");
     db.exec("INSERT INTO entries (title, done) VALUES ('original title', 0)");
     const id = db.query("SELECT id FROM entries LIMIT 1")[0].id;
@@ -198,7 +198,7 @@ test("inline edit: GET /entries/:id/edit returns form, PATCH saves + returns row
 });
 
 test("inline edit: PATCH with empty title re-renders edit form with error", async () => {
-    const { db } = await import("hull:db");
+    const db = (await import("hull:db")).db.default();
     db.exec("DELETE FROM entries");
     db.exec("INSERT INTO entries (title, done) VALUES ('keep me', 0)");
     const id = db.query("SELECT id FROM entries LIMIT 1")[0].id;
@@ -229,7 +229,7 @@ test("inline edit: PATCH with empty title re-renders edit form with error", asyn
 });
 
 test("idempotency: repeating POST with same Idempotency-Key writes once", async () => {
-    const { db } = await import("hull:db");
+    const db = (await import("hull:db")).db.default();
     db.exec("DELETE FROM entries");
 
     const home = await test.get("/", { middleware: true });
@@ -300,6 +300,6 @@ test("POST /entries with too-long title preserves submitted value in re-render",
     test.eq(res.status, 200);
     test.ok(res.body.includes(`value="${longTitle}"`),
             "submitted (too-long) value should be pre-filled in the input");
-    test.ok(res.body.includes('<small role="alert"'),
+    test.ok(res.body.includes('class="hull-form-error"'),
             "should show a per-field error message");
 });

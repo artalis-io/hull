@@ -334,8 +334,8 @@ Register with `app.use(method, pattern, mw)`:
 | `etag` | `hull.web.middleware.etag` | `hull:web:middleware:etag` | ETag response helpers with 304 Not Modified |
 | `db.udf` | `db.udf.register/unregister` | `db.udf.register/unregister` | User-defined SQL functions (Lua/JS callbacks or WASM) |
 | `image` | `hull.image` | `hull:image` | Image decode/encode (stb_image), raw pixel buffers |
-| `ws-server` | `hull.web.ws-server` | `hull:web:ws-server` | WebSocket server (`app.ws`, `broadcast`, `connections`) |
-| `ws-client` | `hull.web.ws-client` | `hull:web:ws-client` | WebSocket client (`ws.connect`) |
+| `ws-server` | `hull.web.ws-server` | `hull:web:ws-server` | WebSocket server (`app.ws`, `broadcast`, `connections`; JS `wsServer`) |
+| `ws-client` | `hull.web.ws-client` | `hull:web:ws-client` | WebSocket client (`connect`; JS `wsClient.connect`) |
 | `ssh` | `hull.ssh` | `hull:ssh` | SSH-2 client: exec, SFTP, WebSocket-relay tunnels, host-key trust stores; reach granted by `manifest.ssh`. See [SSH client](#ssh-client-hullssh) and [ssh.md](ssh.md) |
 | `sse` | `hull.web.sse` (decorates `app.sse`) | `hull:web:sse` (decorates `app.sse`) | Server-Sent Events |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
@@ -385,9 +385,14 @@ Register with `app.use(method, pattern, mw)`:
   pre-parsed url-encoded form, not the raw upload.
 
 **auth.session_middleware(opts)**. Session cookie authentication.
-- `opts.cookie_name`. Session cookie name (default: `"hull_session"`)
+- `opts.name`. Session cookie name (default: `"hull_session"`;
+  `cookie_name` / JS `cookieName` is an accepted alias)
 - `opts.optional`. Continue without session (default: `false`)
 - `opts.login_path`. Redirect here on failure instead of sending 401
+- `opts.exclude_paths` / `excludePaths`. Paths this middleware skips: an
+  exact path (`"/health"`) or a `"/prefix/*"` pattern.
+- `opts.cookie_opts` / `cookieOpts`. Forwarded to `cookie.clear` when a
+  stale cookie is cleared.
 - Sets `req.ctx.session` and `req.ctx.session_id`.
 - Returns `1` on auth failure (sends 401 or redirect), `0` on success.
 
@@ -398,6 +403,10 @@ Register with `app.use(method, pattern, mw)`:
   `exp` claim is refused; pass `false` to accept non-expiring tokens.
   (Before audit 4 the default was `false`, so `jwt.sign` without `exp`
   minted a token the middleware honoured forever.)
+- `opts.iss`, `opts.aud`, `opts.leeway`. Passed to `jwt.verify` (the
+  required issuer, the required audience, clock skew in seconds).
+- `opts.exclude_paths` / `excludePaths`. Paths this middleware skips: an
+  exact path or a `"/prefix/*"` pattern.
 - Reads `Authorization: Bearer <token>` header.
 - Sets `req.ctx.user` (decoded payload).
 - Returns `1` on auth failure (sends 401 + JSON), `0` on success.
@@ -416,8 +425,8 @@ verifies ID token signatures against the IdP's JWKS (x5c → SPKI PEM via
 verifier into an HttpOnly cookie so the callback can't be replayed
 cross-provider or by a CSRF.
 
-- `oauth.init(opts)`. Call once at app startup. Required: `state_secret`
-  (≥16 bytes), `providers = { name = {...}, ... }`. Optional: `state_cookie`,
+- `oauth.init(opts)`. Call once at app startup. Required: `secret`
+  (≥32 bytes; `state_secret` is an accepted alias), `providers = { name = {...}, ... }`. Optional: `state_cookie`,
   `state_ttl` / `jwks_ttl` (positive numbers of seconds; anything else raises -
   audit 44), `find_user(provider, claims) -> user` (required when
   `on_login` is set), `on_login(req, res, user, ctx) -> path?` (signature
@@ -451,8 +460,8 @@ cross-provider or by a CSRF.
 - App must declare `hull/web/middleware/oauth@1` in `manifest.modules` plus
   add the IdP host (e.g. `accounts.google.com`, `login.microsoftonline.com`)
   to `manifest.hosts`.
-- JS API: same shape with camelCase keys (`stateSecret`, `clientId`,
-  `clientSecret`, `onLogin`, `onLogout`).
+- JS API: same shape with camelCase keys (`secret`, alias `stateSecret`;
+  `clientId`, `clientSecret`, `findUser`, `onLogin`, `onLogout`).
 - See `tests/fixtures/oauth_client_lua/app.lua` for a complete worked
   example, exercised end-to-end against a Python mock IdP via
   `tests/e2e_oauth.sh`.
@@ -591,10 +600,13 @@ verify step between successful first-factor auth and `on_login` when
 
 - `authflows.init(opts)`. Required at app startup. Validates all
   callbacks up front + creates internal tables.
-  - `opts.state_secret` (≥32 bytes). HMAC key for the signed tokens.
+  - `opts.secret` (≥32 bytes; `state_secret` is an accepted alias). HMAC
+    key for the signed tokens.
   - `opts.email_send(to, subject, html, text)`. App-provided.
-  - `opts.templates = { welcome, verify, magic_link, password_reset,
-    email_change }`. Each is `function(ctx) → { subject, html?, text? }`.
+  - `opts.templates = { welcome, magic_link, password_reset, email_change,
+    email_change_notify? }`. Each is `function(ctx) → { subject, html?, text? }`.
+    `welcome` also carries the verify link (registration and verify resend);
+    `email_change_notify` is optional and goes to the old address.
   - `opts.user_*` callbacks (find_by_email, get, create, set_password,
     set_email, set_email_verified). All required; missing ones are
     reported together at init time. **Shortcut:** pass
@@ -1021,7 +1033,7 @@ verify step between successful first-factor auth and `on_login` when
   checks. The TOTP-pending flow uses the underlying envelope.verify
   directly so the token stays usable across retry-on-typo attempts
   and is only burned on a successful code verify.
-- JS API: camelCase keys (`stateSecret`, `emailSend`, `userFindByEmail`,
+- JS API: camelCase keys (`secret`, with `stateSecret` as an alias; `emailSend`, `userFindByEmail`,
   `onLogin`, `magicLinkAutoSignup`, `requireVerifiedEmail`, `enableTotp`,
   `userTotpEnrolled`, `totpVerify`, `totpPendingTtl`, `totpPendingRedirect`,
   `verifyFormRedirect`, `totpDisable`). The `user*` lookups, `totpVerify` and
@@ -1069,7 +1081,7 @@ verify step between successful first-factor auth and `on_login` when
   active until the user clicks the link sent to the new one.
 
 **session**. Server-side sessions backed by SQLite. Requires `session.init()` at startup.
-- `session.init(opts)`. Creates `hull_sessions` table; runs PRAGMA-checked additive migrations (adds `user_id`, `ip`, `user_agent` columns for the device-management helpers). `opts.ttl` = lifetime in seconds (default: `86400`). A ttl - `opts.ttl`, `opts.absolute_ttl` (`absoluteTtl`, or `false` to turn the cap off) and the per-call `{ ttl }` of `create` / `load` / `update` - must be a positive, finite number in both runtimes; anything else (a string such as `"86400"`, `0`, NaN, infinity) raises (audit 15: JS concatenated a string onto the expiry, Lua coerced it, and an invalid `absolute_ttl` used to turn the cap off with a warning).
+- `session.init(opts)`. Creates `hull_sessions` table; runs PRAGMA-checked additive migrations (adds `user_id`, `ip`, `user_agent` columns for the device-management helpers). `opts.ttl` = lifetime in seconds (default: `86400`). A ttl - `opts.ttl`, `opts.absolute_ttl` (`absoluteTtl`, or `false` to turn the cap off) and the per-call `{ ttl }` of `create` / `load` / `update` - must be a positive, finite number in both runtimes; anything else (a string such as `"86400"`, `0`, NaN, infinity) raises (audit 15: JS concatenated a string onto the expiry, Lua coerced it, and an invalid `absolute_ttl` used to turn the cap off with a warning). `opts.trust_proxy` (JS `trustProxy`, default `false`): the client IP that `create(data, { req })` records is taken from the last `X-Forwarded-For` entry instead of the socket peer; set it only behind a proxy that writes that header.
 - `session.create(data, opts?)` → 64-char hex session ID. `opts.req` lets it capture ip + ua + user_id columns at create time. `data.user_id` is auto-populated into the column.
 - `session.load(session_id)` → data table or nil. Auto-extends expiry.
 - `session.update(session_id, data)`. Updates session data. An id that is not a session id (64 lowercase hex characters, as `session.create` makes them) answers `false` without touching the database, as `session.destroy` does (audit 44).
@@ -1162,6 +1174,7 @@ verify step between successful first-factor auth and `on_login` when
   in a nested batch it cannot - the outer batches' savepoints went with the
   commit - so the batches report their transaction lost and fail.
 - `transaction.try(fn)` → `(ok, err)`. Like `run` but returns error instead of throwing.
+  JS: `transaction.attempt(fn)` → `[ok, err]`, also exported as `transaction.try`.
 
 **idempotency**. Idempotency-Key middleware with response caching.
 - `idempotency.init(opts)`. Creates `_hull_idempotency_keys` table. `opts.ttl` = key lifetime in seconds (default: `86400`); it and the middleware's own `opts.ttl` must be a whole number of seconds in 1..31622400 (366 days), or they raise (audit 15; the upper bound, audit 26, keeps the expiry inside a 32-bit INTEGER column on PostgreSQL / MySQL).
@@ -1335,7 +1348,7 @@ MIT-licensed QR Code generator library; tables transcribed from
 ISO/IEC 18004:2015 Annex E + Table 9 and cross-verified against
 Python's `qrcode` library on 48 input / EC / mask combinations.
 
-- `qrcode.encode(text, opts?)` → `{ matrix, size, version, ec_level, mask }`.
+- `qrcode.encode(text, opts?)` → `{ matrix, size, version, ec_level, mask }` (JS: `ecLevel` in place of `ec_level`).
   Matrix is 1-indexed; cells are 0 (light) or 1 (dark).
   - `opts.ec_level` (Lua) / `opts.ecLevel` (JS). `"L"|"M"|"Q"|"H"`, default `"M"`.
   - `opts.mask`. An integer `0..7` to force a specific mask (anything else
@@ -1353,6 +1366,18 @@ Python's `qrcode` library on 48 input / EC / mask combinations.
 
 Used by `hull/web/middleware/totp` for enrollment QR rendering;
 also useful for WiFi codes, contact cards, payment links, etc.
+
+**pagination** (`hull/web/pagination@1`). Page math for list views.
+- `pagination.from_query(req, opts?)` (JS `fromQuery`) → `{ page, per_page, offset, limit }`
+  from `req.query.page` / `req.query.per_page`. Options: Lua `default_per_page`
+  (20) / `max_per_page` (100); JS `defaultPerPage` / `maxPerPage`.
+- `pagination.render(total, opts)` → `{ total, pages, page, per_page, prev, next,
+  has_prev, has_next, show, links }` (the same snake_case result keys in both
+  runtimes; `links` holds `{ page, url, active }` or `{ ellipsis = true }`).
+  Options: `page`, `per_page` (snake_case in both runtimes), `window` (2), and
+  the link base and default page size - Lua `base_url` / `default_per_page`,
+  JS `baseUrl` / `defaultPerPage` (a `base_url` / `default_per_page` key is
+  ignored in JS).
 
 **search**. Full-text search backed by SQLite FTS5.
 - `search.create_index(name, columns, opts?)`. Create FTS5 virtual table.
@@ -1483,7 +1508,7 @@ on a bad value instead of silently turning the bound off:
 - `image.new(w, h, format, pixels)` → HlImage. Formats: `"rgba8"`, `"r8"`, `"rgba16float"`, `"r32float"`.
 - `image.from_buffer(buf, w, h, format)` → HlImage. Zero-copy borrow from a `MappedBuffer`/`WasmBuffer` (the source's bytes back the image directly). The borrow is refcounted: closing the source (`buf:close()`) while the image is alive is safe and defers the source's actual munmap/free until the last borrowing image is freed (no dangling pixels). Other sources (string, `ArrayBuffer`/typed array, another image) have no refcountable object to pin and are copied.
 - `image.decode(data, format?)` → HlImage. Auto-detects PNG/JPEG/BMP from magic bytes. A JPEG with more than 100 scans is refused (audit 18).
-- `image.encode(img, format, opts?)` → bytes. `opts.quality` for JPEG (default 90). The encoder works outside the VM heap, so an image larger than the heap limit (a zero-copy view of a mapping or a `WasmBuffer` can be) is refused with `image_too_large` before it runs (audit 18).
+- `image.encode(img, format, opts?)` → bytes. `format` is `"png"` or `"jpeg"` (BMP is decode-only; anything else fails with `unsupported_format`), and the image's format must be `"rgba8"` or `"r8"` (else `unsupported_pixel_format`). `opts.quality` for JPEG (default 90). The encoder works outside the VM heap, so an image larger than the heap limit (a zero-copy view of a mapping or a `WasmBuffer` can be) is refused with `image_too_large` before it runs (audit 18).
 - An image's own pixels (`image.new`, a copying `from_buffer`, `decode`, `from_wasm`, `gpu.texture_read`) are allocated from the VM's heap, so they count against its memory limit (64 MB by default): an image that does not fit fails like any other allocation (`decode` fails with `out_of_memory`). A borrowing `from_buffer` costs nothing extra.
 - `img:width()`, `img:height()`, `img:format()`, `img:size()`. Properties.
 - `img:pixels()`. Raw pixel bytes.
@@ -1495,6 +1520,7 @@ Register WebSocket endpoints with `app.ws(path, callbacks)`. Server-side connect
 
 **Lua:**
 ```lua
+local ws = require("hull.web.ws-server")
 app.ws("/ws/chat", {
     on_open = function(conn)
         log.info("connected: " .. conn:id())
@@ -1513,7 +1539,7 @@ app.ws("/ws/chat", {
 import { wsServer } from "hull:web:ws-server";
 app.ws("/ws/chat", {
     onOpen(conn) { log.info("connected: " + conn.id); },
-    onMessage(conn, msg, isBinary) { ws.broadcast("/ws/chat", msg); },
+    onMessage(conn, msg, isBinary) { wsServer.broadcast("/ws/chat", msg); },
     onClose(conn, code, reason) { log.info("disconnected: " + conn.id); },
 });
 ```
@@ -1542,15 +1568,18 @@ finished it, and otherwise cancelled: its continuation never runs (audit 14).
 - `conn:ping(data?)` / `conn.ping(data?)`. Send ping
 - `conn.data`. Per-connection storage (table/object, lazy-created)
 
-**Module functions:**
-- `ws.broadcast(path, data [, binary])`. Broadcast to all connections on path, returns count sent
-- `ws.connections(path)`. Count active connections on path
-- `ws.connect(url, handlers [, opts])`. Connect to remote WebSocket server (see below)
+**Module functions** (`hull.web.ws-server` in Lua; the `wsServer` export of
+`hull:web:ws-server` in JS):
+- `broadcast(path, data [, binary])`. Broadcast to all connections on path, returns count sent
+- `connections(path)`. Count active connections on path
 
-**Client WebSocket (`ws.connect`):**
+**Client WebSocket** (`hull.web.ws-client` in Lua; the `wsClient` export of
+`hull:web:ws-client` in JS): `connect(url, handlers)`. Connect to a remote
+WebSocket server. No third options argument is read in either runtime.
 
 ```lua
-local client = ws.connect("ws://other:8080/feed", {
+local ws_client = require("hull.web.ws-client")
+local client = ws_client.connect("ws://other:8080/feed", {
     on_open = function(conn) conn:send("hello") end,
     on_message = function(conn, msg) log.info(msg) end,
     on_close = function(conn, code, reason) end,
@@ -1559,7 +1588,8 @@ local client = ws.connect("ws://other:8080/feed", {
 ```
 
 ```javascript
-const client = ws.connect("ws://other:8080/feed", {
+import { wsClient } from "hull:web:ws-client";
+const client = wsClient.connect("ws://other:8080/feed", {
     onOpen(conn) { conn.send("hello"); },
     onMessage(conn, msg) { log.info(msg); },
     onClose(conn, code, reason) {},
@@ -1735,9 +1765,10 @@ end)
 
 - **Middleware order matters:** Rate limit before auth (reject early, save work). CORS before auth (preflight must not require credentials).
 - **Scope middleware to paths:** Use `"/api/*"` not `"/*"` for CORS and rate limiting. Public routes (health checks, static assets) shouldn't be rate limited or require auth.
+- **Client address:** `req.remote_addr` is the socket peer's IP in both runtimes (snake_case in JS too; absent when there is no socket, as in `test.get`). Behind a proxy, read the forwarded address only through a module's `trust_proxy` / `trustProxy` option.
 - **Use `req.ctx` for data passing:** Middleware stores data in `req.ctx` (e.g. `session_id`, `user`, `csrf_token`) for downstream handlers.
 - **CORS origins:** Always list explicit origins in production. Never use `"*"` with `credentials = true`.
-- **Rate limiting keys:** Default `"global"` key rate-limits all clients together. Use a key function for per-user limits: `key = function(req) return req.ctx.user_id or req.headers["x-forwarded-for"] or "anon" end`.
+- **Rate limiting keys:** The default key is the client IP (IPv6 grouped by /64; `trust_proxy = true`, JS `trustProxy`, takes the last `X-Forwarded-For` entry, for an app behind a reverse proxy), so each client gets its own bucket. A fixed string key rate-limits all clients together. Use a key function for per-user limits: `key = function(req) return req.ctx.user_id or req.headers["x-forwarded-for"] or "anon" end`.
 - **CSRF is for cookies only:** Session/cookie auth needs CSRF protection. JWT Bearer auth does not (tokens aren't sent automatically by browsers).
 - **Session init at startup:** Call `session.init()` before registering routes. It creates the SQLite table.
 - **Lua vs JS differences:** The Lua and JS APIs are functionally equivalent but differ in naming conventions (snake_case vs camelCase) and some defaults. See the JS stdlib source for JS-specific option names.
@@ -1939,8 +1970,8 @@ JS VM runs with the defaults. The request body size is capped separately by
 ### Outbound HTTP timeout (`hull/http-client`)
 
 Every outbound request - the async `http.async.get` / `post` / `put` / `patch` /
-`delete` / `request` (the binding behind `http.fetch`) and the sync
-`http.get` / `post` / `put` / `patch` / `delete` / `request` - runs under **one
+`delete` / `request` and the sync `http.get` / `post` / `put` / `patch` /
+`delete` / `request` - runs under **one
 deadline for the whole request**: connect, TLS handshake, sending the body,
 receiving the response, and every redirect hop all count against it. It is not a
 per-read, idle or per-hop timeout: a redirect hop gets only what is left of the
@@ -1949,6 +1980,13 @@ remainder before each hop, and on the async path arms its own deadline - in a
 request handler and in a timer, WebSocket callback or `app.main` alike). At most
 **5** redirect hops are followed (`HL_HTTP_MAX_REDIRECTS`), each checked against
 `manifest.hosts`.
+
+The module has no `fetch` member in either runtime: this document's
+`http.fetch` is shorthand for the non-blocking `async.*` calls. In Lua they are
+`require("hull.http-client").async.*`; in JS, `import { httpClient } from
+"hull:http-client"`, then `httpClient.async.request` / `get` / `post` / `put` /
+`patch` / `delete` (each returns a Promise) and the blocking `httpClient.get`
+/ ... / `request`.
 
 **DNS is not interrupted by the deadline.** Both paths resolve the host with a
 blocking `getaddrinfo` (the async client too: Hull uses the system resolver, which
@@ -2863,6 +2901,11 @@ under it; `test` is a global in those files.
 | `test.run_main(args, opts?)` | `test.runMain(args, opts?)` | run `app.main` once: `{ code, stdout, stderr }` |
 | `test.eq(a, b, msg?)`, `test.ok(v, msg?)`, `test.err(fn, pattern?)` | same | assertions |
 
+`test.eq` compares numbers, strings, booleans and nil / null / undefined by
+value, and tables / objects by identity, never deeply: two separate tables or
+objects with the same contents are not equal (Lua raw equality, so no `__eq`).
+Compare fields one at a time.
+
 `test.run_main` / `runMain` (for an app that registers `app.main`, with or
 without routes): `args` becomes `ctx.args` (strings); `ctx.stdout` /
 `ctx.stderr` are captured into the result, the process's own streams
@@ -2919,4 +2962,4 @@ tui.print(x, y, s) / tui.write(s) / tui.flush()
 tui.poll(timeout_ms)          -- yields to event loop; returns event or nil
 ```
 
-JS API is the same shape (`import { tui } from "hull:tui"`) in camelCase: `tui.enableMouse`, `tui.clipboardSet`, `tui.poll` returns a `Promise<event|null>`.
+JS API is the same shape (`import { tui } from "hull:tui"`) in camelCase: `tui.enableMouse`, `tui.clipboardSet`, `tui.run({ onEvent, tickMs, kittyKbd })`, and `tui.caps()` names the Kitty flag `kittyKbd`. JS `tui.poll(timeoutMs)` returns an event that is already queued synchronously (an event object, not a Promise); otherwise `tui.poll(0)` (or no argument) returns `null` synchronously, and any other timeout returns a `Promise<event|null>` (a negative timeout waits for an event with no time limit).

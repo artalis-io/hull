@@ -17,8 +17,6 @@ import { encoding } from "hull:encoding";
 import { log } from "hull:log";
 
 app.manifest({
-    name    : "multipart-upload",
-    version : "0.0.1",
     modules : [
         "hull/http-server@1",
         "hull/crypto@1",

@@ -14,9 +14,11 @@
  *                                   PKCE challenge + signed state cookie.
  *   GET /auth/:provider/callback -> exchanges code for tokens, verifies
  *                                   ID token via JWKS x5c, validates
- *                                   iss / aud / exp / nonce, calls
- *                                   onLogin(req, res, provider, claims,
- *                                   tokens), 302s to return URL.
+ *                                   iss / aud / exp / nonce, resolves
+ *                                   findUser(provider, claims) -> user,
+ *                                   calls onLogin(req, res, user,
+ *                                   { provider, claims, tokens }),
+ *                                   302s to return URL.
  *   GET /auth/logout             -> clears state cookies; optional
  *                                   onLogout clears app session.
  *
@@ -69,11 +71,14 @@
  *               clientSecret: env.get("GOOGLE_CLIENT_SECRET"),
  *           },
  *       },
- *       onLogin: async (req, res, provider, claims, tokens) => {
- *           const user = await findOrCreateUser(claims.sub, claims.email);
- *           session.createForUser(req, res, user.id);
- *           return "/";
- *       },
+ *       // Key the account on the issuer + subject, never on the email
+ *       // claim (see the Lua sibling).
+ *       findUser: (provider, claims) =>
+ *           findOrCreateUser(claims.iss, claims.sub, claims.email),
+ *       // onLogin(req, res, user, { provider, claims, tokens }) matches
+ *       // hull:web:auth-flows, so one session.loginHandler(cookie) wires both.
+ *       onLogin: session.loginHandler(cookie),
+ *       onLogout: session.logoutHandler(cookie),
  *   });
  *   oauth.routes(app);
  */

@@ -2,6 +2,7 @@
 //
 // Demonstrates hull:web:middleware:health and hull:web:middleware:etag
 
+import { app } from "hull:app";
 import { db as dbModule } from "hull:db";
 const db = dbModule.default();
 import { etag } from "hull:web:middleware:etag";

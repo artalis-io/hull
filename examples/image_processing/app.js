@@ -9,6 +9,7 @@
 //       curl localhost:3000/create
 //       curl localhost:3000/info
 
+import { app } from "hull:app";
 import { encoding } from "hull:encoding";
 import { image } from "hull:image";
 
@@ -51,10 +52,10 @@ app.get("/create", (_req, res) => {
 
     res.json({
         ok: true,
-        width: img.width(),
-        height: img.height(),
-        format: img.format(),
-        pixelSize: img.size(),
+        width: img.width,
+        height: img.height,
+        format: img.format,
+        pixelSize: img.size,
         pngSize: pngData.byteLength,
         pngHex: encoding.hex.encode(pngData),   // hex for JSON transport
     });
@@ -88,16 +89,16 @@ app.get("/info", (_req, res) => {
     res.json({
         ok: true,
         original: {
-            width: img.width(),
-            height: img.height(),
-            format: img.format(),
-            size: img.size(),
+            width: img.width,
+            height: img.height,
+            format: img.format,
+            size: img.size,
         },
         decoded: {
-            width: decoded.width(),
-            height: decoded.height(),
-            format: decoded.format(),
-            size: decoded.size(),
+            width: decoded.width,
+            height: decoded.height,
+            format: decoded.format,
+            size: decoded.size,
         },
         roundTripMatch: match,
     });

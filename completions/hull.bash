@@ -20,7 +20,7 @@ _hull() {
         cword=$COMP_CWORD
     }
 
-    local commands="keygen build verify verify-self verify-release sign-release sbom inspect manifest test new init dev eject sign-platform migrate modules agent mcp check compute deploy version doctor update tools help"
+    local commands="keygen build verify verify-self verify-release sign-release sbom inspect manifest test new init types dev eject sign-platform migrate modules agent mcp check compute deploy version doctor update tools help"
     local tools_subs="list install uninstall"
     local modules_subs="list available explain analyze"
     local sbom_formats="human json cyclonedx spdx"
@@ -140,6 +140,14 @@ _hull() {
             fi
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=($(compgen -W "--runtime" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -d -- "$cur"))
+            fi
+            ;;
+
+        types)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "-o --output --force --check --help" -- "$cur"))
             else
                 COMPREPLY=($(compgen -d -- "$cur"))
             fi

@@ -82,3 +82,6 @@ _dbg*/
 # assembly it writes next to the compiler's cwd.
 .aarch64/
 cc*.s
+
+# TypeScript compiler for make check-types (tests/types/package-lock.json pins it).
+tests/types/node_modules/

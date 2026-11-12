@@ -453,6 +453,9 @@ end)
 {{ pagination_nav | raw }}
 ```
 
+JS: `nav(total, { page, perPage, defaultPerPage, baseUrl, window, target,
+pushUrl })` - all camelCase, unlike the base `pagination.render`.
+
 Returns `""` when there's only one page. Each link carries both
 `hx-get` AND `href` for progressive enhancement (search-engine
 crawlers + no-JS users still get working pagination).

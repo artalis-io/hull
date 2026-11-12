@@ -8,6 +8,42 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- **TypeScript declarations for Hull's JavaScript API, and `hull types`.** `.d.ts` files
+  for every `hull:*` JavaScript module, the `app` intrinsic, the globals, the `app.main`
+  context, the manifest and the `test` global ship in the hull binary. `hull types
+  [app_dir]` installs them under `<app_dir>/types/`, plus a `tsconfig.json` where none
+  exists, so an editor or `tsc --noEmit` type-checks a JavaScript app (`checkJs`).
+  - A re-run after `hull update` replaces the files it wrote and removes ones no longer
+    shipped. A file you edited is a conflict unless you pass `--force`.
+  - `hull types --check` fails when the installed declarations differ from the
+    hull binary's.
+  - `make check-types` (CI job `types`) verifies the declarations with the pinned
+    TypeScript compiler: a strict compile, a drift check against the running hull's
+    exports, usage fixtures, and every example app type-checked as JavaScript.
+  - Design: docs/typescript_design.md §2. Running TypeScript source itself is a later
+    step.
+
+### Fixed
+
+- **Example apps the new type check found broken** (JS unless noted).
+  - `examples/health_etag` and `examples/image_processing` used an `app` global that does
+    not exist, so they failed at load.
+  - `image_processing` and `gpu_texture` called the image `width` / `height` / `format` /
+    `size` getters as methods.
+  - The `hypermedia_photos` tests called `db.exec` on the module object.
+  - `irc_chat` (both runtimes): federation keyed every outbound peer by a client
+    connection's nonexistent `id`, so all peers shared one handshake slot. A binary
+    WebSocket frame failed JSON parsing in JS where Lua accepted it.
+  - `timers`, `async_http` and `multipart_upload` (both runtimes) declared manifest keys
+    the runtime ignores (`database`, `name`, `version`).
+- **Docs that disagreed with the JS runtime:** the auth-flows templates and secret
+  option, the oauth `onLogin` example, the ratelimit default key (per client IP, not
+  one global bucket), the WebSocket client / server module names, the JS `tui.poll` and
+  `tui.caps()` shapes, `qrcode`'s `ecLevel`, `image.encode`'s formats, and `pagination`
+  (now documented).
+
 ## [0.21.0] - 2026-11-12
 
 New features (MariaDB `client_ed25519`, MySQL `caching_sha2_password` full authentication over the

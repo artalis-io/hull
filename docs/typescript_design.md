@@ -1,6 +1,6 @@
 # TypeScript - design
 
-Status: **DESIGN-ONLY. NOTHING IMPLEMENTED.** Builds on
+Status: **T1 (types + `hull types`) implemented; T2 and T3 design-only.** Builds on
 [buildcontext_design.md](buildcontext_design.md) (BuildContext),
 [dev_pipeline_generations_design.md](dev_pipeline_generations_design.md) (pipeline
 generations), [javascript_source_frontend_design.md](javascript_source_frontend_design.md)
@@ -34,7 +34,7 @@ module resolution modes), CommonJS interop.
 
 | Step | What | Depends on |
 |---|---|---|
-| T1 | `.d.ts` + `hull types` (§2) | nothing |
+| T1 | `.d.ts` + `hull types` (§2) - implemented | nothing |
 | T2 | TypeScript frontend, analysis only (§3) | the shipped JS frontend |
 | BuildContext 1-5 | action core, outputs, artifact seam, tool seam, plugin runtime | - |
 | G1, G2 | pipeline generations: overlay, runner wiring | BuildContext 2, 5 |
@@ -47,69 +47,82 @@ BuildContext checkpoint 5's parity demonstration (that one consumes Lua AND Java
 selections; erasure has no Lua input), and it needs one explicit pipeline route from
 checkpoint 6, not the full BuildArtifact model (§4.2).
 
-## 2. Types for authoring (T1)
+## 2. Types for authoring (T1) - implemented
 
 ### 2.1 What ships
 
-`types/hull/` in the repository, embedded in the hull binary (like `stdlib/context/`):
+`types/` in the repository, embedded in the hull binary only (`hl_types_entries`, a
+registry linked into `hull` alone, so a built app carries none of it):
 
-- one `declare module "hull:<name>" { ... }` per JS module of the module registry,
-  first-party stdlib and native alike (`hull:db`, `hull:crypto`, `hull:web:cookie`, ...);
-  internal underscore modules (`hull:_template`, `hull:_test_hooks`, ...) are NOT declared:
-  apps cannot import them;
-- the app globals: `app` (with the module-conditional decorations - `app.every` /
-  `app.daily` typed as present, documented as requiring `hull/timers`), `hull`,
-  `console`, the `app.main` context (`args`, `env`, `stdin`, `stdout`, `stderr`,
-  `signal`), the request / response objects, `test` (in a separate `hull-test.d.ts` for
-  test files);
-- the manifest: `app.manifest()` takes a typed `HullManifest` (modules as the
-  `"hull/<name>@<major>"` template-literal union, plus every documented section), so a
-  misspelled manifest key is a type error;
-- module specs are versioned with the hull release that embeds them; nothing is fetched.
+- `types/hull/modules/<a>.<b>.d.ts`: one `declare module "hull:<a>:<b>"` per JavaScript
+  module of the registry, first-party stdlib and native alike. Internal modules
+  (`hull:_template`, `hull:db:_internal`, `hull:ssh:wire`, ...) are not declared; nor are
+  registry modules with no JavaScript import (`hull:timers`, `hull:web:sse`,
+  `hull:inspect`), and the drift check (§2.3) asserts they stay undeclared;
+- `types/hull/app.d.ts`, `globals.d.ts` (`hull`, `console`) and `core.d.ts`: the `app`
+  intrinsic (module-conditional members documented), the shared `Hull` namespace -
+  request / response, handlers and middleware, the `app.main` context, WebSocket / SSE
+  shapes, database connections, buffers, refusal errors;
+- `types/hull-test/test.d.ts`: the `test` global of `hull test` files, kept apart so app
+  code does not see it;
+- the manifest: `app.manifest()` takes a typed `Hull.Manifest` (modules as the
+  `"hull/<name>@<major>"` union with an optional `?`, plus every section the extractor
+  reads), so a misspelled manifest key is a type error.
 
-They describe the API in [app_api_reference.md](app_api_reference.md) and nothing else.
+Values whose shape the APP defines - a database row, a JSON body or payload, a job input,
+a `req.ctx` slot - are `Hull.Data` (`any`, as `JSON.parse` returns), the one exception to
+the no-`any` rule; where the API can take a type parameter (`conn.query<User>()`,
+`test.get<T>()`) it narrows them. Everything the API defines is typed exactly.
 
-### 2.2 `hull types [app_dir] [--out DIR] [--force]`
+### 2.2 `hull types [app_dir] [-o DIR] [--force] [--check]`
 
-A tool-mode command (Lua tool module + thin C dispatcher, like `hull init`):
+A tool-mode command (`stdlib/cli/lua/hull/types.lua` + a thin C dispatcher, like
+`hull init`), reading the declarations through `tool.types_files()`:
 
-- writes the embedded declarations to `<app_dir>/types/hull/` (or `--out`); refuses to
-  overwrite a file it did not write unless `--force` (it records what it wrote in
-  `types/hull/.hull-types.version`, carrying the hull version);
-- writes a `tsconfig.json` only when none exists: `noEmit`, `strict`,
-  `allowImportingTsExtensions` (§4.3), `module` / `target` matching QuickJS's ES level,
-  `types` pointing at `types/hull`; an existing one is left alone and the lines to add
-  are printed;
-- prints nothing from the app tree unescaped (the tool writers' escaping, CLAUDE.md "Tool
-  VM writers");
-- re-run after `hull update` to refresh (the version file says when they are stale;
-  `hull doctor` reports stale app types when run in an app directory).
+- writes them to `<app_dir>/types/` (or `-o DIR`); the files it wrote are recorded with
+  their SHA-256 and the hull version in `types/hull/.hull-types`;
+- a re-run (after `hull update`) replaces a recorded file that is unchanged and removes
+  one this version no longer ships; a file that was edited, or that Hull did not write,
+  is a conflict: nothing is written and the command fails unless `--force`;
+- `--check` writes nothing and fails when the installed declarations differ from this
+  hull's (an app's CI can run it);
+- writes `tsconfig.json` (and `tests/tsconfig.json` for test files, which adds
+  `types/hull-test`) only where none exists, an existing one is left alone; the defaults
+  are `checkJs`, `strict` with `noImplicitAny` and `strictNullChecks` off - plain
+  JavaScript without annotations - which a TypeScript app can tighten;
+- refuses a symbolic link as the destination, and escapes what it prints.
 
-`hull new --runtime js` and `hull init --runtime js` offer to run it (a flag, not a
-default, until T3).
+Offering it from `hull new` / `hull init` is left for T3, when a scaffold can be
+TypeScript.
 
-### 2.3 Keeping them true
+### 2.3 Keeping them true (`make check-types`, CI job `types`)
 
-A declaration that disagrees with the runtime is worse than none. In the same PR as T1:
+A declaration that disagrees with the runtime is worse than none. With the TypeScript
+compiler pinned in `tests/types/package-lock.json` (7.0.2):
 
-- **Export drift test** (a `js_types` UTEST leg): for every declared `hull:` module, load
-  it in a JS runtime with that module declared and compare its export names with the
-  names declared in its `declare module` block (read from the `.d.ts`, which keeps a
-  strict, linted layout: one `export` per line). A missing or extra name fails.
-- **Registry drift test**: every app-importable JS module in the registry has a
-  `declare module`, and every `declare module` names a registry module.
-- **Compile test** (CI, where `tsc` is available, skipped otherwise): `tsc --noEmit`
-  over every `examples/*/app.js` with `checkJs` and the shipped types, and over a set of
-  negative fixtures that must fail (a wrong argument type, a misspelled manifest key, an
-  import of `hull:_template`).
-- New invariant (CLAUDE.md "Invariants are linted"): "a change to an app-facing JS export
-  updates `types/hull/`" - enforced by the drift test, which the invariants doc lists.
+- **Strict compile:** the declarations and fixtures compile under `strict`.
+- **Drift check:** `tests/types/inventory.sh` loads every registry module in the built
+  hull and records its live exports, four levels deep (member names and kind: function /
+  object / primitive); `tests/types/drift.mjs` turns that into type-level assertions
+  (`build/types/drift.ts`) that tsc checks against the declarations: a member missing from
+  the types, a declared member the runtime lacks, a wrong kind, or a non-JavaScript module
+  that is declared all fail, naming the key. No compiler API is used - tsc is the checker.
+- **Fixtures:** `tests/types/fixtures/*.ts` use every module as an app would, with
+  `// @ts-expect-error` on calls that must be rejected (an unused one fails).
+- **Examples:** every `examples/**/*.js` type-checks as JavaScript (`checkJs`, the
+  `hull types` defaults). This found example apps that failed at load (a missing
+  `hull:app` import, getters called as methods) and manifest keys the runtime ignores.
+- **`make e2e-types`:** installs into an app, the conflict / `--force` / `--check` /
+  removal rules, and a type-check of an app with the installed files (a wrong call fails).
+
+The CI job runs on every change, as the invariant lint does: a change to a C binding or a
+stdlib export changes the inventory, and the drift check fails until `types/hull` follows.
 
 ### 2.4 Lua
 
 The same declarations for LuaLS (`---@meta` files, `hull types --lua`) are a natural
-follow-up on the same source: out of scope here, noted so T1's layout does not preclude
-it (declarations are grouped per module, not per language file).
+follow-up on the same source: out of scope here (declarations are grouped per module, so
+the layout does not preclude it).
 
 ## 3. The TypeScript frontend (T2)
 

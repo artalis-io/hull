@@ -66,6 +66,12 @@ const FEDERATION = {
 // its JSON messages); hull:crypto takes and returns bytes. These convert at
 // that boundary. A signature or key from a peer is untrusted input, so one
 // that is not hex of the right length is a failed check, not an error.
+// A WebSocket message is a string (text frame) or an ArrayBuffer (binary
+// frame). Every message here is JSON; a binary frame is read as its UTF-8
+// text, as the Lua twin reads both (null when it is not UTF-8).
+function frameText(raw) {
+    return typeof raw === "string" ? raw : encoding.utf8.decode(raw);
+}
 function hexBytes(s) {
     const b = typeof s === "string" ? encoding.hex.decode(s) : null;
     return b === null ? null : encoding.bytes.toU8(b);
@@ -472,7 +478,7 @@ app.ws("/ws", {
 
     onMessage(conn, raw) {
         let msg;
-        try { msg = JSON.parse(raw); } catch (_e) { msg = null; }
+        try { msg = JSON.parse(frameText(raw)); } catch (_e) { msg = null; }
         if (!msg || !msg.type)
             return wsError(conn, "invalid JSON message");
 
@@ -950,7 +956,7 @@ app.get("/e2e-test", async (req, res) => {
         },
         onMessage(conn, msg) {
             let data;
-            try { data = JSON.parse(msg); } catch (_e) { return; }
+            try { data = JSON.parse(frameText(msg)); } catch (_e) { return; }
             if (!data) return;
 
             if (data.type === "motd") {
@@ -984,7 +990,7 @@ app.get("/e2e-test", async (req, res) => {
         },
         onMessage(conn, msg) {
             let data;
-            try { data = JSON.parse(msg); } catch (_e) { return; }
+            try { data = JSON.parse(frameText(msg)); } catch (_e) { return; }
             if (!data) return;
 
             if (data.type === "motd") {
@@ -1196,7 +1202,7 @@ app.ws("/federation", {
 
     onMessage(conn, raw) {
         let data;
-        try { data = JSON.parse(raw); } catch (_e) { data = null; }
+        try { data = JSON.parse(frameText(raw)); } catch (_e) { data = null; }
         if (!data || !data.type) {
             wsSend(conn, { type: "fed_error", message: "invalid JSON" });
             conn.close();
@@ -1330,6 +1336,9 @@ app.get("/federation/status", (_req, res) => {
 
 if (FEDERATION.enabled) {
     function connectToPeer(peer) {
+        // One outbound connection per call: its handshake state lives here
+        // (a ws-client connection has no id to key fedPending by).
+        let pending = null;
         wsClient.connect(peer.url, {
             onOpen(conn) {
                 wsSend(conn, {
@@ -1337,7 +1346,7 @@ if (FEDERATION.enabled) {
                     server: FEDERATION.serverName,
                     public_key: FEDERATION.publicKey,
                 });
-                fedPending[conn.id] = {
+                pending = {
                     state: "awaiting_challenge",
                     publicKey: peer.publicKey,
                     url: peer.url,
@@ -1345,9 +1354,9 @@ if (FEDERATION.enabled) {
             },
             onMessage(conn, raw) {
                 let data;
-                try { data = JSON.parse(raw); } catch (_e) { return; }
+                try { data = JSON.parse(frameText(raw)); } catch (_e) { return; }
+                if (!data) return;
 
-                const pending = fedPending[conn.id];
                 if (pending && pending.state === "awaiting_challenge") {
                     if (data.type === "fed_challenge") {
                         const mySig = signHex(data.challenge, FEDERATION.secretKey);
@@ -1376,7 +1385,7 @@ if (FEDERATION.enabled) {
                         fedPeers[serverName] = {
                             conn, publicKey: pending.publicKey, authenticated: true,
                         };
-                        delete fedPending[conn.id];
+                        pending = null;
                         log.info(`federation: peer ${serverName} authenticated (outbound)`);
                     } else if (data.type === "fed_error") {
                         log.error(`federation: peer rejected auth: ${data.message}`);
@@ -1387,9 +1396,9 @@ if (FEDERATION.enabled) {
                 }
             },
             onClose(conn) {
-                delete fedPending[conn.id];
+                pending = null;
                 for (const name in fedPeers) {
-                    if (fedPeers[name].conn && fedPeers[name].conn.id === conn.id) {
+                    if (fedPeers[name].conn === conn) {
                         delete fedPeers[name];
                         log.info(`federation: outbound peer ${name} disconnected`);
                         break;
@@ -1469,7 +1478,8 @@ app.get("/e2e-federation-test", async (req, res) => {
         },
         onMessage(conn, raw) {
             let data;
-            try { data = JSON.parse(raw); } catch (_e) { return; }
+            try { data = JSON.parse(frameText(raw)); } catch (_e) { return; }
+            if (!data) return;
 
             if (data.type === "fed_challenge") {
                 const sig = signHex(data.challenge, fakeSk);
@@ -1528,7 +1538,8 @@ app.get("/e2e-federation-test", async (req, res) => {
             onOpen(_conn) {},
             onMessage(conn, raw) {
                 let data;
-                try { data = JSON.parse(raw); } catch (_e) { return; }
+                try { data = JSON.parse(frameText(raw)); } catch (_e) { return; }
+                if (!data) return;
                 if (data.type === "motd") {
                     conn.send(JSON.stringify({
                         type: "login", username: "fed_test_user", password: "fedpass1234",
