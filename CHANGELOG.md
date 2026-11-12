@@ -8,7 +8,56 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- **MariaDB `client_ed25519` authentication** (`IDENTIFIED VIA ed25519`, #1062).
+  The client signs the server's nonce with the Ed25519 key derived from SHA-512
+  of the password, the empty password included. This works from an
+  AuthSwitchRequest or from a greeting that names the plugin, on any sslmode.
+  Over an unverified channel it logs the same once-per-DSN WARN as native /
+  caching_sha2.
+- **MySQL `caching_sha2_password` full authentication over the RSA public-key
+  exchange** (#1063). Without TLS, full authentication now uses the server's RSA
+  key. Pin it with `?server_public_key=<PEM file or the PEM itself>`, or opt into
+  fetching it with `?get_server_public_key=true` (anyone on the path can replace
+  a fetched key; Hull WARNs). Before this, an account whose hash the server had
+  not cached could log in only over verified TLS. Over unverified TLS
+  (`sslmode=require`, or `prefer` against a TLS server) full authentication is
+  still refused, because the server expects the cleartext password on any TLS
+  session. A key file named in a manifest DSN must sit inside the app directory
+  (or `@state/`); a `db.open` DSN may give only the inline PEM.
+- **`gpu.async.compile(name, wgsl, opts?)` and `gpu.async.load(name, opts?)`**
+  (Lua and JS, #1064). They compile a WGSL shader without blocking the event
+  loop: the calling run parks until the pipeline is installed (Lua returns
+  `true` / `nil, err`; JS returns a Promise). They run the same charge, shader
+  source policy, pre-checks and compile-helper verdict as `gpu.compile` /
+  `gpu.load`, with the same errors. The compile deadline still applies
+  (`compile_timeout`), and while the compile runs the device answers other GPU
+  calls with `gpu_busy`.
+- **`conn.udf.register` / `unregister` on a SQLite `db.open(dsn)` connection**
+  (Lua and JS, #1065). A UDF registered there runs in that connection's own
+  synchronous statements. As on a registry connection, `conn.async` runs on a
+  worker connection that has none. `close()`, or collection of the connection,
+  drops its UDFs. A UDF that refers to its own connection does not keep it
+  alive, and `db.open` at the 16-connection cap collects once before refusing,
+  now with the `busy` refusal code. `close()` from inside a UDF running on that
+  connection is refused.
+- **`hull test` runs CLI apps** (#1066). `test.run_main(args, opts)` (Lua) /
+  `test.runMain(args, opts)` (JS) runs the app's `app.main` once in-process and
+  returns `{ code, stdout, stderr }`, with `ctx.stdout` / `ctx.stderr` captured.
+  `opts.stdin` feeds `ctx.stdin`. `opts.env` is `ctx.env`, limited to the
+  manifest's `env` names. `opts.timeout_ms` / `timeoutMs` bounds main's waits
+  (`hull.sleep`, `http.fetch`, `db.async`, `compute.async`), which `hull test`
+  and `hull agent test` now drive on an event loop of their own. main runs on
+  the test case's instruction budget, as a `test.get` request does. An app with
+  routes and `app.main` gets both helpers; an app with neither fails with a
+  clear message. The `hull new --type cli` / `--cli` scaffolds and
+  `examples/cli_modular` ship working tests.
+
 ### Fixed
+
+- **`docs/app_api_reference.md` no longer says WASM UDFs work with
+  `db.async.query()`** (#1065). No connection's UDFs reach the worker pool.
 
 - **`hull update` spells every version the same way.** It printed the
   running version without a `v` (`current  0.20.0`) and the release's with
