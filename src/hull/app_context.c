@@ -26,6 +26,7 @@
 #include "hull/sandbox.h"        /* hl_sandbox_db_path */
 #include <limits.h>
 #include "hull/shared/host.h"   /* HL_HOST_PATH_MAX */
+#include "hull/utils/path_normalize.h"   /* hl_path_normalize */
 #include "hull/cap/fs.h"          /* HlFsConfig - test/agent fs sandbox wiring
                                    * (unconditional: fs_cfg is not DB-gated) */
 #include "hull/utils/alloc.h"     /* HlAllocator + hl_alloc_init for the fs policy */
@@ -76,6 +77,7 @@ struct HlAppContext {
     /* Owned app_dir copy backing fs_cfg_storage.base_dir (rt->fs_cfg borrows it,
      * so it must outlive the runtime - opts->app_dir may be a caller stack). */
     char          *app_dir_copy;
+    int            app_dir_abs;    /* app_dir_copy was made absolute */
     /* fs capability config wired onto rt->fs_cfg when the app declares
      * fs.read/fs.write, so blob.* / fs.* / fs.mmap work under `hull test` /
      * `hull agent` the same way they do under `hull dev` (serve.c does the
@@ -165,6 +167,39 @@ static const char *discover_entry_in(const HlRuntimeFactory *const *facs,
     return NULL;
 }
 
+/* ── Internal: absolute app paths ──────────────────────────────────── */
+
+/* A relative app directory or entry, made absolute against the working
+ * directory and normalized, into a malloc'd string (NULL on failure). The
+ * JS loader resolves a relative import against the importing module's name
+ * and takes a relative result as app-root-relative, so an entry named
+ * `app/app.js` (from `hull test app`) made `./lib/a.js` `app/lib/a.js`,
+ * opened as `<app>/app/lib/a.js`. Absolute names are matched against the
+ * app directory and work, so both are made absolute the same way. */
+static char *abs_normalized(const char *path)
+{
+    char cwd[HL_HOST_PATH_MAX];
+    size_t pl = strlen(path);
+    if (path[0] == '/') {
+        cwd[0] = '\0';
+    } else if (!getcwd(cwd, sizeof cwd)) {
+        return NULL;
+    }
+    size_t cl = strlen(cwd);
+    if (pl > SIZE_MAX / 2 || cl > SIZE_MAX / 2) return NULL;
+    char *out = malloc(cl + 1 + pl + 1);
+    if (!out) return NULL;
+    if (cl) {
+        memcpy(out, cwd, cl);
+        out[cl] = '/';
+        memcpy(out + cl + 1, path, pl + 1);
+    } else {
+        memcpy(out, path, pl + 1);
+    }
+    if (hl_path_normalize(out) != 0) { free(out); return NULL; }
+    return out;
+}
+
 /* ── Internal: determine runtime type from entry point ─────────────── */
 
 static int resolve_entry_and_runtime(HlAppContext *ctx,
@@ -181,18 +216,27 @@ static int resolve_entry_and_runtime(HlAppContext *ctx,
          * immutable sources, no merged/mutable array. */
         size_t base_count = 0;
         const HlRuntimeFactory *const *base = hl_runtime_factories(&base_count);
-        entry = discover_entry_in(base, base_count, opts->app_dir,
+        entry = discover_entry_in(base, base_count, ctx->app_dir_copy,
                                   entry_buf, buf_size, &ctx->factory);
         if (!entry) {
             size_t feat_count = 0;
             const HlRuntimeFactory *const *feats =
                 hl_runtime_feature_factories(&feat_count);
-            entry = discover_entry_in(feats, feat_count, opts->app_dir,
+            entry = discover_entry_in(feats, feat_count, ctx->app_dir_copy,
                                       entry_buf, buf_size, &ctx->factory);
         }
     } else {
         /* Caller provided entry point - match factory by file extension. */
         ctx->factory = hl_runtime_factory_for_filename(entry);
+        /* A disk entry is named absolutely, as the directory is (see
+         * abs_normalized); an embedded one is a VFS key and left alone. */
+        if (ctx->app_dir_abs && entry[0] != '/') {
+            char *abs = abs_normalized(entry);
+            if (!abs || strlen(abs) >= buf_size) { free(abs); return -1; }
+            memcpy(entry_buf, abs, strlen(abs) + 1);
+            free(abs);
+            entry = entry_buf;
+        }
     }
 
     // cppcheck-suppress knownConditionTrueFalse
@@ -449,8 +493,18 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     ctx->fs_policy_storage = HL_FS_POLICY_INIT;
     hl_alloc_init(&ctx->fs_alloc, 0);   /* the policy needs a non-NULL allocator */
 
-    /* Own a stable copy of app_dir for fs_cfg.base_dir (see struct comment). */
-    ctx->app_dir_copy = strdup(opts->app_dir);
+    /* Own a stable copy of app_dir for fs_cfg.base_dir (see struct comment).
+     * In development (no embedded app files) it is made absolute, and so is a
+     * relative entry (abs_normalized); a built binary's paths are kept. */
+    extern const HlEntry hl_app_entries[];
+    HlVfs probe;
+    hl_vfs_init(&probe, hl_app_entries, NULL);
+    if (!hl_vfs_embedded(&probe)) {
+        ctx->app_dir_copy = abs_normalized(opts->app_dir);
+        ctx->app_dir_abs = 1;
+    } else {
+        ctx->app_dir_copy = strdup(opts->app_dir);
+    }
     if (!ctx->app_dir_copy) { free(ctx); return -1; }
 
     /* `.hull` is reserved from the disk loaders whether or not a policy
@@ -570,8 +624,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     /* Init VFS instances. The platform VFS unions the runtime-agnostic base
      * stdlib with each composed runtime's stdlib (via hl_stdlib_feature_entries);
      * in a base build with no runtime feature it borrows the static base. */
-    extern const HlEntry hl_app_entries[];
-    hl_vfs_init(&ctx->app_vfs, hl_app_entries, opts->app_dir);
+    hl_vfs_init(&ctx->app_vfs, hl_app_entries, ctx->app_dir_copy);
     hl_platform_vfs_init(&ctx->platform_vfs, &ctx->platform_vfs_owned);
 
 #ifdef HL_ENABLE_DB
