@@ -70,16 +70,18 @@ app.get("/process", (_req, res) => {
     // Upload as persistent GPU texture
     gpu.texture("input", img);
 
-    // Create output storage texture (same dimensions)
-    gpu.texture("output", null, {
+    // Create the output storage texture (same dimensions) from zeroed
+    // bytes: gpu.texture(name, null) destroys a texture, it does not make one.
+    gpu.texture("output", new ArrayBuffer(img.width * img.height * 4), {
         width: img.width,
         height: img.height,
         format: "rgba8",
         storage: true,
     });
 
-    // Dispatch the invert shader
-    gpu.dispatch("invert", {
+    // Dispatch the invert shader; outputTexture reads the 2nd texture back
+    // as raw RGBA8 bytes.
+    const outBytes = gpu.dispatch("invert", {
         textures: [
             { name: "input" },                      // sampled (binding 0, 1)
             { name: "output", storage: true },       // storage (binding 2)
@@ -88,11 +90,8 @@ app.get("/process", (_req, res) => {
         outputTexture: 1,  // 0-indexed: read back the 2nd texture
     });
 
-    // Read back result
-    const outImg = gpu.textureRead("output");
-
     // Compare first pixel: original (0, 0, 128, 255) -> inverted (255, 255, 127, 255)
-    const outPixels = new Uint8Array(outImg.pixels());
+    const outPixels = new Uint8Array(outBytes);
 
     res.json({
         ok: true,
@@ -103,9 +102,9 @@ app.get("/process", (_req, res) => {
             firstPixel: { r: 0, g: 0, b: 128, a: 255 },
         },
         output: {
-            width: outImg.width,
-            height: outImg.height,
-            format: outImg.format,
+            width: img.width,
+            height: img.height,
+            format: "rgba8",
             firstPixel: {
                 r: outPixels[0],
                 g: outPixels[1],
@@ -116,5 +115,4 @@ app.get("/process", (_req, res) => {
     });
 
     img.close();
-    outImg.close();
 });

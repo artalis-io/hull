@@ -417,44 +417,34 @@ static JSValue js_test_eq(JSContext *ctx, JSValueConst this_val,
     (void)this_val;
     if (argc < 2) return JS_ThrowTypeError(ctx, "test.eq requires 2 arguments");
 
-    int equal = 0;
-
-    /* Use strict equality for primitives */
-    if (JS_IsNumber(argv[0]) && JS_IsNumber(argv[1])) {
-        double a, b;
-        JS_ToFloat64(ctx, &a, argv[0]);
-        JS_ToFloat64(ctx, &b, argv[1]);
-        equal = (a == b);
-    } else if (JS_IsString(argv[0]) && JS_IsString(argv[1])) {
-        const char *a = JS_ToCString(ctx, argv[0]);
-        const char *b = a ? JS_ToCString(ctx, argv[1]) : NULL;
-        equal = (a && b && strcmp(a, b) == 0);
-        if (a) JS_FreeCString(ctx, a);
-        if (b) JS_FreeCString(ctx, b);
-        /* A conversion that failed (out of memory, the run's budget running
-         * out in the scan) left its exception pending: pass it on, never a
-         * test.eq TypeError over it (audit 44, test.ok's twin). */
-        if (!a || !b) return JS_EXCEPTION;
-    } else if (JS_IsBool(argv[0]) && JS_IsBool(argv[1])) {
-        equal = (JS_ToBool(ctx, argv[0]) == JS_ToBool(ctx, argv[1]));
-    } else if (JS_IsNull(argv[0]) && JS_IsNull(argv[1])) {
-        equal = 1;
-    } else if (JS_IsUndefined(argv[0]) && JS_IsUndefined(argv[1])) {
-        equal = 1;
-    } else {
-        /* Reference equality for objects */
-        equal = (JS_VALUE_GET_PTR(argv[0]) == JS_VALUE_GET_PTR(argv[1]));
-    }
+    /* `===`: values of different types are never equal, strings compare in
+     * full (a C-string strcmp stopped at an embedded NUL, so "a\0b" equalled
+     * "a\0c"), BigInts by value, objects by identity. The hand-written
+     * ladder this replaces compared the raw value payloads of mismatched
+     * types, so test.eq(0, null) and test.eq(1, true) passed. */
+    int equal = JS_StrictEq(ctx, argv[0], argv[1]);
 
     if (!equal) {
         int want_msg = argc >= 3 && JS_IsString(argv[2]);
         const char *msg = want_msg ? JS_ToCString(ctx, argv[2]) : NULL;
-        if (want_msg && !msg) return JS_EXCEPTION;   /* as above (audit 44) */
+        /* A failed conversion left its exception pending: pass it on, never a
+         * test.eq TypeError over it (audit 44, test.ok's twin). */
+        if (want_msg && !msg) return JS_EXCEPTION;
         JSValue a_str = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
         JSValue b_str = JS_IsException(a_str) ? JS_EXCEPTION
             : JS_JSONStringify(ctx, argv[1], JS_UNDEFINED, JS_UNDEFINED);
-        const char *a = JS_IsException(b_str) ? NULL : JS_ToCString(ctx, a_str);
-        const char *b = a ? JS_ToCString(ctx, b_str) : NULL;
+        size_t a_len = 0, b_len = 0;
+        const char *a = JS_IsException(b_str) ? NULL : JS_ToCStringLen(ctx, &a_len, a_str);
+        const char *b = a ? JS_ToCStringLen(ctx, &b_len, b_str) : NULL;
+        /* The message copies both sides: charge it (1 unit per 8 bytes, as
+         * the other copies) before it is built, so a run the JSON of a large
+         * value took over its budget ends with the uncatchable interrupt,
+         * not a test.eq failure app code can catch (audit 44). */
+        if (a && b && hl_js_budget_charge(ctx, 1 + (a_len + b_len) / 8) != 0) {
+            JS_FreeCString(ctx, a);
+            JS_FreeCString(ctx, b);
+            a = b = NULL;
+        }
         if (!a || !b) {
             /* A side that cannot be described (its JSON or the conversion
              * failed): the pending exception goes on (audit 44). */
@@ -462,6 +452,12 @@ static JSValue js_test_eq(JSContext *ctx, JSValueConst this_val,
             JS_FreeValue(ctx, a_str);
             JS_FreeValue(ctx, b_str);
             if (msg) JS_FreeCString(ctx, msg);
+            /* Describing a large value (its JSON) can take the run over its
+             * budget and then fail with a catchable out-of-memory before the
+             * next poll trips it: end the run uncatchably, never with an
+             * error app code can catch past its budget. */
+            if (hl_js_budget_charge(ctx, 0) != 0)
+                return JS_EXCEPTION;
             if (!JS_HasException(ctx)) JS_ThrowOutOfMemory(ctx);
             return JS_EXCEPTION;
         }

@@ -14491,6 +14491,41 @@ UTEST(js_test_audit44, eq_conversion_failure_keeps_exception)
 }
 #endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* test.eq is `===`. It compared strings as C strings (strcmp stopped at an
+ * embedded NUL, so "a\0b" equalled "a\0c") and values of different types by
+ * their raw payloads, so test.eq(0, null) and test.eq(1, true) passed. */
+UTEST(js_test_harness, eq_is_strict_equality)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRouter router;
+    KlAllocator alloc = kl_allocator_default();
+    kl_http_router_init(&router, &alloc);
+    hl_js_test_register(js.ctx, &router, &js);
+    /* 1 when test.eq(a, b) throws (not equal), 0 when it passes. */
+    EXPECT_EQ(eval_int("globalThis.__neq = (a, b) => { try { test.eq(a, b); return 0; } "
+                       "catch (e) { return 1; } }, 1"), 1);
+    EXPECT_EQ(eval_int("__neq('a\\u0000b', 'a\\u0000c')"), 1);
+    EXPECT_EQ(eval_int("__neq(0, null)"), 1);
+    EXPECT_EQ(eval_int("__neq(1, true)"), 1);
+    EXPECT_EQ(eval_int("__neq(0, false)"), 1);
+    EXPECT_EQ(eval_int("__neq(null, undefined)"), 1);
+    EXPECT_EQ(eval_int("__neq('1', 1)"), 1);
+    EXPECT_EQ(eval_int("__neq(1n, 2n)"), 1);
+    EXPECT_EQ(eval_int("__neq({}, {})"), 1);
+    /* Equal values still pass. */
+    EXPECT_EQ(eval_int("__neq('a\\u0000b', 'a\\u0000b')"), 0);
+    EXPECT_EQ(eval_int("__neq(1, 1.0)"), 0);
+    EXPECT_EQ(eval_int("__neq(2n ** 70n, 2n ** 70n)"), 0);
+    EXPECT_EQ(eval_int("__neq(null, null)"), 0);
+    EXPECT_EQ(eval_int("(() => { const o = {}; return __neq(o, o); })()"), 0);
+    EXPECT_EQ(eval_int("globalThis.__neq = undefined, 1"), 1);
+    kl_http_router_free(&router);
+    cleanup_js_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
 /* ── Audit 23 G2: a binding's loop over app strings stops at the budget ─ */
 
 /* JS_ToCStringLen's ASCII path charged its scan but ignored the trip, so a
@@ -15972,6 +16007,32 @@ UTEST(js_gpu, dispatch_reads_back_the_buffer_it_names)
     JGPU_EXPECT("gpu.dispatch('nope', { buffers: [{ data: u('x') }] }); return 'ran';",
                 "throw: gpu.dispatch: shader_not_found");
     EXPECT_EQ(gpu_mock_dispatches, before);
+    jgpu_cleanup();
+}
+
+/* outputTexture alone reads the texture back: the default buffer 0 came
+ * first, so a texture-only shader failed with
+ * output_buffer_index_out_of_range after it ran, and beside a buffer the
+ * texture was never read back. An explicit output still reads the buffer. */
+#define HL_TEST_GPU_TEX_WGSL \
+    "@group(0) @binding(0) var t: texture_storage_2d<rgba8unorm, write>; fn main() {}"
+#define HL_TEST_GPU_MIX_WGSL \
+    "@group(0) @binding(0) var<storage, read_write> a: array<u32>; " \
+    "@group(0) @binding(1) var t: texture_storage_2d<rgba8unorm, write>; fn main() {}"
+UTEST(js_gpu, output_texture_alone_reads_the_texture)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    JGPU_EXPECT("gpu.compile('tex', '" HL_TEST_GPU_TEX_WGSL "');"
+                "gpu.compile('mix', '" HL_TEST_GPU_MIX_WGSL "');"
+                "gpu.texture('o', u('ABCDEFGH'), { width: 2, height: 1, format: 'rgba8', storage: true });"
+                "const t = [{ name: 'o', storage: true }];"
+                "const a = gpu.dispatch('tex', { textures: t, outputTexture: 0 });"
+                "const b = gpu.dispatch('mix', { buffers: [{ data: u('xyzw') }], textures: t,"
+                "  outputTexture: 0 });"
+                "const c = gpu.dispatch('mix', { buffers: [{ data: u('xyzw') }], textures: t,"
+                "  output: 0, outputTexture: 0 });"
+                "return s(a) + ' ' + s(b) + ' ' + s(c);",
+                "ABCDEFGH ABCDEFGH xyzw");
     jgpu_cleanup();
 }
 

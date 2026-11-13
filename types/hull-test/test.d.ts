@@ -74,7 +74,7 @@ declare namespace Hull {
         delete<T = Data>(path: string, opts?: TestRequestOptions): TestResponse<T>;
         /** In-process PATCH through the app's routes. */
         patch<T = Data>(path: string, opts?: TestRequestOptions): TestResponse<T>;
-        /** Assert equality (primitives by value, objects by identity); throws on mismatch. */
+        /** Assert `actual === expected` (objects by identity, never deeply); throws on mismatch. */
         eq(actual: unknown, expected: unknown, message?: string): void;
         /** Assert truthiness; throws otherwise. */
         ok(value: unknown, message?: string): void;

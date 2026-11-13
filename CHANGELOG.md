@@ -32,6 +32,21 @@ release-artifact layout).
   ended the whole test run with a malloc abort. The harness kept the response's
   own pointer for an empty body and freed it; the result now holds only its own
   copies. JS was not affected on its normal path. Present since at least 0.20.
+- **JS `test.eq` is `===`.** It compared strings as C strings, so two strings that
+  differed only after an embedded NUL were equal. Values of different types were
+  compared by their raw payloads, so `test.eq(0, null)`, `test.eq(1, true)` and
+  `test.eq(null, undefined)` passed, and two equal BigInts past the small-integer
+  range failed. A JS test that relied on the loose comparison now fails (Lua
+  `test.eq` was already raw equality).
+- **`gpu.dispatch` with only `outputTexture` / `output_texture` reads that texture
+  back.** The default buffer read-back (buffer 0 in JS, 1 in Lua) came first. A
+  texture-only shader therefore failed with `output_buffer_index_out_of_range`
+  after it ran, as the documented example did, and beside a buffer the texture
+  was never read back. An explicit `output` still reads the buffer.
+  `examples/gpu_texture` (both runtimes) answered 500 on `/process`: it also
+  "created" its output texture with `gpu.texture(name, null)`, which destroys
+  one. It now makes it from zeroed bytes and verifies on Metal. The docs now say
+  a texture read-back returns raw bytes, not an HlImage.
 - **Example apps the new type check found broken** (JS unless noted).
   - `examples/health_etag` and `examples/image_processing` used an `app` global that does
     not exist, so they failed at load.

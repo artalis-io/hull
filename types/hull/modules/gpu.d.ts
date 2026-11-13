@@ -67,9 +67,9 @@ declare module "hull:gpu" {
         buffers?: GpuBufferDesc[];
         /** Textures (at most 8). */
         textures?: GpuTextureDesc[];
-        /** Index of the buffer to read back (default 0); false reads nothing back. */
+        /** Index of the buffer to read back (default 0, unless `outputTexture` is given); false reads nothing back. */
         output?: number | false;
-        /** Index of the texture to read back instead of a buffer. */
+        /** Index of the texture whose raw pixel bytes to read back; given without `output`, it replaces the buffer default. */
         outputTexture?: number;
         /** Bound (ms), clamped to 60 s. */
         timeout?: number;
@@ -167,7 +167,7 @@ declare module "hull:gpu" {
         load(name: string, opts?: GpuDeviceOption): true;
         /** Run a compiled shader with no read-back (`output: false`, no `outputTexture`) -> true. */
         dispatch(name: string, opts: GpuDispatchOptions & { output: false; outputTexture?: undefined }): true;
-        /** Run a compiled shader; returns the read-back of buffer `output` (default 0). */
+        /** Run a compiled shader; returns the read-back of buffer `output` (default 0), or of texture `outputTexture`. */
         dispatch(name: string, opts: GpuDispatchOptions & { output?: number }): ArrayBuffer;
         /** Run a compiled shader; returns the read-back, or true when nothing is read back (`output: false`, no `outputTexture`). */
         dispatch(name: string, opts: GpuDispatchOptions): ArrayBuffer | true;

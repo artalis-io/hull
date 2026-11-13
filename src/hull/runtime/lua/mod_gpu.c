@@ -651,8 +651,10 @@ static int l_gpu_dispatch(lua_State *L)
     /* Parse output buffer index (1-indexed in Lua).
      * output = N   -> read back buffer N (1-indexed)
      * output = false -> fire-and-forget (skip readback)
-     * output absent -> default to buffer 1 (backward compat) */
+     * output absent -> buffer 1 (backward compat), unless output_texture
+     *                  asks for a texture read-back (below) */
     lua_getfield(L, 2, "output");
+    int out_given = !lua_isnil(L, -1);
     if (lua_isboolean(L, -1) && !lua_toboolean(L, -1)) {
         opts.output_buffer = HL_GPU_OUTPUT_NONE;
     } else {
@@ -752,6 +754,12 @@ static int l_gpu_dispatch(lua_State *L)
     if (!lua_isnil(L, -1))
         opts.output_texture = (int)lua_tointeger(L, -1) - 1;
     lua_pop(L, 1);
+    /* output_texture alone reads that texture back. The default buffer 1
+     * took precedence: a texture-only shader (no buffers) failed with
+     * output_buffer_index_out_of_range after it ran, and with buffers the
+     * texture was never read back. */
+    if (!out_given && opts.output_texture >= 0)
+        opts.output_buffer = HL_GPU_OUTPUT_NONE;
 
     void *output = NULL;
     size_t output_len = 0;
