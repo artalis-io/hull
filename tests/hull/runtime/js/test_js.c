@@ -14494,6 +14494,35 @@ UTEST(js_test_audit44, eq_conversion_failure_keeps_exception)
 #endif /* HL_ENABLE_HTTP_SERVER */
 
 #ifdef HL_ENABLE_HTTP_SERVER
+/* Audit 46: test.eq's failure message was the JSON of each side, and JSON
+ * cannot serialise a BigInt, so test.eq(1n, 2n) threw "Do not know how to
+ * serialize a BigInt" instead of reporting the failure. */
+UTEST(js_audit46, test_eq_bigint_message)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRouter router;
+    KlAllocator alloc = kl_allocator_default();
+    kl_http_router_init(&router, &alloc);
+    hl_js_test_register(js.ctx, &router, &js);
+    /* 1 when the failure message is test.eq's and names both values. */
+    EXPECT_EQ(eval_int("(() => { try { test.eq(1n, 2n); return 0; } catch (e) { "
+                       "return (e.message.indexOf('test.eq failed') === 0 && "
+                       "e.message.indexOf('2n') > 0 && e.message.indexOf('1n') > 0) "
+                       "? 1 : 2; } })()"), 1);
+    EXPECT_EQ(eval_int("(() => { try { test.eq({ a: 1n }, { a: 1n }, 'm'); return 0; } "
+                       "catch (e) { return (e.message.indexOf('test.eq failed: m') === 0 && "
+                       "e.message.indexOf('1n') > 0) ? 1 : 2; } })()"), 1);
+    EXPECT_EQ(eval_int("(() => { try { test.eq(1n, 1); return 0; } catch (e) { "
+                       "return e.message.indexOf('test.eq failed') === 0 ? 1 : 2; } })()"), 1);
+    /* Equal BigInts still pass. */
+    EXPECT_EQ(eval_int("(() => { test.eq(2n ** 70n, 2n ** 70n); return 1; })()"), 1);
+    kl_http_router_free(&router);
+    cleanup_js_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
+#ifdef HL_ENABLE_HTTP_SERVER
 /* test.eq is `===`. It compared strings as C strings (strcmp stopped at an
  * embedded NUL, so "a\0b" equalled "a\0c") and values of different types by
  * their raw payloads, so test.eq(0, null) and test.eq(1, true) passed. */

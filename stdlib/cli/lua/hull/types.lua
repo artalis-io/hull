@@ -82,6 +82,36 @@ local function parent(path)
     return path:match("^(.*)/[^/]*$")
 end
 
+-- A name hull types could have written: "hull/..." or "hull-test/...", plain
+-- components (no empty, ".", ".." or dot-leading one, no backslash), ending
+-- in .d.ts or .md - the shape of every declaration file any version embeds.
+-- The record is a file in the app tree, so its names are repo content: a
+-- planted "../../x" entry made the stale-file removal delete outside types/
+-- (audit 46).
+local function shipped_name(name)
+    if type(name) ~= "string" or #name > 512 then return false end
+    if not (name:match("^hull/") or name:match("^hull%-test/")) then return false end
+    if not (name:match("%.d%.ts$") or name:match("%.md$")) then return false end
+    if name:find("//", 1, true) or name:sub(-1) == "/" then return false end
+    for seg in name:gmatch("[^/]+") do
+        if not seg:match("^[%w_%-][%w_.%-]*$") then return false end
+    end
+    return true
+end
+
+-- The first path from base down to base/rel (each component, the leaf
+-- included) that is a symbolic link, or nil. A linked directory below types/
+-- (types/hull/modules -> elsewhere) sent writes and removals outside it
+-- (audit 46).
+local function link_below(base, rel)
+    local acc = base
+    for seg in rel:gmatch("[^/]+") do
+        acc = join(acc, seg)
+        if tool.is_symlink(acc) then return acc end
+    end
+    return nil
+end
+
 -- The record: "version <v>" then "<sha256> <relative path>" per file.
 local function read_record(out)
     local path = join(out, RECORD)
@@ -148,14 +178,17 @@ local function main()
     local files, version = tool.types_files()
     if #files == 0 then fail("this hull binary embeds no TypeScript declarations") end
 
+    local record_link = link_below(out, RECORD)
+    if record_link then fail("'" .. record_link .. "' is a symbolic link") end
     local rec = read_record(out) or { files = {} }
     local embedded = {}
     local stale, conflicts, writes = {}, {}, {}
     for _, f in ipairs(files) do
         embedded[f.name] = true
         local path = join(out, f.name)
-        if tool.is_symlink(path) then
-            conflicts[#conflicts + 1] = f.name .. " (a symbolic link)"
+        local link = link_below(out, f.name)
+        if link then
+            conflicts[#conflicts + 1] = f.name .. " (" .. link .. " is a symbolic link)"
         elseif not tool.file_exists(path) then
             writes[#writes + 1] = f
         elseif tool.read_file(path) ~= f.body then
@@ -168,19 +201,28 @@ local function main()
         end
     end
     -- Files an earlier hull wrote that this one no longer ships.
+    -- Only names hull types could have written are acted on; any other
+    -- entry is ignored (and reported by --check).
+    local ignored = {}
     for name, hash in pairs(rec.files) do
-        if not embedded[name] then
+        if not shipped_name(name) then
+            ignored[#ignored + 1] = name
+        elseif not embedded[name] then
             local path = join(out, name)
-            if tool.file_exists(path) and tool.sha256_file(path) == hash then
+            local link = link_below(out, name)
+            if link then
+                conflicts[#conflicts + 1] = name .. " (" .. link .. " is a symbolic link)"
+            elseif tool.file_exists(path) and tool.sha256_file(path) == hash then
                 stale[#stale + 1] = name
             end
         end
     end
     table.sort(stale)
     table.sort(conflicts)
+    table.sort(ignored)
 
     if opts.check then
-        local bad = #writes + #stale + #conflicts
+        local bad = #writes + #stale + #conflicts + #ignored
         if rec.version ~= version then bad = bad + 1 end
         if bad == 0 then
             print("hull types: " .. out .. " matches hull " .. version)
@@ -191,6 +233,9 @@ local function main()
         for _, f in ipairs(writes) do tool.stderr("  differs   " .. tool.escape(f.name) .. "\n") end
         for _, n in ipairs(conflicts) do tool.stderr("  edited    " .. tool.escape(n) .. "\n") end
         for _, n in ipairs(stale) do tool.stderr("  stale     " .. tool.escape(n) .. "\n") end
+        for _, n in ipairs(ignored) do
+            tool.stderr("  ignored   " .. tool.escape(n) .. " (a record entry hull types never writes)\n")
+        end
         tool.stderr("Run `hull types` to update them.\n")
         tool.exit(1)
     end
@@ -218,12 +263,23 @@ local function main()
         if not h then fail("cannot read back " .. join(out, f.name)) end
         hashes[f.name] = h
     end
-    for _, n in ipairs(stale) do tool.remove_file(join(out, n)) end
+    local removed, unremoved = 0, {}
+    for _, n in ipairs(stale) do
+        if tool.remove_file(join(out, n)) then removed = removed + 1
+        else unremoved[#unremoved + 1] = n end
+    end
     if not write_record(out, version, hashes) then fail("cannot write " .. join(out, RECORD)) end
 
     print("hull types: " .. out .. " (hull " .. version .. ")")
     print(string.format("  %d written, %d unchanged, %d removed",
-        #writes, #files - #writes, #stale))
+        #writes, #files - #writes, removed))
+    for _, n in ipairs(unremoved) do
+        tool.stderr("hull types: could not remove " .. tool.escape(join(out, n)) .. "\n")
+    end
+    for _, n in ipairs(ignored) do
+        tool.stderr("hull types: ignored record entry " .. tool.escape(n) ..
+                    " (a name hull types never writes)\n")
+    end
 
     -- tsconfig.json only where none exists, and only for the default layout
     -- (its include paths assume <app_dir>/types).
@@ -232,22 +288,27 @@ local function main()
         return
     end
     local tsconfig = join(opts.dir, "tsconfig.json")
-    if tool.file_exists(tsconfig) then
+    if tool.is_symlink(tsconfig) then
+        print("  tsconfig.json is a symbolic link (not written)")
+    elseif tool.file_exists(tsconfig) then
         print("  tsconfig.json exists (unchanged); it needs \"types/hull/**/*.d.ts\" in include")
     elseif tool.write_file(tsconfig, TSCONFIG) then
         print("  created tsconfig.json")
     end
     local tests = join(opts.dir, "tests")
-    if tool.path_kind(tests) == "dir" then
+    if tool.is_symlink(tests) then
+        print("  tests/ is a symbolic link: tests/tsconfig.json not written")
+    elseif tool.path_kind(tests) == "dir" then
         local tt = join(tests, "tsconfig.json")
-        if not tool.file_exists(tt) and tool.write_file(tt, TSCONFIG_TESTS) then
+        if not tool.is_symlink(tt) and not tool.file_exists(tt)
+           and tool.write_file(tt, TSCONFIG_TESTS) then
             print("  created tests/tsconfig.json")
         end
     end
     print("")
     print("Type-check with an installed TypeScript:  tsc --noEmit -p " ..
           (opts.dir == "." and "." or opts.dir) ..
-          (tool.path_kind(tests) == "dir" and ("  (tests: -p " .. join(opts.dir, "tests") .. ")") or ""))
+          ((tool.path_kind(tests) == "dir" and not tool.is_symlink(tests)) and ("  (tests: -p " .. join(opts.dir, "tests") .. ")") or ""))
 end
 
 return main
