@@ -22,7 +22,6 @@ HULL=./build/hull
 . "$(dirname "$0")/lib/hull_rc.sh"
 hull_rc_init "$HULL"
 RC_TMP="${TMPDIR:-/tmp}/hull_agent_rc.$$"
-trap 'rm -f "$RC_TMP"' EXIT
 PASS=0
 FAIL=0
 RUNTIME=${RUNTIME:-all}
@@ -66,15 +65,57 @@ check_exit() {
     fi
 }
 
-wait_for_server() {
-    # $1 = port
-    for _i in 1 2 3 4 5 6 7 8 9 10; do
-        if curl -s "http://127.0.0.1:$1/health" >/dev/null 2>&1; then
+# Ports the servers below listen on. Below 32768 on purpose: Linux hands out
+# client source ports from 32768-60999 (ip_local_port_range), so a fixed
+# listening port in that range can be held by any client socket on the host -
+# the CI runner's own long-lived connections included - and the server then
+# fails to bind for as long as that socket lives (under `hull dev` the
+# supervisor restarts it, failing again each time). macOS and Windows hand
+# them out from 49152, which is why the former 398xx ports never failed there.
+# The pid offset keeps two concurrent runs apart.
+PORT_BASE=$((21000 + ($$ % 500) * 20))
+
+# How long a server may take to come up. Generous, since a loaded CI runner is
+# slow; the wait ends as soon as the port answers or the process exits.
+START_TIMEOUT=${HULL_E2E_START_TIMEOUT:-120}
+
+LOG_DIR=$(mktemp -d)
+trap 'rm -f "$RC_TMP"; rm -rf "$LOG_DIR"' EXIT
+
+# dump_log LOG: print a server's output after a failed start, so the failure
+# says why (a bind error, a crash, a load error).
+dump_log() {
+    echo "  --- $1 ---"
+    if [ -s "$1" ]; then tail -n 60 "$1" | sed 's/^/  | /'; else echo "  | (empty)"; fi
+}
+
+# wait_until_up PID PORT LOG [FILE...]: wait until every FILE exists and
+# http://127.0.0.1:PORT/health answers. Fails at once when PID exits and after
+# START_TIMEOUT seconds otherwise, printing LOG either way.
+wait_until_up() {
+    _wpid=$1; _wport=$2; _wlog=$3
+    shift 3
+    _wend=$(( $(date +%s) + START_TIMEOUT ))
+    while :; do
+        _wfiles=1
+        for _wf in "$@"; do
+            [ -f "$_wf" ] || _wfiles=""
+        done
+        if [ -n "$_wfiles" ] &&
+           curl -s -m 5 -o /dev/null "http://127.0.0.1:$_wport/health" 2>/dev/null; then
             return 0
         fi
-        sleep 0.5
+        if ! kill -0 "$_wpid" 2>/dev/null; then
+            echo "  process $_wpid exited before port $_wport answered"
+            break
+        fi
+        if [ "$(date +%s)" -ge "$_wend" ]; then
+            echo "  port $_wport did not answer within ${START_TIMEOUT}s"
+            break
+        fi
+        sleep 0.25
     done
-    echo "  server did not start on port $1"
+    dump_log "$_wlog"
     return 1
 }
 
@@ -275,13 +316,13 @@ if [ "${HULL_RC_SHIFT:-0}" = 1 ]; then AGENT_REQ_ENV="MSYS2_ARG_CONV_EXCL=*"; fi
 
 echo "--- agent request ---"
 
-PORT_REQ=39890
+PORT_REQ=$((PORT_BASE + 0))
 TMPDIR_REQ=$(mktemp -d)
 
-$HULL -p "$PORT_REQ" -d "$TMPDIR_REQ/data.db" "$HELLO_APP" >/dev/null 2>&1 &
+$HULL -p "$PORT_REQ" -d "$TMPDIR_REQ/data.db" "$HELLO_APP" >"$LOG_DIR/request.log" 2>&1 &
 SERVER_PID=$!
 
-if ! wait_for_server "$PORT_REQ"; then
+if ! wait_until_up "$SERVER_PID" "$PORT_REQ" "$LOG_DIR/request.log"; then
     fail "request - server startup"
     stop_server
     rm -rf "$TMPDIR_REQ"
@@ -328,13 +369,13 @@ check_contains "status not running"        "$OUT" '"running":false'
 check_contains "status port shown"         "$OUT" '"port":39899'
 
 # Server running
-PORT_STATUS=39891
+PORT_STATUS=$((PORT_BASE + 1))
 TMPDIR_STATUS=$(mktemp -d)
 
-$HULL -p "$PORT_STATUS" -d "$TMPDIR_STATUS/data.db" "$HELLO_APP" >/dev/null 2>&1 &
+$HULL -p "$PORT_STATUS" -d "$TMPDIR_STATUS/data.db" "$HELLO_APP" >"$LOG_DIR/status.log" 2>&1 &
 SERVER_PID=$!
 
-if ! wait_for_server "$PORT_STATUS"; then
+if ! wait_until_up "$SERVER_PID" "$PORT_STATUS" "$LOG_DIR/status.log"; then
     fail "status - server startup"
 else
     OUT=$($HULL agent status -p "$PORT_STATUS")
@@ -392,10 +433,11 @@ if [ "$APP_EXT" = "js" ]; then
 else
     printf 'this is not ( valid lua\n' > "$DEVERR/app.lua"
 fi
-$HULL dev --agent -p 39896 "$DEVERR/app.$APP_EXT" >/dev/null 2>&1 &
+$HULL dev --agent -p "$((PORT_BASE + 2))" "$DEVERR/app.$APP_EXT" >"$LOG_DIR/deverr.log" 2>&1 &
 DEV_PID=$!
 GOT=""
-for _ in $(seq 1 60); do
+DEV_END=$(( $(date +%s) + START_TIMEOUT ))
+while [ "$(date +%s)" -lt "$DEV_END" ] && kill -0 "$DEV_PID" 2>/dev/null; do
     if [ -f "$DEVERR/.hull/last_error.json" ] && [ -f "$DEVERR/.hull/dev.json" ]; then
         OUT=$($HULL agent errors "$DEVERR")
         case "$OUT" in *'failed to load'*) GOT=1; break ;; esac
@@ -409,6 +451,7 @@ if [ -n "$GOT" ]; then
     check_not_contains "errors: session MAC not echoed"      "$OUT" '"mac"'
 else
     fail "errors: a live dev --agent load failure is reported (got: $OUT)"
+    dump_log "$LOG_DIR/deverr.log"
 fi
 kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true
 # The session is over: its record no longer verifies.
@@ -421,7 +464,7 @@ check_not_contains "errors: ended session's record not served" "$OUT" 'failed to
 # carry no MAC under the $HOME key, so they are ignored. Both runtimes.
 echo ""
 echo "--- audit 37: dev sidecars are out of the app's reach ---"
-FPORT=39880
+FPORT=$((PORT_BASE + 3))
 for FEXT in lua js; do
     FA="$TMPDIR_ERR/forger_$FEXT"
     mkdir -p "$FA"
@@ -471,16 +514,13 @@ end)
 LUAEOF
     fi
     ln -s .hull "$FA/alias"
-    $HULL dev --agent -p "$FPORT" "$FA/app.$FEXT" >/dev/null 2>&1 &
+    $HULL dev --agent -p "$FPORT" "$FA/app.$FEXT" >"$LOG_DIR/forger_$FEXT.log" 2>&1 &
     F_PID=$!
-    UP=""
-    for _ in $(seq 1 60); do
-        if [ -f "$FA/.hull/dev.json" ] && curl -s "http://127.0.0.1:$FPORT/health" >/dev/null 2>&1; then
-            UP=1; break
-        fi
-        sleep 0.5
-    done
-    if [ -z "$UP" ]; then
+    # Ready means the supervisor is done too: it publishes discovery.json
+    # after spawning the app (tmp + rename), so planting a forged one below
+    # before that publish lands lets the real one replace it.
+    if ! wait_until_up "$F_PID" "$FPORT" "$LOG_DIR/forger_$FEXT.log" \
+            "$FA/.hull/dev.json" "$FA/.hull/discovery.json"; then
         fail "audit 37 ($FEXT): dev --agent forger app did not start"
     else
         PROBE=$(curl -s "http://127.0.0.1:$FPORT/probe")
