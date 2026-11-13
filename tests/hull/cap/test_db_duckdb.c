@@ -17,6 +17,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_duckdb.h"
 #include "hull/cap/db_budget.h"
+#include "hull/shared/dispatch_meter.h"   /* HL_METER_SLOWDOWN */
 #include "hull/cap/types.h"
 
 #pragma GCC diagnostic push
@@ -1784,7 +1785,10 @@ UTEST(duckdb_task_bound, single_task_statements_charge_their_cpu)
 {
     HlDbHandle h = {0};
     ASSERT_EQ(duck_open_mem(&h), 0);
-    TbCount c = { 0, 30000000 };
+    /* CPU time is divided by HL_METER_SLOWDOWN in a sanitizer build (the
+     * uninstrumented DuckDB runs at release speed there): so is the limit. */
+    const int64_t limit = 30000000 / (int64_t)HL_METER_SLOWDOWN;
+    TbCount c = { 0, limit };
     HlDbBudgetBinding prev = hl_db_budget_swap(tb_counting, &c);
     int ran = 0, failed = 0;
     for (; ran < 15 && !failed; ran++)
@@ -1795,7 +1799,7 @@ UTEST(duckdb_task_bound, single_task_statements_charge_their_cpu)
     hl_db_budget_restore(prev);
     EXPECT_TRUE(failed);
     EXPECT_LT(ran, 15);
-    EXPECT_GT(c.used, (int64_t)30000000);
+    EXPECT_GT(c.used, limit);
     ASSERT_EQ(0, tb_drain());
     h.backend->close(&h);
 }
