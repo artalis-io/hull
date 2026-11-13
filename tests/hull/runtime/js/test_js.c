@@ -11502,6 +11502,14 @@ UTEST(js_audit9, response_bodies_are_charged)
 #include "hull/cap/http.h"   /* HlHttpConfig */
 #include "hull/cap/fs.h"     /* HlFsConfig */
 
+/* The limit a "this still fits" check runs under. Not the small limit the
+ * matching over-limit check uses: besides a call's explicit charge, the
+ * binding dispatcher charges its measured time (64 units / us), and a
+ * preempted CI runner spent a 200k (~3 ms) or 1M (~15 ms) limit on a few
+ * cheap calls (#1086, #1085). 10M is still a tenth of the default budget, so
+ * a charge far too large for a cheap call still trips it. */
+#define A10_FITS_LIMIT 10000000
+
 /* Run @p code as a module under a budget of @p limit; 1 if the run went
  * over it. */
 static int a10_run_tripped(const char *code, int64_t limit)
@@ -11534,7 +11542,7 @@ UTEST(js_audit10, fs_write_is_charged)
         200000), 1);
     EXPECT_EQ(a10_run_tripped(
         "try { fs.write('a.bin', 'x'); } catch (e) {} globalThis.__a10_small = 1;",
-        200000), 0);
+        A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a10_small|0"), 1);
     js.base.fs_cfg = NULL;
     cleanup_js_caps();
@@ -11987,7 +11995,7 @@ UTEST(js_audit14, sse_and_ws_writes_are_charged)
         "globalThis.ws = wsServer; globalThis.MB = 'm'.repeat(1024 * 1024);\n", 0), 0);
     EXPECT_EQ(a10_run_tripped("ws.broadcast('/ws', MB);", 1000000), 1);
     EXPECT_EQ(a10_run_tripped("globalThis.__a14_sent = ws.broadcast('/ws', 'hi');",
-                              1000000), 0);
+                              A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a14_sent"), 0);
 
     /* conn.send: the charge trips before Keel is reached, so a connection
@@ -15485,7 +15493,7 @@ UTEST(js_audit27, http_bodies_are_charged)
         EXPECT_EQ_MSG(a10_run_tripped(big[i], 500000), 1, big[i]);
     EXPECT_EQ(a10_run_tripped(
         "try { http.post('http://x.invalid/', new ArrayBuffer(64)); }"
-        " catch (e) {}", 500000), 0);
+        " catch (e) {}", A10_FITS_LIMIT), 0);
     size_t saved = js.max_heap_bytes;
     js.max_heap_bytes = 4 << 20;
     char *r = a15_throws("http.post('http://x.invalid/', HB)");
@@ -16495,7 +16503,7 @@ UTEST(js_audit37, small_fs_calls_have_a_floor)
     EXPECT_EQ(a10_run_tripped(
         "for (let i = 0; i < 10; i++) fs.write('e.txt', '');"
         "if (fs.stat('e.txt').size !== 0) throw new Error('size');"
-        "globalThis.__a37_ok = 1;", 1000000), 0);
+        "globalThis.__a37_ok = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a37_ok|0"), 1);
     cleanup_js_caps();
     a15_fs_close(&f);
@@ -16525,7 +16533,7 @@ UTEST(js_audit37, small_blob_calls_have_a_floor)
         "blob.init({ dir: 'blobs' }); const id = blob.put('').id;"
         "if (!blob.exists(id) || blob.size(id) !== 0 || !blob.delete(id))"
         "  throw new Error('blob');"
-        "globalThis.__a37_blob = 1;", 1000000), 0);
+        "globalThis.__a37_blob = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a37_blob|0"), 1);
     cleanup_js_caps();
     a15_fs_close(&f);
@@ -16817,7 +16825,7 @@ UTEST(js_audit38, path_resolution_is_charged)
         "fs.mmap('d/" A38_DEEP "/one').close();"
         "if (fs.list('d/" A38_DEEP "').length !== 2) throw new Error('list');"
         "if (fs.read('s40/empty').byteLength !== 0) throw new Error('sym');"
-        "globalThis.__a38_ok = 1;", 1000000), 0);
+        "globalThis.__a38_ok = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a38_ok|0"), 1);
     cleanup_js_caps();
     a15_fs_close(&f);
@@ -16861,7 +16869,7 @@ UTEST(js_audit38, tar_entries_are_charged)
         "tar.extract(t, 'y');"
         "if (fs.read('y/sub/b.txt').byteLength !== 1) throw new Error('extract');"
         "if (tar.pack(['y/a.txt', 'y/sub/b.txt']).byteLength === 0) throw new Error('pack');"
-        "globalThis.__a38_tar = 1;", 1000000), 0);
+        "globalThis.__a38_tar = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a38_tar|0"), 1);
     cleanup_js_caps();
     a15_fs_close(&f);
@@ -17052,7 +17060,7 @@ UTEST(js_audit39, blob_walks_are_charged)
         "if (blob.iter().length !== 300) throw new Error('iter');"
         "if (!(blob.totalSize() > 0)) throw new Error('size');"
         "if (blob.cleanup({ maxAge: 1e9 }).removed !== 0) throw new Error('cleanup');"
-        "globalThis.__a39_walk = 1;", 5000000), 0);
+        "globalThis.__a39_walk = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a39_walk|0"), 1);
     cleanup_js_caps();
     a15_fs_close(&f);
@@ -17083,7 +17091,7 @@ UTEST(js_audit39, blob_init_is_charged)
     EXPECT_EQ(a10_run_tripped(
         "for (let i = 0; i < 10; i++) blob.init({ dir: 'data/blobs' });"
         "if (blob.count() !== 0) throw new Error('count');"
-        "globalThis.__a39_init = 1;", 1000000), 0);
+        "globalThis.__a39_init = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a39_init|0"), 1);
     cleanup_js_caps();
     a15_fs_close(&f);
@@ -17106,7 +17114,7 @@ UTEST(js_audit39, blob_reader_reads_are_charged)
         "const r = blob.reader(blob.put('hello').id); let n = 0;"
         "for (;;) { const c = r.read(2); if (c === null) break; n += c.byteLength; }"
         "r.close(); if (n !== 5) throw new Error('read');"
-        "globalThis.__a39_read = 1;", 1000000), 0);
+        "globalThis.__a39_read = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a39_read|0"), 1);
     cleanup_js_caps();
     a15_fs_close(&f);
@@ -17150,7 +17158,7 @@ UTEST(js_audit39, db_open_is_charged)
         "  c.exec('INSERT INTO t VALUES (?)', [i]); c.close(); }"
         "const c = dbm.open('x.db'); const r = c.query('SELECT count(*) AS n FROM t');"
         "c.close(); if (r[0].n !== 5) throw new Error('count');"
-        "globalThis.__a39_db = 1;", 2000000), 0);
+        "globalThis.__a39_db = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a39_db|0"), 1);
     hl_db_registry_set_manifest(test_db_registry, NULL);
     cleanup_js_caps();
@@ -17183,7 +17191,7 @@ UTEST(js_audit39, render_string_is_charged_and_not_persisted)
         4000000), 1);
     EXPECT_EQ(a10_run_tripped(
         "for (let i = 0; i < 50; i++) tpl.renderString('<p>{{ x }}</p>', { x: i });"
-        "globalThis.__a39_small = 1;", 1000000), 0);
+        "globalThis.__a39_small = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a39_small|0"), 1);
     cleanup_js_caps();
     if (saved_home[0]) setenv("HOME", saved_home, 1);
@@ -17212,7 +17220,7 @@ UTEST(js_audit39, x509_parse_is_charged)
         "const der = new Uint8Array(2048).fill(48).buffer;\n"
         "for (let i = 0; i < 100; i++)\n"
         "  if (crypto.x509PubkeyPem(der) !== null) throw new Error('parsed');\n"
-        "globalThis.__a39_x = 1;", 1000000), 0);
+        "globalThis.__a39_x = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a39_x|0"), 1);
     cleanup_js_caps();
 }
@@ -17249,7 +17257,7 @@ UTEST(js_audit39, sync_http_requests_are_charged)
         "import { httpClient as http } from 'hull:http-client';\n"
         "let n = 0;\n"
         "for (let i = 0; i < 20; i++) { try { http.get('http://127.0.0.1:1/x'); } catch (e) { n++; } }\n"
-        "globalThis.__a39_h = n;", 1000000), 0);
+        "globalThis.__a39_h = n;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a39_h|0"), 20);
     js.base.http_cfg = NULL;
     cleanup_js_caps();
@@ -17279,12 +17287,12 @@ UTEST(js_audit39, a_collect_and_retry_is_charged)
     EXPECT_EQ(a10_run_tripped(
         "try { fs.mmap('d/" A38_DEEP "/one'); globalThis.__a39_g = 2; }\n"
         "catch (e) { globalThis.__a39_g = /too_many_mappings/.test(e.message) ? 1 : 3; }",
-        5000000), 0);
+        A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a39_g|0"), 1);
     /* Dropped mappings are still collected and their slots reused. */
     EXPECT_EQ(a10_run_tripped(
         "globalThis.BIG = null; HELD.length = 0;\n"
-        "fs.mmap('d/" A38_DEEP "/one').close(); globalThis.__a39_r = 1;", 5000000), 0);
+        "fs.mmap('d/" A38_DEEP "/one').close(); globalThis.__a39_r = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a39_r|0"), 1);
     cleanup_js_caps();
     a15_fs_close(&f);
@@ -17545,7 +17553,7 @@ UTEST(js_audit40, mime_sniff_is_charged)
         "eq(mime.sniff('<?xml?><!DOCTYPE html><HTML>'), 'text/html');\n"
         "eq(mime.sniff('<?xml' + '<'.repeat(8000)), 'application/xml');\n"
         "eq(mime.sniff('<?xml<<svg'), 'image/svg+xml');\n"
-        "globalThis.__a40_m = 1;", 100000), 0);
+        "globalThis.__a40_m = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a40_m|0"), 1);
     cleanup_js_caps();
 }
@@ -17572,7 +17580,7 @@ UTEST(js_audit40, ws_and_sse_frames_are_charged)
         "for (let i = 0; i < 10000; i++) { try { S.event('e', ''); } catch (e) {} }",
         1000000), 1);
     EXPECT_EQ(a10_run_tripped("for (let i = 0; i < 100; i++) S.comment('hi');",
-                              1000000), 0);
+                              A10_FITS_LIMIT), 0);
 
     HlAllocator wa;
     hl_alloc_init(&wa, 0);
@@ -17642,7 +17650,7 @@ UTEST(js_audit40, small_calls_have_a_floor)
         "for (let i = 0; i < 100000; i++) time.datetime();", 1000000), 1);
     EXPECT_EQ(a10_run_tripped(
         "import { time } from 'hull:time';\n"
-        "for (let i = 0; i < 1000; i++) { time.date(); time.datetime(); }", 1000000), 0);
+        "for (let i = 0; i < 1000; i++) { time.date(); time.datetime(); }", A10_FITS_LIMIT), 0);
     cleanup_js_caps();
 }
 
@@ -18040,7 +18048,7 @@ UTEST(js_audit41, log_and_console_have_a_floor)
     EXPECT_EQ(a10_run_tripped(
         "import { log } from 'hull:log';\n"
         "for (let i = 0; i < 100; i++) { log.info('a', 'b'); console.log('c', 1); }",
-        1000000), 0);
+        A10_FITS_LIMIT), 0);
     log_set_quiet(false);
     cleanup_js_caps();
 }
@@ -18064,7 +18072,7 @@ UTEST(js_audit41, small_crypto_calls_have_a_floor)
     EXPECT_EQ(a10_run_tripped(
         "for (let i = 0; i < 1000; i++) { crypto.sha256('x'); crypto.randomToken(16);"
         "  crypto.hmacSha256('m', 'k');"
-        "  const h = crypto.createSha256(); h.update('x'); h.digest(); }", 2000000), 0);
+        "  const h = crypto.createSha256(); h.update('x'); h.digest(); }", A10_FITS_LIMIT), 0);
     cleanup_js_caps();
 }
 
@@ -18095,7 +18103,7 @@ UTEST(js_audit41, ctx_output_is_charged_and_stdin_is_mains)
         "for (let i = 0; i < 100000; i++) SAVED.stderr.flush();", 1000000), 1);
     EXPECT_EQ(a10_run_tripped(
         "for (let i = 0; i < 100; i++) { SAVED.stderr.write(''); SAVED.stderr.flush(); }",
-        1000000), 0);
+        A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("(() => { try { SAVED.stdin.read(); return 0; } catch (e) {"
                        "  return /only available in app.main/.test(e.message) ? 1 : 2; } })()"),
               1);
@@ -18208,7 +18216,7 @@ UTEST(js_audit41, sync_smtp_send_has_a_floor)
     snprintf(code, sizeof code, "%sfor (let i = 0; i < 1000; i++) smtp.send(o);", pre);
     EXPECT_EQ(a10_run_tripped(code, 1000000), 1);
     snprintf(code, sizeof code, "%sfor (let i = 0; i < 10; i++) smtp.send(o);", pre);
-    EXPECT_EQ(a10_run_tripped(code, 1000000), 0);
+    EXPECT_EQ(a10_run_tripped(code, A10_FITS_LIMIT), 0);
     log_set_quiet(false);
     js.base.smtp_cfg = NULL;
     cleanup_js_caps();
@@ -18238,7 +18246,7 @@ UTEST(js_audit41, kv_open_and_commands_have_a_floor)
         1000000), 1);
     EXPECT_EQ(a10_run_tripped(
         "for (let i = 0; i < 10; i++) try { KVN('redis://127.0.0.1:1'); } catch (e) {}",
-        1000000), 0);
+        A10_FITS_LIMIT), 0);
 #ifdef HL_ENABLE_VALKEY
     HlFakeResp srv;
     ASSERT_EQ(fake_resp_start(&srv), 0);
@@ -18259,7 +18267,7 @@ UTEST(js_audit41, kv_open_and_commands_have_a_floor)
         "for (let i = 0; i < 10; i++) {"
         "  if (new Uint8Array(K.get('a'))[0] !== 120) throw new Error('get');"
         "  K.set('a', 'x'); }\n"
-        "K.close();", 1000000), 0);
+        "K.close();", A10_FITS_LIMIT), 0);
     snprintf(code, sizeof code,
              "for (let i = 0; i < 100; i++) KVN('redis://127.0.0.1:%d').close();", srv.port);
     EXPECT_EQ(a10_run_tripped(code, 1000000), 1);
