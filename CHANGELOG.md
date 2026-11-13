@@ -43,9 +43,16 @@ release-artifact layout).
     under the default 10 s `request_ms`, 35.4 s before), and SIGTERM exits at once.
   - Inside a transaction, an abandoned statement takes the transaction with it:
     every call but the app's `ROLLBACK` is refused until then.
+  - An abandoned statement still running 60 s later ends the process (one FATAL
+    line, exit status 75), as `--vm-thread`'s ceiling does, so a supervisor
+    restarts it: nothing in-process can stop the statement, and it holds a CPU.
   - At most 4 abandoned statements run in the process; past that no DuckDB
-    statement starts under a run until one ends. An abandoned statement still uses
-    one CPU until it finishes.
+    statement starts under a run until one ends.
+  - The statement thread's CPU time is charged to the run, so a loop of long
+    single-task statements trips the instruction budget (the 2 MB `instr` above
+    now ends at 2.1 s on the default budget).
+  - An abandoned statement keeps its reference on the file's shared instance, so
+    reopening the file while it runs does not make a second instance.
   - Statements run outside a run (migrations) still run inline. A statement under a
     run costs about 30-60 us more.
 

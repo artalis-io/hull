@@ -28,6 +28,7 @@
 #include "hull/cap/db_sql_kw.h"
 #include "hull/cap/types.h"
 #include "hull/utils/alloc.h"
+#include "hull/shared/dispatch_meter.h"   /* hl_meter_ns_units */
 #include "log.h"
 
 /* duckdb.h (vendored) has a few prototype-less C-API declarations that trip
@@ -47,6 +48,13 @@
 #include <limits.h>     /* PATH_MAX */
 #include <dirent.h>     /* opendir: hl_db_duckdb_split_root */
 #include <sys/stat.h>   /* lstat */
+#include <errno.h>
+#include <poll.h>       /* duck_raw_log */
+#include <signal.h>     /* duck_block_signals */
+#include <unistd.h>     /* _exit, write */
+#if defined(__APPLE__)
+#include <mach/mach.h>  /* thread_info: the statement thread's CPU time */
+#endif
 
 /* VARCHAR/BLOB inline threshold: a duckdb_string_t of length <= 12 stores its
  * bytes inline; longer strings live behind value.pointer.ptr. See duckdb.h. */
@@ -775,6 +783,30 @@ static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
     return 0;
 }
 
+/* Drop one connection's reference on a file's instance (its connection
+ * already disconnected). The last one closes the instance: CLOSING in the
+ * list while duckdb_close (a checkpoint) runs outside the lock, taken off it
+ * after - an open of the file waits for that. */
+static void duck_shared_release(HlDuckShared *sh)
+{
+    HlDuckShared *gone = NULL;
+    pthread_mutex_lock(&g_duck_shared_mu);
+    if (--sh->refs == 0) {
+        sh->state = HL_DUCK_CLOSING;
+        gone = sh;
+    }
+    pthread_mutex_unlock(&g_duck_shared_mu);
+    if (gone) {
+        duckdb_close(&gone->db);
+        pthread_mutex_lock(&g_duck_shared_mu);
+        duck_unlink(gone);
+        pthread_cond_broadcast(&g_duck_shared_cv);
+        pthread_mutex_unlock(&g_duck_shared_mu);
+        free(gone->path);
+        free(gone);
+    }
+}
+
 static void duck_close(HlDbHandle *h)
 {
     if (!h || !h->ctx) return;
@@ -783,25 +815,7 @@ static void duck_close(HlDbHandle *h)
     s->exec = NULL;
     duckdb_disconnect(&s->con);
     if (s->shared) {
-        /* The last connection to the file closes its instance: CLOSING in
-         * the list while duckdb_close (a checkpoint) runs outside the lock,
-         * taken off it after - an open of the file waits for that. */
-        HlDuckShared *gone = NULL;
-        pthread_mutex_lock(&g_duck_shared_mu);
-        if (--s->shared->refs == 0) {
-            s->shared->state = HL_DUCK_CLOSING;
-            gone = s->shared;
-        }
-        pthread_mutex_unlock(&g_duck_shared_mu);
-        if (gone) {
-            duckdb_close(&gone->db);
-            pthread_mutex_lock(&g_duck_shared_mu);
-            duck_unlink(gone);
-            pthread_cond_broadcast(&g_duck_shared_cv);
-            pthread_mutex_unlock(&g_duck_shared_mu);
-            free(gone->path);
-            free(gone);
-        }
+        duck_shared_release(s->shared);
     } else {
         duckdb_close(&s->db);
     }
@@ -958,15 +972,25 @@ static void duck_track_txn(HlDbDuckCtx *s, const char *sql, int ok)
 #define HL_DB_DUCK_ABANDON_GRACE_MS 500
 
 /* Abandoned statements still running, process-wide. Each holds a thread and
- * a CPU until it ends; past the cap no DuckDB statement starts under a run. */
+ * a CPU until it ends; past the cap no DuckDB statement starts under a run.
+ * Statements already running when it is reached can still be abandoned (one
+ * per thread running DuckDB), so it may be passed by that many. */
 #define HL_DB_DUCK_MAX_ABANDONED 4
+
+/* An abandoned statement still running this long after it was abandoned
+ * ends the process (_exit, status HL_DB_DUCK_CEILING_STATUS), as --vm-thread's
+ * ceiling does: nothing in-process can stop it, and it holds a CPU. */
+#define HL_DB_DUCK_ABANDON_CEILING_MS 60000
+#define HL_DB_DUCK_CEILING_STATUS     75
 
 /* The statement thread's stack: binding and planning recurse over the
  * expression tree (max_expression_depth 1000), and run there now. */
 #define HL_DB_DUCK_STMT_STACK ((size_t)16 << 20)
+#define HL_DB_DUCK_CEILING_STACK ((size_t)256 << 10)
 
 static pthread_mutex_t g_duck_abandoned_mu = PTHREAD_MUTEX_INITIALIZER;
 static int             g_duck_abandoned;   /* under g_duck_abandoned_mu */
+static int             g_duck_ceiling_ms = HL_DB_DUCK_ABANDON_CEILING_MS;
 
 int hl_db_duckdb_abandoned_running(void)
 {
@@ -976,7 +1000,101 @@ int hl_db_duckdb_abandoned_running(void)
     return n;
 }
 
-enum { HL_DUCK_JOB_PREPARING = 0, HL_DUCK_JOB_EXECUTING, HL_DUCK_JOB_DONE };
+#ifdef HL_DUCKDB_TEST_HOOKS
+int hl_db_duckdb_test_instance_refs(const char *path)
+{
+    char *key = duck_canon(path);
+    if (!key) return -1;
+    pthread_mutex_lock(&g_duck_shared_mu);
+    HlDuckShared *sh = duck_find(key);
+    int n = sh ? sh->refs : 0;
+    pthread_mutex_unlock(&g_duck_shared_mu);
+    free(key);
+    return n;
+}
+
+void hl_db_duckdb_test_set_abandon_ceiling_ms(int ms)
+{
+    __atomic_store_n(&g_duck_ceiling_ms,
+                     ms > 0 ? ms : HL_DB_DUCK_ABANDON_CEILING_MS,
+                     __ATOMIC_RELAXED);
+}
+#endif
+
+/* Block the asynchronous signals on a thread Hull starts for DuckDB, as the
+ * VM thread does: they belong to the loop thread. SIGRTMAX - 3 (the Landlock
+ * self-restriction request, vendor/pledge patch 0004) stays deliverable. */
+static void duck_block_signals(void)
+{
+    sigset_t block;
+    sigemptyset(&block);
+    sigaddset(&block, SIGINT);
+    sigaddset(&block, SIGTERM);
+    sigaddset(&block, SIGHUP);
+    sigaddset(&block, SIGQUIT);
+    sigaddset(&block, SIGPIPE);
+    sigaddset(&block, SIGUSR1);
+    sigaddset(&block, SIGUSR2);
+    sigaddset(&block, SIGCHLD);
+    sigaddset(&block, SIGALRM);
+    (void)pthread_sigmask(SIG_BLOCK, &block, NULL);
+}
+
+/* A condition variable waited on with duck_cond_wait_ms: on the monotonic
+ * clock where it can be (not Apple, which waits relatively). Sets
+ * *monotonic. */
+static int duck_cond_init(pthread_cond_t *cv, int *monotonic)
+{
+    *monotonic = 0;
+    pthread_condattr_t ca;
+    int have_attr = pthread_condattr_init(&ca) == 0;
+#if !defined(__APPLE__)
+    if (have_attr && pthread_condattr_setclock(&ca, CLOCK_MONOTONIC) == 0)
+        *monotonic = 1;
+#endif
+    int rc = pthread_cond_init(cv, have_attr ? &ca : NULL);
+    if (have_attr) pthread_condattr_destroy(&ca);
+    return rc;
+}
+
+/* Wait on @p cv (@p mu held) for at most @p ms. */
+static void duck_cond_wait_ms(pthread_cond_t *cv, pthread_mutex_t *mu,
+                              int monotonic, int ms)
+{
+#if defined(__APPLE__)
+    (void)monotonic;
+    struct timespec rel = { (time_t)(ms / 1000), (long)(ms % 1000) * 1000000L };
+    (void)pthread_cond_timedwait_relative_np(cv, mu, &rel);
+#else
+    struct timespec abs;
+    clock_gettime(monotonic ? CLOCK_MONOTONIC : CLOCK_REALTIME, &abs);
+    abs.tv_sec  += (time_t)(ms / 1000);
+    abs.tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (abs.tv_nsec >= 1000000000L) { abs.tv_sec++; abs.tv_nsec -= 1000000000L; }
+    (void)pthread_cond_timedwait(cv, mu, &abs);
+#endif
+}
+
+/* One line to fd 2 without the log lock (an abandoned thread may be inside a
+ * log write) and only if fd 2 takes it within a moment, as vm_thread.c's
+ * raw_log does. Hull's own text only. */
+static void duck_raw_log(const char *line)
+{
+    struct pollfd pf = { STDERR_FILENO, POLLOUT, 0 };
+    if (poll(&pf, 1, 100) <= 0 || !(pf.revents & POLLOUT)) return;
+    size_t n = strlen(line);
+    ssize_t w;
+    do w = write(STDERR_FILENO, line, n);
+    while (w < 0 && errno == EINTR);
+}
+
+enum {
+    HL_DUCK_JOB_PREPARING = 0,
+    HL_DUCK_JOB_EXECUTING,
+    HL_DUCK_JOB_FETCHING,   /* the result is being fetched (an autocommit
+                             * statement commits here): never abandoned */
+    HL_DUCK_JOB_DONE
+};
 
 /* One statement: prepared, bound and executed to a materialized result,
  * either inline on the calling thread (no run bound: nothing can stop it) or
@@ -984,14 +1102,18 @@ enum { HL_DUCK_JOB_PREPARING = 0, HL_DUCK_JOB_EXECUTING, HL_DUCK_JOB_DONE };
 typedef struct HlDuckJob {
     pthread_mutex_t   mu;
     pthread_cond_t    cv;
+    int               cv_monotonic;
     int               threaded;
-    int               refs;        /* threaded: under mu, caller + thread */
+    int               refs;        /* threaded: under mu */
     int               phase;       /* HL_DUCK_JOB_*, under mu */
     int               stop;        /* the run tripped, under mu */
     int               abandoned;   /* the caller left, under mu */
     int               stoppable;   /* not a TRANSACTION statement */
     int64_t           tasks;       /* tasks run, under mu */
     duckdb_connection con;
+    /* The file's instance an abandoned statement's connection holds a
+     * reference on (taken at abandonment, dropped after its disconnect). */
+    HlDuckShared     *shared;
     /* Input: owned copies when threaded (an abandoned statement outlives
      * the caller's memory), borrowed inline. */
     const char       *sql;
@@ -1095,6 +1217,16 @@ static void duck_job_run(HlDuckJob *j)
         }
     }
     if (!j->stoppable) tripped = 0;   /* ran to its end: report what it did */
+    /* Fetching commits an autocommit statement: a statement the caller
+     * abandoned meanwhile is not fetched (dropping the pending result rolls
+     * it back), and once fetching the caller does not abandon it, so a
+     * commit is never reported as a failure. */
+    if (!tripped && st != DUCKDB_PENDING_ERROR && j->threaded) {
+        pthread_mutex_lock(&j->mu);
+        if (j->abandoned) tripped = 1;
+        else j->phase = HL_DUCK_JOB_FETCHING;
+        pthread_mutex_unlock(&j->mu);
+    }
     if (tripped || st == DUCKDB_PENDING_ERROR) {
         j->interrupted = tripped;
         duck_job_err(j, tripped ? "interrupted (instruction limit exceeded)"
@@ -1148,19 +1280,77 @@ static int duck_job_finish(HlDuckJob *j)
     pthread_mutex_lock(&j->mu);
     j->phase = HL_DUCK_JOB_DONE;
     int abandoned = j->abandoned;
-    pthread_cond_signal(&j->cv);
+    pthread_cond_broadcast(&j->cv);   /* the caller, or the ceiling watch */
     pthread_mutex_unlock(&j->mu);
     if (abandoned) {
         /* Nobody reads the result. Dropping the connection rolls back
-         * whatever the statement's transaction held. */
+         * whatever the statement's transaction held; then the file's
+         * instance loses the reference the connection held (it may be the
+         * last: the instance closes here). */
         duck_job_release(j);
         duckdb_disconnect(&j->con);
+        if (j->shared) duck_shared_release(j->shared);
+        j->shared = NULL;
         pthread_mutex_lock(&g_duck_abandoned_mu);
         g_duck_abandoned--;
         pthread_mutex_unlock(&g_duck_abandoned_mu);
     }
     duck_job_unref(j);
     return abandoned;
+}
+
+/* Watch an abandoned statement: still running g_duck_ceiling_ms after it
+ * was abandoned, it ends the process (see HL_DB_DUCK_ABANDON_CEILING_MS). */
+static void *duck_ceiling_thread(void *arg)
+{
+    HlDuckJob *j = arg;
+    duck_block_signals();
+    int ceiling = __atomic_load_n(&g_duck_ceiling_ms, __ATOMIC_RELAXED);
+    uint64_t end = hl_db_monotonic_ms() + (uint64_t)ceiling;
+    pthread_mutex_lock(&j->mu);
+    while (j->phase != HL_DUCK_JOB_DONE) {
+        uint64_t now = hl_db_monotonic_ms();
+        if (now >= end) break;
+        uint64_t left = end - now;
+        duck_cond_wait_ms(&j->cv, &j->mu, j->cv_monotonic,
+                          left > 1000 ? 1000 : (int)left);
+    }
+    int done = j->phase == HL_DUCK_JOB_DONE;
+    pthread_mutex_unlock(&j->mu);
+    if (done) {
+        duck_job_unref(j);
+        return NULL;
+    }
+    char line[256];
+    snprintf(line, sizeof line,
+             "FATAL [hull:duckdb] a DuckDB statement abandoned at its run's "
+             "time limit is still running %d ms later inside one task; "
+             "exiting without teardown (status %d) so a supervisor restarts "
+             "the process\n", ceiling, HL_DB_DUCK_CEILING_STATUS);
+    duck_raw_log(line);
+    _exit(HL_DB_DUCK_CEILING_STATUS);
+}
+
+/* Start the ceiling watch on @p j (abandoned; it takes a reference). */
+static void duck_ceiling_start(HlDuckJob *j)
+{
+    pthread_mutex_lock(&j->mu);
+    j->refs++;
+    pthread_mutex_unlock(&j->mu);
+    pthread_attr_t attr;
+    int ok = pthread_attr_init(&attr) == 0;
+    if (ok) {
+        (void)pthread_attr_setstacksize(&attr, HL_DB_DUCK_CEILING_STACK);
+        (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_t th;
+        ok = pthread_create(&th, &attr, duck_ceiling_thread, j) == 0;
+        pthread_attr_destroy(&attr);
+    }
+    if (!ok) {
+        log_warn("[hull:c] could not start the ceiling watch of an abandoned "
+                 "DuckDB statement; it runs until it ends");
+        duck_job_unref(j);
+    }
 }
 
 /* A handle's statement thread, made at its first statement under a run and
@@ -1171,7 +1361,36 @@ struct HlDuckExec {
     pthread_t       th;
     HlDuckJob      *job;    /* submitted, under mu */
     int             quit;   /* under mu: duck_close joins it */
+#if defined(__APPLE__)
+    mach_port_t     port;   /* the thread's, for its CPU time */
+#else
+    clockid_t       cpu_clock;
+    int             have_cpu_clock;
+#endif
 };
+
+/* The statement thread's CPU time in ns, or 0 when it cannot be read. */
+static uint64_t duck_exec_cpu_ns(const HlDuckExec *ex)
+{
+#if defined(__APPLE__)
+    thread_basic_info_data_t info;
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(ex->port, THREAD_BASIC_INFO, (thread_info_t)&info,
+                    &count) != KERN_SUCCESS)
+        return 0;
+    uint64_t us = (uint64_t)info.user_time.seconds * 1000000u +
+                  (uint64_t)info.user_time.microseconds +
+                  (uint64_t)info.system_time.seconds * 1000000u +
+                  (uint64_t)info.system_time.microseconds;
+    return us ? us * 1000u : 1;
+#else
+    struct timespec ts;
+    if (!ex->have_cpu_clock || clock_gettime(ex->cpu_clock, &ts) != 0)
+        return 0;
+    uint64_t ns = (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+    return ns ? ns : 1;
+#endif
+}
 
 static void duck_exec_free(HlDuckExec *ex)
 {
@@ -1183,6 +1402,7 @@ static void duck_exec_free(HlDuckExec *ex)
 static void *duck_exec_thread(void *arg)
 {
     HlDuckExec *ex = arg;
+    duck_block_signals();
     for (;;) {
         pthread_mutex_lock(&ex->mu);
         while (!ex->job && !ex->quit)
@@ -1223,6 +1443,11 @@ static HlDuckExec *duck_exec_start(void)
         duck_exec_free(ex);
         return NULL;
     }
+#if defined(__APPLE__)
+    ex->port = pthread_mach_thread_np(ex->th);
+#else
+    ex->have_cpu_clock = pthread_getcpuclockid(ex->th, &ex->cpu_clock) == 0;
+#endif
     return ex;
 }
 
@@ -1266,18 +1491,32 @@ static int duck_job_copy_input(HlDuckJob *j, const char *sql,
     return 0;
 }
 
-static void duck_deadline_after(struct timespec *ts, int ms)
+/* The units the statement's work since the last reading is worth: its tasks
+ * at HL_DB_DUCK_TASK_OPS, plus the statement thread's CPU time at the
+ * binding dispatcher's rate (or, with no CPU clock, the wall time). The
+ * calling thread sleeps meanwhile, so the dispatcher measures ~0 CPU for
+ * the call: without this a loop of single-task statements, each one long
+ * task, cost ~10000 units a statement (a 300 ms one ~33x less than its
+ * time). Units charged during the call count against the dispatcher's own
+ * measure (hl_meter_settle), so nothing is charged twice. */
+static int64_t duck_work_units(const HlDuckExec *ex, int64_t tasks,
+                               uint64_t *cpu_last, uint64_t *wall_last)
 {
-    clock_gettime(CLOCK_REALTIME, ts);
-    ts->tv_nsec += (long)ms * 1000000L;
-    while (ts->tv_nsec >= 1000000000L) {
-        ts->tv_sec++;
-        ts->tv_nsec -= 1000000000L;
+    int64_t units = tasks * HL_DB_DUCK_TASK_OPS;
+    uint64_t cpu = duck_exec_cpu_ns(ex);
+    uint64_t wall = hl_meter_ticks();
+    if (cpu && *cpu_last) {
+        if (cpu > *cpu_last) units += (int64_t)hl_meter_ns_units(cpu - *cpu_last);
+    } else if (wall > *wall_last) {
+        units += (int64_t)hl_meter_ticks_units(wall - *wall_last);
     }
+    *cpu_last = cpu;
+    *wall_last = wall;
+    return units;
 }
 
 /* Run @p j for a caller whose run is bound: the statement runs on a thread
- * of its own while this thread charges its tasks to the run and asks it every
+ * of its own while this thread charges its work to the run and asks it every
  * HL_DB_DUCK_SLICE_MS. One task can run for any time - a quadratic substring
  * search (instr / strpos / contains / replace / LIKE) over long values,
  * constant folding at prepare, an O(n*m) levenshtein - and nothing inside it
@@ -1286,11 +1525,12 @@ static void duck_deadline_after(struct timespec *ts, int ms)
  * for days. Once the run trips, a statement still running
  * HL_DB_DUCK_ABANDON_GRACE_MS later is ABANDONED: the call fails, the
  * connection the statement holds goes with it (dropped, its transaction
- * rolled back, once the statement ends) and the handle gets a new one. A
- * TRANSACTION statement is not abandoned once prepared (see duck_job_run).
- * Returns 0 when the job ended (its result in @p j, which the caller frees),
- * 1 when it was abandoned (@p j is no longer the caller's), -1 when it could
- * not start. */
+ * rolled back, once the statement ends) and the handle gets a new one; still
+ * running HL_DB_DUCK_ABANDON_CEILING_MS later, it ends the process. A
+ * TRANSACTION statement is not abandoned once prepared, nor one being
+ * fetched (see duck_job_run). Returns 0 when the job ended (its result in
+ * @p j, which the caller frees), 1 when it was abandoned (@p j is no longer
+ * the caller's), -1 when it could not start. */
 static int duck_run_bounded(HlDbDuckCtx *s, HlDuckJob *j)
 {
     pthread_mutex_lock(&g_duck_abandoned_mu);
@@ -1307,6 +1547,8 @@ static int duck_run_bounded(HlDbDuckCtx *s, HlDuckJob *j)
     }
     HlDuckExec *ex = s->exec;
     pthread_t th = ex->th;
+    uint64_t cpu_last = duck_exec_cpu_ns(ex);
+    uint64_t wall_last = hl_meter_ticks();
     j->refs = 2;
     pthread_mutex_lock(&ex->mu);
     ex->job = j;
@@ -1318,15 +1560,15 @@ static int duck_run_bounded(HlDbDuckCtx *s, HlDuckJob *j)
     int abandoned = 0;
     pthread_mutex_lock(&j->mu);
     while (j->phase != HL_DUCK_JOB_DONE) {
-        struct timespec ts;
-        duck_deadline_after(&ts, HL_DB_DUCK_SLICE_MS);
-        (void)pthread_cond_timedwait(&j->cv, &j->mu, &ts);
+        duck_cond_wait_ms(&j->cv, &j->mu, j->cv_monotonic,
+                          HL_DB_DUCK_SLICE_MS);
         if (j->phase == HL_DUCK_JOB_DONE) break;
         if (!j->stop) {
             int64_t ran = j->tasks - charged;
             charged = j->tasks;
             pthread_mutex_unlock(&j->mu);
-            int t = hl_db_budget_charge(ran * HL_DB_DUCK_TASK_OPS) != 0;
+            int64_t units = duck_work_units(ex, ran, &cpu_last, &wall_last);
+            int t = hl_db_budget_charge(units) != 0;
             pthread_mutex_lock(&j->mu);
             if (t) {
                 j->stop = 1;
@@ -1334,25 +1576,42 @@ static int duck_run_bounded(HlDbDuckCtx *s, HlDuckJob *j)
             }
             continue;
         }
-        if ((j->phase == HL_DUCK_JOB_PREPARING || j->stoppable) &&
+        if ((j->phase == HL_DUCK_JOB_PREPARING ||
+             (j->phase == HL_DUCK_JOB_EXECUTING && j->stoppable)) &&
             hl_db_monotonic_ms() - trip_ms >= HL_DB_DUCK_ABANDON_GRACE_MS) {
             pthread_mutex_lock(&g_duck_abandoned_mu);
             g_duck_abandoned++;
             pthread_mutex_unlock(&g_duck_abandoned_mu);
+            /* The connection keeps a reference on the file's instance until
+             * the statement drops it, so the registry entry outlives the
+             * handle's own connections: a new open of the file finds it
+             * instead of making a second instance (audit 20 / 22). */
+            if (s->shared) {
+                pthread_mutex_lock(&g_duck_shared_mu);
+                s->shared->refs++;
+                pthread_mutex_unlock(&g_duck_shared_mu);
+                j->shared = s->shared;
+            }
             j->abandoned = 1;
             abandoned = 1;
             break;
         }
     }
-    /* The tasks it ran since the last slice. */
     int64_t ran = abandoned ? 0 : j->tasks - charged;
     pthread_mutex_unlock(&j->mu);
-    if (ran > 0) (void)hl_db_budget_charge(ran * HL_DB_DUCK_TASK_OPS);
-    if (!abandoned) return 0;
+    if (!abandoned) {
+        /* The work since the last slice. */
+        int64_t units = duck_work_units(ex, ran, &cpu_last, &wall_last);
+        if (units > 0) (void)hl_db_budget_charge(units);
+        return 0;
+    }
 
     log_warn("[hull:c] a DuckDB statement ran %d ms past its run's limit "
              "inside one task and was abandoned; it keeps a thread busy "
-             "until it ends", HL_DB_DUCK_ABANDON_GRACE_MS);
+             "until it ends, and ends the process if it still runs %d ms "
+             "from now", HL_DB_DUCK_ABANDON_GRACE_MS,
+             __atomic_load_n(&g_duck_ceiling_ms, __ATOMIC_RELAXED));
+    duck_ceiling_start(j);
     duck_job_unref(j);
     /* The statement keeps its thread: it frees itself once the statement
      * ends (ex may already be gone). The next statement gets a new one. */
@@ -1363,7 +1622,13 @@ static int duck_run_bounded(HlDbDuckCtx *s, HlDuckJob *j)
      * is refused until the app's ROLLBACK (as a Postgres connection lost
      * inside a transaction). */
     duckdb_connection fresh = NULL;
-    if (duckdb_connect(s->db, &fresh) != DuckDBSuccess) fresh = NULL;
+    if (duckdb_connect(s->db, &fresh) != DuckDBSuccess) {
+        fresh = NULL;
+        static int logged;
+        if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
+            log_error("[hull:c] duckdb: no new connection after a statement "
+                      "was abandoned; the handle refuses every statement");
+    }
     s->con = fresh;
     if (s->in_txn) s->txn_lost = 1;
     duck_set_err(s, "interrupted (run limit exceeded; the statement was "
@@ -1399,7 +1664,7 @@ static int duck_run(HlDbDuckCtx *s, const char *sql, const HlValue *params,
             duck_set_err(s, "out of memory");
             return -1;
         }
-        if (pthread_cond_init(&j->cv, NULL) != 0) {
+        if (duck_cond_init(&j->cv, &j->cv_monotonic) != 0) {
             pthread_mutex_destroy(&j->mu);
             free(j);
             duck_set_err(s, "out of memory");
@@ -1543,6 +1808,10 @@ static int duck_exec_script(HlDbHandle *h, const char *sql)
     if (!h || !h->ctx) return -1;
     HlDbDuckCtx *s = h->ctx;
     if (duck_refuse_sql(s, sql) != 0) return -1;
+    if (!s->con) {
+        duck_set_err(s, "duckdb: no connection");
+        return -1;
+    }
     duckdb_result r;
     if (duckdb_query(s->con, sql, &r) != DuckDBSuccess) {
         duck_set_err(s, duckdb_result_error(&r));
