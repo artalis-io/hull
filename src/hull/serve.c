@@ -2423,7 +2423,8 @@ static int hl_serve_wire_caps(HlServerState *s)
     /* One decision with the app context (hl_gpu_manifest_admit, audit 46):
      * an invalid gpu.devices list refuses gpu even when `modules` names
      * hull/gpu. */
-    if (gpu_ctx_ok && !hl_gpu_manifest_admit(&s->manifest, &s->module_set)) {
+    int gpu_admit = hl_gpu_manifest_admit(&s->manifest, &s->module_set);
+    if (gpu_ctx_ok && !gpu_admit) {
         rt->gpu_ctx = NULL;
         log_info("[hull:c] gpu not admitted (not declared, or gpu.devices "
                  "names no valid device) - gpu.* disabled");
@@ -2437,7 +2438,8 @@ static int hl_serve_wire_caps(HlServerState *s)
          * for one that set the opt-in without hull/gpu). */
         int dynamic = hl_gpu_manifest_dynamic_shaders(&s->manifest,
                                                       &s->module_set);
-        hl_gpu_ctx_apply_manifest(gpu_ctx, &s->manifest, shader_vfs);
+        hl_gpu_ctx_apply_manifest(gpu_ctx, &s->manifest, gpu_admit,
+                                  shader_vfs);
         if (embedded && dynamic)
             log_info("[hull:c] gpu.dynamic_shaders: runtime WGSL source is "
                      "compiled first in a helper process%s",

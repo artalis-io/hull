@@ -691,11 +691,13 @@ int hl_gpu_backend_present(void);
 
 /* The applied manifest's part: the device allowlist (a gpu.devices list
  * that names no valid device allows none, audit 46) and the
- * gpu.dynamic_shaders opt-in. Whether the runtime gets the context at all
- * is hl_gpu_manifest_admit's (module_resolver.h), the one decision every
- * entry point takes. */
+ * gpu.dynamic_shaders opt-in, raised only when @p admitted. Whether the
+ * runtime gets the context at all is hl_gpu_manifest_admit's
+ * (module_resolver.h), the one decision every entry point takes; the caller
+ * passes its answer as @p admitted. */
 struct HlManifest;
 void hl_gpu_ctx_apply_manifest(HlGpuCtx *ctx, const struct HlManifest *m,
+                               int admitted,
                                const struct HlVfs *shader_vfs);
 
 /* Destroy and free a context hl_gpu_ctx_open made (sealed or not). The

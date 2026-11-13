@@ -85,7 +85,7 @@ HlGpuCtx *hl_gpu_ctx_open(int device, const struct HlVfs *shader_vfs)
 }
 
 void hl_gpu_ctx_apply_manifest(HlGpuCtx *ctx, const HlManifest *m,
-                               const struct HlVfs *shader_vfs)
+                               int admitted, const struct HlVfs *shader_vfs)
 {
     if (!ctx)
         return;
@@ -108,11 +108,14 @@ void hl_gpu_ctx_apply_manifest(HlGpuCtx *ctx, const HlManifest *m,
                  n, ctx->device_count);
     }
     /* The mode was set at open, before the top level ran; this raises the
-     * opt-in, which only the applied manifest can grant. */
+     * opt-in, which only the applied manifest of an app admitted gpu.* can
+     * grant - @p admitted is hl_gpu_manifest_admit's answer, so the policy
+     * and the compile helper's stop agree (audit 46). */
     hl_cap_gpu_set_shader_policy(ctx,
         hl_vfs_embedded(shader_vfs) ? HL_GPU_SHADERS_EMBEDDED
                                     : HL_GPU_SHADERS_DEV,
-        present && m->gpu_dynamic_shaders && !m->gpu_devices_invalid,
+        admitted && present && m->gpu_dynamic_shaders &&
+            !m->gpu_devices_invalid,
         shader_vfs);
 }
 

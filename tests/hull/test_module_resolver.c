@@ -772,4 +772,97 @@ UTEST(build_flavor, auto_from_resolved_manifest)
 }
 #endif
 
+/* ── Audit 46: the one GPU admit decision every entry point takes ────── */
+
+/* A set holding hull/gpu, as a --with=gpu build resolves it. */
+static int a46_gpu_set(HlManifest *m, HlResolvedModuleSet *s)
+{
+    char err[256] = {0};
+    return hl_module_resolver_resolve_caps(
+        m, s, hl_module_build_caps() | HL_MOD_CAP_GPU, err, sizeof(err));
+}
+
+UTEST(module_resolver_audit46, invalid_devices_refused_with_hull_gpu)
+{
+    HlManifest m;
+    clear_manifest(&m);
+    m.present = 1;
+    add_module(&m, "gpu", 1);
+    HlResolvedModuleSet s = {0};
+    ASSERT_EQ(a46_gpu_set(&m, &s), 0);
+    ASSERT_TRUE(hl_module_set_contains_name(&s, "hull/gpu"));
+    /* Declared and valid: admitted. */
+    m.gpu = 1;
+    EXPECT_TRUE(hl_gpu_manifest_admit(&m, &s));
+    /* A gpu.devices list naming no valid device: the extractor clears gpu
+     * and sets the marker. The module set alone admitted it (every device). */
+    m.gpu = 0;
+    m.gpu_devices_invalid = 1;
+    EXPECT_FALSE(hl_gpu_manifest_admit(&m, &s));
+    m.gpu_dynamic_shaders = 1;
+    EXPECT_FALSE(hl_gpu_manifest_dynamic_shaders(&m, &s));
+}
+
+UTEST(module_resolver_audit46, null_set_and_absent_manifest)
+{
+    HlManifest m;
+    clear_manifest(&m);
+    /* No manifest at all, or one not present: admitted, as before. */
+    EXPECT_TRUE(hl_gpu_manifest_admit(NULL, NULL));
+    EXPECT_TRUE(hl_gpu_manifest_admit(&m, NULL));
+    EXPECT_FALSE(hl_gpu_manifest_dynamic_shaders(NULL, NULL));
+    EXPECT_FALSE(hl_gpu_manifest_dynamic_shaders(&m, NULL));
+    /* A modules list but no resolved set: nothing to admit from. */
+    m.present = 1;
+    add_module(&m, "gpu", 1);
+    m.gpu = 1;
+    EXPECT_FALSE(hl_gpu_manifest_admit(&m, NULL));
+}
+
+UTEST(module_resolver_audit46, legacy_form_without_modules)
+{
+    HlManifest m;
+    clear_manifest(&m);
+    m.present = 1;
+    HlResolvedModuleSet s = {0};
+    EXPECT_FALSE(hl_gpu_manifest_admit(&m, &s));        /* no gpu field */
+    m.gpu = 1;
+    EXPECT_TRUE(hl_gpu_manifest_admit(&m, &s));         /* gpu = true */
+    m.gpu_dynamic_shaders = 1;
+    EXPECT_TRUE(hl_gpu_manifest_dynamic_shaders(&m, &s));
+    m.gpu = 0;
+    m.gpu_devices_invalid = 1;                          /* devices = 0 */
+    EXPECT_FALSE(hl_gpu_manifest_admit(&m, &s));
+    EXPECT_FALSE(hl_gpu_manifest_dynamic_shaders(&m, &s));
+}
+
+UTEST(module_resolver_audit46, dynamic_shaders_needs_admission)
+{
+    /* gpu.dynamic_shaders set, hull/gpu not declared: the compile helper
+     * has nothing to check (it stayed up before). */
+    HlManifest m;
+    clear_manifest(&m);
+    m.present = 1;
+    m.gpu = 1;
+    m.gpu_dynamic_shaders = 1;
+    add_module(&m, "json", 1);
+    HlResolvedModuleSet s = {0};
+    ASSERT_EQ(a46_gpu_set(&m, &s), 0);
+    EXPECT_FALSE(hl_gpu_manifest_admit(&m, &s));
+    EXPECT_FALSE(hl_gpu_manifest_dynamic_shaders(&m, &s));
+    /* Declared: both on. */
+    HlManifest m2;
+    clear_manifest(&m2);
+    m2.present = 1;
+    m2.gpu = 1;
+    m2.gpu_dynamic_shaders = 1;
+    add_module(&m2, "gpu", 1);
+    HlResolvedModuleSet s2 = {0};
+    ASSERT_EQ(a46_gpu_set(&m2, &s2), 0);
+    EXPECT_TRUE(hl_gpu_manifest_dynamic_shaders(&m2, &s2));
+    /* Not opted in: off. */
+    m2.gpu_dynamic_shaders = 0;
+    EXPECT_FALSE(hl_gpu_manifest_dynamic_shaders(&m2, &s2));
+}
+
 UTEST_MAIN();

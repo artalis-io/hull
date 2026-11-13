@@ -10380,16 +10380,21 @@ UTEST(js_runtime, manifest_http_timeout)
  * not an array does too. */
 UTEST(js_runtime, manifest_gpu_devices_fail_closed)
 {
-    static const struct { const char *decl; int gpu; int count; } cases[] = {
-        { "app.manifest({ gpu: { devices: [0, 2] } });",       1, 2 },
-        { "app.manifest({ gpu: { devices: [] } });",           1, 0 },
-        { "app.manifest({ gpu: {} });",                        1, 0 },
-        { "app.manifest({ gpu: { devices: ['0'] } });",        0, 0 },
-        { "app.manifest({ gpu: { devices: [0.5] } });",        0, 0 },
-        { "app.manifest({ gpu: { devices: [, ] } });",         0, 0 },
-        { "app.manifest({ gpu: { devices: [1, '0'] } });",     1, 1 },
-        { "app.manifest({ gpu: { devices: '0' } });",          0, 0 },
-        { "app.manifest({ gpu: { devices: { 0: 0 } } });",     0, 0 },
+    static const struct { const char *decl; int gpu; int count; int inv; } cases[] = {
+        { "app.manifest({ gpu: { devices: [0, 2] } });",       1, 2, 0 },
+        { "app.manifest({ gpu: { devices: [] } });",           1, 0, 0 },
+        { "app.manifest({ gpu: {} });",                        1, 0, 0 },
+        { "app.manifest({ gpu: { devices: ['0'] } });",        0, 0, 1 },
+        { "app.manifest({ gpu: { devices: ['z'] } });",        0, 0, 1 },
+        { "app.manifest({ gpu: { devices: [0.5] } });",        0, 0, 1 },
+        { "app.manifest({ gpu: { devices: [, ] } });",         0, 0, 1 },
+        { "app.manifest({ gpu: { devices: [1, '0'] } });",     1, 1, 0 },
+        { "app.manifest({ gpu: { devices: [0, 'x'] } });",     1, 1, 0 },
+        { "app.manifest({ gpu: { devices: '0' } });",          0, 0, 1 },
+        { "app.manifest({ gpu: { devices: 0 } });",            0, 0, 1 },
+        { "app.manifest({ gpu: { devices: null } });",         0, 0, 1 },
+        { "app.manifest({ gpu: { devices: { 0: 0 } } });",     0, 0, 1 },
+        { "app.manifest({ gpu: true });",                      1, 0, 0 },
     };
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         init_js();
@@ -10404,6 +10409,8 @@ UTEST(js_runtime, manifest_gpu_devices_fail_closed)
         ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
         EXPECT_EQ_MSG(m.gpu, cases[i].gpu, cases[i].decl);
         EXPECT_EQ_MSG(m.gpu_device_count, cases[i].count, cases[i].decl);
+        /* The fail-closed marker every entry point reads (audit 46). */
+        EXPECT_EQ_MSG(m.gpu_devices_invalid, cases[i].inv, cases[i].decl);
         hl_manifest_free(&m);
         cleanup_js();
     }

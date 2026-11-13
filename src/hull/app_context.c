@@ -882,9 +882,11 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                     /* One decision with serve.c (audit 46): an invalid
                      * gpu.devices list refuses gpu even when `modules`
                      * names hull/gpu. */
-                    if (!hl_gpu_manifest_admit(&m, &ctx->module_set))
+                    int admit = hl_gpu_manifest_admit(&m, &ctx->module_set);
+                    if (!admit)
                         ctx->rt->gpu_ctx = NULL;
-                    hl_gpu_ctx_apply_manifest(ctx->gpu_ctx, &m, &ctx->app_vfs);
+                    hl_gpu_ctx_apply_manifest(ctx->gpu_ctx, &m, admit,
+                                              &ctx->app_vfs);
                 }
                 /* The input ceilings (manifest `limits`), as serve.c does. */
                 hl_runtime_apply_input_limits(ctx->rt, &m);
