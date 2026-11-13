@@ -2545,6 +2545,12 @@ jobs:
         timeout-minutes: 2
         run: make e2e-compute HL_ENABLE_GPU=1
 
+      # hull test / hull agent test dispatch on the runner's Metal device
+      # (an "Apple Paravirtual device"); a host without one fails.
+      - name: hull test loads hull/gpu (e2e)
+        timeout-minutes: 10
+        run: HULL_E2E_REQUIRE_GPU=1 sh tests/e2e_gpu_hull_test.sh
+
   duckdb:
     needs: [classify]
     if: needs.classify.outputs.run_db_duckdb == 'true'
@@ -2767,6 +2773,9 @@ jobs:
       - name: Compose the GPU feature into an app binary (e2e)
         timeout-minutes: 15
         run: sh tests/e2e_feature_gpu.sh
+      - name: hull test / hull agent test load hull/gpu (e2e)
+        timeout-minutes: 15
+        run: sh tests/e2e_gpu_hull_test.sh
 
   # TUI as a composable FEATURE. Own fresh build tree. Builds a TUI-free base
   # (EMBED_PLATFORM=1 HL_ENABLE_TUI=0) + the tui feature archive, then

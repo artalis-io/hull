@@ -1534,6 +1534,13 @@ e2e-jobs: $(BUILDDIR)/hull
 e2e-test-cli: $(BUILDDIR)/hull
 	sh tests/e2e_test_cli.sh
 
+# `hull test` / `hull agent test` load hull/gpu (cap/gpu_setup.c). Rebuilds
+# build/ with HL_ENABLE_GPU=1 (needs `make fetch-wgpu`); on a host with a GPU,
+# HULL_E2E_REQUIRE_GPU=1 makes "no device" a failure.
+.PHONY: e2e-gpu-hull-test
+e2e-gpu-hull-test:
+	sh tests/e2e_gpu_hull_test.sh
+
 e2e-test-harness: $(BUILDDIR)/hull
 	sh tests/e2e_test_harness.sh
 

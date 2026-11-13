@@ -58,15 +58,27 @@ typedef struct HlAppContextOpts {
     long          stack_limit;       /* JS only */
     long          instruction_limit;
 
-    /* External WASM/GPU caches (server owns these, context just wires them) */
+    /* External WASM/GPU caches (the entry point owns these, the context
+     * wires them). With gate_modules the context applies the manifest's GPU
+     * part (gating, device allowlist, gpu.dynamic_shaders) to gpu_ctx too;
+     * serve.c defers the load and applies it itself. */
     HlWasmCache  *wasm_cache;       /* NULL = init internal cache */
-    HlGpuCtx     *gpu_ctx;          /* NULL = no GPU */
+    HlGpuCtx     *gpu_ctx;          /* NULL = no GPU (or see gpu_open) */
     /* The operator's --wasm-* overrides (NULL = none). With gate_modules the
      * context resolves them with the manifest's `wasm` limits onto
      * rt->wasm_config (include/hull/wasm_config.h), the ceilings the compute
      * bindings clamp to - as serve.c does for the server. */
     const HlWasmCliLimits *wasm_cli;
     int           gpu_device;       /* -1 = default */
+    /* 1 = with gpu_ctx NULL, open a GPU context of the context's own
+     * (cap/gpu_setup.c), freed after the runtime: `hull test` and `hull
+     * agent test`, which run app code that may use hull/gpu and apply no
+     * kernel sandbox. An entry point that applies one opens the context
+     * itself before its phase-1 sandbox and passes gpu_ctx (serve.c,
+     * serve_cli.c). Inspection commands leave both unset so looking at an
+     * app opens no device. The caller must free its thread pool before
+     * hl_app_context_free. */
+    int           gpu_open;
 
     /* Pure compute mode: 1 = skip database entirely.
      * db_handle / db_registry will be NULL, db global not registered. */

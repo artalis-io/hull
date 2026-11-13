@@ -151,7 +151,8 @@ int hl_agent_test(const char *app_dir, ShJsonBuf *out)
     HlTestRunnerLoop loop;   /* as hull test's (commands/test.c) */
     (void)hl_test_runner_loop_init(&loop);
     HlAppContextOpts opts = { .app_dir = app_dir, .entry_point = entry,
-                              .gate_modules = 1, .thread_pool = loop.pool };
+                              .gate_modules = 1, .thread_pool = loop.pool,
+                              .gpu_open = 1, .gpu_device = -1 };
     if (hl_app_context_init(&ctx, &opts) != 0) {
         hl_test_runner_loop_detach(&loop, NULL);
         hl_test_runner_loop_free(&loop);

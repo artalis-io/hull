@@ -27,6 +27,23 @@ release-artifact layout).
 
 ### Fixed
 
+- **`hull test`, `hull agent test` and a built `app.main` binary had no `hull/gpu`.**
+  Only the server's startup opened a GPU context, so in a GPU build an app requiring
+  `hull.gpu` (`hull:gpu`) failed to load under `hull test` (Lua: `module not found`,
+  JS: `gpu` was `null`). A binary built with `--with=gpu` whose app has only
+  `app.main` had the same gap.
+  - Every entry point that runs app code now opens the context the same way
+    (`hl_gpu_ctx_open`, `cap/gpu_setup.c`): backend, device and shader policy before
+    the app's top level runs, then the manifest's gating, device allowlist and
+    `gpu.dynamic_shaders`. The `app.main` runner opens it before its phase-1 sandbox,
+    as the server does. Commands that only inspect an app open no device.
+  - A built `app.main` binary now starts the shader compile helper as the server does,
+    so `gpu.dynamic_shaders` checks runtime WGSL source there too.
+  - `tests/e2e_feature_gpu.sh` wrapped the require in `pcall` and took the missing
+    module for "no GPU device", so its device sections never ran, on any host.
+    `HULL_E2E_REQUIRE_GPU=1` now fails when a GPU host skips them.
+    `tests/e2e_gpu_hull_test.sh` (`make e2e-gpu-hull-test`) checks `hull test` against
+    the server's view of the device. INV-12 refuses `hl_cap_gpu_init` outside `cap/`.
 - **Lua `hull test` aborted on an empty-body response.** A `test.get` (or `post`,
   ...) whose response had no body - a redirect, a bare status, `res:text("")` -
   ended the whole test run with a malloc abort. The harness kept the response's

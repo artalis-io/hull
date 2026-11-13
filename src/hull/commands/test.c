@@ -106,6 +106,8 @@ static int run_tests_for_entry(const char *app_dir, const char *entry)
         .entry_point  = entry,
         .gate_modules = 1,
         .thread_pool  = loop.pool,
+        .gpu_open     = 1,     /* an app under test may use hull/gpu */
+        .gpu_device   = -1,
     };
     if (hl_app_context_init(&ctx, &opts) != 0) {
         fprintf(stderr, "hull test: failed to initialize app context\n");

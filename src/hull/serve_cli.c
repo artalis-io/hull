@@ -46,6 +46,8 @@
 #include "hull/cap/env.h"
 #include "hull/cap/audit.h"
 #include "hull/cap/policy_seal.h"   /* hl_policy_seal_* - every build seals its policy */
+#include "hull/cap/gpu.h"           /* hl_gpu_ctx_open (cap/gpu_setup.c) */
+#include "hull/cap/gpu_helper.h"    /* the shader compile helper */
 #include "hull/signature.h"
 #include "hull/runtime_flags.h"
 #include "hull/cap/run_watchdog.h"   /* --max-run-ms */
@@ -329,6 +331,20 @@ static int hl_check_signed_policy(HlRuntime *rt)
     return 0;
 }
 
+/* The GPU context (cap/gpu_setup.c), opened before the phase-1 sandbox as
+ * serve.c opens the server's - a backend initialised under the pledge would
+ * need syscalls it does not grant - and closed after the app context (its
+ * runtime's finalizers release GPU objects) and the pool. NULL without a
+ * composed --with=gpu backend or without a device. */
+static HlGpuCtx *cli_gpu;
+
+static void cli_gpu_close(void)
+{
+    hl_gpu_helper_stop();
+    hl_gpu_ctx_close(cli_gpu);
+    cli_gpu = NULL;
+}
+
 /* Free the worker pool with every running db.async op told to stop: its
  * budget trips at the next charge, so an op waiting on a silent server does
  * not hold the join (audit 27). */
@@ -366,6 +382,7 @@ static int cli_fail(HlAppContext *ctx, HlRuntime *rt,
     if (rt) rt->async_ctx = NULL;
     if (manifest) hl_manifest_free(manifest);
     hl_app_context_free(ctx);
+    cli_gpu_close();
     be->free(async_ctx);
     if (cfg_arena) sh_seal_arena_destroy(cfg_arena);
     if (seal_arena) sh_seal_arena_destroy(seal_arena);
@@ -382,6 +399,12 @@ static int cli_fail(HlAppContext *ctx, HlRuntime *rt,
 __attribute__((weak))
 int hull_serve(int argc, char **argv)
 {
+    /* The shader compile helper (cap/gpu_helper.c) is this same binary,
+     * spawned with this argv[1] before the sandbox, as serve.c takes it.
+     * Before any argument parsing or app loading. */
+    if (argc >= 2 && strcmp(argv[1], HL_GPU_HELPER_ARGV1) == 0)
+        return hl_gpu_helper_main(argc >= 3 ? argv[2] : NULL);
+
     /* No agent sidecars here: the dev session nonce is not the app's to read
      * (audit 36). */
     {
@@ -530,12 +553,30 @@ int hull_serve(int argc, char **argv)
         fprintf(stderr, "[hull:cli] thread pool init failed - async ops unavailable\n");
     }
 
+    /* GPU before the phase-1 sandbox, with the init-time shader policy over
+     * the embedded app files (static: it must outlive the context). The app
+     * context applies the manifest's part once the app has loaded. */
+    {
+        extern const HlEntry hl_app_entries[];
+        static HlVfs gpu_shader_vfs;
+        hl_vfs_init(&gpu_shader_vfs, hl_app_entries, app_dir);
+        cli_gpu = hl_gpu_ctx_open(-1, &gpu_shader_vfs);
+        /* The compile helper for gpu.dynamic_shaders, as serve.c starts it:
+         * the phase-1 sandbox forbids spawning and the manifest is not known
+         * yet, so it starts now and stops below unless the app opted in. */
+        if (cli_gpu && hl_vfs_embedded(&gpu_shader_vfs) &&
+            hl_gpu_helper_start(NULL) != 0)
+            log_warn("[hull:cli] GPU compile helper did not start: runtime "
+                     "WGSL source (gpu.dynamic_shaders) will be refused");
+    }
+
     /* Phase 1 sandbox: block exec/proc/fork before loading user code.
      * No-op on macOS (seatbelt is a single irreversible phase-2 profile). */
     if (!no_sandbox) {
         if (hl_sandbox_apply_pledge() != 0) {
             fprintf(stderr, "hull: failed to apply phase 1 sandbox\n");
             if (pool) be->pool_free(pool);
+            cli_gpu_close();
             be->free(async_ctx);
             return 1;
         }
@@ -562,6 +603,7 @@ int hull_serve(int argc, char **argv)
         .no_migrate      = no_migrate,
         .sandbox         = !no_sandbox,
         .gate_modules    = 1,
+        .gpu_ctx         = cli_gpu,        /* hull/gpu, opened above */
         .keep_internal_in_app_db = xo.keep_internal,
         .instruction_limit = xo.instruction_limit,
 #ifdef HL_ENABLE_WASM
@@ -578,6 +620,7 @@ int hull_serve(int argc, char **argv)
     if (hl_app_context_init(&ctx, &opts) != 0) {
         fprintf(stderr, "hull: failed to initialize app context\n");
         if (pool) be->pool_free(pool);
+        cli_gpu_close();
         be->free(async_ctx);
         return 1;
     }
@@ -590,8 +633,9 @@ int hull_serve(int argc, char **argv)
     HlRuntime *rt = hl_app_context_runtime(ctx);
     if (!rt || !rt->vt) {
         fprintf(stderr, "hull: no runtime available\n");
-        hl_app_context_free(ctx);
         if (pool) be->pool_free(pool);
+        hl_app_context_free(ctx);
+        cli_gpu_close();
         be->free(async_ctx);
         return 1;
     }
@@ -617,6 +661,10 @@ int hull_serve(int argc, char **argv)
     if (rt->vt->extract_manifest(rt, &manifest) != 0) {
         log_warn("[hull:cli] manifest extraction failed; running without policy");
     }
+    /* No runtime WGSL source to check: the helper goes (the app context
+     * applied gpu.dynamic_shaders to the GPU context already). */
+    if (!(manifest.present && manifest.gpu_dynamic_shaders))
+        hl_gpu_helper_stop();
 
     /* Seal the manifest, exactly as serve.c does for the server build.
      *
@@ -845,6 +893,8 @@ int hull_serve(int argc, char **argv)
 #ifdef HL_ENABLE_DB
         || (rt->db_registry && hl_db_registry_seal(rt->db_registry) != 0)
 #endif
+        /* The GPU device allowlist and shader policy, as serve.c seals them. */
+        || (cli_gpu && hl_policy_page_seal(cli_gpu) != 0)
         ) {
         log_error("[hull:cli] could not seal the runtime's policy");
 #ifdef HL_ENABLE_HTTP_CLIENT
@@ -945,6 +995,7 @@ int hull_serve(int argc, char **argv)
     free((void *)env_allow);
     hl_manifest_free(&manifest);
     hl_app_context_free(ctx);
+    cli_gpu_close();
 #ifdef HL_ENABLE_HTTP_CLIENT
     /* After the runtime, as in serve.c: a TLS stream it held (an SSH tunnel
      * collected with it) does its close_notify through this context, which

@@ -132,6 +132,11 @@ struct HlAppContext {
     int            wasm_ok;       /* 1 = wasm_cache was initialized */
     int            wasm_external; /* 1 = external cache, don't destroy */
 #endif
+    /* The GPU context the runtime got (the caller's, or the one this
+     * context opened - HlAppContextOpts.gpu_open - which it frees after the
+     * runtime). The manifest step applies to either. */
+    HlGpuCtx      *gpu_ctx;
+    int            gpu_owned;
 };
 
 /* ── Entry point detection ─────────────────────────────────────────── */
@@ -721,6 +726,14 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
      * runtime registers hull.gpu only when this is non-NULL, so gpu stays
      * unexposed when there's no GPU. */
     base.gpu_ctx = opts->gpu_ctx;
+    /* Or one of its own (cap/gpu_setup.c), opened as serve.c opens the
+     * server's: before the runtime exists, with the init-time shader policy
+     * over this app's VFS, so the top level runs under it. */
+    if (!base.gpu_ctx && opts->gpu_open) {
+        base.gpu_ctx = hl_gpu_ctx_open(opts->gpu_device, &ctx->app_vfs);
+        ctx->gpu_owned = base.gpu_ctx != NULL;
+    }
+    ctx->gpu_ctx = base.gpu_ctx;
 
     /* Init runtime via the factory - table-driven, single-path. */
     if (ctx->factory->create(&ctx->rt, opts, &base) != 0) {
@@ -859,6 +872,24 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                  * compute call uncapped (round-6 M3). */
                 hl_wasm_config_resolve(ctx->rt, &m, opts->wasm_cli);
 #endif
+                /* The manifest's part of GPU, as serve.c wires it: gpu.*
+                 * only when declared, then the device allowlist and the
+                 * gpu.dynamic_shaders opt-in. A built binary's runtime source
+                 * goes through the compile helper its entry point started
+                 * (serve.c, serve_cli.c); `hull test` runs from disk, where
+                 * any source compiles. */
+                if (ctx->gpu_ctx && rc == 0) {
+                    int admit = m.modules_declared
+                        ? hl_module_set_contains_name(&ctx->module_set, "hull/gpu")
+                        : (!m.present || m.gpu);
+                    if (!admit)
+                        ctx->rt->gpu_ctx = NULL;
+                    int restrict_devices = m.present && m.gpu;
+                    hl_gpu_ctx_apply_manifest(ctx->gpu_ctx,
+                        restrict_devices ? m.gpu_devices : NULL,
+                        restrict_devices ? m.gpu_device_count : 0,
+                        m.present && m.gpu_dynamic_shaders, &ctx->app_vfs);
+                }
                 /* The input ceilings (manifest `limits`), as serve.c does. */
                 hl_runtime_apply_input_limits(ctx->rt, &m);
                 hl_manifest_free(&m);
@@ -977,6 +1008,13 @@ void hl_app_context_free(HlAppContext *ctx)
     if (ctx->wasm_ok && !ctx->wasm_external)
         hl_cap_wasm_destroy(&ctx->wasm_cache);
 #endif
+    /* GPU after the runtime too (its GC finalizers release GPU buffers),
+     * and after the caller freed the thread pool (a gpu.async job holds a
+     * device). */
+    if (ctx->gpu_owned)
+        hl_gpu_ctx_close(ctx->gpu_ctx);
+    ctx->gpu_ctx = NULL;
+    ctx->gpu_owned = 0;
 
     ctx->rt = NULL;
     ctx->rt_init = 0;
@@ -994,6 +1032,7 @@ void hl_app_context_free(HlAppContext *ctx)
 }
 
 /* ── Accessors ─────────────────────────────────────────────────────── */
+
 
 struct sqlite3 *hl_app_context_db(HlAppContext *ctx)
 {

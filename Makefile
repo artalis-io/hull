@@ -3767,7 +3767,7 @@ check-module-deps-selftest:                 ## prove the dep gate bites, then go
 # checks the vendored-engine diff against INVARIANTS_BASE (default: the
 # merge-base with origin/main, skipped when that ref is absent).
 .PHONY: check-invariants check-invariants-selftest
-check-invariants:                           ## gate: INV-1..INV-10 invariant lint
+check-invariants:                           ## gate: INV-1..INV-12 invariant lint
 	@python3 scripts/check_invariants.py $(if $(INVARIANTS_BASE),--base $(INVARIANTS_BASE))
 check-invariants-selftest:                  ## prove each invariant rule bites on its fixtures
 	@sh tests/check_invariants_selftest.sh

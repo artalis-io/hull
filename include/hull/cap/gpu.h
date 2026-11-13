@@ -674,6 +674,25 @@ void hl_cap_gpu_set_shader_policy(HlGpuCtx *ctx, int mode, int dynamic_shaders,
  * outlive the context. */
 void hl_cap_gpu_init_shader_policy(HlGpuCtx *ctx, const struct HlVfs *vfs);
 
+/* Open the GPU context an entry point that runs app code uses
+ * (cap/gpu_setup.c): the composed --with=gpu backend, else the compiled-in
+ * wgpu one; @p device as the default (-1 = the backend's); the init-time
+ * shader policy over @p shader_vfs, which must outlive the context. Call it
+ * before the context reaches a runtime. NULL when there is no backend or no
+ * device. The context is page-aligned, so the caller may seal it
+ * (hl_policy_page_seal) once the manifest is applied. */
+HlGpuCtx *hl_gpu_ctx_open(int device, const struct HlVfs *shader_vfs);
+
+/* The applied manifest's part: the device allowlist (@p ndevices > 0) and
+ * the gpu.dynamic_shaders opt-in. */
+void hl_gpu_ctx_apply_manifest(HlGpuCtx *ctx, const int *devices,
+                               int ndevices, int dynamic_shaders,
+                               const struct HlVfs *shader_vfs);
+
+/* Destroy and free a context hl_gpu_ctx_open made (sealed or not). The
+ * thread pool must be freed first, and the runtime destroyed. NULL-safe. */
+void hl_gpu_ctx_close(HlGpuCtx *ctx);
+
 /* The largest stack a shader compile thread can get on this host now (the
  * sizes gpu_compile_start tries), or 0 when none can be started. The
  * compile helper's worker is asked for less (cap/gpu_helper.c), so its
