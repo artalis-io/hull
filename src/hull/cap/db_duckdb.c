@@ -28,6 +28,7 @@
 #include "hull/cap/db_sql_kw.h"
 #include "hull/cap/types.h"
 #include "hull/utils/alloc.h"
+#include "log.h"
 
 /* duckdb.h (vendored) has a few prototype-less C-API declarations that trip
  * Hull's strict -Wstrict-prototypes; keep them from polluting our build. */
@@ -132,6 +133,9 @@ static void duck_unlink(HlDuckShared *sh)
     if (*pp) *pp = sh->next;
 }
 
+typedef struct HlDuckExec HlDuckExec;
+static void duck_exec_stop(HlDuckExec *ex);
+
 typedef struct HlDbDuckCtx {
     duckdb_database    db;
     duckdb_connection  con;
@@ -143,6 +147,13 @@ typedef struct HlDbDuckCtx {
      * failed COMMIT still ends DuckDB's transaction - and ROLLBACK / ABORT
      * when they succeed; a statement the budget interrupted never ran). */
     int                in_txn;
+    /* A statement inside the open transaction was abandoned with the
+     * connection that held it (duck_run_bounded): every statement is refused
+     * until the app's ROLLBACK. */
+    int                txn_lost;
+    /* The thread statements run on under a run (duck_run_bounded); NULL
+     * until the first. */
+    HlDuckExec        *exec;
     /* Audit 34: the file app SQL may not reach through DuckDB's own file
      * functions - the canonical database path, or <cwd>/.tmp (the temp
      * directory) for an in-memory database - and whether file functions
@@ -768,6 +779,8 @@ static void duck_close(HlDbHandle *h)
 {
     if (!h || !h->ctx) return;
     HlDbDuckCtx *s = h->ctx;
+    duck_exec_stop(s->exec);
+    s->exec = NULL;
     duckdb_disconnect(&s->con);
     if (s->shared) {
         /* The last connection to the file closes its instance: CLOSING in
@@ -931,43 +944,138 @@ static void duck_track_txn(HlDbDuckCtx *s, const char *sql, int ok)
     }
 }
 
-/* Units charged to the calling run's budget per DuckDB task this thread runs
- * (a task is one morsel of a pipeline - up to ~120k rows). */
+/* Units charged to the calling run's budget per DuckDB task its statement
+ * runs (a task is one morsel of a pipeline - up to ~120k rows). */
 #define HL_DB_DUCK_TASK_OPS 10000
 
-/* Run @p stmt to a materialized result in @p out, one task at a time, so the
- * run that issued it is charged and can stop it (audit 15). A single
- * duckdb_execute_prepared ran the whole statement inside one binding call:
- * no budget saw it, no watchdog could stop it, and a long analytic query held
- * the event loop for hours. Each task this thread runs charges
- * HL_DB_DUCK_TASK_OPS to the budget bound on the thread (cap/db_budget.h, as
- * SQLite's progress handler does); while DuckDB's own worker threads hold the
- * tasks it charges nothing, but still asks (a 0-unit charge sees the run's
- * wall-clock deadline) and naps briefly. Once the budget or the deadline
- * trips, duckdb_interrupt stops the statement and the call fails. Returns
- * DuckDBSuccess, or DuckDBError with s->errmsg set and @p out empty
- * (*@p interrupted = 1 when the budget stopped it).
- *
- * A TRANSACTION statement (@p stoppable 0) is never interrupted (audit 36):
- * duckdb_interrupt does not stop a task one of DuckDB's own threads already
- * took, and BEGIN / COMMIT / ROLLBACK take effect in that task, so a COMMIT
- * reported "interrupted" had often committed (and a ROLLBACK rolled back) -
- * a worker.dispatch job then failed on a commit that held, its cleanup
- * ROLLBACK found no transaction, and in_txn was wrong. Such a statement is
- * cheap; it runs to its end and its real outcome is reported, as a Postgres
- * COMMIT's reply is read to the end on a trip (commit_sent). The trip stays
- * sticky in the run's budget, which raises it at its next poll. */
-static duckdb_state duck_execute(HlDbDuckCtx *s, duckdb_prepared_statement stmt,
-                                 int stoppable, duckdb_result *out,
-                                 int *interrupted)
+/* How often the thread that issued a statement asks its run while the
+ * statement runs on its own thread. */
+#define HL_DB_DUCK_SLICE_MS 5
+
+/* How long after the run tripped a statement still running is waited for
+ * before it is abandoned. A normal task ends well within it; one that does
+ * not is inside one long operator that no interrupt reaches. */
+#define HL_DB_DUCK_ABANDON_GRACE_MS 500
+
+/* Abandoned statements still running, process-wide. Each holds a thread and
+ * a CPU until it ends; past the cap no DuckDB statement starts under a run. */
+#define HL_DB_DUCK_MAX_ABANDONED 4
+
+/* The statement thread's stack: binding and planning recurse over the
+ * expression tree (max_expression_depth 1000), and run there now. */
+#define HL_DB_DUCK_STMT_STACK ((size_t)16 << 20)
+
+static pthread_mutex_t g_duck_abandoned_mu = PTHREAD_MUTEX_INITIALIZER;
+static int             g_duck_abandoned;   /* under g_duck_abandoned_mu */
+
+int hl_db_duckdb_abandoned_running(void)
 {
-    memset(out, 0, sizeof *out);
-    *interrupted = 0;
+    pthread_mutex_lock(&g_duck_abandoned_mu);
+    int n = g_duck_abandoned;
+    pthread_mutex_unlock(&g_duck_abandoned_mu);
+    return n;
+}
+
+enum { HL_DUCK_JOB_PREPARING = 0, HL_DUCK_JOB_EXECUTING, HL_DUCK_JOB_DONE };
+
+/* One statement: prepared, bound and executed to a materialized result,
+ * either inline on the calling thread (no run bound: nothing can stop it) or
+ * on a thread of its own (a run is bound) - see duck_run_bounded. */
+typedef struct HlDuckJob {
+    pthread_mutex_t   mu;
+    pthread_cond_t    cv;
+    int               threaded;
+    int               refs;        /* threaded: under mu, caller + thread */
+    int               phase;       /* HL_DUCK_JOB_*, under mu */
+    int               stop;        /* the run tripped, under mu */
+    int               abandoned;   /* the caller left, under mu */
+    int               stoppable;   /* not a TRANSACTION statement */
+    int64_t           tasks;       /* tasks run, under mu */
+    duckdb_connection con;
+    /* Input: owned copies when threaded (an abandoned statement outlives
+     * the caller's memory), borrowed inline. */
+    const char       *sql;
+    const HlValue    *params;
+    int               nparams;
+    char             *own_sql;
+    HlValue          *own_params;
+    char            **own_bufs;    /* the copied text / blob bytes */
+    /* Output. */
+    duckdb_prepared_statement stmt;
+    duckdb_result     result;
+    int               have_result;
+    int               is_txn;
+    int               rc;          /* 0 or -1 */
+    int               interrupted; /* the run's trip stopped it */
+    char              err[512];
+} HlDuckJob;
+
+static void duck_job_err(HlDuckJob *j, const char *msg)
+{
+    snprintf(j->err, sizeof j->err, "%s", msg ? msg : "duckdb error");
+}
+
+/* Whether the statement should stop: inline, by charging the run; threaded,
+ * by counting the task for the caller to charge and reading its verdict. */
+static int duck_job_should_stop(HlDuckJob *j, int idle)
+{
+    if (!j->threaded)
+        return hl_db_budget_charge(idle ? 0 : HL_DB_DUCK_TASK_OPS) != 0;
+    pthread_mutex_lock(&j->mu);
+    if (!idle) j->tasks++;
+    int stop = j->stop || j->abandoned;
+    pthread_mutex_unlock(&j->mu);
+    return stop;
+}
+
+/* Prepare, bind and run the job's statement, one task at a time, so the run
+ * that issued it is charged and can stop it (audit 15). Each task charges
+ * HL_DB_DUCK_TASK_OPS (as SQLite's progress handler does); while DuckDB's
+ * own worker threads hold the tasks it charges nothing, but still asks (a
+ * 0-unit charge sees the run's wall-clock deadline) and naps briefly. Once
+ * the budget or the deadline trips, duckdb_interrupt stops the statement at
+ * its next task.
+ *
+ * A TRANSACTION statement is never interrupted (audit 36): duckdb_interrupt
+ * does not stop a task one of DuckDB's own threads already took, and BEGIN /
+ * COMMIT / ROLLBACK take effect in that task, so a COMMIT reported
+ * "interrupted" had often committed. Such a statement is cheap; it runs to
+ * its end and its real outcome is reported, as a Postgres COMMIT's reply is
+ * read to the end on a trip (commit_sent). The trip stays sticky in the
+ * run's budget, which raises it at its next poll. */
+static void duck_job_run(HlDuckJob *j)
+{
+    j->rc = -1;
+    if (duckdb_prepare(j->con, j->sql, &j->stmt) != DuckDBSuccess) {
+        duck_job_err(j, duckdb_prepare_error(j->stmt));
+        return;
+    }
+    if (duck_bind_params(j->stmt, j->params, j->nparams) != 0) {
+        duck_job_err(j, "duckdb parameter bind failed");
+        return;
+    }
+    j->is_txn = duckdb_prepared_statement_type(j->stmt)
+                == DUCKDB_STATEMENT_TYPE_TRANSACTION;
+    int skip = 0;
+    if (j->threaded) pthread_mutex_lock(&j->mu);
+    j->stoppable = !j->is_txn;
+    j->phase = HL_DUCK_JOB_EXECUTING;
+    /* Prepared after the caller left: run nothing (a COMMIT on a connection
+     * it no longer owns least of all). Prepared after the run tripped: a
+     * stoppable statement never starts. */
+    if (j->abandoned || (j->stop && j->stoppable)) skip = 1;
+    if (j->threaded) pthread_mutex_unlock(&j->mu);
+    if (skip) {
+        j->interrupted = 1;
+        duck_job_err(j, "interrupted (instruction limit exceeded)");
+        return;
+    }
+
     duckdb_pending_result pending = NULL;
-    if (duckdb_pending_prepared(stmt, &pending) != DuckDBSuccess) {
-        duck_set_err(s, pending ? duckdb_pending_error(pending) : NULL);
+    if (duckdb_pending_prepared(j->stmt, &pending) != DuckDBSuccess) {
+        duck_job_err(j, pending ? duckdb_pending_error(pending) : NULL);
         duckdb_destroy_pending(&pending);
-        return DuckDBError;
+        return;
     }
     int tripped = 0;
     duckdb_pending_state st;
@@ -976,36 +1084,365 @@ static duckdb_state duck_execute(HlDbDuckCtx *s, duckdb_prepared_statement stmt,
         if (st == DUCKDB_PENDING_RESULT_READY || st == DUCKDB_PENDING_ERROR)
             break;
         int idle = (st == DUCKDB_PENDING_NO_TASKS_AVAILABLE);
-        if (!tripped &&
-            hl_db_budget_charge(idle ? 0 : HL_DB_DUCK_TASK_OPS) != 0) {
+        if (!tripped && duck_job_should_stop(j, idle)) {
             tripped = 1;
-            if (stoppable)
-                duckdb_interrupt(s->con);   /* the next task fails */
+            if (j->stoppable)
+                duckdb_interrupt(j->con);   /* the next task fails */
         }
         if (idle) {
             struct timespec nap = { 0, 100000 };   /* 0.1 ms */
             (void)nanosleep(&nap, NULL);
         }
     }
-    if (!stoppable) tripped = 0;   /* ran to its end: report what it did */
+    if (!j->stoppable) tripped = 0;   /* ran to its end: report what it did */
     if (tripped || st == DUCKDB_PENDING_ERROR) {
-        *interrupted = tripped;
-        duck_set_err(s, tripped ? "interrupted (instruction limit exceeded)"
+        j->interrupted = tripped;
+        duck_job_err(j, tripped ? "interrupted (instruction limit exceeded)"
                                 : duckdb_pending_error(pending));
         duckdb_destroy_pending(&pending);
-        return DuckDBError;
+        return;
     }
-    duckdb_state rc = duckdb_execute_pending(pending, out);
-    if (rc != DuckDBSuccess) {
-        duck_set_err(s, duckdb_result_error(out));
-        duckdb_destroy_result(out);
-        memset(out, 0, sizeof *out);
+    if (duckdb_execute_pending(pending, &j->result) != DuckDBSuccess) {
+        duck_job_err(j, duckdb_result_error(&j->result));
+        duckdb_destroy_result(&j->result);
+    } else {
+        j->have_result = 1;
+        j->rc = 0;
     }
     duckdb_destroy_pending(&pending);
-    return rc;
 }
 
-/* 0 when @p sql may run, -1 (error set) when it is refused. */
+/* Free what the job holds (its result, statement and input copies). */
+static void duck_job_release(HlDuckJob *j)
+{
+    if (j->have_result) duckdb_destroy_result(&j->result);
+    j->have_result = 0;
+    if (j->stmt) duckdb_destroy_prepare(&j->stmt);
+    free(j->own_sql);
+    j->own_sql = NULL;
+    if (j->own_bufs) {
+        for (int i = 0; i < j->nparams; i++) free(j->own_bufs[i]);
+        free(j->own_bufs);
+        j->own_bufs = NULL;
+    }
+    free(j->own_params);
+    j->own_params = NULL;
+}
+
+static void duck_job_unref(HlDuckJob *j)
+{
+    pthread_mutex_lock(&j->mu);
+    int left = --j->refs;
+    pthread_mutex_unlock(&j->mu);
+    if (left) return;
+    pthread_cond_destroy(&j->cv);
+    pthread_mutex_destroy(&j->mu);
+    free(j);
+}
+
+/* Run @p j on the statement thread and hand it back. Returns whether the
+ * caller had abandoned it (the thread is then no longer the handle's). */
+static int duck_job_finish(HlDuckJob *j)
+{
+    duck_job_run(j);
+    pthread_mutex_lock(&j->mu);
+    j->phase = HL_DUCK_JOB_DONE;
+    int abandoned = j->abandoned;
+    pthread_cond_signal(&j->cv);
+    pthread_mutex_unlock(&j->mu);
+    if (abandoned) {
+        /* Nobody reads the result. Dropping the connection rolls back
+         * whatever the statement's transaction held. */
+        duck_job_release(j);
+        duckdb_disconnect(&j->con);
+        pthread_mutex_lock(&g_duck_abandoned_mu);
+        g_duck_abandoned--;
+        pthread_mutex_unlock(&g_duck_abandoned_mu);
+    }
+    duck_job_unref(j);
+    return abandoned;
+}
+
+/* A handle's statement thread, made at its first statement under a run and
+ * kept for the next ones (a thread per statement cost ~100 us each). */
+struct HlDuckExec {
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    pthread_t       th;
+    HlDuckJob      *job;    /* submitted, under mu */
+    int             quit;   /* under mu: duck_close joins it */
+};
+
+static void duck_exec_free(HlDuckExec *ex)
+{
+    pthread_cond_destroy(&ex->cv);
+    pthread_mutex_destroy(&ex->mu);
+    free(ex);
+}
+
+static void *duck_exec_thread(void *arg)
+{
+    HlDuckExec *ex = arg;
+    for (;;) {
+        pthread_mutex_lock(&ex->mu);
+        while (!ex->job && !ex->quit)
+            pthread_cond_wait(&ex->cv, &ex->mu);
+        HlDuckJob *j = ex->job;
+        ex->job = NULL;
+        pthread_mutex_unlock(&ex->mu);
+        if (!j) return NULL;          /* quit: duck_close joins */
+        if (duck_job_finish(j)) {
+            /* Abandoned: the handle detached this thread and forgot it. */
+            duck_exec_free(ex);
+            return NULL;
+        }
+    }
+}
+
+static HlDuckExec *duck_exec_start(void)
+{
+    HlDuckExec *ex = calloc(1, sizeof *ex);
+    if (!ex) return NULL;
+    if (pthread_mutex_init(&ex->mu, NULL) != 0) {
+        free(ex);
+        return NULL;
+    }
+    if (pthread_cond_init(&ex->cv, NULL) != 0) {
+        pthread_mutex_destroy(&ex->mu);
+        free(ex);
+        return NULL;
+    }
+    pthread_attr_t attr;
+    int ok = pthread_attr_init(&attr) == 0;
+    if (ok) {
+        (void)pthread_attr_setstacksize(&attr, HL_DB_DUCK_STMT_STACK);
+        ok = pthread_create(&ex->th, &attr, duck_exec_thread, ex) == 0;
+        pthread_attr_destroy(&attr);
+    }
+    if (!ok) {
+        duck_exec_free(ex);
+        return NULL;
+    }
+    return ex;
+}
+
+/* Stop and join an idle statement thread (duck_close). */
+static void duck_exec_stop(HlDuckExec *ex)
+{
+    if (!ex) return;
+    pthread_mutex_lock(&ex->mu);
+    ex->quit = 1;
+    pthread_cond_signal(&ex->cv);
+    pthread_mutex_unlock(&ex->mu);
+    pthread_join(ex->th, NULL);
+    duck_exec_free(ex);
+}
+
+static int duck_job_copy_input(HlDuckJob *j, const char *sql,
+                               const HlValue *params, int nparams)
+{
+    j->own_sql = strdup(sql);
+    if (!j->own_sql) return -1;
+    j->sql = j->own_sql;
+    j->nparams = nparams > 0 ? nparams : 0;
+    if (j->nparams) {
+        j->own_params = calloc((size_t)j->nparams, sizeof *j->own_params);
+        j->own_bufs = calloc((size_t)j->nparams, sizeof *j->own_bufs);
+        if (!j->own_params || !j->own_bufs) return -1;
+        for (int i = 0; i < j->nparams; i++) {
+            j->own_params[i] = params[i];
+            if ((params[i].type == HL_TYPE_TEXT ||
+                 params[i].type == HL_TYPE_BLOB) && params[i].s) {
+                char *c = malloc(params[i].len + 1);
+                if (!c) return -1;
+                memcpy(c, params[i].s, params[i].len);
+                c[params[i].len] = '\0';
+                j->own_bufs[i] = c;
+                j->own_params[i].s = c;
+            }
+        }
+    }
+    j->params = j->own_params;
+    return 0;
+}
+
+static void duck_deadline_after(struct timespec *ts, int ms)
+{
+    clock_gettime(CLOCK_REALTIME, ts);
+    ts->tv_nsec += (long)ms * 1000000L;
+    while (ts->tv_nsec >= 1000000000L) {
+        ts->tv_sec++;
+        ts->tv_nsec -= 1000000000L;
+    }
+}
+
+/* Run @p j for a caller whose run is bound: the statement runs on a thread
+ * of its own while this thread charges its tasks to the run and asks it every
+ * HL_DB_DUCK_SLICE_MS. One task can run for any time - a quadratic substring
+ * search (instr / strpos / contains / replace / LIKE) over long values,
+ * constant folding at prepare, an O(n*m) levenshtein - and nothing inside it
+ * looks at duckdb_interrupt: run on this thread, `SELECT instr(h, n)` over a
+ * few MB held the event loop past every deadline and SIGTERM, at 100% CPU,
+ * for days. Once the run trips, a statement still running
+ * HL_DB_DUCK_ABANDON_GRACE_MS later is ABANDONED: the call fails, the
+ * connection the statement holds goes with it (dropped, its transaction
+ * rolled back, once the statement ends) and the handle gets a new one. A
+ * TRANSACTION statement is not abandoned once prepared (see duck_job_run).
+ * Returns 0 when the job ended (its result in @p j, which the caller frees),
+ * 1 when it was abandoned (@p j is no longer the caller's), -1 when it could
+ * not start. */
+static int duck_run_bounded(HlDbDuckCtx *s, HlDuckJob *j)
+{
+    pthread_mutex_lock(&g_duck_abandoned_mu);
+    int full = g_duck_abandoned >= HL_DB_DUCK_MAX_ABANDONED;
+    pthread_mutex_unlock(&g_duck_abandoned_mu);
+    if (full) {
+        duck_set_err(s, "duckdb: too many statements abandoned at their run's "
+                        "time limit are still running; try again later");
+        return -1;
+    }
+    if (!s->exec && !(s->exec = duck_exec_start())) {
+        duck_set_err(s, "duckdb: could not start the statement's thread");
+        return -1;
+    }
+    HlDuckExec *ex = s->exec;
+    pthread_t th = ex->th;
+    j->refs = 2;
+    pthread_mutex_lock(&ex->mu);
+    ex->job = j;
+    pthread_cond_signal(&ex->cv);
+    pthread_mutex_unlock(&ex->mu);
+
+    int64_t charged = 0;
+    uint64_t trip_ms = 0;
+    int abandoned = 0;
+    pthread_mutex_lock(&j->mu);
+    while (j->phase != HL_DUCK_JOB_DONE) {
+        struct timespec ts;
+        duck_deadline_after(&ts, HL_DB_DUCK_SLICE_MS);
+        (void)pthread_cond_timedwait(&j->cv, &j->mu, &ts);
+        if (j->phase == HL_DUCK_JOB_DONE) break;
+        if (!j->stop) {
+            int64_t ran = j->tasks - charged;
+            charged = j->tasks;
+            pthread_mutex_unlock(&j->mu);
+            int t = hl_db_budget_charge(ran * HL_DB_DUCK_TASK_OPS) != 0;
+            pthread_mutex_lock(&j->mu);
+            if (t) {
+                j->stop = 1;
+                trip_ms = hl_db_monotonic_ms();
+            }
+            continue;
+        }
+        if ((j->phase == HL_DUCK_JOB_PREPARING || j->stoppable) &&
+            hl_db_monotonic_ms() - trip_ms >= HL_DB_DUCK_ABANDON_GRACE_MS) {
+            pthread_mutex_lock(&g_duck_abandoned_mu);
+            g_duck_abandoned++;
+            pthread_mutex_unlock(&g_duck_abandoned_mu);
+            j->abandoned = 1;
+            abandoned = 1;
+            break;
+        }
+    }
+    /* The tasks it ran since the last slice. */
+    int64_t ran = abandoned ? 0 : j->tasks - charged;
+    pthread_mutex_unlock(&j->mu);
+    if (ran > 0) (void)hl_db_budget_charge(ran * HL_DB_DUCK_TASK_OPS);
+    if (!abandoned) return 0;
+
+    log_warn("[hull:c] a DuckDB statement ran %d ms past its run's limit "
+             "inside one task and was abandoned; it keeps a thread busy "
+             "until it ends", HL_DB_DUCK_ABANDON_GRACE_MS);
+    duck_job_unref(j);
+    /* The statement keeps its thread: it frees itself once the statement
+     * ends (ex may already be gone). The next statement gets a new one. */
+    s->exec = NULL;
+    pthread_detach(th);
+    /* The old connection is the statement's now: a new one for the handle.
+     * A transaction open on the old one is gone with it, so every statement
+     * is refused until the app's ROLLBACK (as a Postgres connection lost
+     * inside a transaction). */
+    duckdb_connection fresh = NULL;
+    if (duckdb_connect(s->db, &fresh) != DuckDBSuccess) fresh = NULL;
+    s->con = fresh;
+    if (s->in_txn) s->txn_lost = 1;
+    duck_set_err(s, "interrupted (run limit exceeded; the statement was "
+                    "abandoned)");
+    return 1;
+}
+
+/* Run @p sql to a result in a new job (*@p out; NULL when it failed, with
+ * s->errmsg set). @p interrupted: the run's trip stopped it. */
+static int duck_run(HlDbDuckCtx *s, const char *sql, const HlValue *params,
+                    int nparams, HlDuckJob **out, int *interrupted)
+{
+    *out = NULL;
+    *interrupted = 0;
+    HlDuckJob *j = calloc(1, sizeof *j);
+    if (!j) {
+        duck_set_err(s, "out of memory");
+        return -1;
+    }
+    j->con = s->con;
+    j->phase = HL_DUCK_JOB_PREPARING;
+    j->stoppable = 1;
+    if (hl_db_budget_current().fn == NULL) {
+        /* No run to stop it: run here, as before. */
+        j->sql = sql;
+        j->params = params;
+        j->nparams = nparams;
+        duck_job_run(j);
+    } else {
+        j->threaded = 1;
+        if (pthread_mutex_init(&j->mu, NULL) != 0) {
+            free(j);
+            duck_set_err(s, "out of memory");
+            return -1;
+        }
+        if (pthread_cond_init(&j->cv, NULL) != 0) {
+            pthread_mutex_destroy(&j->mu);
+            free(j);
+            duck_set_err(s, "out of memory");
+            return -1;
+        }
+        int rc;
+        if (duck_job_copy_input(j, sql, params, nparams) != 0) {
+            duck_set_err(s, "out of memory");
+            rc = -1;
+        } else {
+            rc = duck_run_bounded(s, j);
+        }
+        if (rc == 1) {   /* abandoned: the thread frees it */
+            *interrupted = 1;
+            return -1;
+        }
+        if (rc < 0) {   /* no thread started */
+            duck_job_release(j);
+            pthread_cond_destroy(&j->cv);
+            pthread_mutex_destroy(&j->mu);
+            free(j);
+            return -1;
+        }
+    }
+    *out = j;
+    if (j->rc != 0) {
+        duck_set_err(s, j->err);
+        *interrupted = j->interrupted;
+        return -1;
+    }
+    return 0;
+}
+
+/* Free a job duck_run returned. A threaded one is DONE, but its thread may
+ * not have dropped its reference yet. */
+static void duck_job_free(HlDuckJob *j)
+{
+    if (!j) return;
+    duck_job_release(j);
+    if (j->threaded) duck_job_unref(j);
+    else free(j);
+}
+
 static int duck_refuse_sql(HlDbDuckCtx *s, const char *sql)
 {
     const char *msg = duck_sql_refusal(sql, s->deny_file_functions,
@@ -1023,31 +1460,34 @@ static int duck_query(HlDbHandle *h, const char *sql,
     if (!h || !h->ctx) return -1;
     HlDbDuckCtx *s = h->ctx;
     if (duck_refuse_sql(s, sql) != 0) return -1;
-
-    duckdb_prepared_statement stmt;
-    if (duckdb_prepare(s->con, sql, &stmt) != DuckDBSuccess) {
-        duck_set_err(s, duckdb_prepare_error(stmt));
-        duckdb_destroy_prepare(&stmt);
+    if (s->txn_lost) {
+        /* A statement in this transaction was abandoned with the connection
+         * that held it: only the app's ROLLBACK is taken, and answered done
+         * (there is nothing left to roll back). */
+        if (hl_sql_txn_kind(sql) == HL_SQL_TXN_ROLLBACK) {
+            s->txn_lost = 0;
+            s->in_txn = 0;
+            return 0;
+        }
+        duck_set_err(s, "the transaction was lost: a statement in it was "
+                        "abandoned at its run's time limit; ROLLBACK");
         return -1;
     }
-    if (duck_bind_params(stmt, params, nparams) != 0) {
-        duck_set_err(s, "duckdb parameter bind failed");
-        duckdb_destroy_prepare(&stmt);
+    if (!s->con) {
+        duck_set_err(s, "duckdb: no connection");
         return -1;
     }
 
-    int is_txn_stmt =
-        duckdb_prepared_statement_type(stmt) == DUCKDB_STATEMENT_TYPE_TRANSACTION;
-    duckdb_result result;
+    HlDuckJob *job = NULL;
     int interrupted = 0;
-    if (duck_execute(s, stmt, !is_txn_stmt, &result, &interrupted)
-        != DuckDBSuccess) {
-        duckdb_destroy_prepare(&stmt);
+    if (duck_run(s, sql, params, nparams, &job, &interrupted) != 0) {
         /* An interrupted statement never ran: the state is unchanged. */
-        if (is_txn_stmt && !interrupted) duck_track_txn(s, sql, 0);
+        if (job && job->is_txn && !interrupted) duck_track_txn(s, sql, 0);
+        duck_job_free(job);
         return -1;
     }
-    if (is_txn_stmt) duck_track_txn(s, sql, 1);
+    if (job->is_txn) duck_track_txn(s, sql, 1);
+    duckdb_result result = job->result;
 
     int rc = 0;
     if (cb) {
@@ -1085,8 +1525,7 @@ static int duck_query(HlDbHandle *h, const char *sql,
         }
     }
 
-    duckdb_destroy_result(&result);
-    duckdb_destroy_prepare(&stmt);
+    duck_job_free(job);   /* the result and the statement */
     return rc < 0 ? -1 : 0;
 }
 
@@ -1153,6 +1592,7 @@ static void duck_guard_stale_txn(HlDbHandle *h)
         fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
     duckdb_destroy_result(&res);
     s->in_txn = 0;
+    s->txn_lost = 0;
 }
 
 static int duck_in_txn(HlDbHandle *h)

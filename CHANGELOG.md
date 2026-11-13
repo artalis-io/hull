@@ -27,6 +27,28 @@ release-artifact layout).
 
 ### Fixed
 
+- **A DuckDB statement could hold the event loop past every deadline and SIGTERM.**
+  DuckDB looks at an interrupt only between execution tasks, and one task can run
+  for any time: its substring search is quadratic, so `instr` / `strpos` /
+  `contains` / `replace` / `LIKE '%x%'` over long values (600 KB: 3 s, 2 MB: 35 s,
+  and a projection of 2048 rows is one task) ran far past the run's deadline,
+  and constant folding did the same inside `duckdb_prepare`. Two servers spun at
+  100% CPU inside `instr` for 12 days.
+  - Under a run, a DuckDB statement now runs on the handle's own statement thread
+    while the calling thread charges its tasks and asks the run every 5 ms. 500 ms
+    after the run trips, a statement still running is abandoned: the call fails,
+    the statement keeps its thread and connection (dropped, its writes rolled back,
+    once it ends), and the handle continues on a new connection. A request whose
+    statement never ends is answered at its deadline + 500 ms (measured: 10.5 s
+    under the default 10 s `request_ms`, 35.4 s before), and SIGTERM exits at once.
+  - Inside a transaction, an abandoned statement takes the transaction with it:
+    every call but the app's `ROLLBACK` is refused until then.
+  - At most 4 abandoned statements run in the process; past that no DuckDB
+    statement starts under a run until one ends. An abandoned statement still uses
+    one CPU until it finishes.
+  - Statements run outside a run (migrations) still run inline. A statement under a
+    run costs about 30-60 us more.
+
 - **`hull test`, `hull agent test` and a built `app.main` binary had no `hull/gpu`.**
   Only the server's startup opened a GPU context, so in a GPU build an app requiring
   `hull.gpu` (`hull:gpu`) failed to load under `hull test` (Lua: `module not found`,

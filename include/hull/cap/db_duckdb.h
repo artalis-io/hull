@@ -48,6 +48,11 @@ void hl_db_duckdb_set_fs_policy_ex(const char *const *dirs, int ndirs,
 #define HL_DUCK_ROOT_ENTRIES_MAX 1024
 typedef int (*HlDuckRootEntryFn)(void *ud, const char *abs_path, int is_dir);
 int hl_db_duckdb_split_root(const char *root, HlDuckRootEntryFn fn, void *ud);
+
+/* Statements abandoned at their run's time limit that are still running
+ * (each on a thread of its own; see duck_run_bounded in cap/db_duckdb.c).
+ * For tests and diagnostics. */
+int hl_db_duckdb_abandoned_running(void);
 #endif
 
 #endif /* HL_CAP_DB_DUCKDB_H */

@@ -1580,6 +1580,141 @@ UTEST(duckdb_convergence_idb, ordinary_mode_b_files_still_work)
     idb_teardown(&t);
 }
 
+/* ── One long task (duckdb_task_bound) ────────────────────────────────
+ *
+ * DuckDB checks duckdb_interrupt only between tasks, and one task can run for
+ * any time: its naive substring search is quadratic, so instr / strpos /
+ * contains / replace / LIKE over a few MB is minutes to days inside ONE
+ * task, and constant folding runs the same work inside duckdb_prepare. Two
+ * servers spun at 100% CPU for 12 days inside instr, past every deadline and
+ * SIGTERM. A statement under a run now runs on a thread of its own and is
+ * abandoned HL_DB_DUCK_ABANDON_GRACE_MS (500 ms) after the run trips. */
+
+/* ~3 s of one task on an Apple M-series core (the search is quadratic:
+ * 160k / 80k is ~0.23 s), ~6 s for TB_SLOWER_ROW. */
+#define TB_SLOW_ROW \
+    "instr(repeat('a', 600000) || i::VARCHAR, repeat('a', 300000) || 'c')"
+#define TB_SLOWER_ROW \
+    "instr(repeat('a', 800000) || i::VARCHAR, repeat('a', 400000) || 'c')"
+
+/* Wait for every abandoned statement to end (each burns a CPU until then). */
+static int tb_drain(void)
+{
+    double until = mono_ms() + 120000.0;
+    while (hl_db_duckdb_abandoned_running() > 0) {
+        if (mono_ms() > until) return -1;
+        usleep(20000);
+    }
+    return 0;
+}
+
+/* Run @p sql under a budget that trips 300 ms from now; the time taken. */
+static double tb_timed(HlDbHandle *h, const char *sql, int *rc_out)
+{
+    double deadline = mono_ms() + 300.0;
+    HlDbBudgetBinding prev = hl_db_budget_swap(trips_at, &deadline);
+    double t0 = mono_ms();
+    *rc_out = hl_db_query(h, sql, NULL, 0, NULL, NULL, NULL);
+    double took = mono_ms() - t0;
+    hl_db_budget_restore(prev);
+    return took;
+}
+
+UTEST(duckdb_task_bound, one_long_task_stops_near_the_deadline)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    static const char *const slow[] = {
+        /* One row: one task, one call of the quadratic search. */
+        "SELECT " TB_SLOW_ROW " FROM range(1) t(i)",
+        /* Constant: folded inside duckdb_prepare, before any task. */
+        "SELECT instr(repeat('a', 600000) || 'b', repeat('a', 300000) || 'c')",
+        /* Other spellings of the same search. */
+        "SELECT strpos(repeat('a', 600000) || i::VARCHAR,"
+        " repeat('a', 300000) || 'c') FROM range(1) t(i)",
+        "SELECT (repeat('a', 600000) || i::VARCHAR) LIKE"
+        " ('%' || repeat('a', 300000) || 'c%') FROM range(1) t(i)",
+    };
+    for (size_t k = 0; k < sizeof slow / sizeof slow[0]; k++) {
+        int rc = 0;
+        double took = tb_timed(&h, slow[k], &rc);
+        EXPECT_EQ(-1, rc);
+        /* Trip at 300 ms + the 500 ms grace + slack; it ran ~3 s before. */
+        EXPECT_LT(took, 1500.0);
+        /* The handle goes on working, on a new connection. */
+        int64_t n = 0;
+        EXPECT_EQ(0, hl_db_query(&h, "SELECT 42", NULL, 0, count_cb, &n, NULL));
+        EXPECT_EQ(42, (int)n);
+    }
+    ASSERT_EQ(0, tb_drain());
+    h.backend->close(&h);
+}
+
+/* An abandoned statement takes its connection with it. Inside a
+ * transaction, everything until the app's ROLLBACK is refused (the
+ * transaction went with the connection), and nothing it or the transaction
+ * wrote is kept; an abandoned autocommit write is not kept either. */
+UTEST(duckdb_task_bound, abandoned_write_is_not_kept)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(0, hl_db_exec(&h, "CREATE TABLE tb (v BIGINT)", NULL, 0));
+
+    ASSERT_EQ(0, hl_db_begin(&h));
+    ASSERT_EQ(0, hl_db_exec(&h, "INSERT INTO tb VALUES (1)", NULL, 0));
+    int rc = 0;
+    double took = tb_timed(&h,
+        "INSERT INTO tb SELECT " TB_SLOW_ROW " FROM range(1) t(i)", &rc);
+    EXPECT_EQ(-1, rc);
+    EXPECT_LT(took, 1500.0);
+    EXPECT_TRUE(hl_db_in_txn(&h));
+    EXPECT_EQ(-1, hl_db_exec(&h, "INSERT INTO tb VALUES (2)", NULL, 0));
+    EXPECT_EQ(0, hl_db_exec(&h, "ROLLBACK", NULL, 0));
+    EXPECT_FALSE(hl_db_in_txn(&h));
+
+    took = tb_timed(&h,
+        "INSERT INTO tb SELECT " TB_SLOW_ROW " FROM range(1) t(i)", &rc);
+    EXPECT_EQ(-1, rc);
+    EXPECT_LT(took, 1500.0);
+
+    ASSERT_EQ(0, tb_drain());
+    int64_t n = -1;
+    ASSERT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM tb", NULL, 0,
+                             count_cb, &n, NULL));
+    EXPECT_EQ(0, (int)n);
+    h.backend->close(&h);
+}
+
+/* Each abandoned statement keeps a thread and a CPU until it ends: past
+ * HL_DB_DUCK_MAX_ABANDONED (4) no statement starts under a run, so a request
+ * loop cannot pile them up; outside a run (migrations) statements still run. */
+UTEST(duckdb_task_bound, abandoned_statements_are_capped)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    for (int k = 0; k < 4; k++) {
+        int rc = 0;
+        double took = tb_timed(&h,
+            "SELECT " TB_SLOWER_ROW " FROM range(1) t(i)", &rc);
+        EXPECT_EQ(-1, rc);
+        EXPECT_LT(took, 1500.0);
+    }
+    EXPECT_EQ(4, hl_db_duckdb_abandoned_running());
+    if (hl_db_duckdb_abandoned_running() == 4) {
+        int rc = 0;
+        double took = tb_timed(&h, "SELECT 1", &rc);
+        EXPECT_EQ(-1, rc);
+        EXPECT_LT(took, 100.0);
+        EXPECT_TRUE(strstr(hl_db_errmsg(&h), "abandoned") != NULL);
+        EXPECT_EQ(0, hl_db_exec(&h, "SELECT 1", NULL, 0));   /* unbound */
+    }
+    ASSERT_EQ(0, tb_drain());
+    int rc = 0;
+    (void)tb_timed(&h, "SELECT 1", &rc);
+    EXPECT_EQ(0, rc);
+    h.backend->close(&h);
+}
+
 UTEST_MAIN()
 
 #else  /* !HL_ENABLE_DUCKDB - no-op so the file is harmless in every flavor */
