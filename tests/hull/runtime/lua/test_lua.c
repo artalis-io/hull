@@ -12149,12 +12149,15 @@ UTEST(lua_audit10, asymmetric_crypto_is_charged)
                       LUA_OK, loops[i]);
         EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
     }
-    /* A few operations fit. */
+    /* A few operations fit. The limit here is 10M, not 1M: the binding
+     * dispatcher also charges each call's measured time (64 units / us), and
+     * 1M is only ~15 ms of it, which a preempted CI runner can spend on three
+     * scalar multiplications. Their fixed charge is ~49k units either way. */
     EXPECT_EQ(audit10_run(
         "local pk, sk = crypto.ed25519_keypair() "
         "local s = crypto.ed25519_sign('m', sk) "
         "assert(crypto.ed25519_verify('m', s, pk)) return 1",
-        1000000, err, sizeof err), LUA_OK);
+        10000000, err, sizeof err), LUA_OK);
 
     /* RSA is charged by size before the key is parsed: a 5000-byte PEM is
      * ~6.7k bits (7^3 * 2^14 units), a 1024-byte signature against a key
