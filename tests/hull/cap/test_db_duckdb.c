@@ -1784,7 +1784,14 @@ static int tb_counting(void *ud, int64_t units)
 UTEST(duckdb_task_bound, single_task_statements_charge_their_cpu)
 {
     HlDbHandle h = {0};
-    ASSERT_EQ(duck_open_mem(&h), 0);
+    /* One DuckDB thread: the task runs on the statement thread, whose CPU
+     * time is what is charged. With DuckDB's own workers (4 threads, the
+     * default) one of them can take it, and it is charged per task only - on
+     * Linux CI they did, and 15 statements cost ~150k units. */
+    hl_db_duckdb_test_set_threads(1);
+    int orc = duck_open_mem(&h);
+    hl_db_duckdb_test_set_threads(0);
+    ASSERT_EQ(orc, 0);
     /* CPU time is divided by HL_METER_SLOWDOWN in a sanitizer build (the
      * uninstrumented DuckDB runs at release speed there): so is the limit. */
     const int64_t limit = 30000000 / (int64_t)HL_METER_SLOWDOWN;

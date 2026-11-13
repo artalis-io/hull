@@ -61,6 +61,10 @@ void hl_db_duckdb_test_set_abandon_ceiling_ms(int ms);
 /* Test only, likewise: the references on @p path's shared instance (one per
  * open handle and per abandoned statement still running), 0 for none. */
 int hl_db_duckdb_test_instance_refs(const char *path);
+/* Test only, likewise: @p n == 1 opens later databases with one DuckDB thread,
+ * so every task runs on the statement thread (its CPU time is charged); any
+ * other value restores the default 4. */
+void hl_db_duckdb_test_set_threads(int n);
 #endif
 
 #endif /* HL_CAP_DB_DUCKDB_H */

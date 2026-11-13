@@ -298,6 +298,28 @@ static char *duck_alloc_list(const char *const *arr, int n)
  *
  * These options are set at config time (before open); lock_configuration is
  * applied last so the config-time sets are not themselves rejected. */
+
+/* DuckDB's thread count (pinned; see below). A test build can pin it to 1 so
+ * every task runs on the thread that asks for it: with DuckDB's own workers a
+ * task they take is charged per task only, not by its CPU time (see
+ * duck_work_units). */
+#ifdef HL_DUCKDB_TEST_HOOKS
+static int g_duck_test_threads;
+void hl_db_duckdb_test_set_threads(int n)
+{
+    __atomic_store_n(&g_duck_test_threads, n, __ATOMIC_RELAXED);
+}
+static const char *duck_threads_setting(void)
+{
+    return __atomic_load_n(&g_duck_test_threads, __ATOMIC_RELAXED) == 1 ? "1" : "4";
+}
+#else
+static const char *duck_threads_setting(void)
+{
+    return "4";
+}
+#endif
+
 static int duck_apply_config_security(duckdb_config config)
 {
     /* Each returns DuckDBSuccess/Error; a rejected option name is fatal (the
@@ -316,7 +338,7 @@ static int duck_apply_config_security(duckdb_config config)
      * them tunable (tracked in docs/duckdb_backend_design.md §3.2). */
     if (duckdb_set_config(config, "memory_limit", "2GB") != DuckDBSuccess)
         return -1;
-    if (duckdb_set_config(config, "threads", "4") != DuckDBSuccess)
+    if (duckdb_set_config(config, "threads", duck_threads_setting()) != DuckDBSuccess)
         return -1;
     /* Mode B enables external access but bounds it to allowed_directories;
      * mode A leaves it off (DB file + :memory: only). */
@@ -1498,7 +1520,10 @@ static int duck_job_copy_input(HlDuckJob *j, const char *sql,
  * the call: without this a loop of single-task statements, each one long
  * task, cost ~10000 units a statement (a 300 ms one ~33x less than its
  * time). Units charged during the call count against the dispatcher's own
- * measure (hl_meter_settle), so nothing is charged twice. */
+ * measure (hl_meter_settle), so nothing is charged twice. A task one of
+ * DuckDB's own worker threads takes (threads = 4) is not on this clock: it is
+ * charged HL_DB_DUCK_TASK_OPS only, as before the statement thread, and
+ * bounded by the run's deadline, the abandon and the exit ceiling. */
 static int64_t duck_work_units(const HlDuckExec *ex, int64_t tasks,
                                uint64_t *cpu_last, uint64_t *wall_last)
 {
