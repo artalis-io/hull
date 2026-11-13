@@ -1698,10 +1698,15 @@ UTEST(duckdb_task_bound, abandoned_statements_are_capped)
 {
     HlDbHandle h = {0};
     ASSERT_EQ(duck_open_mem(&h), 0);
+    /* Four rows in one task: the first statement must still run when the
+     * fourth is abandoned ~3 s later, and on Linux CI one row of
+     * TB_SLOWER_ROW had already ended. A ceiling well past the run time, so
+     * the process does not exit under a loaded runner. */
+    hl_db_duckdb_test_set_abandon_ceiling_ms(600000);
     for (int k = 0; k < 4; k++) {
         int rc = 0;
         double took = tb_timed(&h,
-            "SELECT " TB_SLOWER_ROW " FROM range(1) t(i)", &rc);
+            "SELECT " TB_SLOWER_ROW " FROM range(4) t(i)", &rc);
         EXPECT_EQ(-1, rc);
         EXPECT_LT(took, 1500.0);
     }
@@ -1715,6 +1720,7 @@ UTEST(duckdb_task_bound, abandoned_statements_are_capped)
         EXPECT_EQ(0, hl_db_exec(&h, "SELECT 1", NULL, 0));   /* unbound */
     }
     ASSERT_EQ(0, tb_drain());
+    hl_db_duckdb_test_set_abandon_ceiling_ms(0);
     int rc = 0;
     (void)tb_timed(&h, "SELECT 1", &rc);
     EXPECT_EQ(0, rc);
