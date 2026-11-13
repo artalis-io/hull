@@ -27,6 +27,23 @@ release-artifact layout).
 
 ### Fixed
 
+- **A GPU build on a host with no GPU device could not load a JS app importing `hull:gpu`.**
+  The runtimes registered `hull.gpu` / `hull:gpu` only when a device was found, so a
+  declared `import { gpu } from "hull:gpu"` failed the app's load ("unknown hull module"),
+  and in Lua `require("hull.gpu")` raised `module not found` (only a `pcall` let the app
+  fall back).
+  - Both runtimes now register the module whenever the binary has a GPU backend (a
+    monolithic `HL_ENABLE_GPU` build or a composed `--with=gpu`;
+    `hl_gpu_backend_present`). With no device, `gpu.available()` is false,
+    `gpu.devices()` is empty, and every other call (including `gpu.async.*`) raises
+    `gpu.<name>: no GPU device on this host`. The module gate and the optional `?`
+    form are unchanged: an undeclared `hull/gpu` is still refused, and a binary with
+    no backend still binds `null` for `"hull/gpu@1?"`.
+  - A test build (`HL_GPU_HELPER_TEST_HOOKS=1`) takes `HULL_TEST_GPU_NO_DEVICE=1` to act
+    as a host with no device; `tests/e2e_gpu_hull_test.sh` now runs its Lua and JS legs
+    that way too (the JS leg was skipped without a device), plus unit tests in both
+    runtimes over the mock backend.
+
 - **`hull test`, `hull agent test` and a built `app.main` binary had no `hull/gpu`.**
   Only the server's startup opened a GPU context, so in a GPU build an app requiring
   `hull.gpu` (`hull:gpu`) failed to load under `hull test` (Lua: `module not found`,

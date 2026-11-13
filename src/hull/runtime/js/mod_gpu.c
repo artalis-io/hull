@@ -2729,48 +2729,111 @@ opts_done:
     return promise;
 }
 
+typedef struct {
+    const char  *name;
+    JSCFunction *fn;
+    int          length;
+} JsGpuFn;
+
+static const JsGpuFn js_gpu_funcs[] = {
+    { "available",   js_gpu_available,   0 },
+    { "devices",     js_gpu_devices,     0 },
+    { "compile",     js_gpu_compile,     2 },
+    { "load",        js_gpu_load,        2 },
+    { "dispatch",    js_gpu_dispatch,    2 },
+    { "pipeline",    js_gpu_pipeline,    2 },
+    { "buffer",      js_gpu_buffer,      3 },
+    { "bufferRead",  js_gpu_buffer_read, 1 },
+    { "bufferCopy",  js_gpu_buffer_copy, 3 },
+    { "texture",     js_gpu_texture,     3 },
+#ifdef HL_ENABLE_IMAGE
+    { "textureRead", js_gpu_texture_read, 1 },
+#endif
+    { NULL, NULL, 0 }
+};
+
+static const JsGpuFn js_gpu_async_funcs[] = {
+    { "compile",  js_gpu_async_compile,  2 },
+    { "load",     js_gpu_async_load,     1 },
+    { "dispatch", js_gpu_async_dispatch, 2 },
+    { "pipeline", js_gpu_async_pipeline, 2 },
+    { NULL, NULL, 0 }
+};
+
+/* Every gpu.* call but available / devices on a binary whose backend found
+ * no device. data[0]: the call's name. */
+static JSValue js_gpu_no_device(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv, int magic,
+                                JSValueConst *data)
+{
+    (void)this_val; (void)argc; (void)argv; (void)magic;
+    const char *name = JS_ToCString(ctx, data[0]);
+    JSValue err = JS_ThrowInternalError(ctx, "%s: no GPU device on this host "
+                                        "(check gpu.available() first)",
+                                        name ? name : "gpu");
+    if (name)
+        JS_FreeCString(ctx, name);
+    return err;
+}
+
+/* The real bindings with a device, else the same names with available /
+ * devices real (false / []) and every other call throwing - the shape of
+ * Lua's hull.gpu on such a host. */
+static int js_gpu_fill(JSContext *ctx, JSValue obj, const JsGpuFn *f,
+                       const char *prefix, int has_device)
+{
+    for (; f->name; f++) {
+        JSValue fn;
+        if (has_device || f->fn == js_gpu_available ||
+            f->fn == js_gpu_devices) {
+            fn = JS_NewCFunction(ctx, f->fn, f->name, f->length);
+        } else {
+            char full[64];
+            snprintf(full, sizeof(full), "%s%s", prefix, f->name);
+            JSValue nm = JS_NewString(ctx, full);
+            if (JS_IsException(nm))
+                return -1;
+            fn = JS_NewCFunctionData(ctx, js_gpu_no_device, f->length, 0,
+                                     1, &nm);
+            JS_FreeValue(ctx, nm);
+        }
+        if (JS_IsException(fn) ||
+            JS_SetPropertyStr(ctx, obj, f->name, fn) < 0)
+            return -1;
+    }
+    return 0;
+}
+
 static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
 {
     if (hl_js_check_module_declared(ctx, "hull/gpu", "hull:gpu") != 0) return -1;
 
+    int has_device = js_get_gpu_ctx(ctx) != NULL;
     JSValue gpu = JS_NewObject(ctx);
-
-    JS_SetPropertyStr(ctx, gpu, "available",
-                      JS_NewCFunction(ctx, js_gpu_available, "available", 0));
-    JS_SetPropertyStr(ctx, gpu, "devices",
-                      JS_NewCFunction(ctx, js_gpu_devices, "devices", 0));
-    JS_SetPropertyStr(ctx, gpu, "compile",
-                      JS_NewCFunction(ctx, js_gpu_compile, "compile", 2));
-    JS_SetPropertyStr(ctx, gpu, "load",
-                      JS_NewCFunction(ctx, js_gpu_load, "load", 2));
-    JS_SetPropertyStr(ctx, gpu, "dispatch",
-                      JS_NewCFunction(ctx, js_gpu_dispatch, "dispatch", 2));
-    JS_SetPropertyStr(ctx, gpu, "pipeline",
-                      JS_NewCFunction(ctx, js_gpu_pipeline, "pipeline", 2));
-    JS_SetPropertyStr(ctx, gpu, "buffer",
-                      JS_NewCFunction(ctx, js_gpu_buffer, "buffer", 3));
-    JS_SetPropertyStr(ctx, gpu, "bufferRead",
-                      JS_NewCFunction(ctx, js_gpu_buffer_read, "bufferRead", 1));
-    JS_SetPropertyStr(ctx, gpu, "bufferCopy",
-                      JS_NewCFunction(ctx, js_gpu_buffer_copy, "bufferCopy", 3));
-    JS_SetPropertyStr(ctx, gpu, "texture",
-                      JS_NewCFunction(ctx, js_gpu_texture, "texture", 3));
-#ifdef HL_ENABLE_IMAGE
-    JS_SetPropertyStr(ctx, gpu, "textureRead",
-                      JS_NewCFunction(ctx, js_gpu_texture_read, "textureRead", 1));
-#endif
+    if (JS_IsException(gpu))
+        return -1;
+    if (js_gpu_fill(ctx, gpu, js_gpu_funcs, "gpu.", has_device) != 0) {
+        JS_FreeValue(ctx, gpu);
+        return -1;
+    }
 
     /* gpu.async sub-object */
     JSValue async_obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, async_obj, "compile",
-                      JS_NewCFunction(ctx, js_gpu_async_compile, "compile", 2));
-    JS_SetPropertyStr(ctx, async_obj, "load",
-                      JS_NewCFunction(ctx, js_gpu_async_load, "load", 1));
-    JS_SetPropertyStr(ctx, async_obj, "dispatch",
-                      JS_NewCFunction(ctx, js_gpu_async_dispatch, "dispatch", 2));
-    JS_SetPropertyStr(ctx, async_obj, "pipeline",
-                      JS_NewCFunction(ctx, js_gpu_async_pipeline, "pipeline", 2));
-    JS_SetPropertyStr(ctx, gpu, "async", async_obj);
+    if (JS_IsException(async_obj)) {
+        JS_FreeValue(ctx, gpu);
+        return -1;
+    }
+    if (js_gpu_fill(ctx, async_obj, js_gpu_async_funcs, "gpu.async.",
+                    has_device) != 0) {
+        JS_FreeValue(ctx, async_obj);
+        JS_FreeValue(ctx, gpu);
+        return -1;
+    }
+    /* Takes async_obj, failure or not. */
+    if (JS_SetPropertyStr(ctx, gpu, "async", async_obj) < 0) {
+        JS_FreeValue(ctx, gpu);
+        return -1;
+    }
 
     hl_js_export_frozen(ctx, m, "gpu", gpu);
     return 0;

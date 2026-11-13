@@ -316,6 +316,24 @@ static const HlGpuBackend GPU_MOCK_BACKEND = {
     .texture_destroy   = gpu_mock_texture_destroy,
 };
 
+/* A composed GPU feature backend, off unless a test turns it on: off, this
+ * strong override answers as the base's weak hook does (none). On, the
+ * binary "has a GPU backend" (hl_gpu_backend_present), so the runtimes
+ * register hull.gpu / hull:gpu even with no context - the shape an app sees
+ * on a host whose backend found no device. */
+static int gpu_mock_feature_on;
+
+const HlGpuBackend *const *hl_gpu_feature_backends(size_t *count)
+{
+    static const HlGpuBackend *const list[] = { &GPU_MOCK_BACKEND };
+    if (!gpu_mock_feature_on) {
+        if (count) *count = 0;
+        return NULL;
+    }
+    if (count) *count = 1;
+    return list;
+}
+
 /* A context with `devices` devices named mock0, mock1, ... and no allowlist. */
 static inline HlGpuCtx *gpu_mock_ctx(int devices)
 {
