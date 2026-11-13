@@ -14515,6 +14515,13 @@ UTEST(js_audit46, test_eq_bigint_message)
                        "e.message.indexOf('1n') > 0) ? 1 : 2; } })()"), 1);
     EXPECT_EQ(eval_int("(() => { try { test.eq(1n, 1); return 0; } catch (e) { "
                        "return e.message.indexOf('test.eq failed') === 0 ? 1 : 2; } })()"), 1);
+    /* A boxed BigInt: JSON.stringify unwraps it after the replacer. */
+    EXPECT_EQ(eval_int("(() => { try { test.eq(Object(1n), 2n); return 0; } catch (e) { "
+                       "return (e.message.indexOf('test.eq failed') === 0 && "
+                       "e.message.indexOf('1n') > 0) ? 1 : 2; } })()"), 1);
+    EXPECT_EQ(eval_int("(() => { try { test.eq({ a: Object(1n) }, 2); return 0; } catch (e) { "
+                       "return (e.message.indexOf('test.eq failed') === 0 && "
+                       "e.message.indexOf('1n') > 0) ? 1 : 2; } })()"), 1);
     /* Equal BigInts still pass. */
     EXPECT_EQ(eval_int("(() => { test.eq(2n ** 70n, 2n ** 70n); return 1; })()"), 1);
     kl_http_router_free(&router);

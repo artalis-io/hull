@@ -183,12 +183,15 @@ local function main()
     local rec = read_record(out) or { files = {} }
     local embedded = {}
     local stale, conflicts, writes = {}, {}, {}
+    -- Paths that run through a symbolic link below out: never written or
+    -- removed, and --force does not change that.
+    local links = {}
     for _, f in ipairs(files) do
         embedded[f.name] = true
         local path = join(out, f.name)
         local link = link_below(out, f.name)
         if link then
-            conflicts[#conflicts + 1] = f.name .. " (" .. link .. " is a symbolic link)"
+            links[link] = true
         elseif not tool.file_exists(path) then
             writes[#writes + 1] = f
         elseif tool.read_file(path) ~= f.body then
@@ -211,18 +214,21 @@ local function main()
             local path = join(out, name)
             local link = link_below(out, name)
             if link then
-                conflicts[#conflicts + 1] = name .. " (" .. link .. " is a symbolic link)"
+                links[link] = true
             elseif tool.file_exists(path) and tool.sha256_file(path) == hash then
                 stale[#stale + 1] = name
             end
         end
     end
+    local link_list = {}
+    for l in pairs(links) do link_list[#link_list + 1] = l end
     table.sort(stale)
     table.sort(conflicts)
     table.sort(ignored)
+    table.sort(link_list)
 
     if opts.check then
-        local bad = #writes + #stale + #conflicts + #ignored
+        local bad = #writes + #stale + #conflicts + #ignored + #link_list
         if rec.version ~= version then bad = bad + 1 end
         if bad == 0 then
             print("hull types: " .. out .. " matches hull " .. version)
@@ -232,6 +238,10 @@ local function main()
                     "'s declarations (installed: " .. tool.escape(rec.version or "none") .. ")\n")
         for _, f in ipairs(writes) do tool.stderr("  differs   " .. tool.escape(f.name) .. "\n") end
         for _, n in ipairs(conflicts) do tool.stderr("  edited    " .. tool.escape(n) .. "\n") end
+        for _, l in ipairs(link_list) do
+            tool.stderr("  link      " .. tool.escape(l) .. " (a symbolic link below " ..
+                        tool.escape(out) .. ")\n")
+        end
         for _, n in ipairs(stale) do tool.stderr("  stale     " .. tool.escape(n) .. "\n") end
         for _, n in ipairs(ignored) do
             tool.stderr("  ignored   " .. tool.escape(n) .. " (a record entry hull types never writes)\n")
@@ -240,10 +250,21 @@ local function main()
         tool.exit(1)
     end
 
-    if #conflicts > 0 then
-        tool.stderr("hull types: these files were edited or not written by hull; nothing was written:\n")
-        for _, n in ipairs(conflicts) do tool.stderr("  " .. tool.escape(join(out, n)) .. "\n") end
-        tool.stderr("Re-run with --force to replace them.\n")
+    if #link_list > 0 or #conflicts > 0 then
+        if #link_list > 0 then
+            tool.stderr("hull types: nothing was written; hull types does not write or remove " ..
+                        "through symbolic links:\n")
+            for _, l in ipairs(link_list) do
+                tool.stderr("  " .. tool.escape(l) .. ": a symbolic link below " ..
+                            tool.escape(out) .. " - remove it\n")
+            end
+        end
+        if #conflicts > 0 then
+            tool.stderr("hull types: these files were edited or not written by hull; " ..
+                        "nothing was written:\n")
+            for _, n in ipairs(conflicts) do tool.stderr("  " .. tool.escape(join(out, n)) .. "\n") end
+            tool.stderr("Re-run with --force to replace them.\n")
+        end
         tool.exit(1)
     end
 
@@ -266,7 +287,11 @@ local function main()
     local removed, unremoved = 0, {}
     for _, n in ipairs(stale) do
         if tool.remove_file(join(out, n)) then removed = removed + 1
-        else unremoved[#unremoved + 1] = n end
+        else
+            unremoved[#unremoved + 1] = n
+            -- Kept in the record, so the next run tries again.
+            hashes[n] = rec.files[n]
+        end
     end
     if not write_record(out, version, hashes) then fail("cannot write " .. join(out, RECORD)) end
 

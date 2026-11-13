@@ -90,23 +90,30 @@ check "--check reports the foreign entry" "[ $rc -ne 0 ] && echo \"\$out\" | gre
 check "--check deleted nothing either" "[ -f '$S/victim/vcs/HEAD' ]"
 
 echo "── types_audit46.symlinked_dir: no write or removal through a linked directory ──"
-A3=$WORK/a46b; mkdir -p "$A3" "$WORK/a46out"; echo x > "$A3/app.js"
+# The link targets are in the app tree, where the tool sandbox lets hull
+# types write: only the link check stops it.
+A3=$WORK/a46b; mkdir -p "$A3/src"; echo x > "$A3/app.js"
 (cd "$A3" && "$HULL" types >/dev/null 2>&1)
-rm -rf "$A3/types/hull/modules"; ln -s "$WORK/a46out" "$A3/types/hull/modules"
+cp "$A3"/types/hull/modules/*.d.ts "$A3/src/"
+printf '\n// my own source\n' >> "$A3/src/db.d.ts"
+rm -rf "$A3/types/hull/modules"; ln -s ../../src "$A3/types/hull/modules"
 out=$(cd "$A3" && "$HULL" types --force 2>&1); rc=$?
-check "a symlinked types/hull/modules is refused" "[ $rc -ne 0 ] && [ -z \"\$(ls '$WORK/a46out')\" ]"
+check "a symlinked types/hull/modules is refused, even with --force" \
+      "[ $rc -ne 0 ] && grep -q 'my own source' '$A3/src/db.d.ts'"
+check "the link is named, with no --force advice" \
+      "echo \"\$out\" | grep -q 'symbolic link' && ! echo \"\$out\" | grep -q 'Re-run with --force'"
 # A recorded stale file reached through a linked directory is not removed.
 rm "$A3/types/hull/modules"; (cd "$A3" && "$HULL" types >/dev/null 2>&1)
-mkdir -p "$WORK/a46old"; printf 'declare const gone: 1;\n' > "$WORK/a46old/gone.d.ts"
-ln -s "$WORK/a46old" "$A3/types/hull/old"
-printf '%s hull/old/gone.d.ts\n' "$(sha "$WORK/a46old/gone.d.ts")" >> "$A3/types/hull/.hull-types"
+mkdir -p "$A3/old"; printf 'declare const gone: 1;\n' > "$A3/old/gone.d.ts"
+ln -s ../../old "$A3/types/hull/old"
+printf '%s hull/old/gone.d.ts\n' "$(sha "$A3/old/gone.d.ts")" >> "$A3/types/hull/.hull-types"
 (cd "$A3" && "$HULL" types >/dev/null 2>&1); rc=$?
-check "a stale file behind a linked directory is kept (and refused)" "[ $rc -ne 0 ] && [ -f '$WORK/a46old/gone.d.ts' ]"
+check "a stale file behind a linked directory is kept (and refused)" "[ $rc -ne 0 ] && [ -f '$A3/old/gone.d.ts' ]"
 rm "$A3/types/hull/old"
 # A symlinked tests/ gets no tsconfig.json.
-A4=$WORK/a46c; mkdir -p "$A4" "$WORK/a46tests"; echo x > "$A4/app.js"; ln -s "$WORK/a46tests" "$A4/tests"
+A4=$WORK/a46c; mkdir -p "$A4/other"; echo x > "$A4/app.js"; ln -s other "$A4/tests"
 (cd "$A4" && "$HULL" types >/dev/null 2>&1)
-check "no tsconfig.json written into a linked tests/" "[ ! -f '$WORK/a46tests/tsconfig.json' ]"
+check "no tsconfig.json written into a linked tests/" "[ ! -f '$A4/other/tsconfig.json' ]"
 
 echo "── types_audit46.removed_count: a refused removal is not counted ──"
 A5=$WORK/a46d; mkdir -p "$A5"; echo x > "$A5/app.js"
@@ -118,6 +125,10 @@ out=$(cd "$A5" && "$HULL" types 2>&1)
 if [ -f "$A5/types/hull/ro/gone.d.ts" ]; then
     check "a failed removal is not counted" "echo \"\$out\" | grep -q ' 0 removed'"
     check "a failed removal is reported" "echo \"\$out\" | grep -q 'could not remove'"
+    check "a failed removal stays in the record" "grep -q 'hull/ro/gone.d.ts' '$A5/types/hull/.hull-types'"
+    chmod 755 "$A5/types/hull/ro"
+    out=$(cd "$A5" && "$HULL" types 2>&1)
+    check "the next run removes it" "[ ! -f '$A5/types/hull/ro/gone.d.ts' ] && echo \"\$out\" | grep -q ' 1 removed'"
 else
     echo "  skip  removal count (running as root)"
 fi
