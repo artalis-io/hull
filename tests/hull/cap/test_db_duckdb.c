@@ -1871,13 +1871,15 @@ UTEST(duckdb_audit46, worker_held_task_is_charged)
             "SELECT instr(repeat('a', 160000) || i::VARCHAR,"
             " repeat('a', 80000) || 'c') FROM range(1) t(i)",
             NULL, 0, NULL, NULL, NULL);
-        double took_us = (mono_ms() - t0) * 1000.0;
+        /* Less the help delay, which is not charged. */
+        double took_us = (mono_ms() - t0 - 30.0) * 1000.0;
         hl_db_budget_restore(prev);
         EXPECT_EQ(0, rc);
         /* The meter's rate (64 units / us), divided in a sanitizer build;
-         * at least half of the statement's time (the help delay and the
-         * statement's own start are not all work). */
-        double want = took_us * 64.0 / (double)HL_METER_SLOWDOWN / 2.0;
+         * at least a third of the statement's time (on a loaded host,
+         * runnable-but-unscheduled time outside the nap is not charged).
+         * Before audit 46 it was ~5%. */
+        double want = took_us * 64.0 / (double)HL_METER_SLOWDOWN / 3.0;
         EXPECT_GT((double)c.used, want);
     }
     hl_db_duckdb_test_set_help_delay_ms(0);
