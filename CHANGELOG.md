@@ -8,6 +8,29 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-13
+
+TypeScript declarations for the JavaScript API and a `hull types` command, then fixes: a DuckDB
+statement stuck inside one execution task can no longer hold a server past every deadline and
+SIGTERM, `hull/gpu` loads under `hull test`, `hull agent test` and a built `app.main` binary and on
+a GPU build with no device, and `hull test` fixes in both runtimes. A minor release for the new
+command. Read the upgrade notes: JS `test.eq` is stricter, and a DuckDB-backed process can now end
+itself.
+
+### Upgrade notes
+
+- **JS `test.eq` is `===`.** `test.eq(0, null)`, `test.eq(1, true)`, `test.eq(null, undefined)`
+  and strings that differ only after a NUL used to pass; a JS test relying on that now fails.
+  Lua `test.eq` is unchanged.
+- **A DuckDB statement still running 60 s after its run's deadline ends the process** (one FATAL
+  line, exit status 75), so run a DuckDB-backed app under a supervisor that restarts it. The
+  request itself is answered by its deadline + 500 ms. DuckDB work done on the statement thread
+  is now charged to the run's instruction budget, so a request that runs long single-task
+  queries (a substring search over large values) can hit the budget where it did not before.
+- **`require("hull.gpu")` / `import { gpu } from "hull:gpu"` succeeds on a GPU build with no
+  device**, with `gpu.available()` false. Code that took a successful `pcall(require, "hull.gpu")`
+  to mean a device exists should test `gpu.available()`.
+
 ### Added
 
 - **TypeScript declarations for Hull's JavaScript API, and `hull types`.** `.d.ts` files
