@@ -48,6 +48,44 @@ void hl_db_budget_restore(HlDbBudgetBinding prev)
     (void)prev;
 }
 
+/* The statement thread (deadline-bounded runs): the caller reads the bound
+ * budget and the clock, and converts the statement thread's CPU time with the
+ * binding meter's rates. With no budget bound (above), every statement runs
+ * inline and these are only linked, never reached. */
+HlDbBudgetBinding hl_db_budget_current(void)
+{
+    HlDbBudgetBinding none = {0};
+    return none;
+}
+
+uint64_t hl_db_monotonic_ms(void)
+{
+    return 0;
+}
+
+uint64_t hl_meter_ns_units(uint64_t ns);
+uint64_t hl_meter_ns_units(uint64_t ns)
+{
+    return ns / 1000;
+}
+
+uint64_t hl_meter_ticks_units(uint64_t ticks);
+uint64_t hl_meter_ticks_units(uint64_t ticks)
+{
+    return ticks;
+}
+
+/* log.c lives in the platform lib; the backend logs only on its abandon
+ * paths, which a smoke with no budget never takes. */
+void log_log(int level, const char *file, int line, const char *fmt, ...);
+void log_log(int level, const char *file, int line, const char *fmt, ...)
+{
+    (void)level;
+    (void)file;
+    (void)line;
+    (void)fmt;
+}
+
 int hl_cap_db_sql_calls_dynamic_sql(const char *sql);
 int hl_cap_db_sql_calls_dynamic_sql(const char *sql)
 {

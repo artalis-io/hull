@@ -27,6 +27,35 @@ release-artifact layout).
 
 ### Fixed
 
+- **A DuckDB statement could hold the event loop past every deadline and SIGTERM.**
+  DuckDB looks at an interrupt only between execution tasks, and one task can run
+  for any time: its substring search is quadratic, so `instr` / `strpos` /
+  `contains` / `replace` / `LIKE '%x%'` over long values (600 KB: 3 s, 2 MB: 35 s,
+  and a projection of 2048 rows is one task) ran far past the run's deadline,
+  and constant folding did the same inside `duckdb_prepare`. Two servers spun at
+  100% CPU inside `instr` for 12 days.
+  - Under a run, a DuckDB statement now runs on the handle's own statement thread
+    while the calling thread charges its tasks and asks the run every 5 ms. 500 ms
+    after the run trips, a statement still running is abandoned: the call fails,
+    the statement keeps its thread and connection (dropped, its writes rolled back,
+    once it ends), and the handle continues on a new connection. A request whose
+    statement never ends is answered by its deadline + 500 ms at the latest (the
+    2 MB `instr` took 35.4 s before), and SIGTERM exits at once.
+  - Inside a transaction, an abandoned statement takes the transaction with it:
+    every call but the app's `ROLLBACK` is refused until then.
+  - An abandoned statement still running 60 s later ends the process (one FATAL
+    line, exit status 75), as `--vm-thread`'s ceiling does, so a supervisor
+    restarts it: nothing in-process can stop the statement, and it holds a CPU.
+  - At most 4 abandoned statements run in the process; past that no DuckDB
+    statement starts under a run until one ends.
+  - The statement thread's CPU time is charged to the run, so a loop of long
+    single-task statements trips the instruction budget (the 2 MB `instr` above
+    now ends at 2.1 s on the default budget).
+  - An abandoned statement keeps its reference on the file's shared instance, so
+    reopening the file while it runs does not make a second instance.
+  - Statements run outside a run (migrations) still run inline. A statement under a
+    run costs about 30-60 us more.
+
 - **A GPU build on a host with no GPU device could not load a JS app importing `hull:gpu`.**
   The runtimes registered `hull.gpu` / `hull:gpu` only when a device was found, so a
   declared `import { gpu } from "hull:gpu"` failed the app's load ("unknown hull module"),

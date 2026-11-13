@@ -145,6 +145,16 @@ GPU_HELPER_TH_OBJ := $(BUILDDIR)/cap_gpu_helper_th.o
 # checks run on every CI host - audit 44).
 HOST_TH_OBJ := $(BUILDDIR)/host_th.o
 TEST_CAP_OBJS := $(filter-out $(BUILDDIR)/cap_gpu_helper.o $(HOST_OBJ),$(CAP_OBJS)) $(GPU_HELPER_TH_OBJ) $(HOST_TH_OBJ)
+# cap/db_duckdb.c likewise (DuckDB builds only): the tests link
+# cap_db_duckdb_th.o, built with -DHL_DUCKDB_TEST_HOOKS
+# (hl_db_duckdb_test_set_abandon_ceiling_ms, so the abandoned-statement exit
+# ceiling is tested in seconds, not a minute).
+ifeq ($(HL_ENABLE_DUCKDB),1)
+DUCKDB_TH_OBJ := $(BUILDDIR)/cap_db_duckdb_th.o
+TEST_CAP_OBJS := $(filter-out $(BUILDDIR)/cap_db_duckdb.o,$(TEST_CAP_OBJS)) $(DUCKDB_TH_OBJ)
+$(DUCKDB_TH_OBJ): $(SRCDIR)/hull/cap/db_duckdb.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_DUCKDB_TEST_HOOKS $(INCLUDES) -c -o $@ $<
+endif
 $(GPU_HELPER_TH_OBJ): $(SRCDIR)/hull/cap/gpu_helper.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_GPU_HELPER_TEST_HOOKS $(INCLUDES) -c -o $@ $<
 $(HOST_TH_OBJ): $(SRCDIR)/hull/shared/host.c $(INCDIR)/hull/shared/host.h | $(BUILDDIR)

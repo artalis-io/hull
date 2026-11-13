@@ -17,6 +17,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_duckdb.h"
 #include "hull/cap/db_budget.h"
+#include "hull/shared/dispatch_meter.h"   /* HL_METER_SLOWDOWN */
 #include "hull/cap/types.h"
 
 #pragma GCC diagnostic push
@@ -32,6 +33,11 @@
 #include <limits.h>   /* PATH_MAX */
 #include <sys/stat.h> /* mkdir */
 #include <dirent.h>   /* opendir: idb_rm_tree */
+#include <spawn.h>    /* posix_spawn: the ceiling child */
+#include <sys/wait.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>   /* _NSGetExecutablePath */
+#endif
 
 /* Open a fresh in-memory DuckDB handle. */
 static int duck_open_mem(HlDbHandle *h)
@@ -1578,6 +1584,315 @@ UTEST(duckdb_convergence_idb, ordinary_mode_b_files_still_work)
     h.backend->close(&h);
     idb_split_free(&sp);
     idb_teardown(&t);
+}
+
+/* ── One long task (duckdb_task_bound) ────────────────────────────────
+ *
+ * DuckDB checks duckdb_interrupt only between tasks, and one task can run for
+ * any time: its naive substring search is quadratic, so instr / strpos /
+ * contains / replace / LIKE over a few MB is minutes to days inside ONE
+ * task, and constant folding runs the same work inside duckdb_prepare. Two
+ * servers spun at 100% CPU for 12 days inside instr, past every deadline and
+ * SIGTERM. A statement under a run now runs on a thread of its own and is
+ * abandoned HL_DB_DUCK_ABANDON_GRACE_MS (500 ms) after the run trips. */
+
+/* ~3 s of one task on an Apple M-series core (the search is quadratic:
+ * 160k / 80k is ~0.23 s), ~6 s for TB_SLOWER_ROW. */
+#define TB_SLOW_ROW \
+    "instr(repeat('a', 600000) || i::VARCHAR, repeat('a', 300000) || 'c')"
+#define TB_SLOWER_ROW \
+    "instr(repeat('a', 800000) || i::VARCHAR, repeat('a', 400000) || 'c')"
+
+/* Wait for every abandoned statement to end (each burns a CPU until then). */
+static int tb_drain(void)
+{
+    double until = mono_ms() + 120000.0;
+    while (hl_db_duckdb_abandoned_running() > 0) {
+        if (mono_ms() > until) return -1;
+        usleep(20000);
+    }
+    return 0;
+}
+
+/* Run @p sql under a budget that trips 300 ms from now; the time taken. */
+static double tb_timed(HlDbHandle *h, const char *sql, int *rc_out)
+{
+    double deadline = mono_ms() + 300.0;
+    HlDbBudgetBinding prev = hl_db_budget_swap(trips_at, &deadline);
+    double t0 = mono_ms();
+    *rc_out = hl_db_query(h, sql, NULL, 0, NULL, NULL, NULL);
+    double took = mono_ms() - t0;
+    hl_db_budget_restore(prev);
+    return took;
+}
+
+UTEST(duckdb_task_bound, one_long_task_stops_near_the_deadline)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    static const char *const slow[] = {
+        /* One row: one task, one call of the quadratic search. */
+        "SELECT " TB_SLOW_ROW " FROM range(1) t(i)",
+        /* Constant: folded inside duckdb_prepare, before any task. */
+        "SELECT instr(repeat('a', 600000) || 'b', repeat('a', 300000) || 'c')",
+        /* Other spellings of the same search. */
+        "SELECT strpos(repeat('a', 600000) || i::VARCHAR,"
+        " repeat('a', 300000) || 'c') FROM range(1) t(i)",
+        "SELECT (repeat('a', 600000) || i::VARCHAR) LIKE"
+        " ('%' || repeat('a', 300000) || 'c%') FROM range(1) t(i)",
+    };
+    for (size_t k = 0; k < sizeof slow / sizeof slow[0]; k++) {
+        int rc = 0;
+        double took = tb_timed(&h, slow[k], &rc);
+        EXPECT_EQ(-1, rc);
+        /* Trip at 300 ms + the 500 ms grace + slack; it ran ~3 s before. */
+        EXPECT_LT(took, 1500.0);
+        /* The handle goes on working, on a new connection. */
+        int64_t n = 0;
+        EXPECT_EQ(0, hl_db_query(&h, "SELECT 42", NULL, 0, count_cb, &n, NULL));
+        EXPECT_EQ(42, (int)n);
+    }
+    ASSERT_EQ(0, tb_drain());
+    h.backend->close(&h);
+}
+
+/* An abandoned statement takes its connection with it. Inside a
+ * transaction, everything until the app's ROLLBACK is refused (the
+ * transaction went with the connection), and nothing it or the transaction
+ * wrote is kept; an abandoned autocommit write is not kept either. */
+UTEST(duckdb_task_bound, abandoned_write_is_not_kept)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(0, hl_db_exec(&h, "CREATE TABLE tb (v BIGINT)", NULL, 0));
+
+    ASSERT_EQ(0, hl_db_begin(&h));
+    ASSERT_EQ(0, hl_db_exec(&h, "INSERT INTO tb VALUES (1)", NULL, 0));
+    int rc = 0;
+    double took = tb_timed(&h,
+        "INSERT INTO tb SELECT " TB_SLOW_ROW " FROM range(1) t(i)", &rc);
+    EXPECT_EQ(-1, rc);
+    EXPECT_LT(took, 1500.0);
+    EXPECT_TRUE(hl_db_in_txn(&h));
+    EXPECT_EQ(-1, hl_db_exec(&h, "INSERT INTO tb VALUES (2)", NULL, 0));
+    EXPECT_EQ(0, hl_db_exec(&h, "ROLLBACK", NULL, 0));
+    EXPECT_FALSE(hl_db_in_txn(&h));
+
+    took = tb_timed(&h,
+        "INSERT INTO tb SELECT " TB_SLOW_ROW " FROM range(1) t(i)", &rc);
+    EXPECT_EQ(-1, rc);
+    EXPECT_LT(took, 1500.0);
+
+    ASSERT_EQ(0, tb_drain());
+    int64_t n = -1;
+    ASSERT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM tb", NULL, 0,
+                             count_cb, &n, NULL));
+    EXPECT_EQ(0, (int)n);
+    h.backend->close(&h);
+}
+
+/* Each abandoned statement keeps a thread and a CPU until it ends: past
+ * HL_DB_DUCK_MAX_ABANDONED (4) no statement starts under a run, so a request
+ * loop cannot pile them up; outside a run (migrations) statements still run. */
+UTEST(duckdb_task_bound, abandoned_statements_are_capped)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    /* Four rows in one task: the first statement must still run when the
+     * fourth is abandoned ~3 s later, and on Linux CI one row of
+     * TB_SLOWER_ROW had already ended. A ceiling well past the run time, so
+     * the process does not exit under a loaded runner. */
+    hl_db_duckdb_test_set_abandon_ceiling_ms(600000);
+    for (int k = 0; k < 4; k++) {
+        int rc = 0;
+        double took = tb_timed(&h,
+            "SELECT " TB_SLOWER_ROW " FROM range(4) t(i)", &rc);
+        EXPECT_EQ(-1, rc);
+        EXPECT_LT(took, 1500.0);
+    }
+    EXPECT_EQ(4, hl_db_duckdb_abandoned_running());
+    if (hl_db_duckdb_abandoned_running() == 4) {
+        int rc = 0;
+        double took = tb_timed(&h, "SELECT 1", &rc);
+        EXPECT_EQ(-1, rc);
+        EXPECT_LT(took, 100.0);
+        EXPECT_TRUE(strstr(hl_db_errmsg(&h), "abandoned") != NULL);
+        EXPECT_EQ(0, hl_db_exec(&h, "SELECT 1", NULL, 0));   /* unbound */
+    }
+    ASSERT_EQ(0, tb_drain());
+    hl_db_duckdb_test_set_abandon_ceiling_ms(0);
+    int rc = 0;
+    (void)tb_timed(&h, "SELECT 1", &rc);
+    EXPECT_EQ(0, rc);
+    h.backend->close(&h);
+}
+
+
+/* Review M1: an abandoned statement's connection keeps the file's instance
+ * alive, so it keeps a reference on the shared registry entry: closing the
+ * handle's own connection must not unlink it, or the next open of the file
+ * makes a second instance of it (two WALs; audit 20 / 22). */
+UTEST(duckdb_task_bound, abandoned_statement_keeps_the_file_instance)
+{
+    char path[] = "/tmp/hull_duck_abandon_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT_TRUE(fd >= 0);
+    close(fd);
+    unlink(path);
+    char dsn[128];
+    snprintf(dsn, sizeof dsn, "duckdb://%s", path);
+
+    HlDbHandle a = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(hl_db_backend_duckdb.open(&a.ctx, dsn, NULL), 0);
+    ASSERT_EQ(0, hl_db_exec(&a, "CREATE TABLE f (x INTEGER)", NULL, 0));
+    EXPECT_EQ(1, hl_db_duckdb_test_instance_refs(path));
+    int rc = 0;
+    double took = tb_timed(&a, "SELECT " TB_SLOWER_ROW " FROM range(1) t(i)",
+                           &rc);
+    EXPECT_EQ(-1, rc);
+    EXPECT_LT(took, 1500.0);
+    /* The handle's new connection + the abandoned one. */
+    EXPECT_EQ(2, hl_db_duckdb_test_instance_refs(path));
+    a.backend->close(&a);
+    EXPECT_EQ(1, hl_db_duckdb_test_instance_refs(path));
+
+    /* A reopen while the statement still runs shares the same instance. */
+    HlDbHandle b = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(hl_db_backend_duckdb.open(&b.ctx, dsn, NULL), 0);
+    EXPECT_EQ(2, hl_db_duckdb_test_instance_refs(path));
+    ASSERT_EQ(0, hl_db_exec(&b, "INSERT INTO f VALUES (1)", NULL, 0));
+    ASSERT_EQ(0, tb_drain());
+    EXPECT_EQ(1, hl_db_duckdb_test_instance_refs(path));
+    b.backend->close(&b);
+    EXPECT_EQ(0, hl_db_duckdb_test_instance_refs(path));
+
+    unlink(path);
+    char wal[160];
+    snprintf(wal, sizeof wal, "%s.wal", path);
+    unlink(wal);
+}
+
+/* A budget that trips once @p ud's count passes its limit. */
+typedef struct { int64_t used, limit; } TbCount;
+static int tb_counting(void *ud, int64_t units)
+{
+    TbCount *c = ud;
+    c->used += units;
+    return c->used > c->limit;
+}
+
+/* Review M2: the statement runs on its own thread while the calling thread
+ * sleeps, so the binding dispatcher measures ~0 CPU for the call. The
+ * statement thread's CPU time is charged instead: a loop of statements that
+ * are each one ~90 ms task trips a 30M-unit budget within a few of them, as
+ * it did when the work ran on the calling thread (it cost ~10000 units a
+ * statement: 15 statements were 150k units). */
+UTEST(duckdb_task_bound, single_task_statements_charge_their_cpu)
+{
+    HlDbHandle h = {0};
+    /* One DuckDB thread: the task runs on the statement thread, whose CPU
+     * time is what is charged. With DuckDB's own workers (4 threads, the
+     * default) one of them can take it, and it is charged per task only - on
+     * Linux CI they did, and 15 statements cost ~150k units. */
+    hl_db_duckdb_test_set_threads(1);
+    int orc = duck_open_mem(&h);
+    hl_db_duckdb_test_set_threads(0);
+    ASSERT_EQ(orc, 0);
+    /* CPU time is divided by HL_METER_SLOWDOWN in a sanitizer build (the
+     * uninstrumented DuckDB runs at release speed there): so is the limit. */
+    const int64_t limit = 30000000 / (int64_t)HL_METER_SLOWDOWN;
+    TbCount c = { 0, limit };
+    HlDbBudgetBinding prev = hl_db_budget_swap(tb_counting, &c);
+    int ran = 0, failed = 0;
+    for (; ran < 15 && !failed; ran++)
+        failed = hl_db_query(&h,
+            "SELECT instr(repeat('a', 100000) || i::VARCHAR,"
+            " repeat('a', 50000) || 'c') FROM range(1) t(i)",
+            NULL, 0, NULL, NULL, NULL) != 0;
+    hl_db_budget_restore(prev);
+    EXPECT_TRUE(failed);
+    EXPECT_LT(ran, 15);
+    EXPECT_GT(c.used, limit);
+    ASSERT_EQ(0, tb_drain());
+    h.backend->close(&h);
+}
+
+/* The child of exit_at_the_ceiling (run only with the variable set): a
+ * statement abandoned at 100 ms + 500 ms that runs ~6 s, under a 1 s
+ * ceiling. Exits 75 from the ceiling watch; returning means it did not. */
+UTEST(duckdb_task_bound, ceiling_child)
+{
+    if (!getenv("HULL_TEST_DUCK_CEILING_CHILD")) return;
+    hl_db_duckdb_test_set_abandon_ceiling_ms(1000);
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    double deadline = mono_ms() + 100.0;
+    HlDbBudgetBinding prev = hl_db_budget_swap(trips_at, &deadline);
+    (void)hl_db_query(&h, "SELECT " TB_SLOWER_ROW " FROM range(1) t(i)",
+                      NULL, 0, NULL, NULL, NULL);
+    hl_db_budget_restore(prev);
+    (void)tb_drain();
+    h.backend->close(&h);
+}
+
+static int tb_self_path(char *out, size_t cap)
+{
+#if defined(__APPLE__)
+    uint32_t n = (uint32_t)cap;
+    return _NSGetExecutablePath(out, &n) == 0 ? 0 : -1;
+#else
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n <= 0) return -1;
+    out[n] = '\0';
+    return 0;
+#endif
+}
+
+/* An abandoned statement still running at the ceiling ends the process with
+ * status 75 and one FATAL line, as --vm-thread's ceiling does (the user's
+ * call on PR #1085): it holds a CPU, and nothing in-process can stop it. */
+UTEST(duckdb_task_bound, exit_at_the_ceiling)
+{
+    char self[PATH_MAX];
+    ASSERT_EQ(0, tb_self_path(self, sizeof self));
+    char errpath[] = "/tmp/hull_duck_ceiling_XXXXXX";
+    int efd = mkstemp(errpath);
+    ASSERT_TRUE(efd >= 0);
+
+    extern char **environ;
+    size_t ne = 0;
+    while (environ[ne]) ne++;
+    char **env = calloc(ne + 2, sizeof *env);
+    ASSERT_TRUE(env != NULL);
+    for (size_t i = 0; i < ne; i++) env[i] = environ[i];
+    env[ne] = (char *)"HULL_TEST_DUCK_CEILING_CHILD=1";
+
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, efd, 2);
+    char *argv[] = { self, (char *)"--filter=duckdb_task_bound.ceiling_child",
+                     NULL };
+    double t0 = mono_ms();
+    pid_t pid;
+    int src = posix_spawn(&pid, self, &fa, NULL, argv, env);
+    posix_spawn_file_actions_destroy(&fa);
+    free(env);
+    ASSERT_EQ(0, src);
+    int st = 0;
+    ASSERT_EQ(pid, waitpid(pid, &st, 0));
+    double took = mono_ms() - t0;
+    ASSERT_TRUE(WIFEXITED(st));
+    EXPECT_EQ(75, WEXITSTATUS(st));
+    /* 100 ms + 500 ms grace + the 1 s ceiling; the statement runs ~6 s. */
+    EXPECT_LT(took, 4000.0);
+
+    char buf[8192];
+    ssize_t n = pread(efd, buf, sizeof buf - 1, 0);
+    close(efd);
+    unlink(errpath);
+    ASSERT_TRUE(n > 0);
+    buf[n] = '\0';
+    EXPECT_TRUE(strstr(buf, "FATAL [hull:duckdb]") != NULL);
 }
 
 UTEST_MAIN()

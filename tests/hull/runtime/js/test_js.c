@@ -11968,7 +11968,9 @@ UTEST(js_audit14, sse_and_ws_writes_are_charged)
     EXPECT_EQ(a10_run_tripped("S.event('e', NL);", 200000), 1);
     EXPECT_EQ(a10_run_tripped("S.comment(NL);", 200000), 1);
     EXPECT_EQ(a14_sse_writes, 0);   /* stopped before Keel wrote a byte */
-    EXPECT_EQ(a10_run_tripped("S.event('e', 'a\\nb', '7'); S.comment('hi');", 200000), 0);
+    /* Small writes fit (10M: the binding dispatcher also charges measured
+     * time, and 200k is ~3 ms of it, which a loaded macOS runner spent). */
+    EXPECT_EQ(a10_run_tripped("S.event('e', 'a\\nb', '7'); S.comment('hi');", 10000000), 0);
     EXPECT_GT(a14_sse_writes, 0);
 
     /* ws.broadcast is charged per connection on the path (these have no Keel
