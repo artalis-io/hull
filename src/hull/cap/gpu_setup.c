@@ -20,6 +20,7 @@
 
 #include "hull/cap/gpu.h"
 #include "hull/cap/policy_seal.h"
+#include "hull/manifest.h"
 #include "hull/vfs.h"
 #include "log.h"
 
@@ -83,29 +84,36 @@ HlGpuCtx *hl_gpu_ctx_open(int device, const struct HlVfs *shader_vfs)
     return ctx;
 }
 
-void hl_gpu_ctx_apply_manifest(HlGpuCtx *ctx, const int *devices,
-                               int ndevices, int dynamic_shaders,
+void hl_gpu_ctx_apply_manifest(HlGpuCtx *ctx, const HlManifest *m,
                                const struct HlVfs *shader_vfs)
 {
     if (!ctx)
         return;
-    if (devices && ndevices > 0) {
+    int present = m && m->present;
+    /* A gpu.devices list that names no valid device restricts to NONE
+     * (audit 46): the caller also withholds the context from the runtime
+     * (hl_gpu_manifest_admit), and this keeps the context itself closed
+     * should it reach one. A valid list restricts to it. */
+    if (present && (m->gpu_devices_invalid ||
+                    (m->gpu && m->gpu_device_count > 0))) {
+        int n = m->gpu_devices_invalid ? 0 : m->gpu_device_count;
         ctx->device_restriction = 1;
         memset(ctx->allowed_devices, 0, sizeof(ctx->allowed_devices));
-        for (int i = 0; i < ndevices; i++) {
-            int d = devices[i];
+        for (int i = 0; i < n; i++) {
+            int d = m->gpu_devices[i];
             if (d >= 0 && d < ctx->device_count)
                 ctx->allowed_devices[d] = 1;
         }
         log_info("[hull:c] gpu device restriction: %d of %d devices allowed",
-                 ndevices, ctx->device_count);
+                 n, ctx->device_count);
     }
     /* The mode was set at open, before the top level ran; this raises the
      * opt-in, which only the applied manifest can grant. */
     hl_cap_gpu_set_shader_policy(ctx,
         hl_vfs_embedded(shader_vfs) ? HL_GPU_SHADERS_EMBEDDED
                                     : HL_GPU_SHADERS_DEV,
-        dynamic_shaders, shader_vfs);
+        present && m->gpu_dynamic_shaders && !m->gpu_devices_invalid,
+        shader_vfs);
 }
 
 void hl_gpu_ctx_close(HlGpuCtx *ctx)

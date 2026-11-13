@@ -15987,6 +15987,69 @@ UTEST(gpu_audit44, async_dispatch_long_name)
     jgpu_cleanup();
 }
 
+#ifdef HL_ENABLE_DB
+/* Audit 46: gpu.bufferCopy read the source size for its charge under a
+ * plain pthread_mutex_lock of the device mutex, blocking behind a
+ * gpu.async job past the run's deadline (the audit 44 rule). It now goes
+ * through the cap's sliced wait and is refused gpu_busy once the run has
+ * stopped. The twin of lua_gpu_audit46.copy_bytes_waits_in_slices. */
+#include "hull/cap/db_budget.h"
+
+static double j46g_now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec * 1e3 + (double)t.tv_nsec / 1e6;
+}
+
+static double j46g_stop_at;
+static int j46g_budget(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return j46g_now_ms() >= j46g_stop_at;
+}
+
+typedef struct { HlGpuDevice *dev; volatile int held; } J46gHold;
+static void *j46g_holder(void *ud)
+{
+    J46gHold *h = ud;
+    pthread_mutex_lock(&h->dev->mutex);
+    h->held = 1;
+    usleep(2500 * 1000);   /* a gpu.async job's backend wait */
+    pthread_mutex_unlock(&h->dev->mutex);
+    return NULL;
+}
+
+UTEST(js_gpu_audit46, copy_bytes_waits_in_slices)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    JGPU_EXPECT("gpu.buffer('a', u('A'.repeat(64)));"
+                "gpu.buffer('b', u('B'.repeat(64))); return 'ok';", "ok");
+    J46gHold h = { &jgpu->devices[0], 0 };
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, j46g_holder, &h));
+    for (int k = 0; k < 500 && !h.held; k++)
+        usleep(2000);
+    ASSERT_TRUE(h.held);
+
+    j46g_stop_at = j46g_now_ms() + 200;
+    HlDbBudgetBinding prev = hl_db_budget_swap(j46g_budget, NULL);
+    double t0 = j46g_now_ms();
+    char *got = eval_str("(() => { try { gpu.bufferCopy('a', 'b'); return 'ran'; }"
+                         " catch (e) { return e.message; } })()");
+    double dt = j46g_now_ms() - t0;
+    hl_db_budget_restore(prev);
+    pthread_join(th, NULL);
+
+    EXPECT_STREQ(got, "gpu.bufferCopy: gpu_busy");
+    EXPECT_LT(dt, 1500.0);
+    free(got);
+    /* The device is free again: the copy goes through. */
+    JGPU_EXPECT("gpu.bufferCopy('a', 'b'); return 'ran';", "ran");
+    jgpu_cleanup();
+}
+#endif /* HL_ENABLE_DB */
+
 UTEST(js_gpu, buffers_are_per_device)
 {
     ASSERT_EQ(jgpu_init(2), 0);

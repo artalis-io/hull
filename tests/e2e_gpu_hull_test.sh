@@ -235,4 +235,59 @@ end)
 LUA
 run undeclared "$WORK/undeclared" 1
 
+echo "=== gpu_audit46.invalid_devices_fail_closed: a gpu.devices list naming no valid device refuses gpu with hull/gpu declared ==="
+# The extractor cleared `gpu` for such a list, but with a modules list the
+# admit read the module set alone, and with `gpu` 0 no device restriction
+# applied: the app got every device. One decision now
+# (hl_gpu_manifest_admit) on every entry point.
+mkdir -p "$WORK/baddev/tests" "$WORK/baddev_js/tests"
+cat > "$WORK/baddev/app.lua" <<'LUA'
+app.manifest({ gpu = { devices = { "zero" } }, modules = { "hull/gpu@1" } })
+app.main(function()
+    local gpu = require("hull.gpu")
+    local pok, r = pcall(gpu.buffer, "b", string.rep("A", 16))
+    local ok = pok and r ~= nil and r ~= false
+    print("BADDEV available=" .. tostring(gpu.available()) .. " buffer=" .. tostring(ok))
+    return 0
+end)
+LUA
+cat > "$WORK/baddev/tests/test_x.lua" <<'LUA'
+test("an invalid gpu.devices list leaves no device", function()
+    local gpu = require("hull.gpu")
+    test.eq(gpu.available(), false)
+    local pok, r = pcall(gpu.buffer, "b", string.rep("A", 16))
+    test.eq(pok and r ~= nil and r ~= false, false)
+    local cok, c = pcall(gpu.compile, "x", "fn main() {}")
+    test.eq(cok and c ~= nil and c ~= false, false)
+end)
+LUA
+cat > "$WORK/baddev_js/app.js" <<'JS'
+import { app } from "hull:app";
+import { gpu } from "hull:gpu";
+app.manifest({ gpu: { devices: ["zero"] }, modules: ["hull/gpu@1"] });
+app.main(() => {
+    let ok = true;
+    try { gpu.buffer("b", new Uint8Array(16).buffer); } catch (e) { ok = false; }
+    console.log("BADDEV available=" + gpu.available() + " buffer=" + ok);
+    return 0;
+});
+JS
+cat > "$WORK/baddev_js/tests/test_x.js" <<'JS'
+import { gpu } from "hull:gpu";
+test("an invalid gpu.devices list leaves no device", () => {
+    test.eq(gpu.available(), false);
+    let threw = false;
+    try { gpu.buffer("b", new Uint8Array(16).buffer); } catch (e) { threw = true; }
+    test.eq(threw, true);
+});
+JS
+for a in "$WORK/baddev/app.lua" "$WORK/baddev_js/app.js"; do
+    BOUT=$("$HULL" "$a" 2>&1) || true
+    echo "$BOUT" | grep -q "BADDEV available=false buffer=false" \
+        || { echo "$BOUT"; echo "FAIL: invalid gpu.devices admitted gpu ($a)"; exit 1; }
+    echo "ok  app.main: invalid gpu.devices refuses gpu ($(basename "$a"))"
+done
+run baddev "$WORK/baddev" 1
+run baddev_js "$WORK/baddev_js" 1
+
 echo "PASS: e2e_gpu_hull_test"

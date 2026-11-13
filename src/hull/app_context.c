@@ -879,16 +879,12 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                  * (serve.c, serve_cli.c); `hull test` runs from disk, where
                  * any source compiles. */
                 if (ctx->gpu_ctx && rc == 0) {
-                    int admit = m.modules_declared
-                        ? hl_module_set_contains_name(&ctx->module_set, "hull/gpu")
-                        : (!m.present || m.gpu);
-                    if (!admit)
+                    /* One decision with serve.c (audit 46): an invalid
+                     * gpu.devices list refuses gpu even when `modules`
+                     * names hull/gpu. */
+                    if (!hl_gpu_manifest_admit(&m, &ctx->module_set))
                         ctx->rt->gpu_ctx = NULL;
-                    int restrict_devices = m.present && m.gpu;
-                    hl_gpu_ctx_apply_manifest(ctx->gpu_ctx,
-                        restrict_devices ? m.gpu_devices : NULL,
-                        restrict_devices ? m.gpu_device_count : 0,
-                        m.present && m.gpu_dynamic_shaders, &ctx->app_vfs);
+                    hl_gpu_ctx_apply_manifest(ctx->gpu_ctx, &m, &ctx->app_vfs);
                 }
                 /* The input ceilings (manifest `limits`), as serve.c does. */
                 hl_runtime_apply_input_limits(ctx->rt, &m);

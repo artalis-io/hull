@@ -98,6 +98,35 @@ bool hl_module_set_contains_name(const HlResolvedModuleSet *s,
     return hl_module_set_contains_spec(s, hl_module_registry_find(canonical_name));
 }
 
+/* Whether the applied manifest admits gpu.* (audit 46): the ONE decision
+ * serve.c, the app context (app.main runner, `hull test`, `hull agent`) and
+ * the compile-helper stop all take. A gpu.devices list that names no valid
+ * device refuses gpu outright: the extractor clears `gpu`, but with a
+ * modules list the admit used to read the module set alone, and since
+ * `gpu` was 0 no device restriction applied either - the app got every
+ * device. Otherwise a modules list is authoritative (hull/gpu admitted);
+ * without one the legacy `gpu = true` field (or no manifest) decides. */
+bool hl_gpu_manifest_admit(const HlManifest *m, const HlResolvedModuleSet *s)
+{
+    if (!m || !m->present)
+        return true;
+    if (m->gpu_devices_invalid)
+        return false;
+    if (m->modules_declared)
+        return s && hl_module_set_contains_name(s, "hull/gpu");
+    return m->gpu != 0;
+}
+
+/* Whether the shader compile helper has anything to check: gpu.* admitted
+ * AND the gpu.dynamic_shaders opt-in (audit 46: the helper stayed up for an
+ * app that set the opt-in but was not admitted hull/gpu). */
+bool hl_gpu_manifest_dynamic_shaders(const HlManifest *m,
+                                     const HlResolvedModuleSet *s)
+{
+    return m && m->present && m->gpu_dynamic_shaders &&
+           hl_gpu_manifest_admit(m, s);
+}
+
 bool hl_module_set_contains_short(const HlResolvedModuleSet *s,
                                    const char *name)
 {

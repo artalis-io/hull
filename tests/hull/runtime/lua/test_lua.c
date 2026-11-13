@@ -15684,6 +15684,78 @@ UTEST(lua_gpu_async_compile, policy_and_load)
     lgpu_cleanup();
 }
 
+#ifdef HL_ENABLE_DB
+/* ── Audit 46: gpu.buffer_copy's size read waits in slices ──────────────
+ *
+ * gpu.buffer_copy read the source buffer's size for its charge under a
+ * plain pthread_mutex_lock of the device mutex, which a gpu.async job holds
+ * on a pool thread across the backend's wait: the event loop blocked behind
+ * it past the run's deadline, the rule audit 44 set for every gpu.* entry
+ * point. It now goes through the cap's sliced wait and is refused
+ * gpu_busy once the run has stopped. */
+#include "hull/cap/db_budget.h"
+
+static double a46g_stop_at;
+static int a46g_budget(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return a41_now_ms() >= a46g_stop_at;
+}
+
+typedef struct { HlGpuDevice *dev; volatile int held; } A46gHold;
+static void *a46g_holder(void *ud)
+{
+    A46gHold *h = ud;
+    pthread_mutex_lock(&h->dev->mutex);
+    h->held = 1;
+    usleep(2500 * 1000);   /* a gpu.async job's backend wait */
+    pthread_mutex_unlock(&h->dev->mutex);
+    return NULL;
+}
+
+UTEST(lua_gpu_audit46, copy_bytes_waits_in_slices)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    LGPU_EXPECT("gpu.buffer('a', string.rep('A', 64)) gpu.buffer('b', string.rep('B', 64)) R = 'ok'",
+                "ok");
+    A46gHold h = { &lgpu->devices[0], 0 };
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, a46g_holder, &h));
+    for (int k = 0; k < 500 && !h.held; k++)
+        usleep(2000);
+    ASSERT_TRUE(h.held);
+
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    a46g_stop_at = a41_now_ms() + 200;
+    HlDbBudgetBinding prev = hl_db_budget_swap(a46g_budget, NULL);
+    double t0 = a41_now_ms();
+    int lrc = luaL_dostring(lua_rt.L,
+        "local ok, e = gpu.buffer_copy('a', 'b') "
+        "R = tostring(ok) .. ' ' .. tostring(e)");
+    double dt = a41_now_ms() - t0;
+    hl_db_budget_restore(prev);
+    char *got = NULL;
+    if (lrc == LUA_OK) {
+        lua_getglobal(lua_rt.L, "R");
+        const char *r = lua_tostring(lua_rt.L, -1);
+        got = strdup(r ? r : "(R unset)");
+    } else {
+        const char *e = lua_tostring(lua_rt.L, -1);
+        got = strdup(e ? e : "(error)");
+    }
+    lua_settop(lua_rt.L, 0);
+    pthread_join(th, NULL);
+
+    EXPECT_STREQ(got, "nil gpu_busy");
+    EXPECT_LT(dt, 1500.0);
+    free(got);
+    /* The device is free again: the copy goes through. */
+    LGPU_EXPECT("local ok, e = gpu.buffer_copy('a', 'b') R = tostring(ok)",
+                "true");
+    lgpu_cleanup();
+}
+#endif /* HL_ENABLE_DB */
+
 /* ── Audit 37: fs.list, fs.stat and small fs / blob writes are charged ─
  *
  * fs.list read a whole directory (every entry, matching the grant's pattern

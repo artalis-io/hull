@@ -2420,28 +2420,23 @@ static int hl_serve_wire_caps(HlServerState *s)
 #endif
 
     /* GPU gating mirrors the WASM rule above (runtime, on gpu_ctx_ok). */
-    if (gpu_ctx_ok) {
-        int admit;
-        if (s->manifest.modules_declared)
-            admit = hl_module_set_contains_name(&s->module_set, "hull/gpu");
-        else
-            admit = !s->manifest.present || s->manifest.gpu;
-        if (!admit) {
-            rt->gpu_ctx = NULL;
-            log_info("[hull:c] gpu not declared - gpu.* disabled");
-        }
+    /* One decision with the app context (hl_gpu_manifest_admit, audit 46):
+     * an invalid gpu.devices list refuses gpu even when `modules` names
+     * hull/gpu. */
+    if (gpu_ctx_ok && !hl_gpu_manifest_admit(&s->manifest, &s->module_set)) {
+        rt->gpu_ctx = NULL;
+        log_info("[hull:c] gpu not declared - gpu.* disabled");
     }
     /* The manifest's device allowlist and gpu.dynamic_shaders opt-in,
      * sealed with the rest of the policy below. */
     if (gpu_ctx_ok) {
         const HlVfs *shader_vfs = hl_app_context_app_vfs(s->app);
         int embedded = hl_vfs_embedded(shader_vfs);
-        int dynamic = s->manifest.present && s->manifest.gpu_dynamic_shaders;
-        int restrict_devices = s->manifest.present && s->manifest.gpu;
-        hl_gpu_ctx_apply_manifest(gpu_ctx,
-            restrict_devices ? s->manifest.gpu_devices : NULL,
-            restrict_devices ? s->manifest.gpu_device_count : 0,
-            dynamic, shader_vfs);
+        /* Only for an app admitted gpu.* (audit 46: the helper stayed up
+         * for one that set the opt-in without hull/gpu). */
+        int dynamic = hl_gpu_manifest_dynamic_shaders(&s->manifest,
+                                                      &s->module_set);
+        hl_gpu_ctx_apply_manifest(gpu_ctx, &s->manifest, shader_vfs);
         if (embedded && dynamic)
             log_info("[hull:c] gpu.dynamic_shaders: runtime WGSL source is "
                      "compiled first in a helper process%s",

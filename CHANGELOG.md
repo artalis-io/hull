@@ -8,6 +8,19 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- GPU (audit 46): a `gpu.devices` list that names no valid device (`{ "zero" }`, or a value that
+  is not a list) now refuses `gpu.*` on every entry point even when `modules` names `hull/gpu`;
+  before, the module set alone admitted it and no device restriction applied, so the app got every
+  device. Serve, the `app.main` runner, `hull test` and `hull agent` take one decision
+  (`hl_gpu_manifest_admit`), and the shader compile helper is stopped for an app that sets
+  `gpu.dynamic_shaders` without being admitted `hull/gpu`. `gpu.buffer_copy` (Lua) /
+  `gpu.bufferCopy` (JS) read the source size under a plain lock of the device mutex, blocking behind
+  a `gpu.async` job past the run's deadline; it now waits in the same slices as every other `gpu.*`
+  call and is refused `gpu_busy` once the run has stopped. A new invariant lint rule (INV-13) keeps
+  every device-mutex lock on that path.
+
 ## [0.22.0] - 2026-11-13
 
 TypeScript declarations for the JavaScript API and a `hull types` command, then fixes: a DuckDB

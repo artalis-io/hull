@@ -358,6 +358,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
             if (listed > 0 && out->gpu_device_count == 0) {
                 log_warn("[manifest] gpu.devices lists no valid device - gpu disabled");
                 out->gpu = 0;
+                out->gpu_devices_invalid = 1;
             }
         } else if (!lua_isnil(L, -1)) {
             /* devices = "0" or 0: a restriction that is not a list must not
@@ -365,6 +366,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
             log_warn("[manifest] gpu.devices must be a list of device "
                      "indices - gpu disabled");
             out->gpu = 0;
+            out->gpu_devices_invalid = 1;
         }
         lua_pop(L, 1); /* pop devices */
     } else {

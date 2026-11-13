@@ -662,8 +662,11 @@ int hull_serve(int argc, char **argv)
         log_warn("[hull:cli] manifest extraction failed; running without policy");
     }
     /* No runtime WGSL source to check: the helper goes (the app context
-     * applied gpu.dynamic_shaders to the GPU context already). */
-    if (!(manifest.present && manifest.gpu_dynamic_shaders))
+     * applied gpu.dynamic_shaders to the GPU context already). The same
+     * decision the app context took: an app not admitted gpu.* has none
+     * (audit 46). */
+    if (!hl_gpu_manifest_dynamic_shaders(&manifest,
+                                         rt->module_set))
         hl_gpu_helper_stop();
 
     /* Seal the manifest, exactly as serve.c does for the server build.

@@ -465,6 +465,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
             if (listed > 0 && out->gpu_device_count == 0) {
                 log_warn("[manifest] gpu.devices lists no valid device - gpu disabled");
                 out->gpu = 0;
+                out->gpu_devices_invalid = 1;
             }
         } else if (!JS_IsUndefined(devs)) {
             /* devices: "0" or 0: a restriction that is not a list must not
@@ -472,6 +473,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
             log_warn("[manifest] gpu.devices must be an array of device "
                      "indices - gpu disabled");
             out->gpu = 0;
+            out->gpu_devices_invalid = 1;
         }
         JS_FreeValue(ctx, devs);
     } else if (JS_IsBool(gpu_val)) {
