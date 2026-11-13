@@ -10,11 +10,14 @@
 # Oracle: `hull app.lua` (the server path) says whether this host has a GPU
 # device. `hull test` must agree - on a device, a test dispatches a shader
 # directly, through a route (test.get) and through app.main
-# (test.run_main); without one, hull.gpu is absent in both (Lua only: a JS
-# `import ... from "hull:gpu"` fails to load with no device, under the
-# server too). Without a device this checks little - the Linux CI job has
-# none; the macOS one has Metal and sets HULL_E2E_REQUIRE_GPU=1, which fails
-# when no device is found.
+# (test.run_main); without one, hull.gpu / hull:gpu still load, in both
+# runtimes, with gpu.available() false and every other call raising (a JS
+# `import { gpu } from "hull:gpu"` used to fail the app's load with no
+# device). The no-device legs always run: on a host with a device, again
+# with HULL_TEST_GPU_NO_DEVICE=1 (a test-build hook, cap/gpu_setup.c, so
+# the build sets HL_GPU_HELPER_TEST_HOOKS=1). The Linux CI job has no
+# device; the macOS one has Metal and sets HULL_E2E_REQUIRE_GPU=1, which
+# fails when no device is found.
 #
 # Needs a monolithic GPU build: `make fetch-wgpu` first. Rebuilds build/
 # with HL_ENABLE_GPU=1 (the config sentinel cleans it).
@@ -26,7 +29,8 @@ cd "$(dirname "$0")/.."
 echo "=== build hull with HL_ENABLE_GPU=1 ==="
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu >"$WORK/build.log" 2>&1 \
+make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu HL_GPU_HELPER_TEST_HOOKS=1 \
+    >"$WORK/build.log" 2>&1 \
     || { tail -40 "$WORK/build.log"; echo "FAIL: GPU build"; exit 1; }
 HULL=$(pwd)/build/hull
 
@@ -77,6 +81,22 @@ LUA
 test("hull.gpu loads under hull test as on the server", function()
     test.eq(GPU ~= nil, $EXPECT)
 end)
+if not $EXPECT then
+    test("no device: hull.gpu loads, available() is false, calls raise", function()
+        local gpu = require("hull.gpu")
+        test.eq(gpu.available(), false)
+        test.eq(#gpu.devices(), 0)
+        local ok, err = pcall(gpu.compile, "x", "y")
+        test.eq(ok, false)
+        test.ok(tostring(err):find("gpu.compile: no GPU device", 1, true) ~= nil)
+        ok, err = pcall(gpu.async.dispatch, "x", {})
+        test.eq(ok, false)
+        test.ok(tostring(err):find("gpu.async.dispatch: no GPU device", 1, true) ~= nil)
+    end)
+    test("no device: app.main falls back", function()
+        test.eq(test.run_main({ "4" }).code, 3)
+    end)
+end
 if $EXPECT then
     test("a test dispatches a shader", function() test.eq(DBL(3), 6) end)
     test("a route dispatches under test.get", function()
@@ -118,9 +138,25 @@ app.main((ctx) => {
 });
 JS
     cat > "$1/tests/test_gpu.js" <<JS
+import { gpu } from "hull:gpu";
 test("hull:gpu loads under hull test as on the server", () => {
     test.eq(HAS_GPU, $EXPECT);
 });
+if (!$EXPECT) {
+    test("no device: hull:gpu loads, available() is false, calls throw", () => {
+        test.eq(gpu.available(), false);
+        test.eq(gpu.devices().length, 0);
+        let msg = "";
+        try { gpu.compile("x", "y"); } catch (e) { msg = e.message; }
+        test.ok(msg.includes("gpu.compile: no GPU device"));
+        msg = "";
+        try { gpu.async.dispatch("x", {}); } catch (e) { msg = e.message; }
+        test.ok(msg.includes("gpu.async.dispatch: no GPU device"));
+    });
+    test("no device: app.main falls back", () => {
+        test.eq(test.runMain(["4"]).code, 3);
+    });
+}
 if ($EXPECT) {
     test("a test dispatches a shader", () => { test.eq(DBL(3), 6); });
     test("a route dispatches under test.get", () => {
@@ -149,15 +185,43 @@ run() {   # $1 = label, $2 = dir, $3 = the number of tests it must pass
     echo "ok  hull agent test ($1)"
 }
 
-if [ "$EXPECT" = true ]; then N=4; else N=1; fi
-mk_lua "$WORK/lua"; run lua "$WORK/lua" "$N"
+# Lua and JS legs with the device state in $EXPECT: 4 tests with a device,
+# 3 without (the no-device shape and app.main's fallback).
+legs() {   # $1 = label suffix
+    if [ "$EXPECT" = true ]; then N=4; else N=3; fi
+    rm -rf "$WORK/lua" "$WORK/js"
+    mk_lua "$WORK/lua"; run "lua$1" "$WORK/lua" "$N"
+    mk_js "$WORK/js";   run "js$1"  "$WORK/js"  "$N"
+}
+legs ""
+
 if [ "$EXPECT" = true ]; then
-    mk_js "$WORK/js"; run js "$WORK/js" 4
-else
-    echo "skip  js (hull:gpu does not load without a device)"
+    echo "=== the same with no device (HULL_TEST_GPU_NO_DEVICE=1) ==="
+    export HULL_TEST_GPU_NO_DEVICE=1
+    PROBE=$("$HULL" "$WORK/probe/app.lua" 2>&1) || true
+    echo "$PROBE" | grep -q "PROBE GPU no" \
+        || { echo "$PROBE"; echo "FAIL: HULL_TEST_GPU_NO_DEVICE=1 left a device"; exit 1; }
+    EXPECT=false
+    legs " (no device)"
+    unset HULL_TEST_GPU_NO_DEVICE
 fi
 
 echo "=== an app that does not declare hull/gpu gets no gpu.* under test ==="
+mkdir -p "$WORK/undeclared_js/tests"
+cat > "$WORK/undeclared_js/app.js" <<'JS'
+import { app } from "hull:app";
+import { gpu } from "hull:gpu";
+app.manifest({ modules: ["hull/http-server@1"] });
+app.get("/", (req, res) => res.text(String(gpu)));
+JS
+cat > "$WORK/undeclared_js/tests/test_x.js" <<'JS'
+test("never runs", () => {});
+JS
+UOUT=$("$HULL" test "$WORK/undeclared_js" 2>&1) \
+    && { echo "$UOUT"; echo "FAIL: an undeclared hull:gpu import loaded"; exit 1; }
+echo "$UOUT" | grep -q "hull/gpu" \
+    || { echo "$UOUT"; echo "FAIL: undeclared hull:gpu: want an error naming hull/gpu"; exit 1; }
+echo "ok  undeclared hull:gpu import refused (js)"
 mkdir -p "$WORK/undeclared/tests"
 cat > "$WORK/undeclared/app.lua" <<'LUA'
 app.manifest({ modules = { "hull/http-server@1" } })

@@ -15902,6 +15902,63 @@ static int jgpu_has(int device, int texture, const char *name)
     "@group(0) @binding(3) var<storage, read_write> d: array<u32>; " \
     "fn main() {}"
 
+/* A GPU build on a host with no device: the backend is there, the context is
+ * not (hl_gpu_ctx_open returns NULL). hull:gpu used to be registered only
+ * with a context, so `import { gpu } from "hull:gpu"` failed the app's load
+ * where Lua's pcall(require) could fall back; it now loads with available()
+ * false and every other call throwing, as Lua's does. */
+static int jgpu_init_no_device(int feature_on)
+{
+    if (js_initialized)
+        hl_js_free(&js);
+    js_initialized = 0;
+    gpu_mock_feature_on = feature_on;
+    hl_platform_vfs_dispose(platform_vfs_owned);
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    memset(&js, 0, sizeof(js));
+    js.base.platform_vfs = &platform_vfs;
+    js_initialized = (hl_js_init(&js, &cfg) == 0);
+    gpu_mock_feature_on = 0;
+    if (!js_initialized) return -1;
+    install_test_js_globals(&js);
+    return 0;
+}
+
+UTEST(js_gpu, no_device_loads_with_available_false)
+{
+    ASSERT_EQ(jgpu_init_no_device(1), 0);
+    JGPU_EXPECT("return typeof gpu + ' ' + gpu.available() + ' ' +"
+                " gpu.devices().length + ' ' + Object.isFrozen(gpu);",
+                "object false 0 true");
+    JGPU_EXPECT("gpu.compile('x', 'y'); return 'ran';",
+                "throw: gpu.compile: no GPU device on this host "
+                "(check gpu.available() first)");
+    JGPU_EXPECT("gpu.async.dispatch('x', {}); return 'ran';",
+                "throw: gpu.async.dispatch: no GPU device on this host "
+                "(check gpu.available() first)");
+    JGPU_EXPECT("return Object.keys(gpu).sort().join(',') + ' ' +"
+                " Object.keys(gpu.async).sort().join(',');",
+#ifdef HL_ENABLE_IMAGE
+                "async,available,buffer,bufferCopy,bufferRead,compile,devices,"
+                "dispatch,load,pipeline,texture,textureRead "
+#else
+                "async,available,buffer,bufferCopy,bufferRead,compile,devices,"
+                "dispatch,load,pipeline,texture "
+#endif
+                "compile,dispatch,load,pipeline");
+    cleanup_js();
+
+#ifndef HL_ENABLE_GPU
+    /* No backend at all (a base binary): hull:gpu is not registered, and
+     * the import resolves to the null-export stub (the harness then binds
+     * the namespace, which has no bindings). */
+    ASSERT_EQ(jgpu_init_no_device(0), 0);
+    JGPU_EXPECT("return typeof globalThis.gpu.available;", "undefined");
+    cleanup_js();
+#endif
+}
+
 UTEST(js_gpu, devices_are_listed)
 {
     ASSERT_EQ(jgpu_init(2), 0);

@@ -10,6 +10,7 @@
 
 #include "mod_buffer.h"
 #include "internal.h"  /* hl_js_request_register, hl_js_sse_register_class */
+#include "hull/cap/gpu.h"  /* hl_gpu_backend_present */
 #include "hull/cap/tui.h"  /* hl_tui_feature_register_js (composed-feature seam) */
 #include "hull/http_feature.h"  /* hl_js_register_http_modules (HTTP-feature seam, #114) */
 
@@ -123,9 +124,13 @@ int hl_js_register_modules(HlJS *js)
     }
 #endif
 
-    /* hull:gpu registers only when a GPU backend is present (monolithic
-     * HL_ENABLE_GPU build or a composed --with=gpu feature). */
-    if (js->base.gpu_ctx) {
+    /* hull:gpu registers when the binary has a GPU backend (monolithic
+     * HL_ENABLE_GPU build or a composed --with=gpu feature), device or not:
+     * with no device (gpu_ctx NULL) gpu.available() is false and the other
+     * calls throw. Registered only with a device, a declared
+     * `import { gpu } from "hull:gpu"` failed the app's load on a host with
+     * none. */
+    if (js->base.gpu_ctx || hl_gpu_backend_present()) {
         if (hl_js_init_gpu_module(js->ctx, js) != 0)
             return -1;
     }

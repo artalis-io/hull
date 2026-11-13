@@ -683,6 +683,12 @@ void hl_cap_gpu_init_shader_policy(HlGpuCtx *ctx, const struct HlVfs *vfs);
  * (hl_policy_page_seal) once the manifest is applied. */
 HlGpuCtx *hl_gpu_ctx_open(int device, const struct HlVfs *shader_vfs);
 
+/* 1 when this binary has a GPU backend (a composed --with=gpu feature or a
+ * monolithic HL_ENABLE_GPU build), device or not. The runtimes register
+ * hull.gpu on it: with no device (a NULL gpu_ctx) the module still loads,
+ * gpu.available() is false and every other call raises. */
+int hl_gpu_backend_present(void);
+
 /* The applied manifest's part: the device allowlist (@p ndevices > 0) and
  * the gpu.dynamic_shaders opt-in. */
 void hl_gpu_ctx_apply_manifest(HlGpuCtx *ctx, const int *devices,

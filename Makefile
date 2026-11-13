@@ -1052,8 +1052,10 @@ CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
 # one of them makes the worker vouch for any source) are compiled in only
 # with -DHL_GPU_HELPER_TEST_HOOKS: always in the unit tests' own copy of
 # cap/gpu_helper.c (mk/tests.mk), and in the whole build with
-# `make HL_GPU_HELPER_TEST_HOOKS=1` (tests/e2e_feature_gpu.sh). A release
-# build never has them (audit convergence §7.3).
+# `make HL_GPU_HELPER_TEST_HOOKS=1` (tests/e2e_feature_gpu.sh). The same flag
+# compiles cap/gpu_setup.c's HULL_TEST_GPU_NO_DEVICE hook (act as a host with
+# no device; tests/e2e_gpu_hull_test.sh). A release build never has them
+# (audit convergence §7.3).
 HL_GPU_HELPER_TEST_HOOKS ?= 0
 ifeq ($(HL_GPU_HELPER_TEST_HOOKS),1)
   CFLAGS += -DHL_GPU_HELPER_TEST_HOOKS
