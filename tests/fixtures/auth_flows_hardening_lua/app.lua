@@ -12,7 +12,7 @@
 -- can hardcode the endpoint. We can't pull a per-run port out of
 -- the environment because Hull's env cap isn't wired until AFTER
 -- top-level code runs (env.get at this point would throw).
-local HIBP_MOCK_PORT = 39911
+local HIBP_MOCK_PORT = 10411
 
 app.manifest({
     name = "auth-flows-hardening-fixture",

@@ -19,7 +19,9 @@ set -eu
 
 # Overridable so a run can sit beside other services on the host.
 CONTAINER=${HULL_E2E_MY_CONTAINER:-hull-mysql-e2e}
-MYPORT=${HULL_E2E_MY_PORT:-55336}
+# Default below 32768: Linux client source ports are 32768-60999, so a
+# published port there can be held by a client socket on the host.
+MYPORT=${HULL_E2E_MY_PORT:-31336}
 PORT=${HULL_E2E_APP_PORT:-18092}
 DSN="mysql://hull:s3cretpw@127.0.0.1:${MYPORT}/hulldb?sslmode=disable"
 DSN_TLS="mysql://hull:s3cretpw@127.0.0.1:${MYPORT}/hulldb?sslmode=require"

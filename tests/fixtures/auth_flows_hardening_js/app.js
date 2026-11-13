@@ -10,7 +10,7 @@ import { time }      from "hull:time";
 // The e2e binds its HIBP mock to this fixed port so the fixture
 // can hardcode the endpoint. Hull's env cap isn't wired during
 // top-level code (env.get would throw).
-const HIBP_MOCK_PORT = 39911;
+const HIBP_MOCK_PORT = 10411;
 
 app.manifest({
     name: "auth-flows-hardening-fixture-js",

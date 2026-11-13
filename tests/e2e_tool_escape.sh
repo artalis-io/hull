@@ -236,7 +236,7 @@ app.post("/up", async (req, res) => {
     res.text("none");
 }, { multipart: { maxPartSize: 65536 } });
 JSEOF
-    MPORT=$((20000 + $$ % 20000))
+    MPORT=$((20000 + $$ % 10000))   # below 32768: Linux client source ports are 32768-60999
     "$HULL" --no-sandbox -p "$MPORT" "$MAPP/app.js" > "$WORKDIR/out.mp" 2>&1 &
     MPID=$!
     up=0

@@ -31,7 +31,9 @@ WORK=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$WORK"; rm -f "$HULL_RC_TMP"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null || true' EXIT
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "PASS: $1"; }
-PORT=39600
+# Below 32768: Linux client source ports are 32768-60999, so a port there can
+# be held by any client socket on the host. The pid offset keeps runs apart.
+PORT=$((10100 + $$ % 300))
 
 # curl that reports the body only on a 2xx; empty otherwise.
 get() { curl -fsS "http://127.0.0.1:$1$2" 2>/dev/null || true; }

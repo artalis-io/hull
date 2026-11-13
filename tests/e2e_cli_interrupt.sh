@@ -125,7 +125,7 @@ for ext in lua js; do
     # nothing before: the runner fell through into the serve loop and served
     # until SIGKILL.
     if [ "$has_server" = 1 ]; then
-        port=$(( 20000 + ($$ % 20000) ))
+        port=$(( 20000 + ($$ % 10000) ))   # below 32768: Linux client source ports are 32768-60999
         [ "$ext" = js ] && port=$((port + 1))
         start "tests/fixtures/cli_interrupt_serve/app.$ext" x -p "$port"
         kill -TERM "$pid"
