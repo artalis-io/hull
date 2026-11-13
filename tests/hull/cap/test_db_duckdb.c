@@ -1792,8 +1792,8 @@ UTEST(duckdb_task_bound, single_task_statements_charge_their_cpu)
     HlDbHandle h = {0};
     /* One DuckDB thread: the task runs on the statement thread, whose CPU
      * time is what is charged. With DuckDB's own workers (4 threads, the
-     * default) one of them can take it, and it is charged per task only - on
-     * Linux CI they did, and 15 statements cost ~150k units. */
+     * default) one of them can take it, and its wall time is charged instead
+     * (audit 46; duckdb_audit46.worker_held_task_is_charged). */
     hl_db_duckdb_test_set_threads(1);
     int orc = duck_open_mem(&h);
     hl_db_duckdb_test_set_threads(0);
@@ -1814,6 +1814,73 @@ UTEST(duckdb_task_bound, single_task_statements_charge_their_cpu)
     EXPECT_LT(ran, 15);
     EXPECT_GT(c.used, limit);
     ASSERT_EQ(0, tb_drain());
+    h.backend->close(&h);
+}
+
+/* Audit 46 L3: an abandon inside a transaction whose reconnect failed left
+ * the handle with no connection and in_txn set; the stale-transaction guard
+ * returned early for a handle with no connection, so the registry reported a
+ * transaction open on every later entry (every wait in the app refused) and
+ * the handle never tried to connect again. */
+UTEST(duckdb_audit46, failed_reconnect_does_not_hold_a_txn)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(0, hl_db_exec(&h, "CREATE TABLE fr (v BIGINT)", NULL, 0));
+    ASSERT_EQ(0, hl_db_begin(&h));
+    ASSERT_EQ(0, hl_db_exec(&h, "INSERT INTO fr VALUES (1)", NULL, 0));
+    hl_db_duckdb_test_fail_reconnects(1);
+    int rc = 0;
+    double took = tb_timed(&h,
+        "INSERT INTO fr SELECT " TB_SLOW_ROW " FROM range(1) t(i)", &rc);
+    hl_db_duckdb_test_fail_reconnects(0);
+    EXPECT_EQ(-1, rc);
+    EXPECT_LT(took, 1500.0);
+    /* The entry boundary: no connection holds a transaction. */
+    h.backend->guard_stale_txn(&h);
+    EXPECT_FALSE(hl_db_in_txn(&h));
+    /* The next statement connects again. */
+    int64_t n = 0;
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT 42", NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(42, (int)n);
+    EXPECT_FALSE(hl_db_in_txn(&h));
+    ASSERT_EQ(0, tb_drain());
+    n = -1;
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM fr", NULL, 0,
+                             count_cb, &n, NULL));
+    EXPECT_EQ(0, (int)n);   /* the transaction went with the connection */
+    h.backend->close(&h);
+}
+
+/* Audit 46 L1: a task one of DuckDB's own worker threads takes (threads = 4,
+ * the default) was charged HL_DB_DUCK_TASK_OPS only, plus the statement
+ * thread's polling CPU: a db.async op whose one long task a worker took ran
+ * ~30x longer on a budget than one the statement thread ran. The statement
+ * thread now naps before it asks for a task (test hook), so a worker takes
+ * it; the charge must still follow the statement's time. */
+UTEST(duckdb_audit46, worker_held_task_is_charged)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    hl_db_duckdb_test_set_help_delay_ms(30);
+    for (int k = 0; k < 3; k++) {
+        TbCount c = { 0, INT64_MAX };
+        HlDbBudgetBinding prev = hl_db_budget_swap(tb_counting, &c);
+        double t0 = mono_ms();
+        int rc = hl_db_query(&h,
+            "SELECT instr(repeat('a', 160000) || i::VARCHAR,"
+            " repeat('a', 80000) || 'c') FROM range(1) t(i)",
+            NULL, 0, NULL, NULL, NULL);
+        double took_us = (mono_ms() - t0) * 1000.0;
+        hl_db_budget_restore(prev);
+        EXPECT_EQ(0, rc);
+        /* The meter's rate (64 units / us), divided in a sanitizer build;
+         * at least half of the statement's time (the help delay and the
+         * statement's own start are not all work). */
+        double want = took_us * 64.0 / (double)HL_METER_SLOWDOWN / 2.0;
+        EXPECT_GT((double)c.used, want);
+    }
+    hl_db_duckdb_test_set_help_delay_ms(0);
     h.backend->close(&h);
 }
 
