@@ -27,6 +27,11 @@ release-artifact layout).
 
 ### Fixed
 
+- **Lua `hull test` aborted on an empty-body response.** A `test.get` (or `post`,
+  ...) whose response had no body - a redirect, a bare status, `res:text("")` -
+  ended the whole test run with a malloc abort. The harness kept the response's
+  own pointer for an empty body and freed it; the result now holds only its own
+  copies. JS was not affected on its normal path. Present since at least 0.20.
 - **Example apps the new type check found broken** (JS unless noted).
   - `examples/health_etag` and `examples/image_processing` used an `app` global that does
     not exist, so they failed at load.
