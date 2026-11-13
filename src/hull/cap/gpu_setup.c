@@ -23,21 +23,46 @@
 #include "hull/vfs.h"
 #include "log.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+/* The backend this binary has: the composed --with=gpu feature, else the
+ * compiled-in wgpu one, else none. */
+static const HlGpuBackend *gpu_backend(void)
+{
+    size_t nfeat = 0;
+    const HlGpuBackend *const *feats = hl_gpu_feature_backends(&nfeat);
+    if (nfeat > 0 && feats && feats[0])
+        return feats[0];
+#ifdef HL_ENABLE_GPU
+    return &hl_gpu_backend_wgpu;
+#else
+    return NULL;
+#endif
+}
+
+int hl_gpu_backend_present(void)
+{
+    return gpu_backend() != NULL;
+}
 
 HlGpuCtx *hl_gpu_ctx_open(int device, const struct HlVfs *shader_vfs)
 {
-    const HlGpuBackend *be = NULL;
-    size_t nfeat = 0;
-    const HlGpuBackend *const *feats = hl_gpu_feature_backends(&nfeat);
-    if (nfeat > 0 && feats)
-        be = feats[0];
-#ifdef HL_ENABLE_GPU
-    if (!be)
-        be = &hl_gpu_backend_wgpu;
-#endif
+    const HlGpuBackend *be = gpu_backend();
     if (!be)
         return NULL;   /* plain base: gpu.* stays unexposed */
+#ifdef HL_GPU_HELPER_TEST_HOOKS
+    /* Test builds only: act as a host whose backend finds no device, so the
+     * no-device path (hull.gpu loads, gpu.available() is false) is covered
+     * on a machine that has one (tests/e2e_gpu_hull_test.sh). */
+    {
+        const char *nd = getenv("HULL_TEST_GPU_NO_DEVICE");
+        if (nd && nd[0] == '1') {
+            log_info("[hull:c] GPU compute unavailable - gpu.* disabled");
+            return NULL;
+        }
+    }
+#endif
 
     HlGpuCtx *ctx = hl_policy_page_alloc(sizeof *ctx);
     if (!ctx)

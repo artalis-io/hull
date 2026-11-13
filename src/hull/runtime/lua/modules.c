@@ -15,6 +15,7 @@
 
 #include "mod_buffer.h"
 #include "internal.h"  /* hl_lua_request_register, hl_lua_sse_register_mt */
+#include "hull/cap/gpu.h"  /* hl_gpu_backend_present */
 #include "hull/cap/tui.h"  /* hl_tui_feature_register_lua (composed-feature seam) */
 #include "hull/http_feature.h"  /* hl_lua_register_http_modules (HTTP-feature seam, #114) */
 
@@ -126,9 +127,11 @@ int hl_lua_register_modules(HlLua *lua)
         register_native_module(L, "hull.compute", luaopen_hull_compute);
 #endif
 
-    /* hull.gpu registers only when a GPU backend is present (monolithic
-     * HL_ENABLE_GPU build or a composed --with=gpu feature). */
-    if (lua->base.gpu_ctx)
+    /* hull.gpu registers when the binary has a GPU backend (monolithic
+     * HL_ENABLE_GPU build or a composed --with=gpu feature), device or not:
+     * with no device (gpu_ctx NULL) gpu.available() is false and the other
+     * calls raise, so an app can fall back (as hull:gpu in JS). */
+    if (lua->base.gpu_ctx || hl_gpu_backend_present())
         register_native_module(L, "hull.gpu", luaopen_hull_gpu);
 
     /* TUI native bridge - registered by the tui feature (a monolithic

@@ -2155,10 +2155,45 @@ static const luaL_Reg gpu_async_funcs[] = {
     {NULL, NULL}
 };
 
+/* Every gpu.* call but available / devices on a binary whose backend found
+ * no device. Upvalue 1: the call's name. */
+static int l_gpu_no_device(lua_State *L)
+{
+    return luaL_error(L, "%s: no GPU device on this host "
+                      "(check gpu.available() first)",
+                      lua_tostring(L, lua_upvalueindex(1)));
+}
+
+/* The module table: the real bindings with a device, else the same names
+ * with available / devices real (false / {}) and every other call raising. */
+static void gpu_newlib(lua_State *L, const luaL_Reg *l, int nfuncs,
+                       const char *prefix, int has_device)
+{
+    lua_createtable(L, 0, nfuncs);
+    if (has_device) {
+        hl_lua_setfuncs(L, l, 0);
+        return;
+    }
+    for (; l->name; l++) {
+        if (l->func == l_gpu_available || l->func == l_gpu_devices) {
+            hl_lua_pushcfunction(L, l->func);
+        } else {
+            lua_pushfstring(L, "%s%s", prefix, l->name);
+            hl_lua_pushcclosure(L, l_gpu_no_device, 1);
+        }
+        lua_setfield(L, -2, l->name);
+    }
+}
+
 int luaopen_hull_gpu(lua_State *L)
 {
-    hl_lua_newlib(L, gpu_funcs);
-    hl_lua_newlib(L, gpu_async_funcs);
+    int has_device = lua_get_gpu_ctx(L) != NULL;
+    gpu_newlib(L, gpu_funcs,
+               (int)(sizeof(gpu_funcs) / sizeof(gpu_funcs[0]) - 1),
+               "gpu.", has_device);
+    gpu_newlib(L, gpu_async_funcs,
+               (int)(sizeof(gpu_async_funcs) / sizeof(gpu_async_funcs[0]) - 1),
+               "gpu.async.", has_device);
     lua_setfield(L, -2, "async");  /* gpu.async = {...} */
     return 1;
 }

@@ -81,9 +81,9 @@ do
     end
 end
 app.main(function()
-    -- pcall: on a GPU-capable binary running on a GPU-LESS host, hull.gpu is
-    -- not registered (no device), so require errors. That's fine here -- the
-    -- build composed the feature and the binary booted, which is the point.
+    -- On a GPU-capable binary running on a GPU-LESS host, hull.gpu loads with
+    -- gpu.available() false. That's fine here -- the build composed the
+    -- feature and the binary booted, which is the point.
     local ok, gpu = pcall(require, "hull.gpu")
     if ok and gpu and gpu.available() then
         assert(TOP_OK == false and TOP_ERR == "dynamic_shader_refused",

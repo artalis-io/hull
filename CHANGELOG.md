@@ -39,8 +39,8 @@ release-artifact layout).
     after the run trips, a statement still running is abandoned: the call fails,
     the statement keeps its thread and connection (dropped, its writes rolled back,
     once it ends), and the handle continues on a new connection. A request whose
-    statement never ends is answered at its deadline + 500 ms (measured: 10.5 s
-    under the default 10 s `request_ms`, 35.4 s before), and SIGTERM exits at once.
+    statement never ends is answered by its deadline + 500 ms at the latest (the
+    2 MB `instr` took 35.4 s before), and SIGTERM exits at once.
   - Inside a transaction, an abandoned statement takes the transaction with it:
     every call but the app's `ROLLBACK` is refused until then.
   - An abandoned statement still running 60 s later ends the process (one FATAL
@@ -55,6 +55,23 @@ release-artifact layout).
     reopening the file while it runs does not make a second instance.
   - Statements run outside a run (migrations) still run inline. A statement under a
     run costs about 30-60 us more.
+
+- **A GPU build on a host with no GPU device could not load a JS app importing `hull:gpu`.**
+  The runtimes registered `hull.gpu` / `hull:gpu` only when a device was found, so a
+  declared `import { gpu } from "hull:gpu"` failed the app's load ("unknown hull module"),
+  and in Lua `require("hull.gpu")` raised `module not found` (only a `pcall` let the app
+  fall back).
+  - Both runtimes now register the module whenever the binary has a GPU backend (a
+    monolithic `HL_ENABLE_GPU` build or a composed `--with=gpu`;
+    `hl_gpu_backend_present`). With no device, `gpu.available()` is false,
+    `gpu.devices()` is empty, and every other call (including `gpu.async.*`) raises
+    `gpu.<name>: no GPU device on this host`. The module gate and the optional `?`
+    form are unchanged: an undeclared `hull/gpu` is still refused, and a binary with
+    no backend still binds `null` for `"hull/gpu@1?"`.
+  - A test build (`HL_GPU_HELPER_TEST_HOOKS=1`) takes `HULL_TEST_GPU_NO_DEVICE=1` to act
+    as a host with no device; `tests/e2e_gpu_hull_test.sh` now runs its Lua and JS legs
+    that way too (the JS leg was skipped without a device), plus unit tests in both
+    runtimes over the mock backend.
 
 - **`hull test`, `hull agent test` and a built `app.main` binary had no `hull/gpu`.**
   Only the server's startup opened a GPU context, so in a GPU build an app requiring

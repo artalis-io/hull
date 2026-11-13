@@ -15148,6 +15148,38 @@ UTEST(lua_gpu, output_texture_alone_reads_the_texture)
     lgpu_cleanup();
 }
 
+/* A GPU build on a host with no device (no context): hull.gpu loads with
+ * available() false and every other call raising - the shape hull:gpu has
+ * in JS. It was registered only with a context, so require failed. */
+UTEST(lua_gpu, no_device_loads_with_available_false)
+{
+    cleanup_lua();
+    hl_platform_vfs_dispose(platform_vfs_owned);
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    memset(&lua_rt, 0, sizeof(lua_rt));
+    lua_rt.base.platform_vfs = &platform_vfs;
+    gpu_mock_feature_on = 1;
+    lua_initialized = (hl_lua_init(&lua_rt, &cfg) == 0);
+    gpu_mock_feature_on = 0;
+    ASSERT_TRUE(lua_initialized);
+    install_test_globals(lua_rt.L);
+    LGPU_EXPECT("local g = require('hull.gpu') "
+                "R = tostring(g.available()) .. ' ' .. #g.devices()",
+                "false 0");
+    LGPU_EXPECT("local g = require('hull.gpu') "
+                "local ok, e = pcall(g.compile, 'x', 'y') "
+                "R = tostring(ok) .. ' ' .. e",
+                "false gpu.compile: no GPU device on this host "
+                "(check gpu.available() first)");
+    LGPU_EXPECT("local g = require('hull.gpu') "
+                "local ok, e = pcall(g.async.dispatch, 'x', {}) "
+                "R = tostring(ok) .. ' ' .. e",
+                "false gpu.async.dispatch: no GPU device on this host "
+                "(check gpu.available() first)");
+    cleanup_lua();
+}
+
 UTEST(lua_gpu, devices_are_listed)
 {
     ASSERT_EQ(lgpu_init(2), 0);
