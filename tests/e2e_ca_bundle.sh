@@ -135,7 +135,9 @@ app.get("/probe", function(req, res)
 end)
 EOF
 
-PORT=$((10000 + (RANDOM % 50000)))
+# Below 32768 (Linux client source ports are 32768-60999); RANDOM is not
+# POSIX sh, the pid is.
+PORT=$((31500 + $$ % 200))
 
 # Hide the system bundle so hull is forced to use the embedded one.
 # Easiest portable trick: pass an empty file as --ca-bundle override... no, we

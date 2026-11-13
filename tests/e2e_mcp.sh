@@ -130,7 +130,9 @@ check_not_contains "call logs: planted text not served"   "$OUT" 'evil.example'
 DEVERR="$PLANT/devapp"
 mkdir -p "$DEVERR"
 printf 'this is not ( valid lua\n' > "$DEVERR/app.lua"
-$HULL dev --agent -p 39895 "$DEVERR/app.lua" >/dev/null 2>&1 &
+# A port below 32768 (Linux client source ports are 32768-60999); the pid
+# offset keeps runs apart.
+$HULL dev --agent -p "$((10700 + $$ % 300))" "$DEVERR/app.lua" >/dev/null 2>&1 &
 DEV_PID=$!
 GOT=""
 for _ in $(seq 1 60); do

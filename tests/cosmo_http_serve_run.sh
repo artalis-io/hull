@@ -28,12 +28,16 @@ serves() {  # <bin> <port> -> echoes the /ping body
     echo "$resp"
 }
 
+# Ports below 32768 (Linux client source ports are 32768-60999, so a port
+# there can be held by any client socket); the pid offset keeps runs apart.
+PORT_BASE=$((31000 + ($$ % 100) * 3))
+
 echo "== second-host run: $(uname -s -m) =="
-if [ "$(serves "$APES/lua_windows.com" 39320)" = "pong" ]; then
+if [ "$(serves "$APES/lua_windows.com" "$((PORT_BASE + 0))")" = "pong" ]; then
     echo "PASS lua serves pong"; else echo "FAIL lua did not serve"; fail=1; fi
-if [ "$(serves "$APES/js_windows.com" 39321)" = "pong" ]; then
+if [ "$(serves "$APES/js_windows.com" "$((PORT_BASE + 1))")" = "pong" ]; then
     echo "PASS js serves pong"; else echo "FAIL js did not serve"; fail=1; fi
-if [ "$(serves "$APES/main_windows.com" 39322)" = "pong" ]; then
+if [ "$(serves "$APES/main_windows.com" "$((PORT_BASE + 2))")" = "pong" ]; then
     echo "FAIL app.main control unexpectedly served"; fail=1
 else echo "PASS app.main control did not serve"; fi
 

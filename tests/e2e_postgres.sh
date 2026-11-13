@@ -20,7 +20,9 @@ set -eu
 
 # Overridable so a run can sit beside other services on the host.
 CONTAINER=${HULL_E2E_PG_CONTAINER:-hull-pg-e2e}
-PGPORT=${HULL_E2E_PG_PORT:-55432}
+# Default below 32768: Linux client source ports are 32768-60999, so a
+# published port there can be held by a client socket on the host.
+PGPORT=${HULL_E2E_PG_PORT:-31432}
 PORT=${HULL_E2E_APP_PORT:-18091}
 DSN="postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=disable"
 DSN_TLS="postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=require"

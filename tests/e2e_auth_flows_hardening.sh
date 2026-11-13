@@ -183,8 +183,10 @@ run_flow() {
     # (Hull's env cap isn't wired during a fixture's top-level
     # code; env.get would throw, so we can't pass a per-run port
     # through the environment.) Pick something unusual to avoid
-    # collisions in a typical dev box.
-    HIBP_PORT=39911
+    # collisions in a typical dev box, and below 32768: Linux hands out
+    # client source ports from 32768-60999, so a port there can be held by
+    # any client socket on the host.
+    HIBP_PORT=10411
     python3 "$HIBP_PY" "$HIBP_PORT" >/dev/null 2>&1 &
     HIBP_PID=$!
     sleep 0.4

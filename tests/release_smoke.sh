@@ -374,7 +374,9 @@ else
     # Run with --verify-sig. The platform-sig + app-sig + file-hash
     # chain all gets exercised at startup. Picks a high port to
     # avoid collision.
-    PORT=$((10000 + (RANDOM % 50000)))
+    # Below 32768 (Linux client source ports are 32768-60999); RANDOM is not
+    # POSIX sh, the pid is.
+    PORT=$((31700 + $$ % 200))
     # package.sig is in app/, so run the embedded app from that directory.
     (cd app && exec ../myapp --verify-sig ../dev.pub --hull-no-sandbox -p "$PORT") >"$PSIG_TMP/myapp.log" 2>&1 &
     SVR=$!
