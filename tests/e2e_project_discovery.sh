@@ -48,6 +48,41 @@ DEV_PID=""
 TMP=$(mktemp -d)
 trap '[ -n "$DEV_PID" ] && kill "$DEV_PID" 2>/dev/null; chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 
+# Ports the `hull dev --agent` servers below listen on. Below 32768 on
+# purpose: Linux hands out client source ports from 32768-60999
+# (ip_local_port_range), so a fixed listening port there can be held by any
+# client socket on the host; the app then fails to bind, the supervisor
+# restarts it, and no generation is published (e2e_agent.sh flaked that way
+# on CI). 13000-14999 is used by no other e2e script; the pid offset keeps
+# two concurrent runs apart.
+PORT_BASE=$((13000 + ($$ % 200) * 10))
+
+# How long a dev session may take to publish; the wait ends as soon as the
+# file appears or the process exits.
+START_TIMEOUT=${HULL_E2E_START_TIMEOUT:-120}
+
+# wait_for_file PID FILE LOG: wait until FILE exists. Returns 1 at once when
+# PID exits and after START_TIMEOUT seconds otherwise, printing LOG either way.
+wait_for_file() {
+    _wpid=$1; _wfile=$2; _wlog=$3
+    _wend=$(( $(date +%s) + START_TIMEOUT ))
+    while [ ! -f "$_wfile" ]; do
+        if ! kill -0 "$_wpid" 2>/dev/null; then
+            echo "  process $_wpid exited before $_wfile appeared"
+            break
+        fi
+        if [ "$(date +%s)" -ge "$_wend" ]; then
+            echo "  $_wfile did not appear within ${START_TIMEOUT}s"
+            break
+        fi
+        sleep 0.25
+    done
+    [ -f "$_wfile" ] && return 0
+    echo "  --- $_wlog ---"
+    if [ -s "$_wlog" ]; then tail -n 60 "$_wlog" | sed 's/^/  | /'; else echo "  | (empty)"; fi
+    return 1
+}
+
 # assert_py "<name>" "<json>" "<python expr over d>": pass iff the expr is truthy.
 assert_py() {
     _name="$1"; _json="$2"; _expr="$3"
@@ -291,10 +326,10 @@ cat > "$DEVAPP/app.lua" <<'EOF'
 local function home() end
 return home
 EOF
-"$HULL" dev --agent -p 39811 "$DEVAPP/app.lua" >/dev/null 2>&1 &
+"$HULL" dev --agent -p "$((PORT_BASE + 0))" "$DEVAPP/app.lua" >"$TMP/devapp.log" 2>&1 &
 DEV_PID=$!
-# wait for the first published generation (up to ~10s)
-i=0; while [ "$i" -lt 20 ] && [ ! -f "$DEVAPP/.hull/discovery.json" ]; do sleep 0.5; i=$((i + 1)); done
+# wait for the first published generation
+wait_for_file "$DEV_PID" "$DEVAPP/.hull/discovery.json" "$TMP/devapp.log" || true
 
 if [ -f "$DEVAPP/.hull/discovery.json" ]; then
     OUTD=$("$HULL" agent inspect "$DEVAPP" 2>/dev/null)
@@ -503,9 +538,9 @@ export function handler() { return 1; }
 EOF
 
 if [ "$JS_ANALYZABLE" = "1" ]; then
-    "$HULL" dev --agent -p 39813 "$MIX/app.lua" >/dev/null 2>&1 &
+    "$HULL" dev --agent -p "$((PORT_BASE + 1))" "$MIX/app.lua" >"$TMP/mix.log" 2>&1 &
     DEV_PID=$!
-    i=0; while [ "$i" -lt 20 ] && [ ! -f "$MIX/.hull/discovery.json" ]; do sleep 0.5; i=$((i + 1)); done
+    wait_for_file "$DEV_PID" "$MIX/.hull/discovery.json" "$TMP/mix.log" || true
     if [ -f "$MIX/.hull/discovery.json" ]; then
         LIVE=$("$HULL" agent inspect "$MIX" 2>/dev/null)
         assert_py "mixed live gen: source=dev, BOTH languages analyzable" "$LIVE" \
@@ -586,9 +621,9 @@ EOF
         '"SLICE7_SHOULD_NOT_RUN" not in json.dumps(d)'
 else
     # ── JS-less symmetry: the SAME lifecycle honestly reports JS unsupported, live + standalone ──
-    "$HULL" dev --agent -p 39813 "$MIX/app.lua" >/dev/null 2>&1 &
+    "$HULL" dev --agent -p "$((PORT_BASE + 1))" "$MIX/app.lua" >"$TMP/mix.log" 2>&1 &
     DEV_PID=$!
-    i=0; while [ "$i" -lt 20 ] && [ ! -f "$MIX/.hull/discovery.json" ]; do sleep 0.5; i=$((i + 1)); done
+    wait_for_file "$DEV_PID" "$MIX/.hull/discovery.json" "$TMP/mix.log" || true
     if [ -f "$MIX/.hull/discovery.json" ]; then
         LIVE=$("$HULL" agent inspect "$MIX" 2>/dev/null)
         assert_py "JS-less live gen: source=dev, JS unsupported, complete=false, Lua analyzed" "$LIVE" \
@@ -618,9 +653,9 @@ EOF
 VICTIM="$TMP/victim.txt"
 printf 'precious\n' > "$VICTIM"
 if ln -s "$VICTIM" "$TRAP/.hull/dev.json.tmp" 2>/dev/null && [ -L "$TRAP/.hull/dev.json.tmp" ]; then
-    "$HULL" dev --agent -p 39813 "$TRAP/app.lua" >/dev/null 2>&1 &
+    "$HULL" dev --agent -p "$((PORT_BASE + 2))" "$TRAP/app.lua" >"$TMP/trap.log" 2>&1 &
     TP=$!
-    i=0; while [ "$i" -lt 20 ] && [ ! -f "$TRAP/.hull/dev.json" ]; do sleep 0.5; i=$((i + 1)); done
+    wait_for_file "$TP" "$TRAP/.hull/dev.json" "$TMP/trap.log" || true
     kill "$TP" 2>/dev/null || true; wait "$TP" 2>/dev/null || true
     [ "$(cat "$VICTIM")" = "precious" ] \
         && pass "dev --agent: a planted .hull/dev.json.tmp link is not written through" \
@@ -631,7 +666,7 @@ if ln -s "$VICTIM" "$TRAP/.hull/dev.json.tmp" 2>/dev/null && [ -L "$TRAP/.hull/d
     mkdir -p "$TRAP2" "$ELSEWHERE"
     cp "$TRAP/app.lua" "$TRAP2/app.lua"
     ln -s "$ELSEWHERE" "$TRAP2/.hull"
-    "$HULL" dev --agent -p 39814 "$TRAP2/app.lua" >/dev/null 2>&1 &
+    "$HULL" dev --agent -p "$((PORT_BASE + 3))" "$TRAP2/app.lua" >/dev/null 2>&1 &
     TP=$!
     sleep 3
     kill "$TP" 2>/dev/null || true; wait "$TP" 2>/dev/null || true
@@ -662,16 +697,16 @@ PLANT_MARK="$TMP/plant_ran"
 printf '#!/bin/sh\necho ran > "%s"\nexit 1\n' "$PLANT_MARK" > "$PLANT/hull"
 chmod +x "$PLANT/hull"
 HULL_ABS=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
-python3 - "$PLANT" "$HULL_ABS" <<'EOF' >"$TMP/plant_dev.log" 2>&1 &
+python3 - "$PLANT" "$HULL_ABS" "$((PORT_BASE + 4))" <<'EOF' >"$TMP/plant_dev.log" 2>&1 &
 import os, sys
-d, exe = sys.argv[1], sys.argv[2]
+d, exe, port = sys.argv[1], sys.argv[2], sys.argv[3]
 os.chdir(d)
 env = dict(os.environ)
 env["PATH"] = ".:" + env.get("PATH", "")
-os.execve(exe, ["hull", "dev", "--agent", "-p", "39815", d + "/app.lua"], env)
+os.execve(exe, ["hull", "dev", "--agent", "-p", port, d + "/app.lua"], env)
 EOF
 DEV_PID=$!
-i=0; while [ "$i" -lt 20 ] && [ ! -f "$PLANT/.hull/discovery.json" ]; do sleep 0.5; i=$((i + 1)); done
+wait_for_file "$DEV_PID" "$PLANT/.hull/discovery.json" "$TMP/plant_dev.log" || true
 # dev removes its sidecars when it exits: look before the kill
 PLANT_PUB=0; [ -f "$PLANT/.hull/discovery.json" ] && PLANT_PUB=1
 kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""

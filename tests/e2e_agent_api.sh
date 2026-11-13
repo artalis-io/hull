@@ -39,14 +39,48 @@ check_contains() {
     esac
 }
 
-wait_for_server() {
-    for _i in 1 2 3 4 5 6 7 8 9 10; do
-        if curl -s "http://127.0.0.1:$1/health" >/dev/null 2>&1; then
+# Ports the servers below listen on. Below 32768 on purpose: Linux hands out
+# client source ports from 32768-60999 (ip_local_port_range), so a fixed
+# listening port in that range can be held by any client socket on the host
+# and the server then fails to bind (e2e_agent.sh flaked that way on CI).
+# 11000-12999 is used by no other e2e script; the pid offset keeps two
+# concurrent runs apart.
+PORT_BASE=$((11000 + ($$ % 200) * 10))
+
+# How long a server may take to come up; the wait ends as soon as the port
+# answers or the process exits.
+START_TIMEOUT=${HULL_E2E_START_TIMEOUT:-120}
+
+LOG_DIR=$(mktemp -d)
+trap 'rm -rf "$LOG_DIR"' EXIT
+
+# dump_log LOG: print a server's output after a failed start.
+dump_log() {
+    echo "  --- $1 ---"
+    if [ -s "$1" ]; then tail -n 60 "$1" | sed 's/^/  | /'; else echo "  | (empty)"; fi
+}
+
+# wait_until_up PID PORT LOG: wait until http://127.0.0.1:PORT/health
+# answers. Fails at once when PID exits and after START_TIMEOUT seconds
+# otherwise, printing LOG either way.
+wait_until_up() {
+    _wpid=$1; _wport=$2; _wlog=$3
+    _wend=$(( $(date +%s) + START_TIMEOUT ))
+    while :; do
+        if curl -s -m 5 -o /dev/null "http://127.0.0.1:$_wport/health" 2>/dev/null; then
             return 0
         fi
-        sleep 0.5
+        if ! kill -0 "$_wpid" 2>/dev/null; then
+            echo "  process $_wpid exited before port $_wport answered"
+            break
+        fi
+        if [ "$(date +%s)" -ge "$_wend" ]; then
+            echo "  port $_wport did not answer within ${START_TIMEOUT}s"
+            break
+        fi
+        sleep 0.25
     done
-    echo "  server did not start on port $1"
+    dump_log "$_wlog"
     return 1
 }
 
@@ -70,13 +104,13 @@ echo "=== E2E: hull --agent-api (detected runtime: $EXPECTED_RT) ==="
 echo ""
 echo "--- agent-api: endpoints enabled ---"
 
-PORT_API=39895
+PORT_API=$((PORT_BASE + 0))
 TMPDIR_API=$(mktemp -d)
 
-$HULL -p "$PORT_API" -d "$TMPDIR_API/data.db" --agent-api "examples/hello/app.$APP_EXT" >/dev/null 2>&1 &
+$HULL -p "$PORT_API" -d "$TMPDIR_API/data.db" --agent-api "examples/hello/app.$APP_EXT" >"$LOG_DIR/api.log" 2>&1 &
 SERVER_PID=$!
 
-if ! wait_for_server "$PORT_API"; then
+if ! wait_until_up "$SERVER_PID" "$PORT_API" "$LOG_DIR/api.log"; then
     fail "agent-api - server startup"
     stop_server
     rm -rf "$TMPDIR_API"
@@ -129,7 +163,7 @@ rm -rf "$TMPDIR_API"
 echo ""
 echo "--- agent-api: /routes reuses the live app context ---"
 
-PORT_LIVE=39897
+PORT_LIVE=$((PORT_BASE + 1))
 TMPDIR_LIVE=$(mktemp -d)
 cat > "$TMPDIR_LIVE/app.lua" <<'LUAEOF'
 local time = require("hull.time")
@@ -149,10 +183,10 @@ app.get("/stamp", (_req, res) => res.text(stamp));
 app.get(stamp, (_req, res) => res.text("ok"));
 JSEOF
 
-$HULL -p "$PORT_LIVE" --no-db --agent-api "$TMPDIR_LIVE/app.$APP_EXT" >/dev/null 2>&1 &
+$HULL -p "$PORT_LIVE" --no-db --agent-api "$TMPDIR_LIVE/app.$APP_EXT" >"$LOG_DIR/live.log" 2>&1 &
 SERVER_PID=$!
 
-if ! wait_for_server "$PORT_LIVE"; then
+if ! wait_until_up "$SERVER_PID" "$PORT_LIVE" "$LOG_DIR/live.log"; then
     fail "agent-api live - server startup"
     stop_server
 else
@@ -172,13 +206,13 @@ rm -rf "$TMPDIR_LIVE"
 echo ""
 echo "--- agent-api: endpoints disabled ---"
 
-PORT_NO_API=39896
+PORT_NO_API=$((PORT_BASE + 2))
 TMPDIR_NO_API=$(mktemp -d)
 
-$HULL -p "$PORT_NO_API" -d "$TMPDIR_NO_API/data.db" "examples/hello/app.$APP_EXT" >/dev/null 2>&1 &
+$HULL -p "$PORT_NO_API" -d "$TMPDIR_NO_API/data.db" "examples/hello/app.$APP_EXT" >"$LOG_DIR/no_api.log" 2>&1 &
 SERVER_PID=$!
 
-if ! wait_for_server "$PORT_NO_API"; then
+if ! wait_until_up "$SERVER_PID" "$PORT_NO_API" "$LOG_DIR/no_api.log"; then
     fail "no-agent-api - server startup"
     stop_server
     rm -rf "$TMPDIR_NO_API"
