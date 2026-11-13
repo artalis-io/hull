@@ -2425,7 +2425,8 @@ static int hl_serve_wire_caps(HlServerState *s)
      * hull/gpu. */
     if (gpu_ctx_ok && !hl_gpu_manifest_admit(&s->manifest, &s->module_set)) {
         rt->gpu_ctx = NULL;
-        log_info("[hull:c] gpu not declared - gpu.* disabled");
+        log_info("[hull:c] gpu not admitted (not declared, or gpu.devices "
+                 "names no valid device) - gpu.* disabled");
     }
     /* The manifest's device allowlist and gpu.dynamic_shaders opt-in,
      * sealed with the rest of the policy below. */
