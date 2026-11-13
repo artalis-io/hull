@@ -1602,43 +1602,20 @@ static int hl_serve_init_app_context(HlServerState *s)
     }
 #endif
 
-    /* Initialize GPU compute from the composable-feature hook: a
-     * `hull build --with=gpu` build links a STRONG override returning the wgpu
-     * backend; a monolithic HL_ENABLE_GPU build falls back to the compiled-in
-     * backend. No backend -> gpu.* stays unavailable (static cache persists). */
+    /* GPU compute (cap/gpu_setup.c): the composed --with=gpu backend, else
+     * the compiled-in one; none -> gpu.* stays unavailable. The shader
+     * policy holds from here, before the context reaches the runtime and
+     * the app's top level runs (audit convergence §7.3 confirming audit): a
+     * built binary compiles only its embedded shaders/, and
+     * gpu.dynamic_shaders is raised once the manifest is applied
+     * (hl_serve_wire_caps). The VFS is static: it must outlive the
+     * context. */
     if (!gpu_ctx_ok) {
-        const HlGpuBackend *gpu_be = NULL;
-        size_t gpu_nfeat = 0;
-        const HlGpuBackend *const *gpu_feats = hl_gpu_feature_backends(&gpu_nfeat);
-        if (gpu_nfeat > 0 && gpu_feats)
-            gpu_be = gpu_feats[0];
-#ifdef HL_ENABLE_GPU
-        if (!gpu_be)
-            gpu_be = &hl_gpu_backend_wgpu;
-#endif
-        if (gpu_be && !gpu_ctx)
-            gpu_ctx = hl_policy_page_alloc(sizeof *gpu_ctx);
-        if (gpu_be && gpu_ctx && hl_cap_gpu_init(gpu_ctx, gpu_be) == HL_GPU_OK
-            && hl_cap_gpu_available(gpu_ctx)) {
-            if (s->cfg.gpu_device >= 0 && s->cfg.gpu_device < gpu_ctx->device_count)
-                gpu_ctx->default_device = s->cfg.gpu_device;
-            /* The shader policy holds from here, before the context reaches
-             * the runtime and the app's top level runs (audit convergence
-             * §7.3 confirming audit: the top level compiled any source with
-             * no policy). A built binary compiles only its embedded
-             * shaders/; gpu.dynamic_shaders is raised once the manifest is
-             * applied (hl_serve_wire_caps). The VFS is static: it must
-             * outlive the context. */
-            {
-                extern const HlEntry hl_app_entries[];
-                static HlVfs gpu_shader_vfs;
-                hl_vfs_init(&gpu_shader_vfs, hl_app_entries, s->app_dir);
-                hl_cap_gpu_init_shader_policy(gpu_ctx, &gpu_shader_vfs);
-            }
-            gpu_ctx_ok = 1;
-        } else if (gpu_be) {
-            log_info("[hull:c] GPU compute unavailable - gpu.* disabled");
-        }
+        extern const HlEntry hl_app_entries[];
+        static HlVfs gpu_shader_vfs;
+        hl_vfs_init(&gpu_shader_vfs, hl_app_entries, s->app_dir);
+        gpu_ctx = hl_gpu_ctx_open(s->cfg.gpu_device, &gpu_shader_vfs);
+        gpu_ctx_ok = gpu_ctx != NULL;
     }
 
     /* The shader compile helper (audit convergence §7.3, cap/gpu_helper.c):
@@ -2454,31 +2431,16 @@ static int hl_serve_wire_caps(HlServerState *s)
             log_info("[hull:c] gpu not declared - gpu.* disabled");
         }
     }
-    /* Apply per-device allowlist if manifest declares specific devices */
-    if (gpu_ctx_ok && s->manifest.present && s->manifest.gpu &&
-        s->manifest.gpu_device_count > 0) {
-        gpu_ctx->device_restriction = 1;
-        memset(gpu_ctx->allowed_devices, 0, sizeof(gpu_ctx->allowed_devices));
-        for (int i = 0; i < s->manifest.gpu_device_count; i++) {
-            int d = s->manifest.gpu_devices[i];
-            if (d >= 0 && d < gpu_ctx->device_count)
-                gpu_ctx->allowed_devices[d] = 1;
-        }
-        log_info("[hull:c] gpu device restriction: %d of %d devices allowed",
-                 s->manifest.gpu_device_count, gpu_ctx->device_count);
-    }
-    /* Shader policy (audit convergence §7.3), sealed with the allowlist: a
-     * built binary (embedded app files) compiles only its embedded
-     * shaders/ unless the manifest sets gpu.dynamic_shaders; development
-     * compiles any source and warns once about inline source. The mode
-     * itself was set at GPU init (before the top level ran); this raises
-     * the opt-in, which only the applied manifest can grant. */
+    /* The manifest's device allowlist and gpu.dynamic_shaders opt-in,
+     * sealed with the rest of the policy below. */
     if (gpu_ctx_ok) {
         const HlVfs *shader_vfs = hl_app_context_app_vfs(s->app);
         int embedded = hl_vfs_embedded(shader_vfs);
         int dynamic = s->manifest.present && s->manifest.gpu_dynamic_shaders;
-        hl_cap_gpu_set_shader_policy(gpu_ctx,
-            embedded ? HL_GPU_SHADERS_EMBEDDED : HL_GPU_SHADERS_DEV,
+        int restrict_devices = s->manifest.present && s->manifest.gpu;
+        hl_gpu_ctx_apply_manifest(gpu_ctx,
+            restrict_devices ? s->manifest.gpu_devices : NULL,
+            restrict_devices ? s->manifest.gpu_device_count : 0,
             dynamic, shader_vfs);
         if (embedded && dynamic)
             log_info("[hull:c] gpu.dynamic_shaders: runtime WGSL source is "
@@ -3256,9 +3218,7 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
      * lives in base-resident gpu.c and is NULL-safe + idempotent. */
     hl_gpu_helper_stop();
     if (gpu_ctx_ok) {
-        hl_policy_page_unseal(gpu_ctx);   /* destroy writes the span */
-        hl_cap_gpu_destroy(gpu_ctx);
-        hl_policy_page_free(gpu_ctx, sizeof *gpu_ctx);
+        hl_gpu_ctx_close(gpu_ctx);
         gpu_ctx = NULL;
         gpu_ctx_ok = 0;
     }

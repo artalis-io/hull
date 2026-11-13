@@ -968,6 +968,30 @@ def inv11(tree, ctx):
     return findings
 
 
+# INV-12 ------------------------------------------------------------------
+# How it decides: any hl_cap_gpu_init( call in src/hull/ outside
+# src/hull/cap/. An entry point that runs app code opens its GPU context
+# with hl_gpu_ctx_open (src/hull/cap/gpu_setup.c), which sets the init-time
+# shader policy before the context reaches a runtime (audit convergence
+# 7.3); only serve.c opened one before, so `hull test` and a built app.main
+# binary had no hull.gpu at all.
+
+@rule("INV-12", "a GPU context is opened through hl_gpu_ctx_open")
+def inv12(tree, ctx):
+    findings, seen = [], set()
+    for p in tree.files("src/hull", exts=(".c",)):
+        if p.startswith("src/hull/cap/"):
+            continue
+        cf = tree.cfile(p)
+        for m in re.finditer(r"\bhl_cap_gpu_init\s*\(", cf.code):
+            sid = f"{p}:{cf.symbol_at(m.start())}"
+            if sid not in seen:
+                seen.add(sid)
+                findings.append((sid, f"hl_cap_gpu_init at line "
+                                 f"{cf.line_of(m.start())} - use hl_gpu_ctx_open"))
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------

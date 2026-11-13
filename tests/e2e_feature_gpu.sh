@@ -16,6 +16,12 @@
 # runtime needs the Vulkan loader present (libvulkan1) even with no GPU device;
 # the CI job installs it. macOS links the Metal frameworks (always in the SDK).
 #
+# The device sections are skipped wherever the built binary does not reach the
+# device path - which, until the app.main runner opened a GPU context
+# (cap/gpu_setup.c), was every host, a Mac with Metal included: hull.gpu was
+# never registered and the pcall below took it for "no GPU device". On a host
+# with a GPU, set HULL_E2E_REQUIRE_GPU=1 so a skip is a failure.
+#
 # Must run on a fresh build tree (no prior HL_ENABLE_GPU=1 objects), so it lives
 # in its own CI job. Requires `make fetch-wgpu` to have run.
 #
@@ -136,6 +142,9 @@ echo "$RUN_OUT" | grep -q "GPU FEATURE APP OK" || {
     echo "FAIL: composed gpu binary did not boot"; exit 1
 }
 echo "ok  --with=gpu composed + booted"
+if [ "${HULL_E2E_REQUIRE_GPU:-0}" = 1 ] && ! echo "$RUN_OUT" | grep -q "dispatch verified on device"; then
+    echo "FAIL: HULL_E2E_REQUIRE_GPU=1 but the built binary did not reach the device"; exit 1
+fi
 if echo "$RUN_OUT" | grep -q "dispatch verified on device"; then
     echo "$RUN_OUT" | grep -q "POLICY: dynamic source refused" \
         || { echo "FAIL: dynamic source not refused"; exit 1; }
@@ -169,7 +178,10 @@ app.main(function()
 end)
 LUA
 "$HULL" build --compiler=system --with=gpu --no-verify-platform -o "$DYN/bin" "$DYN" >/dev/null 2>&1 || true
-DYN_OUT=$("$DYN/bin" 2>&1) || true
+# A cache of its own: an OK verdict a pre-L6 hull sealed on disk for this
+# source would let the compile skip the helper.
+mkdir -p "$DYN/cache"
+DYN_OUT=$(HULL_CACHE_DIR="$DYN/cache" "$DYN/bin" 2>&1) || true
 rm -rf "$DYN"
 echo "$DYN_OUT" | grep -q "DYNAMIC OK" || { echo "$DYN_OUT"; echo "FAIL: opt-in app"; exit 1; }
 if echo "$RUN_OUT" | grep -q "dispatch verified on device"; then
