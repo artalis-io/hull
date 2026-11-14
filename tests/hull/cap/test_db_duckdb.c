@@ -1784,9 +1784,11 @@ static int tb_counting(void *ud, int64_t units)
 /* Review M2: the statement runs on its own thread while the calling thread
  * sleeps, so the binding dispatcher measures ~0 CPU for the call. The
  * statement thread's CPU time is charged instead: a loop of statements that
- * are each one ~90 ms task trips a 30M-unit budget within a few of them, as
- * it did when the work ran on the calling thread (it cost ~10000 units a
- * statement: 15 statements were 150k units). */
+ * are each one task trips a 30M-unit budget, as it did when the work ran on
+ * the calling thread (it cost ~10000 units a statement: 60 statements were
+ * 600k units). A statement is ~30 ms on a CI runner, so a 30M budget takes
+ * ~16 of them: the cap of 60 leaves room for a faster machine (it was 15,
+ * which a fast runner finished under the limit). */
 UTEST(duckdb_task_bound, single_task_statements_charge_their_cpu)
 {
     HlDbHandle h = {0};
@@ -1804,14 +1806,14 @@ UTEST(duckdb_task_bound, single_task_statements_charge_their_cpu)
     TbCount c = { 0, limit };
     HlDbBudgetBinding prev = hl_db_budget_swap(tb_counting, &c);
     int ran = 0, failed = 0;
-    for (; ran < 15 && !failed; ran++)
+    for (; ran < 60 && !failed; ran++)
         failed = hl_db_query(&h,
             "SELECT instr(repeat('a', 100000) || i::VARCHAR,"
             " repeat('a', 50000) || 'c') FROM range(1) t(i)",
             NULL, 0, NULL, NULL, NULL) != 0;
     hl_db_budget_restore(prev);
     EXPECT_TRUE(failed);
-    EXPECT_LT(ran, 15);
+    EXPECT_LT(ran, 60);
     EXPECT_GT(c.used, limit);
     ASSERT_EQ(0, tb_drain());
     h.backend->close(&h);
