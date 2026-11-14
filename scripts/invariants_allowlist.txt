@@ -153,3 +153,6 @@ INV-9  src/hull/runtime/lua/async.c:hl_lua_co_auxwrap  # coroutine.wrap's call: 
 
 # INV-11: Windows app-path checks
 INV-11  src/hull/cap/tool.c:tool_canonical_path  # tool-mode unveil check of the OPERATOR's paths: it rewrites backslashes to walk to an existing ancestor (not an app path joined with a root); its trailing-dot / colon refusals are tool_tail_comp_unsafe's
+
+# INV-13: GPU device mutex
+INV-13  src/hull/cap/gpu.c:hl_cap_gpu_compile_async_finish  # runs on a pool thread, which has no run: dev_lock is tried first and fails only for a thread with a run, so the plain lock is the no-run fallback (a gpu.async job waits as before)

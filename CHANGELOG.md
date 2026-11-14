@@ -17,6 +17,19 @@ release-artifact layout).
   handle whose reconnect failed after an abandoned statement no longer reports a transaction open
   for good (every wait in the app was refused); it connects again at its next call.
 
+- GPU (audit 46): a `gpu.devices` list that names no valid device (`{ "zero" }`, or a value that
+  is not a list) now refuses `gpu.*` on every entry point even when `modules` names `hull/gpu`;
+  before, the module set alone admitted it and no device restriction applied, so the app got every
+  device. That includes JS `gpu: { devices: null }` and any other `devices` value that is not a
+  list: with `hull/gpu` declared it now refuses `gpu.*` where it used to grant every device.
+  Serve, the `app.main` runner, `hull test` and `hull agent` take one decision
+  (`hl_gpu_manifest_admit`), and for an app that sets `gpu.dynamic_shaders` without being
+  admitted `hull/gpu` the opt-in is not raised and the shader compile helper is stopped. `gpu.buffer_copy` (Lua) /
+  `gpu.bufferCopy` (JS) read the source size under a plain lock of the device mutex, blocking behind
+  a `gpu.async` job past the run's deadline; it now waits in the same slices as every other `gpu.*`
+  call and is refused `gpu_busy` once the run has stopped. A new invariant lint rule (INV-13) keeps
+  every device-mutex lock on that path.
+
 - `hull types` acts only on record entries it could have written (audit 46): a planted
   `types/hull/.hull-types` entry such as `../../victim/vcs/HEAD` made the stale-file removal
   delete a file outside `types/`; such entries are now ignored (and reported by `--check`). A

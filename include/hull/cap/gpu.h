@@ -689,10 +689,15 @@ HlGpuCtx *hl_gpu_ctx_open(int device, const struct HlVfs *shader_vfs);
  * gpu.available() is false and every other call raises. */
 int hl_gpu_backend_present(void);
 
-/* The applied manifest's part: the device allowlist (@p ndevices > 0) and
- * the gpu.dynamic_shaders opt-in. */
-void hl_gpu_ctx_apply_manifest(HlGpuCtx *ctx, const int *devices,
-                               int ndevices, int dynamic_shaders,
+/* The applied manifest's part: the device allowlist (a gpu.devices list
+ * that names no valid device allows none, audit 46) and the
+ * gpu.dynamic_shaders opt-in, raised only when @p admitted. Whether the
+ * runtime gets the context at all is hl_gpu_manifest_admit's
+ * (module_resolver.h), the one decision every entry point takes; the caller
+ * passes its answer as @p admitted. */
+struct HlManifest;
+void hl_gpu_ctx_apply_manifest(HlGpuCtx *ctx, const struct HlManifest *m,
+                               int admitted,
                                const struct HlVfs *shader_vfs);
 
 /* Destroy and free a context hl_gpu_ctx_open made (sealed or not). The
@@ -772,6 +777,17 @@ void hl_cap_gpu_buffer_destroy(HlGpuCtx *ctx, int device, const char *name);
 int  hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
                              const char *src_name, const char *dst_name,
                              size_t src_offset, size_t dst_offset, size_t size);
+/* The bytes hl_cap_gpu_buffer_copy would move, for the bindings' charge
+ * before it: @p size, or the rest of @p src_name past @p src_offset when
+ * it is 0, never more than the source holds; 0 when the device or buffer
+ * is not there (the copy then fails). Read under the device mutex taken
+ * through the same sliced wait as every gpu.* entry point (audit 46: the
+ * bindings read it under a plain pthread_mutex_lock, which blocked behind
+ * a gpu.async job past the run's deadline). HL_GPU_OK with *@p out set,
+ * or HL_GPU_ERR_BUSY once the calling run has stopped. */
+int  hl_cap_gpu_buffer_copy_bytes(HlGpuCtx *ctx, int device,
+                                  const char *src_name, size_t src_offset,
+                                  size_t size, size_t *out);
 
 /* Persistent textures (per-device) */
 int  hl_cap_gpu_texture_create(HlGpuCtx *ctx, int device, const char *name,

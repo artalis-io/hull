@@ -992,6 +992,39 @@ def inv12(tree, ctx):
     return findings
 
 
+# INV-13 ------------------------------------------------------------------
+# How it decides (audit 46): a pthread_mutex_lock / pthread_mutex_trylock of
+# a GPU device's mutex - an argument naming `dev->mutex`, `device->mutex` or
+# `devices[...].mutex` - anywhere in src/hull/ outside dev_lock
+# (src/hull/cap/gpu.c). Every gpu.* entry point takes the device mutex
+# through dev_lock, whose sliced wait asks the run and refuses gpu_busy once
+# it stopped (audit 44): gpu.buffer_copy's size read in both bindings took it
+# with a plain lock and blocked behind a gpu.async job past the deadline.
+# A thread with no run (a pool thread) is allowlisted with its reason.
+
+INV13_LOCK = re.compile(
+    r"\bpthread_mutex_(?:try)?lock\s*\(\s*&\s*"
+    r"(?:\w+\s*->\s*)?(?:dev|device|devices\s*\[[^\]]*\])\s*(?:->|\.)\s*mutex\s*\)")
+
+
+@rule("INV-13", "a GPU device mutex is taken through dev_lock")
+def inv13(tree, ctx):
+    findings, seen = [], set()
+    for p in tree.files("src/hull", exts=(".c",)):
+        cf = tree.cfile(p)
+        for m in INV13_LOCK.finditer(cf.code):
+            fn = cf.symbol_at(m.start())
+            if p == "src/hull/cap/gpu.c" and fn == "dev_lock":
+                continue
+            sid = f"{p}:{fn}"
+            if sid not in seen:
+                seen.add(sid)
+                findings.append((sid, f"device mutex locked at line "
+                                 f"{cf.line_of(m.start())} - use dev_lock "
+                                 "(or a cap function that does)"))
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
