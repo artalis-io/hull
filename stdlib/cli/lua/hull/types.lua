@@ -182,12 +182,17 @@ local function main()
     if record_link then fail("'" .. record_link .. "' is a symbolic link") end
     local rec = read_record(out) or { files = {} }
     local embedded = {}
+    -- Shipped names folded to lower case: on a case-insensitive file system a
+    -- record entry "hull/App.d.ts" is the shipped hull/app.d.ts, and was
+    -- removed as stale (audit 47).
+    local embedded_lc = {}
     local stale, conflicts, writes = {}, {}, {}
     -- Paths that run through a symbolic link below out: never written or
     -- removed, and --force does not change that.
     local links = {}
     for _, f in ipairs(files) do
         embedded[f.name] = true
+        embedded_lc[f.name:lower()] = true
         local path = join(out, f.name)
         local link = link_below(out, f.name)
         if link then
@@ -210,7 +215,7 @@ local function main()
     for name, hash in pairs(rec.files) do
         if not shipped_name(name) then
             ignored[#ignored + 1] = name
-        elseif not embedded[name] then
+        elseif not embedded[name] and not embedded_lc[name:lower()] then
             local path = join(out, name)
             local link = link_below(out, name)
             if link then

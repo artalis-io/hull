@@ -557,8 +557,15 @@ static int l_tool_write_file(lua_State *L)
 
     /* O_NOFOLLOW: a package.sig (or any output) planted in an app tree as a
      * symlink redirected this write - `hull build --sign` overwrote its
-     * target. */
-    int wfd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+     * target. O_NONBLOCK + regular files only: opening a planted FIFO for
+     * writing waited for a reader for ever (audit 47). */
+    int wfd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
+                   0644);
+    struct stat wst;
+    if (wfd >= 0 && (fstat(wfd, &wst) != 0 || !S_ISREG(wst.st_mode))) {
+        close(wfd);
+        wfd = -1;
+    }
     FILE *f = wfd >= 0 ? fdopen(wfd, "wb") : NULL;
     if (!f) {
         if (wfd >= 0) close(wfd);
@@ -2133,8 +2140,16 @@ static int l_tool_sha256_file(lua_State *L)
         lua_pushstring(L, "outside the tool sandbox");
         return 2;
     }
-    FILE *f = fopen(path, "rb");
+    /* Regular files only, opened O_NONBLOCK as tool.read_file opens them: a
+     * FIFO planted in an app tree (types/hull/x.d.ts) held fopen for ever,
+     * hanging `hull types --check` (audit 47). */
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    struct stat st;
+    FILE *f = NULL;
+    if (fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode))
+        f = fdopen(fd, "rb");
     if (!f) {
+        if (fd >= 0) close(fd);
         lua_pushnil(L);
         lua_pushstring(L, "cannot open file");
         return 2;
