@@ -1041,7 +1041,63 @@ void hl_db_duckdb_test_set_abandon_ceiling_ms(int ms)
                      ms > 0 ? ms : HL_DB_DUCK_ABANDON_CEILING_MS,
                      __ATOMIC_RELAXED);
 }
+
+static int g_duck_test_fail_connects;
+static int g_duck_test_help_delay_ms;
+
+void hl_db_duckdb_test_fail_reconnects(int n)
+{
+    __atomic_store_n(&g_duck_test_fail_connects, n > 0 ? n : 0,
+                     __ATOMIC_RELAXED);
+}
+
+void hl_db_duckdb_test_set_help_delay_ms(int ms)
+{
+    __atomic_store_n(&g_duck_test_help_delay_ms, ms > 0 ? ms : 0,
+                     __ATOMIC_RELAXED);
+}
 #endif
+
+/* A new connection for a handle whose statement was abandoned with its own
+ * (a test build can make it fail). The first failure in the process is
+ * logged; the handle then has no connection until a later call connects
+ * (duck_ensure_con). */
+static int duck_reconnect(HlDbDuckCtx *s)
+{
+    duckdb_connection fresh = NULL;
+    int failed = 0;
+#ifdef HL_DUCKDB_TEST_HOOKS
+    int left = __atomic_load_n(&g_duck_test_fail_connects, __ATOMIC_RELAXED);
+    if (left > 0) {
+        __atomic_store_n(&g_duck_test_fail_connects, left - 1,
+                         __ATOMIC_RELAXED);
+        failed = 1;
+    }
+#endif
+    if (!failed && (!s->db || duckdb_connect(s->db, &fresh) != DuckDBSuccess))
+        failed = 1;
+    if (failed) {
+        static int logged;
+        if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
+            log_error("[hull:c] duckdb: no new connection after a statement "
+                      "was abandoned; the handle refuses statements until a "
+                      "later one connects");
+        s->con = NULL;
+        return -1;
+    }
+    s->con = fresh;
+    return 0;
+}
+
+/* Audit 46 L3: a handle left with no connection (its reconnect after an
+ * abandon failed) tries again, once per call. */
+static int duck_ensure_con(HlDbDuckCtx *s)
+{
+    if (s->con) return 0;
+    if (duck_reconnect(s) == 0) return 0;
+    duck_set_err(s, "duckdb: no connection");
+    return -1;
+}
 
 /* Block the asynchronous signals on a thread Hull starts for DuckDB, as the
  * VM thread does: they belong to the loop thread. SIGRTMAX - 3 (the Landlock
@@ -1132,6 +1188,9 @@ typedef struct HlDuckJob {
     int               abandoned;   /* the caller left, under mu */
     int               stoppable;   /* not a TRANSACTION statement */
     int64_t           tasks;       /* tasks run, under mu */
+    /* Time the statement thread spent waiting while DuckDB's own worker
+     * threads held the statement's tasks (hl_meter_ticks), under mu. */
+    uint64_t          idle_ticks;
     duckdb_connection con;
     /* The file's instance an abandoned statement's connection holds a
      * reference on (taken at abandonment, dropped after its disconnect). */
@@ -1175,8 +1234,9 @@ static int duck_job_should_stop(HlDuckJob *j, int idle)
 /* Prepare, bind and run the job's statement, one task at a time, so the run
  * that issued it is charged and can stop it (audit 15). Each task charges
  * HL_DB_DUCK_TASK_OPS (as SQLite's progress handler does); while DuckDB's
- * own worker threads hold the tasks it charges nothing, but still asks (a
- * 0-unit charge sees the run's wall-clock deadline) and naps briefly. Once
+ * own worker threads hold the tasks it charges nothing inline, but still asks
+ * (a 0-unit charge sees the run's wall-clock deadline) and naps briefly;
+ * threaded, it records the naps for the caller to charge (audit 46 L1). Once
  * the budget or the deadline trips, duckdb_interrupt stops the statement at
  * its next task.
  *
@@ -1222,6 +1282,15 @@ static void duck_job_run(HlDuckJob *j)
         return;
     }
     int tripped = 0;
+#ifdef HL_DUCKDB_TEST_HOOKS
+    if (j->threaded) {
+        int d = __atomic_load_n(&g_duck_test_help_delay_ms, __ATOMIC_RELAXED);
+        if (d > 0) {
+            struct timespec nap = { d / 1000, (long)(d % 1000) * 1000000L };
+            (void)nanosleep(&nap, NULL);
+        }
+    }
+#endif
     duckdb_pending_state st;
     for (;;) {
         st = duckdb_pending_execute_task(pending);
@@ -1235,7 +1304,16 @@ static void duck_job_run(HlDuckJob *j)
         }
         if (idle) {
             struct timespec nap = { 0, 100000 };   /* 0.1 ms */
+            uint64_t t0 = j->threaded ? hl_meter_ticks() : 0;
             (void)nanosleep(&nap, NULL);
+            if (j->threaded) {
+                /* The statement executes on DuckDB's own threads meanwhile:
+                 * the caller charges this time (audit 46 L1). */
+                uint64_t t1 = hl_meter_ticks();
+                pthread_mutex_lock(&j->mu);
+                if (t1 > t0) j->idle_ticks += t1 - t0;
+                pthread_mutex_unlock(&j->mu);
+            }
         }
     }
     if (!j->stoppable) tripped = 0;   /* ran to its end: report what it did */
@@ -1515,24 +1593,35 @@ static int duck_job_copy_input(HlDuckJob *j, const char *sql,
 
 /* The units the statement's work since the last reading is worth: its tasks
  * at HL_DB_DUCK_TASK_OPS, plus the statement thread's CPU time at the
- * binding dispatcher's rate (or, with no CPU clock, the wall time). The
- * calling thread sleeps meanwhile, so the dispatcher measures ~0 CPU for
- * the call: without this a loop of single-task statements, each one long
- * task, cost ~10000 units a statement (a 300 ms one ~33x less than its
+ * binding dispatcher's rate (or, with no CPU clock, the wall time), plus the
+ * wall time the statement thread spent waiting while DuckDB's own worker
+ * threads held the statement's tasks (@p idle, hl_meter_ticks), at the same
+ * rate. The calling thread sleeps meanwhile, so the dispatcher measures ~0
+ * CPU for the call: without this a loop of single-task statements, each one
+ * long task, cost ~10000 units a statement (a 300 ms one ~33x less than its
  * time). Units charged during the call count against the dispatcher's own
- * measure (hl_meter_settle), so nothing is charged twice. A task one of
- * DuckDB's own worker threads takes (threads = 4) is not on this clock: it is
- * charged HL_DB_DUCK_TASK_OPS only, as before the statement thread, and
- * bounded by the run's deadline, the abandon and the exit ceiling. */
+ * measure (hl_meter_settle), so nothing is charged twice.
+ *
+ * A task one of DuckDB's worker threads takes (threads = 4) is not on the
+ * statement thread's clock, and the C API reports no per-statement CPU while
+ * it runs, so its wall time is charged instead (audit 46 L1: it was charged
+ * HL_DB_DUCK_TASK_OPS only, and a db.async op whose one long task a worker
+ * took ran ~30x longer on a budget). A statement costs about its wall time
+ * whichever thread runs its tasks; parallel workers are not each charged
+ * (no more than the wall time), and a statement whose tasks wait for DuckDB
+ * threads busy with another statement's is charged that wait too. */
 static int64_t duck_work_units(const HlDuckExec *ex, int64_t tasks,
-                               uint64_t *cpu_last, uint64_t *wall_last)
+                               uint64_t idle, uint64_t *cpu_last,
+                               uint64_t *wall_last)
 {
     int64_t units = tasks * HL_DB_DUCK_TASK_OPS;
     uint64_t cpu = duck_exec_cpu_ns(ex);
     uint64_t wall = hl_meter_ticks();
     if (cpu && *cpu_last) {
         if (cpu > *cpu_last) units += (int64_t)hl_meter_ns_units(cpu - *cpu_last);
+        if (idle) units += (int64_t)hl_meter_ticks_units(idle);
     } else if (wall > *wall_last) {
+        /* No CPU clock: the wall time covers the idle time too. */
         units += (int64_t)hl_meter_ticks_units(wall - *wall_last);
     }
     *cpu_last = cpu;
@@ -1581,6 +1670,7 @@ static int duck_run_bounded(HlDbDuckCtx *s, HlDuckJob *j)
     pthread_mutex_unlock(&ex->mu);
 
     int64_t charged = 0;
+    uint64_t idle_charged = 0;
     uint64_t trip_ms = 0;
     int abandoned = 0;
     pthread_mutex_lock(&j->mu);
@@ -1591,8 +1681,11 @@ static int duck_run_bounded(HlDbDuckCtx *s, HlDuckJob *j)
         if (!j->stop) {
             int64_t ran = j->tasks - charged;
             charged = j->tasks;
+            uint64_t idle = j->idle_ticks - idle_charged;
+            idle_charged = j->idle_ticks;
             pthread_mutex_unlock(&j->mu);
-            int64_t units = duck_work_units(ex, ran, &cpu_last, &wall_last);
+            int64_t units = duck_work_units(ex, ran, idle, &cpu_last,
+                                            &wall_last);
             int t = hl_db_budget_charge(units) != 0;
             pthread_mutex_lock(&j->mu);
             if (t) {
@@ -1623,10 +1716,12 @@ static int duck_run_bounded(HlDbDuckCtx *s, HlDuckJob *j)
         }
     }
     int64_t ran = abandoned ? 0 : j->tasks - charged;
+    uint64_t idle = abandoned ? 0 : j->idle_ticks - idle_charged;
     pthread_mutex_unlock(&j->mu);
     if (!abandoned) {
         /* The work since the last slice. */
-        int64_t units = duck_work_units(ex, ran, &cpu_last, &wall_last);
+        int64_t units = duck_work_units(ex, ran, idle, &cpu_last,
+                                        &wall_last);
         if (units > 0) (void)hl_db_budget_charge(units);
         return 0;
     }
@@ -1646,15 +1741,7 @@ static int duck_run_bounded(HlDbDuckCtx *s, HlDuckJob *j)
      * A transaction open on the old one is gone with it, so every statement
      * is refused until the app's ROLLBACK (as a Postgres connection lost
      * inside a transaction). */
-    duckdb_connection fresh = NULL;
-    if (duckdb_connect(s->db, &fresh) != DuckDBSuccess) {
-        fresh = NULL;
-        static int logged;
-        if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
-            log_error("[hull:c] duckdb: no new connection after a statement "
-                      "was abandoned; the handle refuses every statement");
-    }
-    s->con = fresh;
+    (void)duck_reconnect(s);
     if (s->in_txn) s->txn_lost = 1;
     duck_set_err(s, "interrupted (run limit exceeded; the statement was "
                     "abandoned)");
@@ -1763,10 +1850,7 @@ static int duck_query(HlDbHandle *h, const char *sql,
                         "abandoned at its run's time limit; ROLLBACK");
         return -1;
     }
-    if (!s->con) {
-        duck_set_err(s, "duckdb: no connection");
-        return -1;
-    }
+    if (duck_ensure_con(s) != 0) return -1;
 
     HlDuckJob *job = NULL;
     int interrupted = 0;
@@ -1833,10 +1917,7 @@ static int duck_exec_script(HlDbHandle *h, const char *sql)
     if (!h || !h->ctx) return -1;
     HlDbDuckCtx *s = h->ctx;
     if (duck_refuse_sql(s, sql) != 0) return -1;
-    if (!s->con) {
-        duck_set_err(s, "duckdb: no connection");
-        return -1;
-    }
+    if (duck_ensure_con(s) != 0) return -1;
     duckdb_result r;
     if (duckdb_query(s->con, sql, &r) != DuckDBSuccess) {
         duck_set_err(s, duckdb_result_error(&r));
@@ -1880,7 +1961,14 @@ static void duck_guard_stale_txn(HlDbHandle *h)
 {
     if (!h || !h->ctx) return;
     HlDbDuckCtx *s = h->ctx;
-    if (!s->con) return;
+    if (!s->con) {
+        /* No connection holds a transaction: the one the abandoned
+         * statement held went with it (audit 46 L3). Left set, every later
+         * entry saw a transaction open and every wait was refused. */
+        s->in_txn = 0;
+        s->txn_lost = 0;
+        return;
+    }
     duckdb_result res;
     if (duckdb_query(s->con, "ROLLBACK", &res) == DuckDBSuccess)
         fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");

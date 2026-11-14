@@ -65,6 +65,13 @@ int hl_db_duckdb_test_instance_refs(const char *path);
  * so every task runs on the statement thread (its CPU time is charged); any
  * other value restores the default 4. */
 void hl_db_duckdb_test_set_threads(int n);
+/* Test only, likewise: the next @p n connects a handle makes for itself
+ * after a statement was abandoned (or retries later) fail. */
+void hl_db_duckdb_test_fail_reconnects(int n);
+/* Test only, likewise: the statement thread naps @p ms before it first asks
+ * DuckDB for a task of a statement run under a budget, so one of DuckDB's own
+ * worker threads takes a single-task statement; 0 restores the default. */
+void hl_db_duckdb_test_set_help_delay_ms(int ms);
 #endif
 
 #endif /* HL_CAP_DB_DUCKDB_H */

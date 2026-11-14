@@ -10,6 +10,13 @@ release-artifact layout).
 
 ### Fixed
 
+- DuckDB (audit 46): a statement whose task one of DuckDB's own worker threads ran is charged its
+  wall time, as one the statement thread runs is charged its CPU time; it was charged 10000 units a
+  task, so a `db.async` op whose one long task a worker took ran ~57 s on a 100M budget instead of
+  ~2 s. Parallel aggregates now cost about their wall time (a 300 ms one ~23M units, was ~14M). A
+  handle whose reconnect failed after an abandoned statement no longer reports a transaction open
+  for good (every wait in the app was refused); it connects again at its next call.
+
 - GPU (audit 46): a `gpu.devices` list that names no valid device (`{ "zero" }`, or a value that
   is not a list) now refuses `gpu.*` on every entry point even when `modules` names `hull/gpu`;
   before, the module set alone admitted it and no device restriction applied, so the app got every

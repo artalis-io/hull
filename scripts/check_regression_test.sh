@@ -118,6 +118,15 @@ run_cases() {
       test_mysql*) feat="HL_ENABLE_MYSQL=1" ;;
       test_pg*)    feat="HL_ENABLE_POSTGRES=1" ;;
       test_valkey*|test_respwire) feat="HL_ENABLE_VALKEY=1" ;;
+      # Without DuckDB its cases compile to skips that pass on any code, so
+      # they are built with it when the static libs are there (CI fetches
+      # them for a PR that adds DuckDB cases).
+      test_db_duckdb*)
+        if [ -f vendor/duckdb/libduckdb_static.a ]; then
+          feat="HL_ENABLE_DUCKDB=1"
+        else
+          echo "check-regression-test: [$pass] $bin: no DuckDB libs (make fetch-duckdb); its cases skip"
+        fi ;;
     esac
     # shellcheck disable=SC2086 # $feat is one VAR=1 word or empty
     if ! make -j"$jobs" "$bin" $feat REGRESSION_STUBS="$stubs" > "$tmp/build.log" 2>&1; then

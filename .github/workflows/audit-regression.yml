@@ -43,6 +43,16 @@ jobs:
       - name: Build at the PR head (warms the object cache)
         run: make -j"$(nproc)"
 
+      # DuckDB test cases skip without the DuckDB libs, so fetch them when
+      # the PR touches the DuckDB tests.
+      - name: Fetch DuckDB when the PR touches its tests
+        env:
+          BASE_REF: origin/${{ github.event.pull_request.base.ref }}
+        run: |
+          if git diff --name-only "$(git merge-base "$BASE_REF" HEAD)" HEAD | grep -q '^tests/hull/cap/test_db_duckdb'; then
+            make fetch-duckdb
+          fi
+
       - name: Added tests fail on the pre-fix code
         env:
           BASE_REF: origin/${{ github.event.pull_request.base.ref }}
