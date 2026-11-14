@@ -93,14 +93,11 @@ jobs:
       - name: Produce hull-cosmocc.tar
         shell: bash
         run: |
-          # Pin busybox by computing its digest now (the real release, E.3, hard-
-          # pins this constant; the E2E just needs it consistent with the fetch).
-          curl -fsSL --retry 3 -L "$BUSYBOX_URL" -o bb.exe
-          bb_sha=$(sha256sum bb.exe | cut -d' ' -f1)
-          echo "busybox64u.exe sha256 = $bb_sha   (pin this in release.yml for E.3)"
+          # The busybox digest pinned in release.yml; the script falls back to
+          # Hull's own release when frippery.org refuses the runner.
           sh scripts/build_cosmocc_bundle.sh \
              "$COSMOCC_VERSION" "$COSMOCC_SHA256" \
-             "$BUSYBOX_URL" "$bb_sha" \
+             "$BUSYBOX_URL" 6e263d154d8548d1eb936f65d1d8312c80df31c45974e48d6335e4dcc0f4f34c \
              hull-cosmocc.tar
           ls -la hull-cosmocc.tar
       - uses: actions/upload-artifact@v4
