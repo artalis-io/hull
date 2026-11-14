@@ -79,8 +79,18 @@ unzip -q -o "$work/cosmocc.zip" -d "$work/tree"
 test -x "$work/tree/bin/cosmocc" || { echo "build_cosmocc_bundle: no bin/cosmocc in tree" >&2; exit 1; }
 
 # ── busybox ride-along ───────────────────────────────────────────────────
+# frippery.org has answered GitHub's runners 403 (Nov 2026) while serving other
+# clients. The fallback is Hull's own earlier release: its hull-cosmocc.tar
+# carries this busybox at bin/busybox.exe, and the pinned digest below is
+# checked whichever source supplied it.
+bb_fallback_tar="${HULL_BUSYBOX_FALLBACK_TAR:-https://github.com/artalis-io/hull/releases/download/v0.22.0/hull-cosmocc.tar}"
 echo "build_cosmocc_bundle: fetching busybox $bb_url"
-curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 -L "$bb_url" -o "$work/busybox.exe"
+if ! curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 -L "$bb_url" -o "$work/busybox.exe"; then
+    echo "build_cosmocc_bundle: busybox fetch failed; taking it from $bb_fallback_tar"
+    curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 -L "$bb_fallback_tar" -o "$work/bb-fallback.tar"
+    tar -xOf "$work/bb-fallback.tar" ./bin/busybox.exe > "$work/busybox.exe"
+    rm -f "$work/bb-fallback.tar"
+fi
 verify "$work/busybox.exe" "$bb_sha"
 echo "build_cosmocc_bundle: busybox SHA-256 OK"
 # NOTE: busybox is dropped into the tree AFTER the trim below - the trace closure
