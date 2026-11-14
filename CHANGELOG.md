@@ -8,6 +8,25 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-11-14
+
+Fixes from audit round 46, none above Low: DuckDB statements whose work DuckDB's own threads run
+are charged their wall time, a `gpu.devices` list naming no valid device fails closed, and
+`hull types` touches only files it wrote. Read the upgrade notes: both runtime changes can refuse
+an app that ran before.
+
+### Upgrade notes
+
+- **DuckDB parallel queries cost about their wall time.** A query DuckDB spreads over its worker
+  threads was charged a fixed 10000 units a task; it is now charged its wall time (a 300 ms
+  parallel aggregate ~23M units, was ~14M). A request running several large parallel queries can
+  hit the instruction budget where it did not before - raise `--max-instructions` or move the
+  work to `db.async`.
+- **An invalid `gpu.devices` refuses `gpu.*`.** A `devices` list naming no valid device, or a
+  value that is not a list (JS `devices: null` included), used to grant every device once
+  `hull/gpu` was declared; `gpu.*` now refuses. Remove `devices` to use every device, or list
+  valid indices.
+
 ### Fixed
 
 - DuckDB (audit 46): a statement whose task one of DuckDB's own worker threads ran is charged its
