@@ -8,6 +8,14 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- `hull types` (audit 47): a record entry naming a shipped file in another letter case
+  (`hull/Core.d.ts`) no longer removes the shipped `hull/core.d.ts` as stale on a
+  case-insensitive file system. A FIFO planted under `types/` no longer hangs `hull types`,
+  `--check` or `--force`: `tool.sha256_file` and `tool.write_file` open without waiting and take
+  regular files only, as `tool.read_file` does.
+
 ## [0.22.1] - 2026-11-14
 
 Fixes from audit round 46, none above Low: DuckDB statements whose work DuckDB's own threads run
