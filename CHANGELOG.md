@@ -19,9 +19,11 @@ an app that ran before.
 
 - **DuckDB parallel queries cost about their wall time.** A query DuckDB spreads over its worker
   threads was charged a fixed 10000 units a task; it is now charged its wall time (a 300 ms
-  parallel aggregate ~23M units, was ~14M). A request running several large parallel queries can
-  hit the instruction budget where it did not before - raise `--max-instructions` or move the
-  work to `db.async`.
+  parallel aggregate ~23M units, was ~14M), so with the default 100M budget a parallel DuckDB
+  query running past about 1.5 s - in a request, `app.main` or a `db.async` op, which takes the
+  submitting run's limit - now fails where it did not before. Raise `--max-instructions` for
+  DuckDB-heavy apps. On a heavily loaded host the charge can run high, since the time the
+  statement thread waits for DuckDB's workers is charged in full.
 - **An invalid `gpu.devices` refuses `gpu.*`.** A `devices` list naming no valid device, or a
   value that is not a list (JS `devices: null` included), used to grant every device once
   `hull/gpu` was declared; `gpu.*` now refuses. Remove `devices` to use every device, or list
