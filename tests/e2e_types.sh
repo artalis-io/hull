@@ -75,6 +75,65 @@ APP2=$WORK/app2; mkdir -p "$APP2" "$WORK/elsewhere"; ln -s "$WORK/elsewhere" "$A
 (cd "$APP2" && "$HULL" types >/dev/null 2>&1); rc=$?
 check "a symlinked types/ is refused" "[ $rc -ne 0 ] && [ -z \"\$(ls '$WORK/elsewhere')\" ]"
 
+sha() { h=$(shasum -a 256 "$1" 2>/dev/null || sha256sum "$1"); echo "${h%% *}"; }
+
+echo "── types_audit46.record_names: a planted record cannot delete outside types/ ──"
+S=$WORK/a46; mkdir -p "$S/victim/vcs" "$S/evil/types/hull"
+printf 'ref: refs/heads/main\n' > "$S/victim/vcs/HEAD"; echo x > "$S/evil/app.js"
+printf 'version 0\n%s ../../victim/vcs/HEAD\n' "$(sha "$S/victim/vcs/HEAD")" > "$S/evil/types/hull/.hull-types"
+out=$(cd "$S/victim" && "$HULL" types ../evil 2>&1)
+check "a '../' record entry deletes nothing" "[ -f '$S/victim/vcs/HEAD' ]"
+check "nothing is reported removed" "echo \"\$out\" | grep -q ' 0 removed'"
+printf 'version 0\n%s ../../victim/vcs/HEAD\n' "$(sha "$S/victim/vcs/HEAD")" >> "$S/evil/types/hull/.hull-types"
+out=$(cd "$S/victim" && "$HULL" types --check ../evil 2>&1); rc=$?
+check "--check reports the foreign entry" "[ $rc -ne 0 ] && echo \"\$out\" | grep -q 'ignored'"
+check "--check deleted nothing either" "[ -f '$S/victim/vcs/HEAD' ]"
+
+echo "── types_audit46.symlinked_dir: no write or removal through a linked directory ──"
+# The link targets are in the app tree, where the tool sandbox lets hull
+# types write: only the link check stops it.
+A3=$WORK/a46b; mkdir -p "$A3/src"; echo x > "$A3/app.js"
+(cd "$A3" && "$HULL" types >/dev/null 2>&1)
+cp "$A3"/types/hull/modules/*.d.ts "$A3/src/"
+printf '\n// my own source\n' >> "$A3/src/db.d.ts"
+rm -rf "$A3/types/hull/modules"; ln -s ../../src "$A3/types/hull/modules"
+out=$(cd "$A3" && "$HULL" types --force 2>&1); rc=$?
+check "a symlinked types/hull/modules is refused, even with --force" \
+      "[ $rc -ne 0 ] && grep -q 'my own source' '$A3/src/db.d.ts'"
+check "the link is named, with no --force advice" \
+      "echo \"\$out\" | grep -q 'symbolic link' && ! echo \"\$out\" | grep -q 'Re-run with --force'"
+# A recorded stale file reached through a linked directory is not removed.
+rm "$A3/types/hull/modules"; (cd "$A3" && "$HULL" types >/dev/null 2>&1)
+mkdir -p "$A3/old"; printf 'declare const gone: 1;\n' > "$A3/old/gone.d.ts"
+ln -s ../../old "$A3/types/hull/old"
+printf '%s hull/old/gone.d.ts\n' "$(sha "$A3/old/gone.d.ts")" >> "$A3/types/hull/.hull-types"
+(cd "$A3" && "$HULL" types >/dev/null 2>&1); rc=$?
+check "a stale file behind a linked directory is kept (and refused)" "[ $rc -ne 0 ] && [ -f '$A3/old/gone.d.ts' ]"
+rm "$A3/types/hull/old"
+# A symlinked tests/ gets no tsconfig.json.
+A4=$WORK/a46c; mkdir -p "$A4/other"; echo x > "$A4/app.js"; ln -s other "$A4/tests"
+(cd "$A4" && "$HULL" types >/dev/null 2>&1)
+check "no tsconfig.json written into a linked tests/" "[ ! -f '$A4/other/tsconfig.json' ]"
+
+echo "── types_audit46.removed_count: a refused removal is not counted ──"
+A5=$WORK/a46d; mkdir -p "$A5"; echo x > "$A5/app.js"
+(cd "$A5" && "$HULL" types >/dev/null 2>&1)
+mkdir -p "$A5/types/hull/ro"; printf 'declare const gone: 1;\n' > "$A5/types/hull/ro/gone.d.ts"
+printf '%s hull/ro/gone.d.ts\n' "$(sha "$A5/types/hull/ro/gone.d.ts")" >> "$A5/types/hull/.hull-types"
+chmod 555 "$A5/types/hull/ro"
+out=$(cd "$A5" && "$HULL" types 2>&1)
+if [ -f "$A5/types/hull/ro/gone.d.ts" ]; then
+    check "a failed removal is not counted" "echo \"\$out\" | grep -q ' 0 removed'"
+    check "a failed removal is reported" "echo \"\$out\" | grep -q 'could not remove'"
+    check "a failed removal stays in the record" "grep -q 'hull/ro/gone.d.ts' '$A5/types/hull/.hull-types'"
+    chmod 755 "$A5/types/hull/ro"
+    out=$(cd "$A5" && "$HULL" types 2>&1)
+    check "the next run removes it" "[ ! -f '$A5/types/hull/ro/gone.d.ts' ] && echo \"\$out\" | grep -q ' 1 removed'"
+else
+    echo "  skip  removal count (running as root)"
+fi
+chmod 755 "$A5/types/hull/ro"
+
 echo "── type-check with the installed declarations ──"
 if [ -x "$TSC" ]; then
     out=$("$TSC" --noEmit -p "$APP" 2>&1); rc=$?

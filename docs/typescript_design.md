@@ -84,6 +84,12 @@ A tool-mode command (`stdlib/cli/lua/hull/types.lua` + a thin C dispatcher, like
 - a re-run (after `hull update`) replaces a recorded file that is unchanged and removes
   one this version no longer ships; a file that was edited, or that Hull did not write,
   is a conflict: nothing is written and the command fails unless `--force`;
+- the record is a file in the app tree, so its names are repo content: only a name hull
+  types could have written (`hull/...` or `hull-test/...`, plain components, ending in
+  `.d.ts` or `.md`) is acted on, any other entry is ignored (and reported by `--check`);
+  a path below `types/` that runs through a symbolic link (a directory included) is a
+  conflict, for writes and removals alike, and no `tsconfig.json` is written through a
+  linked `tests/` (audit 46);
 - `--check` writes nothing and fails when the installed declarations differ from this
   hull's (an app's CI can run it);
 - writes `tsconfig.json` (and `tests/tsconfig.json` for test files, which adds
