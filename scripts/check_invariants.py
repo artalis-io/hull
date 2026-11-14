@@ -1001,10 +1001,20 @@ def inv12(tree, ctx):
 # it stopped (audit 44): gpu.buffer_copy's size read in both bindings took it
 # with a plain lock and blocked behind a gpu.async job past the deadline.
 # A thread with no run (a pool thread) is allowlisted with its reason.
+# In the GPU files (cap/gpu*.c, runtime/*/mod_gpu*.c, worker_gpu.c) the
+# device mutex is the only field named `mutex` (job locks are `mu`), so any
+# lock of `<expr>->mutex` / `<expr>.mutex` there counts, whatever the
+# variable is called; elsewhere only the device spellings do (the WASM
+# module locks are `mod->mutex`). Timed locks count too.
 
 INV13_LOCK = re.compile(
-    r"\bpthread_mutex_(?:try)?lock\s*\(\s*&\s*"
-    r"(?:\w+\s*->\s*)?(?:dev|device|devices\s*\[[^\]]*\])\s*(?:->|\.)\s*mutex\s*\)")
+    r"\bpthread_mutex_(?:try|timed)?lock\s*\(\s*&\s*"
+    r"(?:\w+\s*->\s*)?(?:dev|device|devices\s*\[[^\]]*\])\s*(?:->|\.)\s*mutex\s*[,)]")
+INV13_LOCK_GPU = re.compile(
+    r"\bpthread_mutex_(?:try|timed)?lock\s*\(\s*&\s*"
+    r"[\w\s\[\]>.()-]*?(?:->|\.)\s*mutex\s*[,)]")
+INV13_GPU_FILE = re.compile(
+    r"^src/hull/(?:cap/gpu[\w-]*\.c|runtime/\w+/mod_gpu[\w-]*\.c|worker_gpu\.c)$")
 
 
 @rule("INV-13", "a GPU device mutex is taken through dev_lock")
@@ -1012,7 +1022,8 @@ def inv13(tree, ctx):
     findings, seen = [], set()
     for p in tree.files("src/hull", exts=(".c",)):
         cf = tree.cfile(p)
-        for m in INV13_LOCK.finditer(cf.code):
+        pat = INV13_LOCK_GPU if INV13_GPU_FILE.match(p) else INV13_LOCK
+        for m in pat.finditer(cf.code):
             fn = cf.symbol_at(m.start())
             if p == "src/hull/cap/gpu.c" and fn == "dev_lock":
                 continue
