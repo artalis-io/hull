@@ -281,6 +281,11 @@ typedef struct HlManifest {
     int         gpu;              /* 1 if app declares gpu: true or gpu: {...} */
     int         gpu_devices[HL_GPU_MAX_DEVICES]; /* allowed device indices */
     int         gpu_device_count; /* 0 = all devices allowed (backward compat) */
+    int         gpu_devices_invalid; /* gpu.devices was given but names no
+                                   * valid device (not a list, or every entry
+                                   * refused): gpu is refused on every entry
+                                   * point, whatever `modules` says
+                                   * (hl_gpu_manifest_admit; audit 46) */
     int         gpu_dynamic_shaders; /* gpu.dynamic_shaders = true (JS
                                    * gpu.dynamicShaders): a built binary may
                                    * compile source not embedded from shaders/

@@ -76,6 +76,17 @@ bool hl_module_set_contains_spec(const HlResolvedModuleSet *set,
 bool hl_module_set_contains_name(const HlResolvedModuleSet *set,
                                   const char *canonical_name);
 
+/* Whether the applied manifest @p m admits gpu.* given the resolved set
+ * @p set (NULL = none resolved): the one decision every entry point takes
+ * (audit 46). A gpu.devices list naming no valid device refuses it whatever
+ * `modules` says. No manifest (or none present) admits, as before. */
+bool hl_gpu_manifest_admit(const HlManifest *m, const HlResolvedModuleSet *set);
+
+/* hl_gpu_manifest_admit and the gpu.dynamic_shaders opt-in: whether the
+ * shader compile helper has runtime source to check. */
+bool hl_gpu_manifest_dynamic_shaders(const HlManifest *m,
+                                     const HlResolvedModuleSet *set);
+
 /* True iff the set holds a module that keeps tables on the stdlib's internal
  * connection (session, rbac, totp, audit-log, idempotency, auth-flows,
  * auth-health), so the Hull-owned internal database is needed (audit

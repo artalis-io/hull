@@ -4330,6 +4330,31 @@ void hl_cap_gpu_texture_destroy(HlGpuCtx *ctx, int device, const char *name)
 
 /* ── GPU-side buffer copy ──────────────────────────────────────────── */
 
+int hl_cap_gpu_buffer_copy_bytes(HlGpuCtx *ctx, int device,
+                                 const char *src_name, size_t src_offset,
+                                 size_t size, size_t *out)
+{
+    if (!out)
+        return HL_GPU_ERR_INTERNAL;
+    *out = 0;
+    if (!ctx || !src_name || ctx->device_count == 0)
+        return HL_GPU_OK;
+    int dev_idx = resolve_device(ctx, device);
+    if (dev_idx < 0 || dev_idx >= ctx->device_count)
+        return HL_GPU_OK;
+    HlGpuDevice *dev = &ctx->devices[dev_idx];
+    if (dev_lock(dev) != 0)   /* the run stopped first (audit 46) */
+        return HL_GPU_ERR_BUSY;
+    HlGpuBuffer *src = find_buffer(dev, src_name);
+    size_t src_size = src ? src->size : 0;
+    pthread_mutex_unlock(&dev->mutex);
+    if (!src || src_offset >= src_size)
+        return HL_GPU_OK;
+    size_t rest = src_size - src_offset;
+    *out = (size == 0 || size > rest) ? rest : size;
+    return HL_GPU_OK;
+}
+
 int hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
                             const char *src_name, const char *dst_name,
                             size_t src_offset, size_t dst_offset, size_t size)
