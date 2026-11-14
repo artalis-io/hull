@@ -34,6 +34,11 @@ env:
   HULL_VERSION: v0.9.0
   COSMOCC_VERSION: 4.0.2
   COSMOCC_SHA256: 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
+  # busybox-w64, the pin release.yml's bundle producer uses; the fallback is
+  # Hull's own release bundle, which carries the same busybox.exe.
+  BUSYBOX_URL: https://frippery.org/files/busybox/busybox-w64u-FRP-6075-g169694ebd.exe
+  BUSYBOX_SHA256: 6e263d154d8548d1eb936f65d1d8312c80df31c45974e48d6335e4dcc0f4f34c
+  BUSYBOX_FALLBACK_TAR: https://github.com/artalis-io/hull/releases/download/v0.22.0/hull-cosmocc.tar
 
 jobs:
   characterize:
@@ -215,7 +220,21 @@ jobs:
           New-Item -ItemType Directory -Force -Path cosmo | Out-Null
           tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
           New-Item -ItemType Directory -Force -Path bb | Out-Null
-          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "https://frippery.org/files/busybox/busybox-w64u-FRP-6075-g169694ebd.exe"
+          # frippery.org refuses GitHub runners (403 since 2026-11-14): fall back
+          # to busybox.exe from Hull's own release bundle. The pin checks either.
+          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "$env:BUSYBOX_URL"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "busybox fetch failed; taking it from $env:BUSYBOX_FALLBACK_TAR"
+            curl.exe -fsSL --retry 3 -L -o bbfb.tar "$env:BUSYBOX_FALLBACK_TAR"
+            if ($LASTEXITCODE -ne 0) { throw "busybox download failed (frippery.org and the Hull release)" }
+            New-Item -ItemType Directory -Force -Path bbfb | Out-Null
+            tar.exe -xf bbfb.tar -C bbfb ./bin/busybox.exe
+            if ($LASTEXITCODE -ne 0) { throw "busybox.exe missing from the Hull release bundle" }
+            Move-Item -Force bbfb/bin/busybox.exe bb\busybox.exe
+            Remove-Item -Recurse -Force bbfb, bbfb.tar
+          }
+          $b = (Get-FileHash bb\busybox.exe -Algorithm SHA256).Hash.ToLower()
+          if ($b -ne $env:BUSYBOX_SHA256) { throw "busybox sha mismatch: got $b" }
           "int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii
 
       - name: Drive cosmocc with shared TMPDIR, NO /bin/sh plant
@@ -279,7 +298,21 @@ jobs:
           tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
           New-Item -ItemType Directory -Force -Path bb | Out-Null
           # busybox-w64 (Ron Yorston). Single native PE, no Cygwin/MSYS runtime.
-          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "https://frippery.org/files/busybox/busybox-w64u-FRP-6075-g169694ebd.exe"
+          # frippery.org refuses GitHub runners (403 since 2026-11-14): fall back
+          # to busybox.exe from Hull's own release bundle. The pin checks either.
+          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "$env:BUSYBOX_URL"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "busybox fetch failed; taking it from $env:BUSYBOX_FALLBACK_TAR"
+            curl.exe -fsSL --retry 3 -L -o bbfb.tar "$env:BUSYBOX_FALLBACK_TAR"
+            if ($LASTEXITCODE -ne 0) { throw "busybox download failed (frippery.org and the Hull release)" }
+            New-Item -ItemType Directory -Force -Path bbfb | Out-Null
+            tar.exe -xf bbfb.tar -C bbfb ./bin/busybox.exe
+            if ($LASTEXITCODE -ne 0) { throw "busybox.exe missing from the Hull release bundle" }
+            Move-Item -Force bbfb/bin/busybox.exe bb\busybox.exe
+            Remove-Item -Recurse -Force bbfb, bbfb.tar
+          }
+          $b = (Get-FileHash bb\busybox.exe -Algorithm SHA256).Hash.ToLower()
+          if ($b -ne $env:BUSYBOX_SHA256) { throw "busybox sha mismatch: got $b" }
           Write-Host "busybox.exe size: $((Get-Item bb\busybox.exe).Length)"
 
       - name: busybox-w64 runs on Windows (sh + coreutils applets)

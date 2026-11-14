@@ -235,6 +235,8 @@ env:
   # release.yml's bundle producer.
   BUSYBOX_URL: https://frippery.org/files/busybox/busybox-w64u-FRP-6075-g169694ebd.exe
   BUSYBOX_SHA256: 6e263d154d8548d1eb936f65d1d8312c80df31c45974e48d6335e4dcc0f4f34c
+  # Hull's own release bundle, which carries the same busybox.exe.
+  BUSYBOX_FALLBACK_TAR: https://github.com/artalis-io/hull/releases/download/v0.22.0/hull-cosmocc.tar
   # cosmocc wedges on a large TU roughly 30% of builds (#462). The probe
   # settled the cause: it is NOT concurrency - compiling vendor/sqlite/sqlite3.c
   # ALONE wedged in 10 of 10 jobs, ~12% of individual compiles, with cc1 blocked
@@ -1303,7 +1305,19 @@ jobs:
           if ($h -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: got $h" }
           New-Item -ItemType Directory -Force -Path cosmo | Out-Null
           tar.exe -xpf cosmocc.zip -C cosmo
+          # frippery.org refuses GitHub runners (403 since 2026-11-14): fall back
+          # to busybox.exe from Hull's own release bundle. The pin checks either.
           curl.exe -fsSL --retry 3 -L -o cosmo/bin/busybox.exe "$env:BUSYBOX_URL"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "busybox fetch failed; taking it from $env:BUSYBOX_FALLBACK_TAR"
+            curl.exe -fsSL --retry 3 -L -o bbfb.tar "$env:BUSYBOX_FALLBACK_TAR"
+            if ($LASTEXITCODE -ne 0) { throw "busybox download failed (frippery.org and the Hull release)" }
+            New-Item -ItemType Directory -Force -Path bbfb | Out-Null
+            tar.exe -xf bbfb.tar -C bbfb ./bin/busybox.exe
+            if ($LASTEXITCODE -ne 0) { throw "busybox.exe missing from the Hull release bundle" }
+            Move-Item -Force bbfb/bin/busybox.exe cosmo/bin/busybox.exe
+            Remove-Item -Recurse -Force bbfb, bbfb.tar
+          }
           $b = (Get-FileHash cosmo/bin/busybox.exe -Algorithm SHA256).Hash.ToLower()
           if ($b -ne $env:BUSYBOX_SHA256) { throw "busybox sha mismatch: got $b" }
           Write-Host "cosmocc extracted; busybox.exe verified"
