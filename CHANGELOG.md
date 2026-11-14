@@ -8,6 +8,18 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- `hull types` acts only on record entries it could have written (audit 46): a planted
+  `types/hull/.hull-types` entry such as `../../victim/vcs/HEAD` made the stale-file removal
+  delete a file outside `types/`; such entries are now ignored (and reported by `--check`). A
+  write or removal through a symbolic link anywhere below `types/` is a conflict, no
+  `tests/tsconfig.json` is written through a linked `tests/` (`--force` does not override a link,
+  and the message says to remove it), and the "removed" count no longer counts a removal that
+  failed; such a file stays in the record so the next run retries it. JS `test.eq` on BigInts,
+  boxed ones included, reports its failure (`test.eq failed: ...`, values shown as `1n`) instead
+  of throwing "Do not know how to serialize a BigInt".
+
 ## [0.22.0] - 2026-11-13
 
 TypeScript declarations for the JavaScript API and a `hull types` command, then fixes: a DuckDB

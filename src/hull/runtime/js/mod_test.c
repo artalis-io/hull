@@ -410,6 +410,81 @@ static JSValue js_test_patch(JSContext *ctx, JSValueConst this_val,
     return js_test_http(ctx, "PATCH", argc, argv);
 }
 
+/* A BigInt as the text "<digits>n". JSON cannot serialise a BigInt, so
+ * test.eq(1n, 2n) threw "Do not know how to serialize a BigInt" instead of
+ * its failure (audit 46). */
+static JSValue js_test_eq_bigint_text(JSContext *ctx, JSValueConst v)
+{
+    size_t len = 0;
+    const char *s = JS_ToCStringLen(ctx, &len, v);
+    if (!s) return JS_EXCEPTION;
+    char *buf = js_malloc(ctx, len + 2);
+    if (!buf) { JS_FreeCString(ctx, s); return JS_EXCEPTION; }
+    memcpy(buf, s, len);
+    buf[len] = 'n';
+    buf[len + 1] = '\0';
+    JS_FreeCString(ctx, s);
+    JSValue r = JS_NewStringLen(ctx, buf, len + 1);
+    js_free(ctx, buf);
+    return r;
+}
+
+/* QuickJS's class id for a boxed BigInt (Object(1n)), which its public API
+ * does not export: read once from a box made through the (locked) global
+ * Object. The id is a compile-time enum value, the same in every runtime.
+ * 0 when it could not be found. */
+static JSClassID js_test_bigint_box_class(JSContext *ctx)
+{
+    static JSClassID id;
+    if (id) return id;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue object = JS_GetPropertyStr(ctx, global, "Object");
+    JS_FreeValue(ctx, global);
+    JSValue big = JS_NewBigInt64(ctx, 0);
+    JSValue box = JS_IsException(object) || JS_IsException(big) ? JS_EXCEPTION
+        : JS_Call(ctx, object, JS_UNDEFINED, 1, (JSValueConst *)&big);
+    JS_FreeValue(ctx, object);
+    JS_FreeValue(ctx, big);
+    if (JS_IsException(box)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return 0;
+    }
+    if (JS_IsObject(box)) id = JS_GetClassID(box);
+    JS_FreeValue(ctx, box);
+    return id;
+}
+
+/* A BigInt primitive, or a boxed one (JSON.stringify unwraps the box after
+ * the replacer runs, then fails on the BigInt inside). */
+static int js_test_is_bigint(JSContext *ctx, JSValueConst v)
+{
+    if (JS_IsBigInt(ctx, v)) return 1;
+    if (!JS_IsObject(v)) return 0;
+    JSClassID box = js_test_bigint_box_class(ctx);
+    return box != 0 && JS_GetClassID(v) == box;
+}
+
+/* JSON.stringify replacer for test.eq's failure message: a BigInt (or a
+ * boxed one) nested in a compared value becomes the string "<digits>n";
+ * every other value is passed through unchanged. */
+static JSValue js_test_eq_replacer(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    if (js_test_is_bigint(ctx, argv[1])) return js_test_eq_bigint_text(ctx, argv[1]);
+    return JS_DupValue(ctx, argv[1]);
+}
+
+/* The text test.eq shows for one side: a top-level BigInt as "<digits>n",
+ * anything else its JSON with nested BigInts rendered by the replacer. */
+static JSValue js_test_eq_describe(JSContext *ctx, JSValueConst v,
+                                   JSValueConst replacer)
+{
+    if (js_test_is_bigint(ctx, v)) return js_test_eq_bigint_text(ctx, v);
+    return JS_JSONStringify(ctx, v, replacer, JS_UNDEFINED);
+}
+
 /* test.eq(a, b, msg?) */
 static JSValue js_test_eq(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv)
@@ -430,9 +505,15 @@ static JSValue js_test_eq(JSContext *ctx, JSValueConst this_val,
         /* A failed conversion left its exception pending: pass it on, never a
          * test.eq TypeError over it (audit 44, test.ok's twin). */
         if (want_msg && !msg) return JS_EXCEPTION;
-        JSValue a_str = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
+        JSValue replacer = JS_NewCFunction(ctx, js_test_eq_replacer, "replacer", 2);
+        if (JS_IsException(replacer)) {
+            if (msg) JS_FreeCString(ctx, msg);
+            return JS_EXCEPTION;
+        }
+        JSValue a_str = js_test_eq_describe(ctx, argv[0], replacer);
         JSValue b_str = JS_IsException(a_str) ? JS_EXCEPTION
-            : JS_JSONStringify(ctx, argv[1], JS_UNDEFINED, JS_UNDEFINED);
+            : js_test_eq_describe(ctx, argv[1], replacer);
+        JS_FreeValue(ctx, replacer);
         size_t a_len = 0, b_len = 0;
         const char *a = JS_IsException(b_str) ? NULL : JS_ToCStringLen(ctx, &a_len, a_str);
         const char *b = a ? JS_ToCStringLen(ctx, &b_len, b_str) : NULL;
