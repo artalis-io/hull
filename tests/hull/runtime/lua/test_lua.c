@@ -12106,6 +12106,14 @@ UTEST(lua_audit9, a_task_that_trips_the_budget_still_finishes)
 #include "hull/cap/http.h"   /* HlHttpConfig */
 #include "hull/cap/fs.h"     /* HlFsConfig */
 
+/* The limit a "this still fits" check runs under. Not the small limit the
+ * matching over-limit check uses: besides a call's explicit charge, the
+ * binding dispatcher charges its measured time (64 units / us), and a
+ * preempted CI runner spent a 200k (~3 ms) or 1M (~15 ms) limit on a few
+ * cheap calls (#1086, #1085). 10M is still a tenth of the default budget, so
+ * a charge far too large for a cheap call still trips it. */
+#define A10_FITS_LIMIT 10000000
+
 /* Run @p code under a budget of @p limit on the caps runtime; the error
  * text, if any, lands in @p err. */
 static int audit10_run(const char *code, int64_t limit, char *err, size_t n)
@@ -12180,7 +12188,7 @@ UTEST(lua_audit10, asymmetric_crypto_is_charged)
     /* An ES256 verify is one scalar multiplication. */
     EXPECT_EQ(audit10_run(
         "return crypto.verify('ES256', 'junk', 'm', string.rep('s', 64))",
-        1000000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     cleanup_lua_caps();
 }
 
@@ -12205,7 +12213,7 @@ UTEST(lua_audit11, rsa_verify_is_charged_by_the_key)
     EXPECT_EQ(audit10_run(
         "local pem = string.rep('A', 20000) local sig = string.rep('s', 4096) "
         "for i = 1, 1000 do assert(not crypto.verify('PS256', pem, 'm', sig)) end "
-        "return 1", 1000000, err, sizeof err), LUA_OK);
+        "return 1", A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     /* A long key with a signature its length is still charged in full. */
     EXPECT_NE(audit10_run(
         "return crypto.verify('RS256', string.rep('A', 2000), 'm', string.rep('s', 1024))",
@@ -12233,7 +12241,7 @@ UTEST(lua_audit10, fs_write_is_charged)
     EXPECT_NE(strstr(err, "instruction limit"), NULL);
     /* A small write is cheap (and refused: no grant). */
     EXPECT_EQ(audit10_run("local ok = fs.write('a.bin', 'x') assert(ok == nil) return 1",
-                          200000, err, sizeof err), LUA_OK);
+                          A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     lua_rt.base.fs_cfg = NULL;
     cleanup_lua_caps();
     rmdir(tmpdir);
@@ -12311,7 +12319,7 @@ UTEST(lua_audit26, smtp_send_copy_is_charged)
         "local r = smtp.send({ host = 'mail.invalid', from = 'a@x.test', "
         "  to = 'b@x.test', subject = 's', body = 'b' }) "
         "assert(type(r) == 'table' and not r.ok) return 1",
-        200000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     audit10_run("BIG = nil return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err);
     lua_rt.base.smtp_cfg = NULL;
     cleanup_lua_caps();
@@ -13614,7 +13622,7 @@ UTEST(lua_audit18, encoding_codecs_are_charged)
                           HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
     /* 400 KB in, 200 KB out: 75000 units. */
     EXPECT_EQ(audit10_run("assert(#enc.hex.decode(MID) == 200000) return 1",
-                          400000, err, sizeof err), LUA_OK);
+                          A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     /* 4 MB in, 2 MB out: 750000 units. */
     EXPECT_NE(audit10_run("enc.hex.decode(HEX) return 1", 400000,
                           err, sizeof err), LUA_OK);
@@ -13672,7 +13680,7 @@ UTEST(lua_audit14, sse_and_ws_writes_are_charged)
     EXPECT_NE(strstr(err, "instruction limit"), NULL);
     EXPECT_EQ(a14_sse_writes, 0);   /* stopped before Keel wrote a byte */
     EXPECT_EQ(audit10_run("S:event('e', 'a\\nb', '7') S:comment('hi') return 1",
-                          200000, err, sizeof err), LUA_OK);
+                          A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     EXPECT_GT(a14_sse_writes, 0);
 
     /* ws.broadcast is charged per connection on the path (these have no Keel
@@ -13691,7 +13699,7 @@ UTEST(lua_audit14, sse_and_ws_writes_are_charged)
                           1000000, err, sizeof err), LUA_OK);
     EXPECT_NE(strstr(err, "instruction limit"), NULL);
     EXPECT_EQ(audit10_run("assert(ws.broadcast('/ws', 'hi') == 0) return 1",
-                          1000000, err, sizeof err), LUA_OK);
+                          A10_FITS_LIMIT, err, sizeof err), LUA_OK);
 
     /* conn:send: the charge trips before Keel is reached, so a connection
      * whose Keel handle is a placeholder is never written to. */
@@ -14793,7 +14801,7 @@ UTEST(lua_audit25, image_copies_are_charged)
     /* Small copies still work under that limit. */
     EXPECT_EQ_MSG(audit10_run(
         "local im = image.new(16, 16, 'rgba8', string.rep('b', 1024)) "
-        "assert(im:width() == 16) return 1", 300000, err, sizeof err),
+        "assert(im:width() == 16) return 1", A10_FITS_LIMIT, err, sizeof err),
         LUA_OK, err);
     cleanup_lua_caps();
 }
@@ -14898,7 +14906,7 @@ UTEST(lua_audit27, hmac_key_is_charged)
     }
     /* A short key stays cheap. */
     EXPECT_EQ(audit10_run("for i = 1, 100 do crypto.hmac_sha256('d', 'key') end return 1",
-                          200000, err, sizeof err), LUA_OK);
+                          A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     audit10_run("BIGK = nil return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err);
     cleanup_lua_caps();
 }
@@ -15861,7 +15869,7 @@ UTEST(lua_audit37, small_fs_calls_have_a_floor)
     EXPECT_EQ(audit10_run(
         "for i = 1, 10 do assert(fs.write('e.txt', '')) end "
         "assert(fs.stat('e.txt').size == 0) return 1",
-        1000000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     cleanup_lua_caps();
     a15_fs_close(&f);
 }
@@ -15894,7 +15902,7 @@ UTEST(lua_audit37, small_blob_calls_have_a_floor)
         "blob.init({ dir = 'blobs' }) local id = blob.put('') "
         "assert(blob.exists(id)) assert(blob.size(id) == 0) "
         "assert(blob.delete(id)) return 1",
-        1000000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     cleanup_lua_caps();
     a15_fs_close(&f);
 }
@@ -15995,7 +16003,7 @@ UTEST(lua_audit38, path_resolution_is_charged)
         "assert(#fs.list('d/" A38_DEEP "') == 2) "
         "assert(fs.read('s40/empty') == '') "
         "assert(fs.read('missing') == nil) return 1",
-        1000000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     cleanup_lua_caps();
     a15_fs_close(&f);
 }
@@ -16050,7 +16058,7 @@ UTEST(lua_audit38, tar_entries_are_charged)
         "assert(tar.extract(t, 'y')) "
         "assert(fs.read('y/sub/b.txt') == 'B') "
         "assert(#tar.pack({ 'y/a.txt', 'y/sub/b.txt' }) > 0) return 1",
-        1000000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     cleanup_lua_caps();
     a15_fs_close(&f);
 }
@@ -16244,7 +16252,7 @@ UTEST(lua_audit39, blob_walks_are_charged)
         "local n = 0 for id in blob.iter() do n = n + 1 end assert(n == 300) "
         "assert(blob.total_size() > 0) "
         "assert(blob.cleanup({ max_age = 1e9 }).removed == 0) return 1",
-        5000000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     EXPECT_STREQ(err, "");
     cleanup_lua_caps();
     a15_fs_close(&f);
@@ -16279,7 +16287,7 @@ UTEST(lua_audit39, blob_init_is_charged)
     EXPECT_EQ(audit10_run(
         "for i = 1, 10 do blob.init({ dir = 'data/blobs' }) end "
         "assert(blob.count() == 0) return 1",
-        1000000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     EXPECT_STREQ(err, "");
     cleanup_lua_caps();
     a15_fs_close(&f);
@@ -16304,7 +16312,7 @@ UTEST(lua_audit39, blob_reader_reads_are_charged)
         "local r = blob.reader(blob.put('hello')) local t = {} "
         "while true do local c = r:read(2) if not c then break end t[#t + 1] = c end "
         "r:close() assert(table.concat(t) == 'hello') return 1",
-        1000000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     cleanup_lua_caps();
     a15_fs_close(&f);
 }
@@ -16344,7 +16352,7 @@ UTEST(lua_audit39, db_open_is_charged)
         "c.exec('INSERT INTO t VALUES (?)', { i }) c.close() end "
         "local c = dbm.open('x.db') local r = c.query('SELECT count(*) AS n FROM t') "
         "c.close() assert(r[1].n == 5) return 1",
-        2000000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     EXPECT_STREQ(err, "");
     hl_db_registry_set_manifest(test_db_registry, NULL);
     cleanup_lua_caps();
@@ -16379,7 +16387,7 @@ UTEST(lua_audit39, render_string_is_charged_and_not_persisted)
     EXPECT_NE(strstr(err, "instruction limit"), NULL);
     EXPECT_EQ(audit10_run(
         "for i = 1, 50 do tpl.render_string('<p>{{ x }}</p>', { x = i }) end return 1",
-        1000000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     cleanup_lua_caps();
     if (saved_home[0]) setenv("HOME", saved_home, 1);
     hl_lua_template_cache_reset();
@@ -16415,7 +16423,7 @@ UTEST(lua_audit39, x509_parse_is_charged)
     EXPECT_EQ(audit10_run(
         "local der = string.rep('\48', 2048) "
         "for i = 1, 100 do assert(crypto.x509_pubkey_pem(der) == nil) end return 1",
-        1000000, err, sizeof err), LUA_OK);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     cleanup_lua_caps();
 }
 
@@ -16453,7 +16461,7 @@ UTEST(lua_audit39, sync_http_requests_are_charged)
     EXPECT_EQ(audit10_run(
         "local http = require('hull.http-client') "
         "for i = 1, 20 do assert(not pcall(http.get, 'http://127.0.0.1:1/x')) end "
-        "return 1", 1000000, err, sizeof err), LUA_OK);
+        "return 1", A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();
 }
@@ -16535,7 +16543,7 @@ UTEST(lua_audit40, mime_sniff_is_charged)
         "assert(mime.sniff('<?xml' .. string.rep(' ', 5000) .. '<svg>') "
         "       == 'application/xml') "
         "assert(mime.sniff('<?xml<<svg') == 'image/svg+xml') return 1",
-        100000, err, sizeof err), LUA_OK, err);
+        A10_FITS_LIMIT, err, sizeof err), LUA_OK, err);
     cleanup_lua_caps();
 }
 
@@ -16566,7 +16574,7 @@ UTEST(lua_audit40, ws_and_sse_frames_are_charged)
                           1000000, err, sizeof err), LUA_OK);
     EXPECT_NE(strstr(err, "instruction limit"), NULL);
     EXPECT_EQ(audit10_run("for i = 1, 100 do S:comment('hi') end return 1",
-                          1000000, err, sizeof err), LUA_OK);
+                          A10_FITS_LIMIT, err, sizeof err), LUA_OK);
 
     /* An empty broadcast is a frame per connection (no Keel connection
      * here, so nothing is sent). */
@@ -16631,7 +16639,7 @@ UTEST(lua_audit40, small_calls_have_a_floor)
     }
     EXPECT_EQ(audit10_run("local t = require('hull.time') "
                           "for i = 1, 1000 do t.date() t.datetime() end return 1",
-                          1000000, err, sizeof err), LUA_OK);
+                          A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     cleanup_lua_caps();
 }
 
@@ -16787,7 +16795,7 @@ UTEST(lua_audit41, log_and_print_have_a_floor)
     }
     EXPECT_EQ(audit10_run("local log = require('hull.log') "
                           "for i = 1, 100 do log.info('a', 'b') print('c', 1) end return 1",
-                          1000000, err, sizeof err), LUA_OK);
+                          A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     log_set_quiet(false);
     cleanup_lua_caps();
 }
@@ -16815,7 +16823,7 @@ UTEST(lua_audit41, small_crypto_calls_have_a_floor)
                           "crypto.hmac_sha256('m', 'k') "
                           "local h = crypto.create_sha256() h:update('x') h:digest() "
                           "end return 1",
-                          1000000, err, sizeof err), LUA_OK);
+                          A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     cleanup_lua_caps();
 }
 
@@ -16847,7 +16855,7 @@ UTEST(lua_audit41, ctx_output_is_charged_and_stdin_is_mains)
     }
     a41_stdout_restore(muted);
     EXPECT_EQ(audit10_run("for i = 1, 100 do SAVED.stderr:write('') SAVED.stderr:flush() end "
-                          "return 1", 1000000, err, sizeof err), LUA_OK);
+                          "return 1", A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     /* Outside app.main: refused before it reads. */
     EXPECT_NE(audit10_run("return SAVED.stdin:read()", 1000000, err, sizeof err), LUA_OK);
     EXPECT_NE(strstr(err, "only available in app.main"), NULL);
@@ -16872,7 +16880,7 @@ UTEST(lua_audit41, sync_smtp_send_has_a_floor)
     EXPECT_NE(audit10_run(code, 1000000, err, sizeof err), LUA_OK);
     EXPECT_NE(strstr(err, "instruction limit"), NULL);
     snprintf(code, sizeof code, "%s for i = 1, 10 do smtp.send(o) end return 1", o);
-    EXPECT_EQ(audit10_run(code, 1000000, err, sizeof err), LUA_OK);
+    EXPECT_EQ(audit10_run(code, A10_FITS_LIMIT, err, sizeof err), LUA_OK);
     log_set_quiet(false);
     lua_rt.base.smtp_cfg = NULL;
     cleanup_lua_caps();
@@ -16900,7 +16908,7 @@ UTEST(lua_audit41, kv_open_and_commands_have_a_floor)
                           "return 1", 1000000, err, sizeof err), LUA_OK);
     EXPECT_NE(strstr(err, "instruction limit"), NULL);
     EXPECT_EQ(audit10_run("for i = 1, 10 do pcall(KVN.open, 'redis://127.0.0.1:1') end "
-                          "return 1", 1000000, err, sizeof err), LUA_OK);
+                          "return 1", A10_FITS_LIMIT, err, sizeof err), LUA_OK);
 #ifdef HL_ENABLE_VALKEY
     /* Commands against a server: each pays a round trip's floor. */
     HlFakeResp srv;
@@ -16920,7 +16928,7 @@ UTEST(lua_audit41, kv_open_and_commands_have_a_floor)
         EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
     }
     EXPECT_EQ_MSG(audit10_run("for i = 1, 10 do assert(K:get('a') == 'x') K:set('a', 'x') end "
-                              "K:close() return 1", 1000000, err, sizeof err), LUA_OK, err);
+                              "K:close() return 1", A10_FITS_LIMIT, err, sizeof err), LUA_OK, err);
     snprintf(code, sizeof code, "for i = 1, 100 do KVN.open('redis://127.0.0.1:%d'):close() "
              "end return 1", srv.port);
     EXPECT_NE(audit10_run(code, 1000000, err, sizeof err), LUA_OK);
