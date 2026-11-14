@@ -145,7 +145,9 @@ check "a case-variant record entry removes no shipped file" \
 echo "── types_audit47.fifo: a planted FIFO does not hang hull types ──"
 # Run each in the background and kill it after 10 s: the pre-fix open waited
 # for a writer / reader for ever.
-bounded() { ( "$@" >/dev/null 2>&1 ) & bp=$!; i=0
+# The command is backgrounded directly and each sh -c execs hull, so $bp is
+# hull itself and the kill reaches it.
+bounded() { "$@" >/dev/null 2>&1 & bp=$!; i=0
     while kill -0 $bp 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
     if kill -0 $bp 2>/dev/null; then kill -9 $bp 2>/dev/null; wait $bp 2>/dev/null; return 124; fi
     wait $bp; return 0; }
@@ -153,13 +155,13 @@ A7=$WORK/a47b; mkdir -p "$A7"; echo x > "$A7/app.js"
 (cd "$A7" && "$HULL" types >/dev/null 2>&1)
 if mkfifo "$A7/types/hull/old.d.ts" 2>/dev/null; then
     printf '%s hull/old.d.ts\n' "$(sha "$A7/types/hull/core.d.ts")" >> "$A7/types/hull/.hull-types"
-    bounded sh -c "cd '$A7' && '$HULL' types --check"; rc=$?
+    bounded sh -c "cd '$A7' && exec '$HULL' types --check"; rc=$?
     check "--check with a recorded FIFO finishes" "[ $rc -ne 124 ]"
     rm "$A7/types/hull/old.d.ts"
     rm "$A7/types/hull/modules/db.d.ts"; mkfifo "$A7/types/hull/modules/db.d.ts"
-    bounded sh -c "cd '$A7' && '$HULL' types"; rc=$?
+    bounded sh -c "cd '$A7' && exec '$HULL' types"; rc=$?
     check "a FIFO at a shipped name does not hang a run" "[ $rc -ne 124 ]"
-    bounded sh -c "cd '$A7' && '$HULL' types --force"; rc=$?
+    bounded sh -c "cd '$A7' && exec '$HULL' types --force"; rc=$?
     check "a FIFO at a shipped name does not hang --force" "[ $rc -ne 124 ]"
 else
     echo "  skip  fifo (mkfifo unavailable)"
