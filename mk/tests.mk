@@ -990,7 +990,7 @@ $(BUILDDIR)/test_module_registry: $(TESTDIR)/hull/test_module_registry.c $(MODUL
 # hl_tui_feature_present the resolver now consults (composed-feature GPU + TUI
 # caps). Both are base-resident, so always available.
 $(BUILDDIR)/test_module_resolver: $(TESTDIR)/hull/test_module_resolver.c $(MODULE_OBJ) $(BUILDDIR)/cap_gpu_feature.o $(BUILDDIR)/cap_tui_feature.o | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MODULE_OBJ) $(BUILDDIR)/cap_gpu_feature.o $(BUILDDIR)/cap_tui_feature.o
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MODULE_OBJ) $(BUILDDIR)/cap_gpu_feature.o $(BUILDDIR)/cap_tui_feature.o $(REGRESSION_STUBS)
 
 # CA bundle test - links against cacert.o and mbedTLS for parse verification.
 # A build that links no TLS (HL_LINK_TLS=0: pure-compute) has no mbedTLS to
