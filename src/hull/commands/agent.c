@@ -28,7 +28,7 @@
 #include "hull/agent_lib.h"
 #include "hull/sbom.h"
 #include "hull/tool.h"
-#include "hull/shared/host.h"   /* hl_host_is_windows: kill(pid,0) is not inert there */
+#include "hull/shared/host.h"   /* hl_host_pid_alive: kill(pid,0) is not inert on Windows */
 #include "hull/shared/dev_session.h"   /* discovery MAC (audit 37) */
 #include "hull/utils/secure_zero.h"
 #include "hull/shared/json_term_safe.h"   /* audit 44 */
@@ -813,34 +813,13 @@ static int agent_inspect_stream_live(const char *app_dir)
     disc_len = doc_len;
     long sp_disc = hl_agent_json_int_field(disc, "session_pid");
 
-    /* Bind the published generation to a specific live dev session.
-     *
-     * The liveness probe is split off deliberately. kill(pid, 0) is POSIX's
-     * "send no signal, just check existence", and it is NOT inert on every
-     * host Hull ships to: measured on Windows (cosmo APE), a matching LIVE pid
-     * here TERMINATES that process, while a mismatched pair - which
-     * short-circuits before the kill - leaves it running. Same code path
-     * otherwise, so the kill is the whole difference.
-     *
-     * The pid a live-session sidecar names IS the `hull dev --agent`
-     * supervisor, so `hull agent inspect` was killing the dev server whose
-     * generation it was about to serve, and returning 0 with correct output.
-     * Nothing caught it because the fast path needs dev.json and
-     * discovery.json to carry the SAME pid that the host agrees is alive, and
-     * on Windows the suite could only ever supply an MSYS pid that Windows
-     * does not know - so the path had never been entered there.
-     *
-     * A safe existence check needs a direct Win32 call (OpenProcess), and
-     * nothing in Hull has one; adding that dependency for one probe is a
-     * bigger change than the bug warrants. So on Windows the fast path is
-     * DECLINED: inspect falls back to a standalone analysis, which is correct
-     * output - freshly analysed, just not tagged `source: dev` and not reusing
-     * the published generation. Correct and slower beats correct and fatal.
-     * Every other host keeps the probe, and this code, exactly as it was.
-     */
+    /* The supervisor must still be running. kill(pid, 0) is POSIX's probe,
+     * but under Cosmopolitan on Windows a matching live pid TERMINATES the
+     * process - `hull agent inspect` killed the dev server whose generation
+     * it was about to serve - so this goes through hl_host_pid_alive, which
+     * asks Win32 there (OpenProcess + GetExitCodeProcess). */
     if (sp_disc != sp_dev) { free(disc); return -1; }
-    if (hl_host_is_windows()) { free(disc); return -1; }
-    if (kill((pid_t)sp_disc, 0) != 0) { free(disc); return -1; }
+    if (hl_host_pid_alive(sp_disc) != 1) { free(disc); return -1; }
 
     /* Only emit a COMPLETE, well-formed document. Validate + emit over the EXACT byte
      * length (not strlen): an embedded NUL must not hide trailing bytes, so `{valid}\0junk`

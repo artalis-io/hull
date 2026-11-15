@@ -37,6 +37,7 @@
 #include "hull/release_io.h"
 #include "hull/tools_install.h"
 #include "hull/cap/tar.h"
+#include "hull/shared/host.h"   /* hl_host_pid_alive */
 #include "sh_json.h"
 
 #include <keel/allocator.h>
@@ -311,7 +312,9 @@ static void sweep_bundle_debris(const char *dest)
         char *end = NULL;
         long pid = strtol(pidp, &end, 10);
         if (!end || *end != '\0' || pid <= 0) continue;
-        if (pid != (long)getpid() && kill((pid_t)pid, 0) == 0) continue;  /* live */
+        /* Not kill(pid, 0): under Cosmopolitan on Windows it terminates
+         * the process it names. */
+        if (pid != (long)getpid() && hl_host_pid_alive(pid) == 1) continue;  /* live */
         char victim[PATH_MAX];
         if ((size_t)snprintf(victim, sizeof victim, "%s/%s", parent, n) < sizeof victim)
             (void)rm_rf(victim);

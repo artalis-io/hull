@@ -14,7 +14,7 @@
 #include "internal.h"
 
 #include "hull/shared/dev_session.h"
-#include "hull/shared/host.h"   /* hl_host_home, hl_host_is_windows */
+#include "hull/shared/host.h"   /* hl_host_home, hl_host_pid_alive */
 #include "hull/utils/secure_zero.h"
 
 #include <errno.h>
@@ -129,11 +129,12 @@ int hl_agent_dev_session(const char *app_dir, char *nonce_out,
         return -1;
     }
 
-    /* kill(pid, 0) terminates the process on Windows (cosmo; see
-     * agent_inspect_stream_live): there the record alone binds. The
-     * supervisor removes its $HOME copy when it exits, and a new session
-     * prunes records whose pid is gone. */
-    if (!hl_host_is_windows() && kill((pid_t)sp, 0) != 0) {
+    /* The supervisor must still be running: one that was killed (no chance
+     * to remove its $HOME record) left a record that verified its stale
+     * sidecars. hl_host_pid_alive asks Win32 on Windows, where kill(pid, 0)
+     * would terminate it (the check was skipped there). Only a pid known to
+     * be running passes, as before. */
+    if (hl_host_pid_alive(sp) != 1) {
         hl_secure_zero(nonce, sizeof nonce);
         return -1;
     }

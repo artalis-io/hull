@@ -294,6 +294,13 @@ test("a42 ordinary query", () => {
 });
 JS
 for d in "hull.evil" "hull:evil"; do
+    # Windows has no ':' in a file name (MSYS maps it to a private code point
+    # the APE then cannot name), so no "hull:evil" directory exists there to
+    # attack with.
+    case "$d:$(uname -s)" in
+        hull:evil:MINGW*|hull:evil:MSYS*|hull:evil:CYGWIN*)
+            echo "  SKIP: hull test $d - no ':' in a Windows file name"; continue ;;
+    esac
     rc=0
     out="$(cd "$TMP/a42" && "$HULL" test "$d" 2>&1)" || rc=$?
     if [ "$rc" -eq 0 ] &&
@@ -317,7 +324,9 @@ for rt in lua js; do
     d="$TMP/a43_$rt"
     mkdir -p "$d/tests" "$d/.hull"
     printf 'SECRET-SIDECAR' > "$d/.hull/secret.html"
-    ln -s .hull "$d/templates"
+    # A REAL link on Windows: MSYS's default `ln -s` copies the directory,
+    # and reading a copy of .hull named templates is no escape to refuse.
+    MSYS=winsymlinks:nativestrict ln -s .hull "$d/templates" 2>/dev/null || true
 done
 cat > "$TMP/a43_lua/app.lua" <<'LUA'
 app.manifest({ modules = { "hull/http-server@1", "hull/template@1" } })
@@ -352,6 +361,10 @@ test("a43 .hull not rendered", () => {
 });
 JS
 for rt in lua js; do
+    if [ ! -L "$TMP/a43_$rt/templates" ]; then
+        echo "  SKIP: test_harness_audit43.hull_reserved_no_policy ($rt) - cannot make a symbolic link here"
+        continue
+    fi
     rc=0
     out="$("$HULL" test "$TMP/a43_$rt" 2>&1)" || rc=$?
     if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'PASS.*a43 .hull not rendered'; then

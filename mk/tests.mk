@@ -726,8 +726,8 @@ $(BUILDDIR)/test_url: $(TESTDIR)/hull/test_url.c $(SRCDIR)/hull/utils/url.h $(SR
 # Host facts + user-facing command rendering (src/hull/shared/host.c). Leaf
 # util, libc only - the artifact-suffix and PATH-split contracts that keep
 # Windows and POSIX output correct. No deps.
-$(BUILDDIR)/test_host: $(TESTDIR)/hull/test_host.c $(HOST_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HOST_OBJ)
+$(BUILDDIR)/test_host: $(TESTDIR)/hull/test_host.c $(HOST_TH_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HOST_TH_OBJ)
 
 # CLI logging policy (src/hull/shared/cli_log.c). Needs the vendored log.c it
 # configures, and nothing else.

@@ -215,6 +215,10 @@ int hl_db_registry_set_app_dir(HlDbRegistry *reg, const char *app_dir)
     if (copy_dir(real, reg->app_dir_real, sizeof reg->app_dir_real) != 0 ||
         copy_dir(app_dir, reg->app_dir_raw, sizeof reg->app_dir_raw) != 0)
         return -1;
+    /* One drive-letter spelling on Windows, the one the DSN is normalised
+     * to (hl_host_normalize_path). */
+    hl_host_canon_drive(reg->app_dir_real);
+    hl_host_canon_drive(reg->app_dir_raw);
     reg->has_app_dir = 1;
     return 0;
 }
@@ -226,6 +230,7 @@ int hl_db_registry_set_state_dir(HlDbRegistry *reg, const char *state_dir)
     if (!realpath(state_dir, real)) return -1;
     if (copy_dir(real, reg->state_dir_real, sizeof reg->state_dir_real) != 0)
         return -1;
+    hl_host_canon_drive(reg->state_dir_real);
     reg->has_state_dir = 1;
     return 0;
 }
@@ -451,7 +456,7 @@ static int confine_manifest_path(const HlDbRegistry *reg, const char *path,
                 while (cut > 0 && tmp[cut] != '/') cut--;
                 if (cut == 0) break;
                 tmp[cut] = '\0';
-                if (realpath(tmp, real)) { found = 1; break; }
+                if (realpath(tmp, real)) { hl_host_canon_drive(real); found = 1; break; }
             }
             int m = found ? snprintf(tmp, sizeof tmp, "%s%s", real, abs + cut) : -1;
             if (m < 0 || (size_t)m >= sizeof tmp ||

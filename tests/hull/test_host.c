@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <dirent.h>
 #include "test_tmpdir.h"
 
@@ -738,9 +739,60 @@ UTEST(host, normalize_path_accepts_either_drive_letter_case)
     if (!hl_host_is_windows()) return;   /* rewrite is Windows-only */
     char buf[HL_HOST_PATH_MAX];
     ASSERT_EQ(1, hl_host_normalize_path("c:/x/y", buf, sizeof buf));
-    ASSERT_STREQ("/c/x/y", buf);
+    ASSERT_STREQ("/C/x/y", buf);
     ASSERT_EQ(1, hl_host_normalize_path("C:/x/y", buf, sizeof buf));
     ASSERT_STREQ("/C/x/y", buf);
+}
+
+UTEST(host, pid_alive_tells_a_running_process_from_a_gone_one)
+{
+    /* The dev-session check behind `hull agent errors` / `inspect`: a killed
+     * supervisor's record must stop verifying. kill(pid, 0) terminates a live
+     * process under Cosmopolitan on Windows, so this is its replacement. */
+    EXPECT_EQ(1, hl_host_pid_alive((long)getpid()));
+    EXPECT_EQ(0, hl_host_pid_alive(0));
+    EXPECT_EQ(0, hl_host_pid_alive(-5));
+    pid_t c = fork();
+    ASSERT_GE(c, 0);
+    if (c == 0) _exit(0);
+    int st = 0;
+    ASSERT_EQ(c, waitpid(c, &st, 0));
+    EXPECT_EQ(0, hl_host_pid_alive((long)c));   /* reaped: no such process */
+}
+
+UTEST(host, canon_drive_upper_cases_a_rooted_drive_on_windows)
+{
+    /* An MSYS shell spells drive D "/d", Hull's own argument handling "/D":
+     * one directory, which a DSN check and the dev-session MAC compared as
+     * two (the Windows e2e: named DSN refused, live session read as forged). */
+    hl_host_test_force_windows(1);
+    char a[] = "/d/a/_temp/app", b[] = "/d", c[] = "/dd/x", d[] = "/D/x";
+    char e[] = "relative/d";
+    hl_host_canon_drive(a); hl_host_canon_drive(b); hl_host_canon_drive(c);
+    hl_host_canon_drive(d); hl_host_canon_drive(e); hl_host_canon_drive(NULL);
+    char buf[HL_HOST_PATH_MAX];
+    int rc = hl_host_normalize_path("/d/a/app/data.db", buf, sizeof buf);
+    hl_host_test_force_windows(-1);
+    EXPECT_STREQ("/D/a/_temp/app", a);
+    EXPECT_STREQ("/D", b);
+    EXPECT_STREQ("/dd/x", c);   /* not a drive: two letters */
+    EXPECT_STREQ("/D/x", d);
+    EXPECT_STREQ("relative/d", e);
+    EXPECT_EQ(1, rc);
+    EXPECT_STREQ("/D/a/app/data.db", buf);
+}
+
+UTEST(host, canon_drive_is_a_no_op_off_windows)
+{
+    hl_host_test_force_windows(0);
+    char a[] = "/d/a/app";
+    hl_host_canon_drive(a);
+    char buf[HL_HOST_PATH_MAX];
+    int rc = hl_host_normalize_path("/d/a/app", buf, sizeof buf);
+    hl_host_test_force_windows(-1);
+    EXPECT_STREQ("/d/a/app", a);
+    EXPECT_EQ(0, rc);
+    EXPECT_STREQ("/d/a/app", buf);
 }
 
 UTEST(host, normalize_path_ignores_a_drive_letter_without_a_separator)
