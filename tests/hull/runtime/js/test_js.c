@@ -11521,6 +11521,15 @@ UTEST(js_audit9, response_bodies_are_charged)
 
 /* Run @p code as a module under a budget of @p limit; 1 if the run went
  * over it. */
+/* The budget an "ordinary work still fits" check gives a run of many file
+ * operations. The dispatcher charges each call its measured time, and file
+ * creates, renames and directory walks on the Windows CI host are about ten
+ * times slower than on Linux / macOS, so the same work costs more there. */
+static int64_t a_fs_fits(int64_t limit)
+{
+    return hl_host_is_windows() ? limit * 32 : limit;
+}
+
 static int a10_run_tripped(const char *code, int64_t limit)
 {
     js.max_instructions = limit;
@@ -16993,7 +17002,7 @@ UTEST(js_audit38, ordinary_fs_work_keeps_its_headroom)
         "for (let i = 1; i <= 500; i++) fs.write('site/p' + i + '.html', 'page ' + i);"
         "for (let i = 1; i <= 500; i++) fs.read('site/p' + i + '.html');"
         "if (fs.list('site').length !== 500) throw new Error('list');"
-        "globalThis.__a38_site = 1;", 15000000), 0);
+        "globalThis.__a38_site = 1;", a_fs_fits(15000000)), 0);
     EXPECT_EQ(eval_int("globalThis.__a38_site|0"), 1);
     cleanup_js_caps();
     a15_fs_close(&f);
@@ -17168,7 +17177,7 @@ UTEST(js_audit39, blob_walks_are_charged)
         "if (blob.iter().length !== 300) throw new Error('iter');"
         "if (!(blob.totalSize() > 0)) throw new Error('size');"
         "if (blob.cleanup({ maxAge: 1e9 }).removed !== 0) throw new Error('cleanup');"
-        "globalThis.__a39_walk = 1;", A10_FITS_LIMIT), 0);
+        "globalThis.__a39_walk = 1;", a_fs_fits(A10_FITS_LIMIT)), 0);
     EXPECT_EQ(eval_int("globalThis.__a39_walk|0"), 1);
     cleanup_js_caps();
     a15_fs_close(&f);

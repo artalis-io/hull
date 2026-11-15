@@ -12116,6 +12116,15 @@ UTEST(lua_audit9, a_task_that_trips_the_budget_still_finishes)
 
 /* Run @p code under a budget of @p limit on the caps runtime; the error
  * text, if any, lands in @p err. */
+/* The budget an "ordinary work still fits" check gives a run of many file
+ * operations. The dispatcher charges each call its measured time, and file
+ * creates, renames and directory walks on the Windows CI host are about ten
+ * times slower than on Linux / macOS, so the same work costs more there. */
+static int64_t a_fs_fits(int64_t limit)
+{
+    return hl_host_is_windows() ? limit * 32 : limit;
+}
+
 static int audit10_run(const char *code, int64_t limit, char *err, size_t n)
 {
     lua_rt.max_instructions = limit;
@@ -16078,7 +16087,7 @@ UTEST(lua_audit38, ordinary_fs_work_keeps_its_headroom)
         "for i = 1, 500 do assert(fs.write('site/p' .. i .. '.html', 'page ' .. i)) end "
         "for i = 1, 500 do assert(fs.read('site/p' .. i .. '.html') == 'page ' .. i) end "
         "assert(#fs.list('site') == 500) return 1",
-        15000000, err, sizeof err), LUA_OK);
+        a_fs_fits(15000000), err, sizeof err), LUA_OK);
     EXPECT_STREQ(err, "");
     cleanup_lua_caps();
     a15_fs_close(&f);
@@ -16252,7 +16261,7 @@ UTEST(lua_audit39, blob_walks_are_charged)
         "local n = 0 for id in blob.iter() do n = n + 1 end assert(n == 300) "
         "assert(blob.total_size() > 0) "
         "assert(blob.cleanup({ max_age = 1e9 }).removed == 0) return 1",
-        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
+        a_fs_fits(A10_FITS_LIMIT), err, sizeof err), LUA_OK);
     EXPECT_STREQ(err, "");
     cleanup_lua_caps();
     a15_fs_close(&f);
