@@ -1910,7 +1910,7 @@ never a fetch.
 |---|---|---|---|
 | native + parser fuzzing | 60 s smoke on the committed corpora | SAME targets + SAME committed corpora at a long budget | yes (in-repo corpora) |
 | rare build configs | the 7-leg `flavors` matrix | CONCRETE uncommon `HL_ENABLE_*` combinations (F.2b), link + smoke | yes |
-| version / compatibility | single LLVM-18, single pinned engine version | pinned LLVM 17 + 18; pinned PostgreSQL 15/16 + MySQL 8.0 (F.2b; MySQL 8.4 + MariaDB are a pending slot) | yes (pinned pkgs/images) |
+| version / compatibility | single LLVM-18, single pinned engine version | pinned LLVM 17 + 18; pinned PostgreSQL 15/16 + MySQL 8.0 / 8.4 (F.2b; MariaDB is a pending slot) | yes (pinned pkgs/images) |
 | conformance-corpus expansion | 614 / 33-case pinned subsets (in `make test`) | **SLOT ONLY** - deferred to its own reviewed design; Slice 6 does not broaden it | n/a |
 
 ## F.2b Additive job inventory (defined BEFORE writing the workflow - amendment 2)
@@ -1933,24 +1933,27 @@ placeholder "rare combinations" jobs - every row names concrete targets/configs
 | `nightly-compat-llvm` | build `wamrc` against llvm-17 AND llvm-18; AOT smoke each | 30 min | llvm-17, llvm-18 | wamrc build log | wamrc builds across LLVM versions | ~10 min |
 | `nightly-compat-db` | `e2e_postgres` vs pinned `postgres:15` & `16`; `e2e_mysql` vs pinned `mysql:8.0` | 40 min | pinned images | e2e logs | wire compat across engine versions | ~20 min |
 
-**Supported nightly DB-compat set: PostgreSQL 15/16 + MySQL 8.0.** This is what the
-e2e harness can reach today; it is machine-pinned by
+**Supported nightly DB-compat set: PostgreSQL 15/16 + MySQL 8.0 / 8.4.** This is what
+the e2e harness can reach today; it is machine-pinned by
 `scripts/ci/test_nightly_matrix.py` (run inside `nightly-success`), which fails if
 the `nightly-compat-db` image inventory drifts.
 
-**PENDING SLOT (NOT executed): MySQL 8.4 + MariaDB.** The first nightly dispatch
-proved WHY these are not yet valid nightly tests: MySQL **8.4** removed the
-`--default-authentication-plugin` startup option the harness uses, **disables
-`mysql_native_password` by default**, and defaults to `caching_sha2_password` -
-whose full-auth Hull performs only over **TLS**, which the harness does not set up.
-So `mysql:8.4` never reaches the Hull client (the container fails to start). Merely
-forcing legacy `mysql_native_password` would test a compatibility escape hatch, not
-Hull's intended 8.4 path, so 8.4 is NOT re-added that way. The follow-up
-compatibility story must implement the REAL path: **TLS-enabled
-`caching_sha2_password` full-auth, version-aware container configuration, and
-MariaDB's distinct authentication behavior** - and is out of Slice 6's scope
-(parallel to the deferred conformance-expansion slot). The version pin above blocks
-a casual re-add of 8.4 / MariaDB without that work.
+**MySQL 8.4 (added by #982, pinned 2026-11-15).** The first nightly dispatch showed
+why 8.4 could not simply be added: it removed the `--default-authentication-plugin`
+startup option, disables `mysql_native_password` by default and defaults to
+`caching_sha2_password`, so the container did not start. `tests/e2e_mysql.sh` now
+starts it with the options it still accepts: `--mysql-native-password=ON
+--authentication-policy=mysql_native_password,,` for the plaintext main phase, and a
+later phase that switches the user to `caching_sha2_password` and runs full auth
+over TLS (refused under `sslmode=require`, which verifies nothing). So the main phase
+still uses the legacy plugin; the `caching_sha2_password` path Hull intends for 8.4
+is covered by the TLS phase. #982 added the leg without updating the pin, and the
+nightly gate failed from 2026-11-01 until the pin followed.
+
+**PENDING SLOT (NOT executed): MariaDB.** Its authentication differs (it greets with
+`mysql_native_password` and moves ed25519 accounts over with an AuthSwitchRequest)
+and the nightly harness does not set it up. The version pin above blocks a casual
+add without that work.
 
 Conformance is intentionally absent: running the committed corpora under ASan/MSan
 is ALREADY covered by main's `sanitizers` + `msan` jobs (no property beyond main);

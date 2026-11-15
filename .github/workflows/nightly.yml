@@ -331,14 +331,12 @@ jobs:
           retention-days: 14
 
   # -- version / compat: the DB wire clients against multiple engine versions.
-  #    SUPPORTED nightly set: PostgreSQL 15/16 + MySQL 8.0 (what the e2e harness
-  #    can reach today). MySQL 8.4 and MariaDB are a PENDING SLOT, NOT executed
-  #    here (Appendix F): 8.4 removed the `--default-authentication-plugin` startup
-  #    option, disables `mysql_native_password` by default, and defaults to
-  #    caching_sha2_password whose full-auth Hull only does over TLS - none of
-  #    which the current harness sets up. The pin scripts/ci/test_nightly_matrix.py
-  #    fails if this image set drifts, so 8.4/MariaDB cannot be casually re-added
-  #    without the real caching_sha2/TLS + version-aware-container harness work. --
+  #    SUPPORTED nightly set: PostgreSQL 15/16 + MySQL 8.0 / 8.4 (what the e2e
+  #    harness can reach today; tests/e2e_mysql.sh starts 8.4 with the options it
+  #    still accepts, #982). MariaDB is a PENDING SLOT, NOT executed here
+  #    (Appendix F): its auth differs and the harness does not set it up. The pin
+  #    scripts/ci/test_nightly_matrix.py fails if this image set drifts, so an
+  #    engine cannot be casually added without the harness work. --
   nightly-compat-db:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     name: Nightly compat (${{ matrix.label }})
