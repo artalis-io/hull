@@ -878,6 +878,13 @@ jobs:
       - name: PROBE - e2e suites on Windows (informational, never gates)
         if: inputs.probe_e2e != ''
         shell: msys2 {0}
+        env:
+          # `ln -s` makes a real (native) symbolic link, dangling ones
+          # included, as on Linux / macOS. MSYS's default copies the target,
+          # so a test of a planted link tested a plain directory, and a link
+          # to a path that does not exist yet failed to be made at all. The
+          # runner has the privilege; nativestrict errors rather than copy.
+          MSYS: winsymlinks:nativestrict
         run: |
           set -uo pipefail
           # /ucrt64/bin last, not first: MSYS-native make is required by this
@@ -1064,6 +1071,13 @@ jobs:
         # runs it too, which is how you exercise the gate on demand.
         if: inputs.probe_e2e == ''
         shell: msys2 {0}
+        env:
+          # `ln -s` makes a real (native) symbolic link, dangling ones
+          # included, as on Linux / macOS. MSYS's default copies the target,
+          # so a test of a planted link tested a plain directory, and a link
+          # to a path that does not exist yet failed to be made at all. The
+          # runner has the privilege; nativestrict errors rather than copy.
+          MSYS: winsymlinks:nativestrict
         run: |
           set -uo pipefail
           export PATH="$PATH:$PWD/cosmo/bin:/ucrt64/bin"

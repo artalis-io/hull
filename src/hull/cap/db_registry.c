@@ -19,10 +19,12 @@
 #include "hull/shared/host.h"     /* hl_host_normalize_path, HL_HOST_PATH_MAX */
 #include "hull/cap/fs_resolve.h"   /* hl_fs_reserved_name */
 #include "hull/host_match.h"      /* hl_dsn_query_param */
+#include "hull/shared/fs_util.h"  /* hl_default_db_path_check */
 
 #include <limits.h>
 #include <sys/stat.h>   /* mkdir */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -524,8 +526,17 @@ static const char *default_internal_dsn(const HlDbRegistry *reg,
     const char *d = reg->default_internal;
     if (strcmp(d, ":memory:") == 0) return d;
     if (hl_db_path_has_symlink(d, reg->default_internal_base)) {
-        *err = "the internal database's path runs through a symbolic link, "
-               "or names something that is not a regular file";
+        /* Say which file and why: the bare refusal left a Windows-only
+         * failure with nothing to go on. Per thread, as *err is borrowed. */
+        static _Thread_local char why[512];
+        char detail[400];
+        if (hl_default_db_path_check(d, detail, sizeof detail) != 0)
+            snprintf(why, sizeof why, "the internal database's path is "
+                     "refused: %s", detail);
+        else
+            snprintf(why, sizeof why, "the internal database's path %.300s "
+                     "runs through a symbolic link", d);
+        *err = why;
         return NULL;
     }
     return d;
