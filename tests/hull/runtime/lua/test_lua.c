@@ -16451,6 +16451,11 @@ UTEST(lua_audit39, sync_http_requests_are_charged)
         "for i = 1, 2000 do pcall(http.get, 'http://x.invalid/') end return 1",
     };
     for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        /* On Windows a refused connect takes about a second (the stack
+         * retries the SYN), so these loops reach the run's deadline before
+         * the budget. The allowlist loop below shows the floor all the same:
+         * it is charged before the check, whatever the host. */
+        if (hl_host_is_windows() && strstr(loops[i], "127.0.0.1:1")) continue;
         char code[512];
         snprintf(code, sizeof code, "local http = require('hull.http-client') %s",
                  loops[i]);
@@ -17224,6 +17229,15 @@ UTEST(lua_audit43, ordinary_module_use_still_works)
 #include "hull/shared/dispatch_meter.h"   /* HL_METER_SLOWDOWN */
 #define HL_METER_TEST_SLOWDOWN HL_METER_SLOWDOWN
 
+/* Windows reads a thread's CPU time in 15.6 ms ticks, and a slow call is
+ * charged at most the CPU time that clock shows, so a lower bound on a
+ * measured charge allows one tick there. */
+static uint64_t disp_floor(uint64_t units)
+{
+    uint64_t tick = hl_host_is_windows() ? (uint64_t)16 * 64000u : 0u;
+    return units > tick ? units - tick : 0u;
+}
+
 static uint64_t disp_now_ns(void)
 {
     struct timespec ts;
@@ -17406,7 +17420,7 @@ UTEST(lua_dispatcher, explicit_charges_are_not_double_counted)
     ASSERT_EQ(luaL_dostring(L, "spin(20)"), LUA_OK);
     wall = (disp_now_ns() - w0) / 1000u * 64u;
     charged = disp_charged(L) - c0;
-    EXPECT_GE(charged, (uint64_t)19 * 64000 / HL_METER_TEST_SLOWDOWN);
+    EXPECT_GE(charged, disp_floor((uint64_t)19 * 64000 / HL_METER_TEST_SLOWDOWN));
     EXPECT_LT(charged, wall + 2 * 64000u);
     EXPECT_EQ(lua_rt.budget.nframes, 0);
     cleanup_lua();
@@ -17423,7 +17437,8 @@ UTEST(lua_dispatcher, a_failed_call_is_charged_up_to_its_error)
     ASSERT_EQ(luaL_dostring(L,
         "local ok, e = pcall(spin_error, 20) assert(not ok) "
         "assert(tostring(e):find('spun then failed'))"), LUA_OK);
-    EXPECT_GE(disp_charged(L) - c0, (uint64_t)19 * 64000 / HL_METER_TEST_SLOWDOWN);
+    EXPECT_GE(disp_charged(L) - c0,
+              disp_floor((uint64_t)19 * 64000 / HL_METER_TEST_SLOWDOWN));
     /* The unwound call's frame went with the error; an enclosing call's
      * frame is untouched (nested pcall inside a coroutine). */
     EXPECT_EQ(lua_rt.budget.nframes, 0);
@@ -17454,7 +17469,7 @@ UTEST(lua_dispatcher, a_parked_wait_is_not_charged)
     ASSERT_EQ(lua_resume(co, L, 1, &nres), LUA_YIELD);
     EXPECT_EQ(lua_rt.budget.nframes, 0);    /* the yield ended the call */
     uint64_t at_yield = disp_charged(co) - c0;
-    EXPECT_GE(at_yield, (uint64_t)9 * 64000 / HL_METER_TEST_SLOWDOWN);
+    EXPECT_GE(at_yield, disp_floor((uint64_t)9 * 64000 / HL_METER_TEST_SLOWDOWN));
     struct timespec nap = { 0, 150 * 1000000L };
     nanosleep(&nap, NULL);
     lua_settop(co, 0);

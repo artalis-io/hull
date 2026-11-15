@@ -222,7 +222,14 @@ UTEST(hl_cap_fs, write_replaces_by_rename)
     ASSERT_EQ(hl_cap_fs_write(&test_cfg, "atomic.txt", "old contents", 12, NULL), 0);
     struct stat before, after;
     ASSERT_EQ(host_path_stat("atomic.txt", &before), 0);
-    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "atomic.txt", "new", 3, NULL), 0);
+    const char *werr = NULL;
+    errno = 0;
+    int wrc = hl_cap_fs_write(&test_cfg, "atomic.txt", "new", 3, &werr);
+    if (wrc != 0)
+        fprintf(stderr, "replace: err=%s errno=%d (%s) old st_mode=%o\n",
+                werr ? werr : "-", errno, strerror(errno),
+                (unsigned)before.st_mode);
+    ASSERT_EQ(wrc, 0);
     ASSERT_EQ(host_path_stat("atomic.txt", &after), 0);
 
     char buf[32];
@@ -614,7 +621,11 @@ UTEST(hl_cap_fs, the_write_open_still_truncates)
     setup_fs();
     ASSERT_EQ(hl_cap_fs_write(&test_cfg, "trunc.bin", "abcdef", 6, NULL), 0);
     const char *err = NULL;
+    errno = 0;
     int fd = hl_cap_fs_open_write_fd(&test_cfg, "trunc.bin", &err);
+    if (fd < 0)
+        fprintf(stderr, "open_write_fd: err=%s errno=%d (%s)\n", err ? err : "-",
+                errno, strerror(errno));
     ASSERT_GE(fd, 0);
     struct stat st;
     ASSERT_EQ(fstat(fd, &st), 0);
