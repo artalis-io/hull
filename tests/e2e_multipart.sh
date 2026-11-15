@@ -844,7 +844,10 @@ run_multipart_tests() {
             *)       fail "$LABEL endless part header cut off, no caps set - $FLOOD" ;;
         esac
         RSS1=$(ps -o rss= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')
-        if [ -n "$RSS0" ] && [ -n "$RSS1" ] && [ $((RSS1 - RSS0)) -lt 32768 ]; then
+        if [ -z "$RSS0" ] || [ -z "$RSS1" ]; then
+            # MSYS's ps reports no RSS for a native (APE) process.
+            echo "  SKIP: $LABEL header flood: RSS bounded (no RSS reading here)"
+        elif [ $((RSS1 - RSS0)) -lt 32768 ]; then
             pass "$LABEL header flood: RSS bounded (${RSS0}K -> ${RSS1}K)"
         else
             fail "$LABEL header flood: RSS bounded (${RSS0}K -> ${RSS1}K)"
