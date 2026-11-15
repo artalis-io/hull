@@ -12116,6 +12116,15 @@ UTEST(lua_audit9, a_task_that_trips_the_budget_still_finishes)
 
 /* Run @p code under a budget of @p limit on the caps runtime; the error
  * text, if any, lands in @p err. */
+/* The budget an "ordinary work still fits" check gives a run of many file
+ * operations. The dispatcher charges each call its measured time, and file
+ * creates, renames and directory walks on the Windows CI host are about ten
+ * times slower than on Linux / macOS, so the same work costs more there. */
+static int64_t a_fs_fits(int64_t limit)
+{
+    return hl_host_is_windows() ? limit * 32 : limit;
+}
+
 static int audit10_run(const char *code, int64_t limit, char *err, size_t n)
 {
     lua_rt.max_instructions = limit;
@@ -16078,7 +16087,7 @@ UTEST(lua_audit38, ordinary_fs_work_keeps_its_headroom)
         "for i = 1, 500 do assert(fs.write('site/p' .. i .. '.html', 'page ' .. i)) end "
         "for i = 1, 500 do assert(fs.read('site/p' .. i .. '.html') == 'page ' .. i) end "
         "assert(#fs.list('site') == 500) return 1",
-        15000000, err, sizeof err), LUA_OK);
+        a_fs_fits(15000000), err, sizeof err), LUA_OK);
     EXPECT_STREQ(err, "");
     cleanup_lua_caps();
     a15_fs_close(&f);
@@ -16252,7 +16261,7 @@ UTEST(lua_audit39, blob_walks_are_charged)
         "local n = 0 for id in blob.iter() do n = n + 1 end assert(n == 300) "
         "assert(blob.total_size() > 0) "
         "assert(blob.cleanup({ max_age = 1e9 }).removed == 0) return 1",
-        A10_FITS_LIMIT, err, sizeof err), LUA_OK);
+        a_fs_fits(A10_FITS_LIMIT), err, sizeof err), LUA_OK);
     EXPECT_STREQ(err, "");
     cleanup_lua_caps();
     a15_fs_close(&f);
@@ -16451,6 +16460,11 @@ UTEST(lua_audit39, sync_http_requests_are_charged)
         "for i = 1, 2000 do pcall(http.get, 'http://x.invalid/') end return 1",
     };
     for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        /* On Windows a refused connect takes about a second (the stack
+         * retries the SYN), so these loops reach the run's deadline before
+         * the budget. The allowlist loop below shows the floor all the same:
+         * it is charged before the check, whatever the host. */
+        if (hl_host_is_windows() && strstr(loops[i], "127.0.0.1:1")) continue;
         char code[512];
         snprintf(code, sizeof code, "local http = require('hull.http-client') %s",
                  loops[i]);
@@ -17224,6 +17238,15 @@ UTEST(lua_audit43, ordinary_module_use_still_works)
 #include "hull/shared/dispatch_meter.h"   /* HL_METER_SLOWDOWN */
 #define HL_METER_TEST_SLOWDOWN HL_METER_SLOWDOWN
 
+/* Windows reads a thread's CPU time in 15.6 ms ticks, and a slow call is
+ * charged at most the CPU time that clock shows, so a lower bound on a
+ * measured charge allows one tick there. */
+static uint64_t disp_floor(uint64_t units)
+{
+    uint64_t tick = hl_host_is_windows() ? (uint64_t)16 * 64000u : 0u;
+    return units > tick ? units - tick : 0u;
+}
+
 static uint64_t disp_now_ns(void)
 {
     struct timespec ts;
@@ -17406,7 +17429,7 @@ UTEST(lua_dispatcher, explicit_charges_are_not_double_counted)
     ASSERT_EQ(luaL_dostring(L, "spin(20)"), LUA_OK);
     wall = (disp_now_ns() - w0) / 1000u * 64u;
     charged = disp_charged(L) - c0;
-    EXPECT_GE(charged, (uint64_t)19 * 64000 / HL_METER_TEST_SLOWDOWN);
+    EXPECT_GE(charged, disp_floor((uint64_t)19 * 64000 / HL_METER_TEST_SLOWDOWN));
     EXPECT_LT(charged, wall + 2 * 64000u);
     EXPECT_EQ(lua_rt.budget.nframes, 0);
     cleanup_lua();
@@ -17423,7 +17446,8 @@ UTEST(lua_dispatcher, a_failed_call_is_charged_up_to_its_error)
     ASSERT_EQ(luaL_dostring(L,
         "local ok, e = pcall(spin_error, 20) assert(not ok) "
         "assert(tostring(e):find('spun then failed'))"), LUA_OK);
-    EXPECT_GE(disp_charged(L) - c0, (uint64_t)19 * 64000 / HL_METER_TEST_SLOWDOWN);
+    EXPECT_GE(disp_charged(L) - c0,
+              disp_floor((uint64_t)19 * 64000 / HL_METER_TEST_SLOWDOWN));
     /* The unwound call's frame went with the error; an enclosing call's
      * frame is untouched (nested pcall inside a coroutine). */
     EXPECT_EQ(lua_rt.budget.nframes, 0);
@@ -17454,7 +17478,7 @@ UTEST(lua_dispatcher, a_parked_wait_is_not_charged)
     ASSERT_EQ(lua_resume(co, L, 1, &nres), LUA_YIELD);
     EXPECT_EQ(lua_rt.budget.nframes, 0);    /* the yield ended the call */
     uint64_t at_yield = disp_charged(co) - c0;
-    EXPECT_GE(at_yield, (uint64_t)9 * 64000 / HL_METER_TEST_SLOWDOWN);
+    EXPECT_GE(at_yield, disp_floor((uint64_t)9 * 64000 / HL_METER_TEST_SLOWDOWN));
     struct timespec nap = { 0, 150 * 1000000L };
     nanosleep(&nap, NULL);
     lua_settop(co, 0);

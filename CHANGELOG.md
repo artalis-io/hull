@@ -8,6 +8,14 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- `fs.write` on Windows (a cosmo build): a file it created was left read-only, so the next
+  `fs.write`, `blob` write or `tar.extract` over it failed with `write_failed`. Since 0.18.3 a
+  new file's bits came from the process umask applied by hand, which on Windows only shapes the
+  `st_mode` cosmo makes up and could leave no owner write bit. A new file is 0644 there again, as
+  an `open(O_CREAT, 0644)` gives it.
+
 ## [0.22.2] - 2026-11-15
 
 One fix from audit round 47, Low: `hull types` no longer removes a shipped declaration a record

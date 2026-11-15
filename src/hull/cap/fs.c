@@ -550,6 +550,12 @@ static void fs_umask_read(void)
 }
 static mode_t fs_default_file_mode(void)
 {
+    /* Not on Windows: cosmo's open there does not apply the umask (it only
+     * shapes the st_mode it makes up), so an open(O_CREAT, 0644) is a
+     * writable file, and the umask taken off by hand could leave no owner
+     * write bit - which fchmod turns into the read-only attribute, and the
+     * file's next write was refused. */
+    if (hl_host_is_windows()) return 0644;
     pthread_once(&fs_umask_once, fs_umask_read);
     return (mode_t)(0644 & ~fs_umask_cached);
 }

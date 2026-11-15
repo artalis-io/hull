@@ -771,6 +771,7 @@ jobs:
           for s in $ENFORCED; do
             test -x "build/$s" || { echo "FAIL $s was not built"; exit 1; }
             out=$(HULL_QUIET_AOT=1 "./build/$s" 2>&1)
+            printf '%s\n' "$out" > "unit-$s.log"
             n=$(fails_of "$out")
             if [ "$n" = "0" ]; then
               echo "ok        $s"
@@ -786,6 +787,7 @@ jobs:
             s=${kv%%:*}; base=${kv##*:}
             test -x "build/$s" || { echo "FAIL $s was not built"; exit 1; }
             out=$(HULL_QUIET_AOT=1 "./build/$s" 2>&1)
+            printf '%s\n' "$out" > "unit-$s.log"
             n=$(fails_of "$out")
             if [ "$n" = "$base" ]; then
               echo "known     $s: $n (baseline $base)"
@@ -820,6 +822,7 @@ jobs:
                 continue
               fi
               out=$(HULL_QUIET_AOT=1 "./build/$s" 2>&1)
+              printf '%s\n' "$out" > "unit-$s.log"
               n=$(fails_of "$out")
               if [ "$n" = "0" ]; then
                 echo "probe     $s: clean -> candidate for ENFORCED"
@@ -1183,6 +1186,18 @@ jobs:
         with:
           name: hull-windows-e2e-probe-logs
           path: e2e-*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      # The gate echoes only the tail of a failing suite, which names the
+      # cases but almost never shows the assertion that failed. Keep each
+      # suite's whole output.
+      - name: Upload the per-suite unit test output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hull-windows-unit-logs
+          path: unit-*.log
           if-no-files-found: warn
           retention-days: 14
 
