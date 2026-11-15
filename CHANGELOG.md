@@ -8,6 +8,12 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-11-15
+
+One fix from audit round 47, Low: `hull types` no longer removes a shipped declaration a record
+entry names in another letter case, and a FIFO planted under `types/` no longer hangs it. Audit
+round 48 (a review of the round 47 fixes) found nothing. No upgrade notes.
+
 ### Fixed
 
 - `hull types` (audit 47): a record entry naming a shipped file in another letter case
