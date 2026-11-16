@@ -13,8 +13,8 @@ The pure-Lua/JS `_memstore` remains the sole memory backend for `hull/kv` and
 
 ## What was built (and where it lives)
 
-A complete Phase 1-3a implementation exists only on the local, unpushed branch
-`feat/kvmem-native` (preserved for reference, not proposed for merge):
+A complete Phase 1-3a implementation exists only at the local, unpushed tag
+`archive/kvmem-native` (preserved for reference, not proposed for merge):
 
 - `cap/kvmem.c`: Robin Hood open addressing over a stable chunked entry slab,
   backward-shift deletion, O(1) intrusive LRU, SipHash-1-3 keyed per store from
@@ -62,7 +62,7 @@ Resident memory (Gate 4): one store populated with 1e6 small entries
 (`key<i>` -> `value<i>`), peak RSS via `/usr/bin/time -l`, one store per process.
 
 Harness: `tests/fixtures/kvmem_bench/{app.lua,app.js,mem.lua}` on the
-`feat/kvmem-native` branch. Reproduce with a `HL_ENABLE_CACHE_NATIVE=1` build:
+`archive/kvmem-native` tag. Reproduce with a `HL_ENABLE_CACHE_NATIVE=1` build:
 
 ```
 hull tests/fixtures/kvmem_bench/app.lua --no-sandbox -- mixed   # | ttl | evict
