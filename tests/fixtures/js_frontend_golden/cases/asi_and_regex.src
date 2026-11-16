@@ -1,0 +1,15 @@
+// Automatic semicolon insertion and the regex / division goal.
+let a = 1
+let b = a
+++b
+const c = a / b / 2
+const re = /ab+c/gi.test("abbc")
+const d = a
+/2/1
+function f() {
+  return
+  a
+}
+const tpl = `x${a}y${`in${b}ner`}z`
+const g = (a) / 2
+let h = 1; h /= 2

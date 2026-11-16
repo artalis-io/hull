@@ -3421,6 +3421,8 @@ endif
 
 # Unit tests / MSan / fuzzing / e2e live in mk/tests.mk.
 include mk/tests.mk
+# The JS-mode frontend snapshot tools (the TypeScript work's JS non-regression gate).
+include mk/js_frontend_dump.mk
 # ── Self-build (hull builds a runnable app binary) ──────────────────
 #
 # A produced binary is a slim app-runner (hl_app_run -> hull_serve), NOT the

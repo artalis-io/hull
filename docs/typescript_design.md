@@ -268,6 +268,21 @@ All through the pipeline, none through a loader transform:
   with no `.ts` on disk and `hull verify` passes; a runtime error's stack trace names
   `lib/a.ts` with the right line.
 - **Types (T1):** §2.3.
+- **JS mode does not change (implemented, ahead of T2).** The TypeScript mode lives in the
+  JS lexer and parser, so two gates hold JS-mode output fixed while it is built:
+  - `test_js_golden` (every `make test`, and `make test-js-frontend`) digests the lex,
+    parse + annotation and scope output of a frozen input set - the pinned Test262 subset
+    and the hand-written cases in `tests/fixtures/js_frontend_golden/cases/` - and compares
+    with the committed `golden.txt`. It also checks that TypeScript syntax stays a
+    `js.syntax` error in JS mode, under a `.js` or a `.ts` path, with no `ts.*` code. A
+    meant change regenerates the golden (`make js-frontend-golden`) and says why in its PR.
+  - `scripts/js_frontend_diff.sh` (`make js-frontend-diff`, CI job `focused-js-frontend`
+    on a PR) builds the dump tool against the frontend at the PR's base and at its head,
+    dumps the repo JS (the conformance corpus, the frozen inputs and the frontend's own
+    modules) with both, and fails on any byte of difference. It prints both timings.
+  One known false accept is frozen as it stands
+  (`known_false_accept_import_no_comma.src`: a default import followed by `{ ... }` or
+  `* as` with no comma); its fix regenerates the golden.
 
 ## 6. Open questions
 

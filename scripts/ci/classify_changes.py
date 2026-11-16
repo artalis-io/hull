@@ -239,6 +239,10 @@ def classify_path(path):
     # change must never skip the tests it modifies. --
     if p.startswith("tests/fixtures/test262/"):
         return {"js_frontend_changed"}
+    # The JS-mode output snapshot (TypeScript non-regression gate): its frozen
+    # inputs + golden, and the base-vs-head comparison script.
+    if p.startswith("tests/fixtures/js_frontend_golden/") or p == "scripts/js_frontend_diff.sh":
+        return {"js_frontend_changed"}
     if p.startswith("tests/fixtures/lua54-tests/"):
         return {"lua_frontend_changed"}
     if p.startswith("tests/hull/frontend/"):

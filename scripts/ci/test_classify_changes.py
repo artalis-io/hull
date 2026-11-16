@@ -191,6 +191,11 @@ check("generic e2e script -> full_core", ["tests/e2e_http.sh"],
 check("example app -> full_core", ["examples/todo/app.lua"],
       want_true=["full_core"], want_false=["full_all", "docs_only"])
 
+check("js golden snapshot -> focused js (not full_core)",
+      ["tests/fixtures/js_frontend_golden/golden.txt",
+       "tests/fixtures/js_frontend_golden/cases/asi_and_regex.src",
+       "scripts/js_frontend_diff.sh"],
+      want_true=["focused_js_frontend"], want_false=["full_core", "full_all"])
 check("frontend C test -> focused js (not full_core)",
       ["tests/hull/frontend/test_js_conformance.c"],
       want_true=["focused_js_frontend"], want_false=["full_core", "full_all"])

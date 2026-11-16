@@ -1,0 +1,9 @@
+// Every `<` / `>` here is a comparison or shift in JS; TypeScript would read some as generics.
+const a = 1, b = 2, c = 3, f = (x) => x, g = 4;
+const r1 = a < b > c;
+const r2 = f(a < b, c > g);
+const r3 = a < b && c > (g);
+const r4 = a >> b, r5 = a >>> b, r6 = a >= b, r7 = a <= b;
+let s = 1; s >>= 1; s >>>= 1; s <<= 2;
+const r8 = (a < b) > (c < g);
+if (a < b) { f(c > g); }

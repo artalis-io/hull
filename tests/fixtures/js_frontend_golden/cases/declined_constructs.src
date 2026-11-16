@@ -1,0 +1,5 @@
+// Valid JavaScript the frontend declines today (js.unsupported).
+function* gen() { yield 1; }
+class P { #secret = 1; get s() { return this.#secret; } }
+let i = 0;
+do { i++; } while (i < 3);

@@ -8,6 +8,14 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- Tests: the JS frontend's JS-mode output is held fixed while the TypeScript mode is built.
+  `test_js_golden` compares the lex, parse and scope output of a frozen input set (the Test262
+  subset and hand-written edge cases) with a committed snapshot, and
+  `scripts/js_frontend_diff.sh` (`make js-frontend-diff`, run by CI on a PR that touches the
+  frontend) compares the output over the repo JS between the PR's base and its head.
+
 ### Fixed
 
 - `fs.write` on Windows (a cosmo build): a file it created was left read-only, so the next

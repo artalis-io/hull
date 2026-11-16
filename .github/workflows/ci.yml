@@ -2178,8 +2178,26 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          # the PR's base commit, for the JS-mode output comparison below
+          fetch-depth: 2
       - name: JS frontend tests (fresh registry embed)
         run: make test-js-frontend
+      # The TypeScript work must not change JS mode (docs/typescript_design.md section 5):
+      # the frontend at the PR's base and at its head dump the repo JS, byte-compared.
+      # Skips itself when the PR changes nothing that can alter the output.
+      - name: JS-mode output, PR base vs head
+        if: github.event_name == 'pull_request'
+        timeout-minutes: 15
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: sh scripts/js_frontend_diff.sh "$BASE_SHA"
+      - name: Upload the JS-mode output diff
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: js-frontend-diff
+          path: build/js-frontend-diff/diff.txt
+          if-no-files-found: ignore
       - name: Project source-discovery lifecycle (hull dev --agent -> inspect, JS)
         timeout-minutes: 6
         run: make e2e-project-discovery

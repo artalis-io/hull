@@ -1,0 +1,8 @@
+import def, { a, b as bee } from "m";
+import * as ns from "n";
+import "side-effect";
+export * from "o";
+export * as p from "p";
+export { a, bee as b2 };
+export const k = ns.x + def;
+export default function () { return a; }
