@@ -360,6 +360,14 @@ UTEST(js_typescript, type_erasure_reports_refusals)
 #define TS_CORPUS "tests/fixtures/ts_frontend"
 static const char *const EXT_TS[] = { ".ts", NULL };
 
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 /* The JSON string value of `key` in `json`, unescaped (\n, \", \\ and \uXXXX below 0x80).
  * malloc'd; NULL when absent or not a string. */
 static char *json_str(const char *json, const char *key)
@@ -378,7 +386,11 @@ static char *json_str(const char *json, const char *key)
             case 'n': out[n++] = '\n'; break;
             case 'r': out[n++] = '\r'; break;
             case 't': out[n++] = '\t'; break;
-            case 'u': { unsigned v = 0; sscanf(p + 1, "%4x", &v); out[n++] = (char)v; p += 4; break; }
+            case 'u': {
+                int v = 0;
+                for (int k = 1; k <= 4; k++) { int d = hex_digit(p[k]); if (d < 0) { free(out); return NULL; } v = v * 16 + d; }
+                out[n++] = (char)v; p += 4; break;
+            }
             default: out[n++] = *p; break;
         }
     }
@@ -386,15 +398,16 @@ static char *json_str(const char *json, const char *key)
     return out;
 }
 
-/* Decode a lowercase hex string; returns the byte count, or (size_t)-1. */
+/* Decode a lowercase hex string; returns the byte count, or (size_t)-1. By hand: scanf's
+ * field width is not honoured alike everywhere (the cosmo build decoded every byte wrong). */
 static size_t unhex(const char *hx, char *out)
 {
     size_t n = strlen(hx);
     if (n % 2) return (size_t)-1;
     for (size_t i = 0; i < n / 2; i++) {
-        unsigned v = 0;
-        if (sscanf(hx + 2 * i, "%2x", &v) != 1) return (size_t)-1;
-        out[i] = (char)v;
+        int hi = hex_digit(hx[2 * i]), lo = hex_digit(hx[2 * i + 1]);
+        if (hi < 0 || lo < 0) return (size_t)-1;
+        out[i] = (char)(hi * 16 + lo);
     }
     return n / 2;
 }
