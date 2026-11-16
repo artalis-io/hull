@@ -245,7 +245,9 @@ UTEST(js_typescript, speculation_budget)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    const int depth = 50, terms = 4000;
+    /* Shallow enough for a sanitizer build's stack, wide enough to pass the budget: each of the
+     * 16 attempts rewinds the ~16000-token tuple. */
+    const int depth = 16, terms = 8000;
     size_t cap = (size_t)depth * 8 + (size_t)terms * 4 + 16, n = 0;
     char *src = (char *)malloc(cap);
     ASSERT_TRUE(src != NULL);
