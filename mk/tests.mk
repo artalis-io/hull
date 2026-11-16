@@ -20,7 +20,7 @@ else ifeq ($(RUNTIME),lua)
   TEST_SRCS := $(filter-out %/test_js_tui_poll.c,$(TEST_SRCS))
   # test_js_session + test_js_lexer + test_js_parser (the JS tooling runtime + frontend) need
   # QuickJS, absent in a lua-only build.
-  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c %/test_js_conformance.c %/test_js_annotations.c %/test_js_scope.c %/test_js_frontend.c %/test_js_generation.c %/test_js_fuzz_entry.c %/test_js_golden.c,$(TEST_SRCS))
+  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c %/test_js_conformance.c %/test_js_annotations.c %/test_js_scope.c %/test_js_frontend.c %/test_js_generation.c %/test_js_fuzz_entry.c %/test_js_golden.c %/test_js_typescript.c,$(TEST_SRCS))
 endif
 
 # The release / verify helpers' rules (below) exist only with the HTTP client:
@@ -509,6 +509,12 @@ $(BUILDDIR)/test_js_frontend: $(TESTDIR)/hull/frontend/test_js_frontend.c $(FRON
 # resolveScope and compares with tests/fixtures/js_frontend_golden/golden.txt (the TypeScript
 # work must not change JS mode). Regenerate with `make js-frontend-golden`. Explicit recipe.
 $(BUILDDIR)/test_js_golden: $(TESTDIR)/hull/frontend/test_js_golden.c $(TESTDIR)/hull/frontend/js_frontend_dump.h $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# hull.frontend TypeScript mode (docs/typescript_design.md section 3): the mode's hook points,
+# the lexer's splitGreater and hull:source:ts_erase, plus TS mode == JS mode once its refusals
+# are removed, over the golden inputs and the repo's JS. Explicit recipe.
+$(BUILDDIR)/test_js_typescript: $(TESTDIR)/hull/frontend/test_js_typescript.c $(TESTDIR)/hull/frontend/js_frontend_dump.h $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
 # Regression for the libFuzzer test entry hull:source:tests:fuzz_parse recovery classification
@@ -1013,7 +1019,7 @@ $(BUILDDIR)/test_cacert: $(TESTDIR)/hull/test_cacert.c $(CACERT_OBJ) $(SH_SEAL_A
 JS_FRONTEND_TEST_BINS := $(addprefix $(BUILDDIR)/,\
 	test_js_session test_js_lexer test_js_parser test_js_conformance \
 	test_js_annotations test_js_scope test_js_frontend test_js_generation test_js_fuzz_entry \
-	test_js_golden)
+	test_js_golden test_js_typescript)
 
 .PHONY: test-js-frontend
 test-js-frontend: $(JS_FRONTEND_TEST_BINS)

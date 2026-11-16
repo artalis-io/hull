@@ -7,7 +7,8 @@
 // js.limit.* diagnostics and it recovers so a full token stream is always returned.
 //
 // Public:
-//   createTokenizer(bytes, opts?) -> { next(regexAllowed?), comments, diagnostics, linemap }
+//   createTokenizer(bytes, opts?) -> { next(regexAllowed?), comments, diagnostics, linemap,
+//                                      peekMark, peekRewind, splitGreater }
 //       INCREMENTAL. The parser calls next(regexAllowed) with the grammar-directed lexical
 //       goal so it controls regex-vs-division at a `/` (the token stream alone cannot tell
 //       `if (ok) {} /re/` from `const f = function(){} / 2`).
@@ -604,8 +605,24 @@ export function createTokenizer(bytes, opts) {
         comments.length = m.commentsLen;
     }
 
+    // TypeScript mode only (docs/typescript_design.md section 3): a type argument list closes
+    // with `>`, but the scanner reads `>>`, `>>>`, `>=`, `>>=` and `>>>=` as one operator
+    // (`Array<Array<T>>`). Called with the LAST token produced still current (no lookahead
+    // read past it), this shortens that token to its first `>` and moves the cursor back to
+    // the byte after it, so the next next() scans the rest again. Returns the `>` token, or
+    // null when the last token is not one of those operators. JS mode never calls it.
+    function splitGreater() {
+        const t = lastToken;
+        if (!t || t.type !== "punctuator" || t.value.length < 2 || t.value.charCodeAt(0) !== 0x3e) return null;
+        const g = { type: "punctuator", value: ">", start: t.start, stop: t.start + 1, nlBefore: t.nlBefore };
+        p = t.start;                     // 0-based: the byte after the first `>`
+        prev = g; lastToken = g;
+        afterToken(g);
+        return g;
+    }
+
     const _linemap = buildLinemap(bytes);
-    return { next: next, comments: comments, diagnostics: budget.list, linemap: _linemap, peekMark: peekMark, peekRewind: peekRewind };
+    return { next: next, comments: comments, diagnostics: budget.list, linemap: _linemap, peekMark: peekMark, peekRewind: peekRewind, splitGreater: splitGreater };
 }
 
 // lex(bytes, opts) -> { tokens, comments, diagnostics, linemap }. Convenience that drives the

@@ -16,6 +16,14 @@ release-artifact layout).
   `scripts/js_frontend_diff.sh` (`make js-frontend-diff`, run by CI on a PR that touches the
   frontend) compares the output over the repo JS between the PR's base and its head. A difference
   passes only for an input whose snapshot line the PR regenerated (`make js-frontend-golden`).
+- JS frontend, internal: a TypeScript mode for the parser (`parse(bytes, { lang: "ts" })`;
+  `lang` defaults to `"js"`, is never chosen from a file's extension, and any other value is
+  refused rather than read as JS), the lexer's `splitGreater()`, and
+  `hull:source:ts_erase` (`typeErasure` / `erase`: span bytes become spaces, CR and LF are kept,
+  a span holding U+2028 / U+2029 is refused). Not reachable from any command yet: this slice
+  recognises the erasable TypeScript constructs and refuses each with `ts.unsupported`; the
+  type grammar that erases them comes next. `test_js_typescript` checks that TS mode, its
+  refusals removed, gives exactly JS mode's output over the golden inputs and the repo's JS.
 
 ### Fixed
 

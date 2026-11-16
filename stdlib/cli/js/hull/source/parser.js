@@ -17,7 +17,19 @@
 //   SourceUnit = { ast, comments, diagnostics, linemap, valid }
 //     ast   = { type:"Program", body:[Statement], start, stop }
 //     valid = diagnostics has no severity:"error"  (i.e. "did it parse cleanly?")
-//   opts: { path?, maxTokens?, maxDiagnostics?, maxDepth? }
+//   opts: { path?, maxTokens?, maxDiagnostics?, maxDepth?, lang? }
+//     lang = "js" (the default when absent) | "ts". Any other value - a typo, or "tsx" / "jsx",
+//     which are not supported - parses nothing: the unit is invalid with one js.internal
+//     diagnostic, never a silent JS parse.
+//
+// TypeScript mode (lang "ts"; docs/typescript_design.md section 3) is OFF by default and is
+// never chosen from the path. Every TypeScript branch below is guarded by `ts &&`
+// and fires only where JavaScript is a syntax error, so JS mode is unchanged byte for byte
+// (test_js_golden and scripts/js_frontend_diff.sh hold it) and valid JavaScript parses the same
+// in both modes (test_js_typescript holds that). In TS mode the unit also carries `typeSpans` (the
+// erasable type syntax, sorted half-open byte ranges, see hull:source:ts_erase). This slice
+// recognises the TypeScript constructs and refuses each one with a ts.unsupported diagnostic;
+// the type grammar that erases them comes next.
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -98,11 +110,25 @@ export function __parseWithInjection(bytes, opts, inject) {
     return protectedParse(function () { return parseInternal(bytes, opts, inject); }, opts);
 }
 
+// The languages parse() reads (opts.lang). "tsx" / "jsx" are known and refused like any
+// unknown value, until JSX is supported.
+const LANGS = new Set(["js", "ts"]);
+
 function parseInternal(bytes, opts, inject) {
     opts = opts || {};
     const path = opts.path || null;
+    const lang = opts.lang === undefined ? "js" : opts.lang;
+    if (!LANGS.has(lang)) {
+        const shown = typeof lang === "string" ? "'" + lang + "'" : typeof lang;
+        return {
+            ast: { type: "Program", start: 1, stop: 1, body: [] },
+            comments: [], linemap: [1], valid: false,
+            diagnostics: [newDiagnostic("error", "js.internal", "unknown lang " + shown + " (expected \"js\" or \"ts\")", path, null)],
+        };
+    }
     const maxDepth = (typeof opts.maxDepth === "number" && opts.maxDepth > 0) ? Math.floor(opts.maxDepth) : 1000;
     const maxDiagnostics = nnInt(opts.maxDiagnostics, 4096);
+    const ts = lang === "ts";
 
     if (inject) inject();            // test-only: fault the parser to exercise protectedParse
 
@@ -115,6 +141,8 @@ function parseInternal(bytes, opts, inject) {
     const la = [];                   // lookahead buffer of tokens AFTER cur (non-destructive peek)
     let depth = 0;
     let errored = false;             // rate-limit cascading recovery within one statement
+    const typeSpans = [];            // TS mode: erasable type syntax (empty until the type grammar lands)
+    let condConsequent = 0;          // TS mode: > 0 inside a `?:` consequent or a `case` test, where `(a) :` is JS
 
     // Module-grammar context (docs/js_test262_design.md). An explicit function-context stack
     // plus a module-item-position flag drive the position-sensitive rules: `await` interpretation
@@ -199,6 +227,48 @@ function parseInternal(bytes, opts, inject) {
     function diag(sev, code, message, start, stop) { budget.push(sev, code, message, { start: start, stop: stop }); }
     function synErr(message, tok) { const t = tok || cur; diag("error", "js.syntax", message, t.start, t.stop); }
     function unsupported(message, tok) { const t = tok || cur; diag("error", "js.unsupported", message, t.start, t.stop); }
+    // TS mode: a TypeScript construct this parser does not (yet) accept. The caller then goes on
+    // as JS mode would, so the JS diagnostics that follow are JS mode's own.
+    // One refusal per position: JS-mode recovery can come back to the same token (a class
+    // member loop retrying at a `:`), and two hooks can see one `<`.
+    let tsRefusedAt = 0;
+    function tsRefuse(what, tok) {
+        const t = tok || cur;
+        if (t.start === tsRefusedAt) return;
+        tsRefusedAt = t.start;
+        diag("error", "ts.unsupported", "TypeScript " + what + " are not supported", t.start, t.stop);
+    }
+    // The token after cur (operator goal: every caller peeks after an identifier or a binding).
+    function tsPeek() { return peekTok(1, false); }
+    function isIdTok(t) { return t.type === "identifier" && !t.escaped; }
+    // A TypeScript declaration at statement start: `interface X`, `type X`, `enum X`,
+    // `namespace X`, `module X`, `declare <anything>`, `abstract class`. Each word followed by a
+    // name ON THE SAME LINE is a JS syntax error (two identifiers with no ASI between them), and
+    // `enum` is reserved; with a line break between, JS reads two statements and so does this.
+    function tsDeclarationStart() {
+        if (!isIdTok(cur)) return null;
+        const v = cur.value;
+        if (v !== "interface" && v !== "type" && v !== "enum" && v !== "namespace" && v !== "module" && v !== "declare" && v !== "abstract") return null;
+        const nx = tsPeek();
+        if (nx.nlBefore) return null;
+        if (v === "abstract") return (isIdTok(nx) && nx.value === "class") ? "abstract classes" : null;
+        if (v === "declare") return nx.type === "identifier" ? "'declare' declarations" : null;
+        if (v === "module") return (nx.type === "identifier" || nx.type === "string") ? "module declarations" : null;
+        if (nx.type !== "identifier") return null;
+        if (v === "interface") return "interfaces";
+        if (v === "type") return "type aliases";
+        if (v === "enum") return "enums";
+        return "namespaces";
+    }
+    // A class member / parameter modifier followed by more of the member on the same line.
+    const TS_MODIFIERS = new Set(["public", "private", "protected", "readonly", "abstract", "override", "declare"]);
+    function tsModifierStart() {
+        if (!isIdTok(cur) || !TS_MODIFIERS.has(cur.value)) return false;
+        const nx = tsPeek();
+        if (nx.nlBefore) return false;
+        return nx.type === "identifier" || nx.type === "string" || nx.type === "number" ||
+               (nx.type === "punctuator" && nx.value === "[");
+    }
 
     function mk(type, start) { return { type: type, start: start, stop: start }; }
     // Finalize a node's half-open range. stop = the last consumed token's stop, but NEVER before
@@ -301,7 +371,11 @@ function parseInternal(bytes, opts, inject) {
                 case "export": st = parseExport(); break;
                 case "with": { const ws = cur.start; unsupported("with statement is not supported"); advance(true); expectP("(", true); parseExpression(); expectP(")", true); nested(parseStatement); st = errNode(ws); break; }
                 case "debugger": { st = mk("DebuggerStatement", cur.start); advance(true); semicolon(); st = fin(st); break; }
-                default: st = parseExpressionStatement();
+                default: {
+                    const what = ts ? tsDeclarationStart() : null;
+                    if (what !== null) tsRefuse(what);
+                    st = parseExpressionStatement();
+                }
             }
         } else {
             st = parseExpressionStatement();
@@ -333,6 +407,8 @@ function parseInternal(bytes, opts, inject) {
         for (;;) {
             const decl = mk("VariableDeclarator", cur.start);
             decl.id = parseBindingTarget();
+            if (ts && isP("!") && !nl()) tsRefuse("definite assignment assertions");
+            else if (ts && isP(":")) tsRefuse("type annotations");
             decl.init = null;
             if (eatP("=", true)) decl.init = parseAssignment();
             d.declarations.push(fin(decl));
@@ -452,7 +528,7 @@ function parseInternal(bytes, opts, inject) {
         s.cases = [];
         while (!isP("}") && !atEof()) {
             const c = mk("SwitchCase", cur.start); c.test = null; c.consequent = [];
-            if (isKw("case")) { advance(true); c.test = parseExpression(); }
+            if (isKw("case")) { advance(true); if (ts) condConsequent++; c.test = parseExpression(); if (ts) condConsequent--; }
             else if (isKw("default")) { advance(true); }
             else { synErr("expected 'case' or 'default'"); advance(true); continue; }
             expectP(":", true);
@@ -537,6 +613,7 @@ function parseInternal(bytes, opts, inject) {
         f.generator = eatP("*", true);
         if (f.generator) { unsupported("generator functions are not supported", prev); }
         f.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
+        if (ts && isP("<")) tsRefuse("type parameters");
         const r = withFn(f.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(true); }, f.generator);
         f.params = r.params; f.body = r.body;       // declaration body `}` -> statement follows
         return fin(f);
@@ -549,6 +626,7 @@ function parseInternal(bytes, opts, inject) {
         f.generator = eatP("*", true);
         if (f.generator) unsupported("generator functions are not supported", prev);
         f.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
+        if (ts && isP("<")) tsRefuse("type parameters");
         const r = withFn(f.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }, f.generator);
         f.params = r.params; f.body = r.body;       // expression body `}` -> a value (division)
         return fin(f);
@@ -559,17 +637,25 @@ function parseInternal(bytes, opts, inject) {
         if (!expectP("(", true)) return params;
         while (!isP(")") && !atEof()) {
             if (isP("...")) { const r = mk("RestElement", cur.start); advance(true); r.argument = parseBindingTarget(); params.push(fin(r)); break; }
+            if (ts && isKw("this") && (peekIsP(1, ":") || peekIsP(1, ",") || peekIsP(1, ")"))) tsRefuse("'this' parameters");
+            else if (ts && tsModifierStart()) tsRefuse("parameter properties");
             let target = parseBindingTarget();
+            if (ts && isP("?")) tsRefuse("optional parameters");
+            else if (ts && isP(":")) tsRefuse("type annotations");
             if (eatP("=", true)) { const ap = mk("AssignmentPattern", target.start); ap.left = target; ap.right = parseAssignment(); target = fin(ap); }
             params.push(target);
             if (!eatP(",", true)) break;
         }
         expectP(")", true);
+        if (ts && isP(":")) tsRefuse("return type annotations");
         return params;
     }
 
     function parseFunctionBody(isDecl) {
-        if (!isP("{")) { synErr("expected function body"); return errNode(cur.start); }
+        if (!isP("{")) {
+            if (ts && (isP(";") || nl() || isP("}") || atEof())) tsRefuse("overload signatures");
+            synErr("expected function body"); return errNode(cur.start);
+        }
         const b = mk("BlockStatement", cur.start);
         b.body = [];
         advance(true);
@@ -588,11 +674,13 @@ function parseInternal(bytes, opts, inject) {
         const c = mk(type, cur.start);
         advance(true);                              // past `class`
         c.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
+        if (ts && isP("<")) tsRefuse("type parameters");
         c.superClass = null;
         // ClassHeritage : extends LeftHandSideExpression -- which INCLUDES call expressions
         // (`class C extends fn(x) {}` is valid), so allow calls. (Passing false left the call
         // arguments unconsumed, which drove non-terminating error recovery -> heap blowup.)
         if (isKw("extends")) { advance(true); c.superClass = parseLeftHandSide(true); }
+        if (ts && isKw("implements")) tsRefuse("implements clauses");
         c.body = [];
         expectP("{", true);
         while (!isP("}") && !atEof()) {
@@ -621,6 +709,7 @@ function parseInternal(bytes, opts, inject) {
             else { if (eatP("=", true)) parseAssignment(); semicolon(); } // a private field
             return errNode(start);
         }
+        if (ts && tsModifierStart()) tsRefuse("'" + cur.value + "' modifiers");
         // Non-destructive one-token lookahead decides whether a keyword-like token is a
         // modifier or the member NAME (e.g. a field named `static` / `async` / `get`).
         let isStatic = false;
@@ -633,6 +722,10 @@ function parseInternal(bytes, opts, inject) {
         if (isP("*")) { isGen = true; unsupported("generator methods are not supported"); advance(true); }
         if (isKw("get") || isKw("set")) { const nx = peekTok(1, false); if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";"))) { kind = cur.value; advance(true); } }
         const key = parsePropertyKey();
+        if (ts && isP("?")) tsRefuse("optional members");
+        else if (ts && isP("!") && !nl()) tsRefuse("definite assignment assertions");
+        else if (ts && isP(":")) tsRefuse("type annotations");
+        else if (ts && isP("<")) tsRefuse("type parameters");
         const m = mk("MethodDefinition", start); m.static = isStatic; m.kind = kind; m.key = key; m.async = isAsync; m.generator = isGen;
         if (isP("(")) {
             const fe = mk("FunctionExpression", cur.start); fe.async = isAsync; fe.generator = isGen; fe.id = null;
@@ -766,7 +859,9 @@ function parseInternal(bytes, opts, inject) {
         if (isP("?")) {
             const node = mk("ConditionalExpression", test.start);
             node.test = test; advance(true);
+            if (ts) condConsequent++;
             node.consequent = parseAssignment();
+            if (ts) condConsequent--;
             expectP(":", true);
             node.alternate = parseAssignment();
             return fin(node);
@@ -779,6 +874,7 @@ function parseInternal(bytes, opts, inject) {
         for (;;) {
             const op = (cur.type === "punctuator" || cur.type === "identifier") ? cur.value : null;
             const prec = op !== null ? BINPREC[op] : undefined;
+            if (ts && prec === undefined && isIdTok(cur) && (op === "as" || op === "satisfies") && !nl()) { tsRefuse("'" + op + "' expressions"); break; }
             if (prec === undefined || prec <= minPrec) break;
             if ((op === "in" || op === "instanceof") && cur.type !== "identifier") break;
             const node = mk(op === "&&" || op === "||" || op === "??" ? "LogicalExpression" : "BinaryExpression", left.start);
@@ -832,6 +928,7 @@ function parseInternal(bytes, opts, inject) {
 
     function parsePostfix() {
         let e = parseLeftHandSide(true);
+        if (ts && isP("!") && !nl()) tsRefuse("non-null assertions");
         if ((isP("++") || isP("--")) && !nl()) {
             // Postfix ++/-- requires a simple assignment target (an Identifier or member access);
             // e.g. `import.meta++` (a MetaProperty) is an invalid update target.
@@ -990,6 +1087,9 @@ function parseInternal(bytes, opts, inject) {
                 if (cur.value === "(") return parseParenOrArrow();
                 if (cur.value === "[") return parseArrayExpr();
                 if (cur.value === "{") return parseObjectExpr();
+                // `<` cannot start a JS expression: a generic arrow `<T>(x) => x` or an
+                // angle-bracket assertion `<T>x`.
+                if (ts && cur.value === "<") tsRefuse("type parameters and angle-bracket assertions");
                 break;
         }
         synErr("unexpected token");
@@ -1058,6 +1158,7 @@ function parseInternal(bytes, opts, inject) {
             if (isP(")")) { trailing = prev; break; }
         }
         expectP(")", false);
+        if (ts && isP(":") && condConsequent === 0) tsRefuse("return type annotations");
         if (isP("=>") && !nl()) return finishArrow(start, items, false);
         if (trailing) synErr("unexpected trailing ','", trailing);
         if (sawRest) { synErr("rest element outside arrow parameters"); }
@@ -1175,12 +1276,19 @@ function parseInternal(bytes, opts, inject) {
         advance(true);
         s.specifiers = [];
         if (cur.type === "string") { s.source = parseLiteral(); semicolon(); return fin(s); }   // side-effect import
+        // `import type X from` / `import type { X }` / `import type * as n`. (`import type from
+        // "m"` and `import type, { a } from "m"` are JS: a default binding named `type`.)
+        if (ts && isKw("type")) {
+            const nx = tsPeek();
+            if ((nx.type === "punctuator" && (nx.value === "{" || nx.value === "*")) || (isIdTok(nx) && nx.value !== "from")) tsRefuse("type-only imports");
+        }
         // ImportClause: a default binding, then - only after a comma - a namespace import or
         // named imports. `import a { b }` / `import a * as n` (no comma) and `import a, from`
         // (a comma with nothing after it) are syntax errors.
         let needMore = true;
         if (cur.type === "identifier" && !RESERVED.has(cur.value)) {
             const d = mk("ImportDefaultSpecifier", cur.start); d.local = parseIdentifier(); s.specifiers.push(fin(d));
+            if (ts && isP("=")) tsRefuse("import-require declarations");
             needMore = eatP(",", true);
             // Missing comma before `{` / `*`: report it, then read them as if it were there.
             if (!needMore && (isP("{") || isP("*"))) { synErr("expected ','"); needMore = true; }
@@ -1195,6 +1303,7 @@ function parseInternal(bytes, opts, inject) {
         else if (isP("{")) {
             advance(true);
             while (!isP("}") && !atEof()) {
+                if (ts && isKw("type") && isIdTok(tsPeek()) && tsPeek().value !== "as") tsRefuse("type-only import specifiers");
                 const spec = mk("ImportSpecifier", cur.start); spec.imported = parseIdentifierName(); spec.local = spec.imported;
                 if (isKw("as")) { advance(true); spec.local = parseBindingIdentifier(); }
                 // Without `as`, the imported name IS the local binding, so it must be a valid
@@ -1218,6 +1327,7 @@ function parseInternal(bytes, opts, inject) {
         // Every export form is a module ITEM: legal only at the module top level.
         if (!atModuleItem) synErr("export declarations may only appear at the top level of a module");
         advance(true);
+        if (ts && isP("=")) tsRefuse("export assignments");
         if (isKw("default")) {
             s.type = "ExportDefaultDeclaration"; advance(true);
             if (isKw("function")) s.declaration = parseFunctionDeclaration(false);
@@ -1246,6 +1356,7 @@ function parseInternal(bytes, opts, inject) {
         if (isP("{")) {
             s.specifiers = []; s.declaration = null; advance(true);
             while (!isP("}") && !atEof()) {
+                if (ts && isKw("type") && isIdTok(tsPeek()) && tsPeek().value !== "as") tsRefuse("type-only export specifiers");
                 const spec = mk("ExportSpecifier", cur.start); spec.local = parseIdentifierName(); spec.exported = spec.local;
                 if (isKw("as")) { advance(true); spec.exported = parseIdentifierName(); }
                 s.specifiers.push(fin(spec));
@@ -1261,7 +1372,13 @@ function parseInternal(bytes, opts, inject) {
         if (isKw("var") || isKw("let") || isKw("const")) s.declaration = parseVarDeclaration();
         else if (isKw("function")) s.declaration = parseFunctionDeclaration(false);
         else if (isKw("class")) s.declaration = parseClassDeclaration();
-        else { synErr("unexpected export"); s.declaration = errNode(cur.start); synchronize(); }
+        else {
+            if (ts) {
+                const what = (isKw("type") && peekIsP(1, "{")) ? "type-only exports" : tsDeclarationStart();
+                if (what !== null) tsRefuse(what);
+            }
+            synErr("unexpected export"); s.declaration = errNode(cur.start); synchronize();
+        }
         return fin(s);
     }
 
@@ -1275,5 +1392,7 @@ function parseInternal(bytes, opts, inject) {
     // so it is a single authoritative sequence -- no merge, no double-counting.
     const allDiags = budget.list;
     const valid = allDiags.every(function (d) { return d.severity !== "error"; });
-    return { ast: ast, comments: tk.comments, diagnostics: allDiags, linemap: tk.linemap, valid: valid };
+    const unit = { ast: ast, comments: tk.comments, diagnostics: allDiags, linemap: tk.linemap, valid: valid };
+    if (ts) unit.typeSpans = typeSpans;
+    return unit;
 }
