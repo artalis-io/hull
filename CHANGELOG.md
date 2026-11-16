@@ -33,7 +33,11 @@ release-artifact layout).
   an expression is read as type arguments by TypeScript's rule (what can follow the `>`) and stays
   a comparison otherwise; each attempt is rewound in full, the lexer included, and the rewound
   tokens are bounded per file (past the bound the construct is refused). An async arrow whose
-  type parameters end a line (`async <T>` LF `(x) => x`) is refused: erased, it is not one. JSDoc
+  type parameters end a line (`async <T>` LF `(x) => x`) is refused: erased, it is not one.
+  Classes and overloads erase: `abstract class`, `implements`, member modifiers (`public`,
+  `private`, `protected`, `readonly`, `override`), members that are types only (`abstract` and
+  `declare` members, index signatures), overload signatures of a function in a statement list or
+  of a class method or constructor, and a first `this` parameter with its comma. JSDoc
   attaches as it does over the erased bytes. Every other TypeScript construct is refused with
   `ts.unsupported`, as is a line break between an arrow's types and its `=>`, a line after an
   `as` / `satisfies` type that would continue the expression (`x as T` / `[1].f()`), and an erased

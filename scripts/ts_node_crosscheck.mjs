@@ -23,7 +23,6 @@ const CORPUS = process.argv[2] || "tests/fixtures/ts_frontend";
 
 // Refuse cases Node's strip mode accepts, with why Hull refuses them.
 const NODE_STRIPS = new Map([
-    ["abstract_class.ts", "class modifiers: slice 2"],
     ["arrow_return_line_break.ts", "line break before => after a return type: Hull refuses"],
     ["asi_array.ts", "erased statement before `[`: Hull refuses, Node inserts `;`"],
     ["asi_as_bracket.ts", "line starting `[` after an `as` type: Hull refuses, Node inserts `;`"],
@@ -32,6 +31,10 @@ const NODE_STRIPS = new Map([
     ["asi_empty_statement.ts", "erased statement before `;`: Hull refuses, Node inserts `;`"],
     ["asi_semicolon.ts", "erased statement before `;`: Hull refuses, Node inserts `;`"],
     ["asi_satisfies_call.ts", "line starting `(` after a `satisfies` type: Hull refuses, Node inserts `;`"],
+    ["asi_class_field.ts", "erased modifier before `[` after a field without `;`: Hull refuses, Node inserts `;`"],
+    ["asi_class_keyword_field.ts", "erased type after a field named static / get / set, before a member: Hull refuses, Node inserts `;`"],
+    ["asi_class_semicolon.ts", "erased member before a `;` after a field without `;`: Hull refuses, Node inserts `;`"],
+    ["asi_class_member.ts", "erased member before `[` after a field without `;`: Hull refuses (Node's output joins the field and `[`)"],
     ["asi_generic_arrow.ts", "erased statement before a generic arrow's `<`: Hull refuses, Node inserts `;`"],
     ["asi_template.ts", "erased statement before a template: Hull refuses, Node inserts `;`"],
     ["async_arrow_type_parameters_newline.ts", "line break after an async arrow's type parameters: Hull refuses, Node's output is not valid JavaScript"],
@@ -40,11 +43,8 @@ const NODE_STRIPS = new Map([
     ["declare_global.ts", "declare global: slice 2"],
     ["declare_initializer.ts", "initializer in a declare declaration: TypeScript rejects it"],
     ["declare_module.ts", "declare module: slice 2"],
-    ["implements.ts", "implements: slice 2"],
+    ["this_parameter_not_first.ts", "this parameter after the first: TypeScript rejects it"],
     ["import_type_require.ts", "import type x = require(): slice 2"],
-    ["modifiers.ts", "class member modifiers: slice 2"],
-    ["overloads.ts", "overloads: slice 2"],
-    ["this_parameter.ts", "this parameter: slice 2"],
 ]);
 
 const strip = mod.stripTypeScriptTypes;
@@ -103,6 +103,6 @@ for (const f of list(path.join(CORPUS, "refuse"))) {
 }
 for (const f of NODE_STRIPS.keys()) if (!seen.has(f)) fail(`NODE_STRIPS names refuse/${f}, which does not exist`);
 
-if (accepted < 19 || refused < 32) fail(`corpus too small: ${accepted} accept, ${refused} refuse`);
+if (accepted < 21 || refused < 33) fail(`corpus too small: ${accepted} accept, ${refused} refuse`);
 if (failures) process.exit(1);
 console.log(`ts-node-crosscheck: Node ${process.version}: ${accepted} accept cases match, ${refused} refuse cases agree`);

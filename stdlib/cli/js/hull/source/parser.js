@@ -298,7 +298,7 @@ function parseInternal(bytes, opts, inject) {
         const nx = tsPeek();
         if (nx.nlBefore) return false;
         return nx.type === "identifier" || nx.type === "string" || nx.type === "number" ||
-               (nx.type === "punctuator" && nx.value === "[");
+               (nx.type === "punctuator" && (nx.value === "[" || nx.value === "#" || nx.value === "*"));
     }
     // TS mode: split a `>>`-family token at cur so its first `>` closes a type list. Through the
     // tokenizer when nothing was read past cur; by hand when a lookahead already was.
@@ -514,6 +514,12 @@ function parseInternal(bytes, opts, inject) {
         return null;
     }
     function tsPeekFromCur(i) { return peekTok(i, false); }
+    // `abstract class` (cur `abstract`, `class` on the same line): `abstract` erases.
+    function tsAbstractClassAhead() {
+        if (!isKw("abstract")) return false;
+        const t1 = peekTok(1, false);
+        return isIdTok(t1) && t1.value === "class" && !t1.nlBefore;
+    }
     // `import type X from` / `import type { X }` / `import type * as n` at cur `import` (`import
     // type from "m"` and `import type, { a }` are JS: a default binding named `type`).
     function tsTypeOnlyImportAhead() {
@@ -532,14 +538,32 @@ function parseInternal(bytes, opts, inject) {
     function tsEraseStatement(body) {
         const before = lastJs;
         tsSpan(body);
-        if (before !== null && before === asiEnd) {
-            if (tsContinuesExpression(cur))
-                diag("error", "ts.unsupported", "an erased TypeScript declaration between a statement without ';' and a line that would continue it is not supported: end the statement before it with ';'", cur.start, cur.stop);
-            else if (isP(";"))
-                diag("error", "ts.unsupported", "an erased TypeScript declaration between a statement without ';' and a ';' is not supported: end the statement before it with ';'", cur.start, cur.stop);
-        }
+        tsErasedStatementEnd(before);
         return null;
     }
+    // After an erased statement whose JavaScript predecessor ends at `before`.
+    function tsErasedStatementEnd(before) {
+        if (before === null || before !== asiEnd) return;
+        if (tsContinuesExpression(cur))
+            diag("error", "ts.unsupported", "an erased TypeScript declaration between a statement without ';' and a line that would continue it is not supported: end the statement before it with ';'", cur.start, cur.stop);
+        else if (isP(";"))
+            diag("error", "ts.unsupported", "an erased TypeScript declaration between a statement without ';' and a ';' is not supported: end the statement before it with ';'", cur.start, cur.stop);
+    }
+    // A statement or class member that turns out to be erasable only once it is read (an
+    // overload signature, an abstract or `declare` member): tsMark() at its first token, then
+    // tsRetroErase(mark) at its end replaces whatever spans it recorded with one span over all
+    // of it and forgets its tokens, so the node it built can be dropped.
+    function tsMark() { return { start: cur.start, spans: typeSpans.length, lastJs: lastJs, firstJs: firstJs, asiEnd: asiEnd }; }
+    function tsRetroErase(mark) {
+        typeSpans.length = mark.spans;
+        if (prev !== null && prev.stop > mark.start) typeSpans.push({ start: mark.start, stop: prev.stop });
+        lastJs = mark.lastJs; firstJs = mark.firstJs; asiEnd = mark.asiEnd;
+    }
+    // TS mode: set right before a function body is read where a signature without a body
+    // erases (a statement-list function, a class method); parseFunctionBody then sets
+    // tsSigFound instead of refusing.
+    let tsSigAllowed = false, tsSigFound = false;
+    const TS_ERASED = { type: "TsErased" };      // a class member erased whole (never in the AST)
     // A token that both starts a statement and continues an expression on the previous line.
     // `<` starts a generic arrow, whose erased `<T>` leaves its `(` to continue the line.
     function tsContinuesExpression(t) {
@@ -665,6 +689,7 @@ function parseInternal(bytes, opts, inject) {
     function parseStatement() {
         const listItem = stmtListItem;
         stmtListItem = false;
+        const tsMk = ts && listItem ? tsMark() : null;
         if (!guard()) { synchronize(); unguard(); return errNode(cur.start); }
         let st;
         if (cur.type === "punctuator") {
@@ -686,8 +711,8 @@ function parseInternal(bytes, opts, inject) {
             } else
             switch (cur.value) {
                 case "var": case "let": case "const": st = parseVarDeclaration(); break;
-                case "function": st = parseFunctionDeclaration(false); break;
-                case "async": st = maybeAsyncFunctionDecl(); break;
+                case "function": st = parseFunctionDeclaration(false, undefined, tsMk); break;
+                case "async": st = maybeAsyncFunctionDecl(tsMk); break;
                 case "class": st = parseClassDeclaration(); break;
                 case "if": st = parseIf(); break;
                 case "for": st = parseFor(); break;
@@ -709,10 +734,11 @@ function parseInternal(bytes, opts, inject) {
                     else st = parseImport();
                     break;
                 }
-                case "export": st = parseExport(); break;
+                case "export": st = parseExport(tsMk); break;
                 case "with": { const ws = cur.start; unsupported("with statement is not supported"); advance(true); expectP("(", true); parseExpression(); expectP(")", true); nested(parseStatement); st = errNode(ws); break; }
                 case "debugger": { st = mk("DebuggerStatement", cur.start); advance(true); semicolon(); st = fin(st); break; }
                 default: {
+                    if (ts && tsAbstractClassAhead()) { tsSpan(function () { advance(true); }); st = parseClassDeclaration(); break; }
                     const kind = ts ? tsErasableKind(cur, tsPeekFromCur) : null;
                     if (kind !== null && listItem) { st = tsEraseStatement(function () { tsDeclarationBody(kind); }); break; }
                     const what = ts ? (kind !== null ? "declarations outside a statement list" : tsDeclarationStart()) : null;
@@ -942,13 +968,13 @@ function parseInternal(bytes, opts, inject) {
     }
 
     // -- functions / classes --
-    function maybeAsyncFunctionDecl() {
+    function maybeAsyncFunctionDecl(tsMk) {
         // `async function ...` declaration (no LineTerminator between `async` and `function`);
         // otherwise `async` is an ordinary identifier -> expression statement.
         const start = cur.start;
         if (asyncFunctionAhead()) {
             advance(true);                          // consume `async` -> cur is `function`
-            return parseFunctionDeclaration(true, start);
+            return parseFunctionDeclaration(true, start, tsMk);
         }
         return parseExpressionStatement();
     }
@@ -959,7 +985,9 @@ function parseInternal(bytes, opts, inject) {
         return nx.type === "identifier" && nx.value === "function" && !nx.nlBefore;
     }
 
-    function parseFunctionDeclaration(isAsync, start) {
+    // tsMk (TS mode, a statement-list item): the statement's tsMark(). A signature without a
+    // body (an overload) is then erased with the whole statement, which returns null.
+    function parseFunctionDeclaration(isAsync, start, tsMk) {
         const f = mk("FunctionDeclaration", start !== undefined ? start : cur.start);
         f.async = isAsync === true;
         advance(true);                              // past `function`
@@ -967,7 +995,10 @@ function parseInternal(bytes, opts, inject) {
         if (f.generator) { unsupported("generator functions are not supported", prev); }
         f.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
         if (ts && isP("<")) tsTypeParameters();
-        const r = withFn(f.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(true); }, f.generator);
+        const sigOk = ts && tsMk !== undefined && tsMk !== null;
+        tsSigFound = false;
+        const r = withFn(f.async ? "async" : "regular", parseParams, function () { tsSigAllowed = sigOk; return parseFunctionBody(true); }, f.generator);
+        if (tsSigFound) { tsSigFound = false; tsRetroErase(tsMk); tsErasedStatementEnd(tsMk.lastJs); return null; }
         f.params = r.params; f.body = r.body;       // declaration body `}` -> statement follows
         return fin(f);
     }
@@ -990,7 +1021,14 @@ function parseInternal(bytes, opts, inject) {
         if (!expectP("(", true)) return params;
         while (!isP(")") && !atEof()) {
             if (isP("...")) { const r = mk("RestElement", cur.start); advance(true); r.argument = parseBindingTarget(); if (ts && isP(":")) tsAnnotation(); params.push(fin(r)); break; }
-            if (ts && isKw("this") && (peekIsP(1, ":") || peekIsP(1, ",") || peekIsP(1, ")"))) tsRefuse("'this' parameters");
+            if (ts && isKw("this") && (peekIsP(1, ":") || peekIsP(1, ",") || peekIsP(1, ")"))) {
+                // `this: T`, first: it erases with its comma. Anywhere else TypeScript rejects it.
+                if (params.length > 0) tsRefuse("'this' parameters after the first parameter");
+                else {
+                    tsSpan(function () { advance(false); if (isP(":")) { advance(false); types.parseType(); } if (isP(",")) advance(true); });
+                    continue;
+                }
+            }
             else if (ts && tsModifierStart()) tsRefuse("parameter properties");
             let target = parseBindingTarget();
             if (ts && isP("?")) tsOptional();
@@ -1005,8 +1043,13 @@ function parseInternal(bytes, opts, inject) {
     }
 
     function parseFunctionBody(isDecl) {
+        const sigOk = tsSigAllowed;
+        tsSigAllowed = false;
         if (!isP("{")) {
-            if (ts && (isP(";") || nl() || isP("}") || atEof())) tsRefuse("overload signatures");
+            if (ts && (isP(";") || nl() || isP("}") || atEof())) {
+                if (sigOk) { if (isP(";")) advance(true); tsSigFound = true; return errNode(cur.start); }
+                tsRefuse("overload signatures");
+            }
             synErr("expected function body"); return errNode(cur.start);
         }
         const b = mk("BlockStatement", cur.start);
@@ -1026,7 +1069,8 @@ function parseInternal(bytes, opts, inject) {
     function parseClass(type) {
         const c = mk(type, cur.start);
         advance(true);                              // past `class`
-        c.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
+        // TS mode: `class implements I {}` has no name.
+        c.id = (cur.type === "identifier" && !RESERVED.has(cur.value) && !(ts && isKw("implements"))) ? parseIdentifier() : null;
         if (ts && isP("<")) tsTypeParameters();
         c.superClass = null;
         // ClassHeritage : extends LeftHandSideExpression -- which INCLUDES call expressions
@@ -1037,13 +1081,20 @@ function parseInternal(bytes, opts, inject) {
             // `extends Base<T>`: the heritage takes type arguments whatever follows them.
             if (ts && isP("<")) tsSpan(function () { types.parseTypeArguments(); });
         }
-        if (ts && isKw("implements")) tsRefuse("implements clauses");
+        if (ts && isKw("implements")) {
+            tsSpan(function () {
+                advance(false);
+                for (;;) { const b = cur.start; types.parseType({ noConditional: true }); if (cur.start === b || !isP(",")) break; advance(false); }
+            });
+        }
         c.body = [];
         expectP("{", true);
         while (!isP("}") && !atEof()) {
+            if (ts && isP(";")) tsClassHazard(true);
             if (eatP(";", true)) continue;
             const before = cur.start;
             const m = parseClassMember();
+            if (m === TS_ERASED) continue;
             if (m) c.body.push(m);
             // A member that consumed nothing (e.g. `async . x`: the key parse
             // fails on `.` without advancing) must still move the loop on:
@@ -1056,7 +1107,60 @@ function parseInternal(bytes, opts, inject) {
         return fin(c);
     }
 
+    // TS mode: class member modifiers (cur at one): `public` / `private` / `protected` /
+    // `readonly` / `override` erase; `declare` and `abstract` erase with the whole member
+    // (info.erase). A modifier is one only with more of the member after it on its line.
+    function tsMemberModifiers(info) {
+        while (tsModifierStart()) {
+            if (cur.value === "declare") info.declare = true;
+            else if (cur.value === "abstract") info.abstract = true;
+            tsSpan(function () { advance(true); });
+        }
+    }
+    // TS mode: a field that ended by ASI, then erased syntax (its own type, erased members or
+    // modifiers), then a token that would join the field once the erased bytes are blank:
+    // - a `;` (`x` / `m(): void;` / `;` is one field in JavaScript, its range ending at the
+    //   `;`; an erased member takes one `;`, so this is a second one);
+    // - after an initializer, a member starting `[` `*` `in` `instanceof` (`x = a` /
+    //   `private [k] = 1` reads `a[k] = 1`);
+    // - after a field named `static` / `get` / `set` with no initializer, any member (`static:
+    //   number` / `x = 1` reads `static x = 1`: those words take a line break after them).
+    // Checked at a `;` (now) or at a member's first JavaScript token (returned, so a member
+    // that turns out to be erased reports nothing).
+    let tsFieldAsi = null;                            // { tok, init, word }: the last field, ended by ASI
+    function tsClassHazard(now) {
+        const f = tsFieldAsi;
+        if (f === null || f.tok !== lastJs || !(typeSpans.length > 0 && typeSpans[typeSpans.length - 1].start >= lastJs.stop)) return null;
+        const t = cur;
+        let joins;
+        if (t.type === "punctuator" && t.value === ";") joins = true;
+        else if (f.init) joins = (t.type === "punctuator" && (t.value === "[" || t.value === "*")) || (isIdTok(t) && (t.value === "in" || t.value === "instanceof"));
+        else joins = f.word && !(t.type === "punctuator" && t.value === "}");
+        if (!joins) return null;
+        const h = { start: t.start, stop: t.stop };
+        if (now) tsClassHazardReport(h);
+        return h;
+    }
+    function tsClassHazardReport(h) {
+        diag("error", "ts.unsupported", "erased TypeScript syntax between a class field without ';' and a ';' or member that would join it is not supported: end the field with ';'", h.start, h.stop);
+    }
+    // `[key: T]: U` (cur `[`, an identifier and `:` after it): a class index signature.
+    function tsIndexSignatureAhead() {
+        if (!isP("[")) return false;
+        return isIdTok(peekTok(1, false)) && peekIsP(2, ":");
+    }
+    // A token after `static` / `async` / `get` / `set` that makes that word the member's name.
+    function nameBoundary(nx) {
+        if (nx.type !== "punctuator") return false;
+        const v = nx.value;
+        return v === "(" || v === "=" || v === ";" || v === "}" || (ts && (v === ":" || v === "?" || v === "!" || v === "<"));
+    }
+
     function parseClassMember() {
+        const tsMk = ts ? tsMark() : null;
+        const tsInfo = { declare: false, abstract: false };
+        if (ts) tsMemberModifiers(tsInfo);
+        const hazard = ts ? tsClassHazard(false) : null;
         const start = cur.start;
         if (cur.type === "punctuator" && cur.value === "#") {
             unsupported("private class members are not supported");
@@ -1066,19 +1170,31 @@ function parseInternal(bytes, opts, inject) {
             else { if (eatP("=", true)) parseAssignment(); semicolon(); } // a private field
             return errNode(start);
         }
-        if (ts && tsModifierStart()) tsRefuse("'" + cur.value + "' modifiers");
         // Non-destructive one-token lookahead decides whether a keyword-like token is a
         // modifier or the member NAME (e.g. a field named `static` / `async` / `get`, which may
         // end the class body: `class C { get }`).
         let isStatic = false;
         if (isKw("static")) {
             const nx = peekTok(1, false);
-            if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";" || nx.value === "}"))) { isStatic = true; advance(true); }
+            if (!nameBoundary(nx)) { isStatic = true; advance(true); }
+        }
+        if (ts && isStatic) tsMemberModifiers(tsInfo);     // `static readonly x`
+        if (ts && tsIndexSignatureAhead()) {
+            // `[key: string]: T;`: a type member, erased whole.
+            tsSpan(function () {
+                advance(false); advance(false); advance(false);   // `[`, the name, `:`
+                types.parseType();
+                if (isP("]")) advance(false); else synErr("expected ']'");
+                if (isP(":")) { advance(false); types.parseType(); }
+            });
+            semicolon();
+            tsRetroErase(tsMk);
+            return TS_ERASED;
         }
         let kind = "method", isAsync = false, isGen = false;
-        if (isKw("async")) { const nx = peekTok(1, false); if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";" || nx.value === "}")) && !nx.nlBefore) { isAsync = true; advance(true); } }
+        if (isKw("async")) { const nx = peekTok(1, false); if (!nameBoundary(nx) && !nx.nlBefore) { isAsync = true; advance(true); } }
         if (isP("*")) { isGen = true; unsupported("generator methods are not supported"); advance(true); }
-        if (isKw("get") || isKw("set")) { const nx = peekTok(1, false); if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";" || nx.value === "}"))) { kind = cur.value; advance(true); } }
+        if (isKw("get") || isKw("set")) { const nx = peekTok(1, false); if (!nameBoundary(nx)) { kind = cur.value; advance(true); } }
         const key = parsePropertyKey();
         if (ts && isP("?")) tsOptional();
         else if (ts && isP("!") && !nl()) tsDefinite();
@@ -1087,7 +1203,18 @@ function parseInternal(bytes, opts, inject) {
         const m = mk("MethodDefinition", start); m.static = isStatic; m.kind = kind; m.key = key; m.async = isAsync; m.generator = isGen;
         if (isP("(")) {
             const fe = mk("FunctionExpression", cur.start); fe.async = isAsync; fe.generator = isGen; fe.id = null;
-            const fr = withFn(fe.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }, fe.generator); fe.params = fr.params; fe.body = fr.body;
+            tsSigFound = false;
+            const fr = withFn(fe.async ? "async" : "regular", parseParams, function () { tsSigAllowed = ts; return parseFunctionBody(false); }, fe.generator); fe.params = fr.params; fe.body = fr.body;
+            if (ts) {
+                // A method without a body (an overload signature, or abstract) erases whole.
+                const sig = tsSigFound;
+                tsSigFound = false;
+                if (tsInfo.declare) synErr("'declare' cannot be used on a method", key);
+                else if (tsInfo.abstract && !sig) synErr("an abstract method cannot have a body", key);
+                if (sig) { tsRetroErase(tsMk); return TS_ERASED; }
+                if (hazard !== null) tsClassHazardReport(hazard);
+                tsFieldAsi = null;
+            }
             m.value = fin(fe);
             return fin(m);
         }
@@ -1095,6 +1222,18 @@ function parseInternal(bytes, opts, inject) {
         m.type = "PropertyDefinition"; m.value = null;
         if (eatP("=", true)) m.value = parseAssignment();
         semicolon();
+        if (ts) {
+            // `declare x: T` and `abstract x: T` are types only: erased whole.
+            if (tsInfo.declare || tsInfo.abstract) {
+                if (m.value !== null) synErr("a 'declare' or 'abstract' field cannot have an initializer", key);
+                tsRetroErase(tsMk);
+                return TS_ERASED;
+            }
+            if (hazard !== null) tsClassHazardReport(hazard);
+            const word = m.value === null && key.type === "Identifier" && start === key.start &&
+                (key.name === "static" || key.name === "get" || key.name === "set");
+            tsFieldAsi = asiEnd === lastJs ? { tok: lastJs, init: m.value !== null, word: word } : null;
+        }
         return fin(m);
     }
 
@@ -1737,7 +1876,7 @@ function parseInternal(bytes, opts, inject) {
         return fin(s);
     }
 
-    function parseExport() {
+    function parseExport(tsMk) {
         const s = mk("ExportNamedDeclaration", cur.start);
         // Every export form is a module ITEM: legal only at the module top level.
         if (!atModuleItem) synErr("export declarations may only appear at the top level of a module");
@@ -1754,8 +1893,9 @@ function parseInternal(bytes, opts, inject) {
         if (ts && isP("=")) tsRefuse("export assignments");
         if (isKw("default")) {
             s.type = "ExportDefaultDeclaration"; advance(true);
-            if (isKw("function")) s.declaration = parseFunctionDeclaration(false);
-            else if (asyncFunctionAhead()) s.declaration = maybeAsyncFunctionDecl();
+            if (ts && tsAbstractClassAhead()) tsSpan(function () { advance(true); });
+            if (isKw("function")) { s.declaration = parseFunctionDeclaration(false, undefined, tsMk); if (s.declaration === null) return null; }
+            else if (asyncFunctionAhead()) { s.declaration = maybeAsyncFunctionDecl(tsMk); if (s.declaration === null) return null; }
             else if (isKw("class")) s.declaration = parseClassDeclaration();
             else { s.declaration = parseAssignment(); semicolon(); }
             return fin(s);
@@ -1794,9 +1934,10 @@ function parseInternal(bytes, opts, inject) {
         }
         // export <declaration>
         s.specifiers = []; s.source = null;
+        if (ts && tsAbstractClassAhead()) tsSpan(function () { advance(true); });
         if (isKw("var") || isKw("let") || isKw("const")) s.declaration = parseVarDeclaration();
-        else if (isKw("function")) s.declaration = parseFunctionDeclaration(false);
-        else if (asyncFunctionAhead()) s.declaration = maybeAsyncFunctionDecl();
+        else if (isKw("function")) { s.declaration = parseFunctionDeclaration(false, undefined, tsMk); if (s.declaration === null) return null; }
+        else if (asyncFunctionAhead()) { s.declaration = maybeAsyncFunctionDecl(tsMk); if (s.declaration === null) return null; }
         else if (isKw("class")) s.declaration = parseClassDeclaration();
         else {
             if (ts) {

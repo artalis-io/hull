@@ -1,0 +1,1 @@
+ts.unsupported 47 48 erased TypeScript syntax between a class field without ';' and a ';' or member that would join it is not supported: end the field with ';'
