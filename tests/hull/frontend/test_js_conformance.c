@@ -25,7 +25,7 @@
  *   UNSUPPORTED    parser declined AND oracle ACCEPTS (valid decline)-> reported
  *   UNSUP-REJECT   parser declined but oracle REJECTS (no allowlist) -> gated 0 (a decline
  *                    must not hide a malformed input)
- *   DIVERGENCE     an allowlisted parser/oracle mismatch             -> reported
+ *   DIVERGENCE     an allowlisted parser/oracle mismatch, either way -> reported
  *   INDETERMINATE  parser js.limit.* / js.internal                   -> gated 0
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -113,7 +113,10 @@ static int classify(Tally *t, Verdict pv, Verdict ov, int allow_divergence)
         if (allow_divergence) { t->divergence++; return 0; }  /* a static-semantic divergence */
         t->false_accept++; return 1;
     }
-    if (pv == V_REJECT && ov == V_ACCEPT) { t->false_reject++; return 1; }
+    if (pv == V_REJECT && ov == V_ACCEPT) {
+        if (allow_divergence) { t->divergence++; return 0; }  /* the oracle is the lenient one */
+        t->false_reject++; return 1;
+    }
     t->agree++; return 0;                            /* accept/accept or reject/reject */
 }
 
@@ -232,6 +235,9 @@ static const Case MALFORMED[] = {
     { "var interface",         "var interface;" },
     { "import-as reserved",    "import { x as eval } from \"m\";" },         /* eval illegal binding target */
     { "import local reserved", "import { eval } from \"m\";" },             /* no-`as` local must be bindable */
+    { "import default no comma {", "import type { T } from \"m\";" },         /* ImportClause needs the comma */
+    { "import default no comma *", "import a * as n from \"m\";" },
+    { "import namespace no as",   "import * n from \"m\";" },
     { "bare yield in module",  "yield;" },                                  /* reserved outside a generator */
 };
 
@@ -255,6 +261,10 @@ static const Case DIVERGENCE[] = {
     { "with (strict early err)",   "with (o) { x; }" },
     { "dup lexical binding",       "let d = 1; let d = 2;" },
     { "undeclared export",         "export { neverDeclared };" },
+    /* The other direction: QuickJS ACCEPTS a default import with a trailing comma and nothing
+     * after it; the grammar (ImportedDefaultBinding `,` NameSpaceImport | NamedImports) and V8
+     * reject it, and so does the parser. */
+    { "import default trailing ,", "import a, from \"m\";" },
 };
 
 UTEST(js_conformance, curated_matrix)

@@ -1,0 +1,6 @@
+// ImportClause errors: a default import needs a comma before `{ ... }` or `* as`, a comma
+// needs one of them after it, and a namespace import needs `as`. QuickJS rejects each.
+import type { T } from "m";
+import a * as n from "m2";
+import b, from "m3";
+import * c from "m4";

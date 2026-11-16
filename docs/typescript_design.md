@@ -282,9 +282,6 @@ All through the pipeline, none through a loader transform:
     modules) with both, and fails on any byte of difference, except in an input whose
     `golden.txt` line the change itself regenerated: a meant change is visible in review.
     It prints both timings.
-  One known false accept is frozen as it stands
-  (`known_false_accept_import_no_comma.src`: a default import followed by `{ ... }` or
-  `* as` with no comma); its fix regenerates the golden.
 
 ## 6. Open questions
 
