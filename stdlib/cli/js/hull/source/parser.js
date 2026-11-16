@@ -1050,13 +1050,16 @@ function parseInternal(bytes, opts, inject) {
         if (isP(")")) { advance(false); if (isP("=>")) return finishArrow(start, [], false); synErr("unexpected ')'"); return errNode(start); }
         const items = [];
         let sawRest = false;
+        let trailing = null;                        // a `,` right before `)`: legal for an arrow only
         for (;;) {
             if (isP("...")) { const r = mk("RestElement", cur.start); advance(true); r.argument = parseBindingTarget(); items.push(fin(r)); sawRest = true; break; }
             items.push(parseAssignment());
             if (!eatP(",", true)) break;
+            if (isP(")")) { trailing = prev; break; }
         }
         expectP(")", false);
         if (isP("=>") && !nl()) return finishArrow(start, items, false);
+        if (trailing) synErr("unexpected trailing ','", trailing);
         if (sawRest) { synErr("rest element outside arrow parameters"); }
         if (items.length === 1) return items[0];
         const seq = mk("SequenceExpression", start); seq.expressions = items; return fin(seq);
