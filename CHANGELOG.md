@@ -19,6 +19,12 @@ release-artifact layout).
 
 ### Fixed
 
+- JS source analysis (`hull agent inspect`, `hull dev --agent`): an import with a default
+  binding and no comma before `{ ... }` or `* as` (`import type { T } from "m"`,
+  `import a * as n from "m"`), a trailing comma after the default binding
+  (`import a, from "m"`) and a namespace import without `as` are now syntax errors, as the
+  grammar has them; they parsed cleanly before. QuickJS itself accepts the trailing-comma form,
+  so the conformance oracle lists it as a documented divergence.
 - `fs.write` on Windows (a cosmo build): a file it created was left read-only, so the next
   `fs.write`, `blob` write or `tar.extract` over it failed with `write_failed`. Since 0.18.3 a
   new file's bits came from the process umask applied by hand, which on Windows only shapes the

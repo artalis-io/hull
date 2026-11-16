@@ -1,4 +1,0 @@
-// KNOWN FALSE ACCEPT (to fix in its own PR, regenerating the golden): the parser takes a
-// default import followed by `{ ... }` or `* as` with no comma; QuickJS rejects both.
-import type { T } from "m";
-import a * as n from "m2";

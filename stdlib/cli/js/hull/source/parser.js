@@ -1172,11 +1172,23 @@ function parseInternal(bytes, opts, inject) {
         advance(true);
         s.specifiers = [];
         if (cur.type === "string") { s.source = parseLiteral(); semicolon(); return fin(s); }   // side-effect import
+        // ImportClause: a default binding, then - only after a comma - a namespace import or
+        // named imports. `import a { b }` / `import a * as n` (no comma) and `import a, from`
+        // (a comma with nothing after it) are syntax errors.
+        let needMore = true;
         if (cur.type === "identifier" && !RESERVED.has(cur.value)) {
             const d = mk("ImportDefaultSpecifier", cur.start); d.local = parseIdentifier(); s.specifiers.push(fin(d));
-            eatP(",", true);
+            needMore = eatP(",", true);
+            // Missing comma before `{` / `*`: report it, then read them as if it were there.
+            if (!needMore && (isP("{") || isP("*"))) { synErr("expected ','"); needMore = true; }
         }
-        if (isP("*")) { const ns = mk("ImportNamespaceSpecifier", cur.start); advance(true); if (isKw("as")) advance(true); ns.local = parseBindingIdentifier(); s.specifiers.push(fin(ns)); }
+        if (!needMore) { /* a default binding alone */ }
+        else if (isP("*")) {
+            const ns = mk("ImportNamespaceSpecifier", cur.start); advance(true);
+            if (isKw("as")) advance(true); else synErr("expected 'as'");
+            ns.local = parseBindingIdentifier(); s.specifiers.push(fin(ns));
+        }
+        else if (s.specifiers.length > 0 && !isP("{")) synErr("expected '*' or '{'");
         else if (isP("{")) {
             advance(true);
             while (!isP("}") && !atEof()) {
