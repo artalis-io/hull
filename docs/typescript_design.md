@@ -279,7 +279,9 @@ All through the pipeline, none through a loader transform:
   - `scripts/js_frontend_diff.sh` (`make js-frontend-diff`, CI job `focused-js-frontend`
     on a PR) builds the dump tool against the frontend at the PR's base and at its head,
     dumps the repo JS (the conformance corpus, the frozen inputs and the frontend's own
-    modules) with both, and fails on any byte of difference. It prints both timings.
+    modules) with both, and fails on any byte of difference, except in an input whose
+    `golden.txt` line the change itself regenerated: a meant change is visible in review.
+    It prints both timings.
   One known false accept is frozen as it stands
   (`known_false_accept_import_no_comma.src`: a default import followed by `{ ... }` or
   `* as` with no comma); its fix regenerates the golden.

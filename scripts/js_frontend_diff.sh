@@ -11,6 +11,9 @@
 # (this checkout's files), and fails on any byte of difference in the lex / parse /
 # resolveScope output. It also prints both timings (a slowdown is for the PR to explain).
 #
+# A difference passes only for an input whose golden.txt line the change itself
+# regenerated (`make js-frontend-golden`): a meant change is then visible in review.
+#
 # Skips (exit 0) when nothing that can change JS-mode output differs from BASE_REF;
 # JS_FRONTEND_DIFF_FORCE=1 runs anyway. Outputs stay in build/js-frontend-diff/.
 set -eu
@@ -87,7 +90,32 @@ if diff -r "$work/base" "$work/head" >"$work/diff.txt" 2>&1; then
     echo "js_frontend_diff: OK - JS-mode output identical for $files files"
     exit 0
 fi
-echo "js_frontend_diff: JS-mode output CHANGED:" >&2
-grep -E '^(diff|Only in)' "$work/diff.txt" | sed -e "s#$work/##g" | head -50 >&2
-echo "js_frontend_diff: full diff in $work/diff.txt" >&2
+
+# The inputs whose output differs: one per changed or one-sided output file.
+grep -E '^(diff|Only in)' "$work/diff.txt" | awk -v w="$work" '
+    /^diff / { p = $NF }
+    /^Only in / { d = $3; sub(/:$/, "", d); p = d "/" $4 }
+    {
+        sub("^" w "/(base|head)/", "", p)
+        sub(/\.(lex|parse|resolveScope)\.json$/, "", p)
+        print p
+    }' | sort -u >"$work/changed.txt"
+
+# A MEANT change is one the PR shows: it regenerated the frozen snapshot
+# (make js-frontend-golden), so golden.txt's line for that input changed. Those
+# inputs may differ; any other difference is unexplained and fails.
+git diff "$base" -- tests/fixtures/js_frontend_golden/golden.txt |
+    awk '/^[-+][0-9a-f]{64}  / { print substr($0, 68) }' | sort -u >"$work/meant.txt"
+comm -23 "$work/changed.txt" "$work/meant.txt" >"$work/unexplained.txt"
+
+changed=$(wc -l <"$work/changed.txt" | tr -d ' ')
+if [ ! -s "$work/unexplained.txt" ]; then
+    echo "js_frontend_diff: OK - $changed of $files files changed, each one regenerated in golden.txt:"
+    sed 's/^/  /' "$work/changed.txt"
+    exit 0
+fi
+echo "js_frontend_diff: JS-mode output CHANGED, not shown in golden.txt:" >&2
+sed 's/^/  /' "$work/unexplained.txt" | head -50 >&2
+echo "js_frontend_diff: full diff in $work/diff.txt. A meant change to a frozen input is" >&2
+echo "js_frontend_diff: regenerated with make js-frontend-golden; any other input must not change." >&2
 exit 1
