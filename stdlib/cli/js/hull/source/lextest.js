@@ -48,8 +48,9 @@ function runParse(srcBuf, path, opts) {
 // TypeScript mode (docs/typescript_design.md section 3): the same SourceUnit as runParse, plus
 // typeSpans. opts.asJs (test-only) drops the ts.* diagnostics and typeSpans and recomputes
 // `valid`, so the result can be compared byte for byte with runParse: the TypeScript hooks
-// only ADD refusals and must never change what JS mode produces. A refusal in a unit that is
-// valid JS is a hook firing on JavaScript, so it changes `status` and fails that comparison.
+// must never change what JS mode produces for valid JavaScript. A refusal or a type span in a
+// unit that is valid JS is a hook firing on JavaScript, so it changes `status` and fails that
+// comparison.
 function runParseTs(srcBuf, path, opts) {
     const o = { path: path || "test.ts", lang: "ts" };
     if (opts && opts.maxDepth !== undefined) o.maxDepth = opts.maxDepth;
@@ -58,7 +59,7 @@ function runParseTs(srcBuf, path, opts) {
     if (opts && opts.asJs) {
         const ds = u.diagnostics.filter(function (d) { return d.code.substring(0, 3) !== "ts."; });
         const ok = ds.every(function (d) { return d.severity !== "error"; });
-        const misfired = ok && ds.length !== u.diagnostics.length;
+        const misfired = ok && (ds.length !== u.diagnostics.length || u.typeSpans.length > 0);
         return { schema_version: 1, status: misfired ? "ts-refusal-in-valid-js" : "ok", ast: u.ast, comments: u.comments, diagnostics: ds, valid: ok };
     }
     return { schema_version: 1, status: "ok", ast: u.ast, comments: u.comments, diagnostics: u.diagnostics, valid: u.valid, typeSpans: u.typeSpans };
@@ -68,8 +69,7 @@ function runParseTs(srcBuf, path, opts) {
 function hex(u8) { let s = ""; for (let i = 0; i < u8.length; i++) s += (u8[i] < 16 ? "0" : "") + u8[i].toString(16); return s; }
 
 // typeErasure over a TS-mode parse, then erase() with its spans - or, when opts.spans is given
-// (test-only), erase() with those spans, to exercise the byte rules before the type grammar
-// produces any.
+// (test-only), erase() with those spans, to exercise the byte rules directly.
 function runEraseTs(srcBuf, path, opts) {
     const p = path || "test.ts";
     const bytes = new Uint8Array(srcBuf);
@@ -78,8 +78,19 @@ function runEraseTs(srcBuf, path, opts) {
     if (!te.ok) return { schema_version: 1, status: "ok", ok: false, error: te.error };
     const spans = (opts && opts.spans !== undefined) ? opts.spans : te.spans;
     const er = erase(bytes, spans);
+    // M2: the erased bytes parse as JavaScript to exactly the TS-mode AST (and cleanly, when the
+    // TS-mode unit was clean).
+    let erasedValid = null, astMatches = null;
+    if (er.ok) {
+        const ju = parse(er.bytes, { path: p });
+        erasedValid = ju.valid;
+        astMatches = JSON.stringify(ju.ast) === JSON.stringify(u.ast);
+    }
     return { schema_version: 1, status: "ok", ok: true, spans: te.spans, refusals: te.refusals, valid: u.valid,
-             erased_ok: er.ok, erased_hex: er.ok ? hex(er.bytes) : null, erase_error: er.ok ? null : er.error };
+             erased_ok: er.ok, erased_hex: er.ok ? hex(er.bytes) : null, erase_error: er.ok ? null : er.error,
+             erased_valid: erasedValid, ast_matches: astMatches, diagnostics: u.diagnostics,
+             // One line per refusal, `<code> <start> <stop> <message>`, for the corpus .expect files.
+             refusal_lines: te.refusals.map(function (d) { return d.code + " " + d.range.start + " " + d.range.stop + " " + d.message; }).join("\n") };
 }
 
 // splitGreater probe: lex to EOF, splitting every multi-character `>` operator once, so each

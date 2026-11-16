@@ -1,0 +1,1 @@
+ts.unsupported 33 35 a line break before '=>' after TypeScript parameter or return types is not supported: keep '=>' on the line the types end

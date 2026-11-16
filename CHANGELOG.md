@@ -20,10 +20,16 @@ release-artifact layout).
   `lang` defaults to `"js"`, is never chosen from a file's extension, and any other value is
   refused rather than read as JS), the lexer's `splitGreater()`, and
   `hull:source:ts_erase` (`typeErasure` / `erase`: span bytes become spaces, CR and LF are kept,
-  a span holding U+2028 / U+2029 is refused). Not reachable from any command yet: this slice
-  recognises the erasable TypeScript constructs and refuses each with `ts.unsupported`; the
-  type grammar that erases them comes next. `test_js_typescript` checks that TS mode, its
-  refusals removed, gives exactly JS mode's output over the golden inputs and the repo's JS.
+  a span holding U+2028 / U+2029 is refused). Not reachable from any command yet. The type
+  grammar (`hull:source:ts_types`) erases annotations (variables, parameters, arrow and
+  async-arrow parameters, returns, class fields), optional `?`, definite `!`, `as` / `as const` /
+  `satisfies` and non-null `!`; type tokens never move a node's range, so the TS-mode AST is the
+  JS-mode AST of the erased bytes. Every other TypeScript construct is refused with
+  `ts.unsupported`, as is a line break between an arrow's types and its `=>`. `test_js_typescript`
+  checks that valid JavaScript parses identically in TS mode, and runs the TypeScript corpus
+  (`tests/fixtures/ts_frontend`): every accepted file erases byte-safely, parses as JavaScript to
+  the same AST, compiles in QuickJS and matches its expected `.js`; every refused file matches its
+  expected refusals.
 
 ### Fixed
 

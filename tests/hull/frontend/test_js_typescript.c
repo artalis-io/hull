@@ -5,20 +5,28 @@
  *
  * This slice adds the mode and its hook points; every TypeScript construct is refused with a
  * ts.unsupported diagnostic and JS mode goes on as before. The suite holds three things:
- *   - TS mode adds refusals and nothing else: over the frozen golden inputs and the repo's own
- *     JS, a TS-mode parse with its ts.* diagnostics removed is byte-identical to the JS-mode
- *     parse (no TypeScript peek changes a token), and a file that is valid JS gets no refusal
- *     at all (no hook misfires on JavaScript);
+ *   - valid JavaScript parses the same in TS mode: over the frozen golden inputs and the repo's
+ *     own JS, every file that is valid JS gives a TS-mode parse byte-identical to the JS-mode
+ *     one, with no refusal and no type span (no hook fires on JavaScript, no TypeScript peek
+ *     changes a token);
  *   - each hook refuses its construct, at the right range, and JS uses of the same words
  *     (`import type from "m"`, `a ? (b) : c`, `case (x):`) stay JS;
  *   - the erasure byte rules: span bytes become spaces, CR / LF are kept, U+2028 / U+2029 and
- *     malformed span lists are refused.
+ *     malformed span lists are refused;
+ *   - the corpus (tests/fixtures/ts_frontend), docs/typescript_design.md section 5:
+ *       accept/NAME.ts parses cleanly in TS mode and its erasure keeps every byte rule (M1),
+ *       parses as JavaScript to exactly the TS-mode AST (M2), compiles in QuickJS as a module
+ *       (M3, compile only) and equals accept/NAME.js byte for byte (M4);
+ *       refuse/NAME.ts is invalid, and its refusals equal refuse/NAME.expect.
+ *     A change that is MEANT: regenerate the .js / .expect files with HULL_TS_CORPUS_UPDATE=1
+ *     and review the diff.
  * JS mode itself is held by test_js_golden and scripts/js_frontend_diff.sh.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #include "utest.h"
 #include "js_frontend_dump.h"
+#include "quickjs.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -53,7 +61,7 @@ static const char *const CORPUS[] = {
 };
 static const char *const CORPUS_EXT[] = { ".js", ".mjs", ".src", NULL };
 
-UTEST(js_typescript, ts_mode_minus_refusals_is_js_mode)
+UTEST(js_typescript, valid_js_parses_the_same_in_ts_mode)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
@@ -67,6 +75,9 @@ UTEST(js_typescript, ts_mode_minus_refusals_is_js_mode)
         ASSERT_TRUE(src != NULL);
         size_t jl = 0, tl = 0;
         char *js = run(s, "parse", src, n, pv.items[i], NULL, &jl);
+        /* Invalid JS may be TypeScript (a Test262 negative, a ts_syntax_is_js_error case):
+         * TS mode is free to read it differently. */
+        if (!has(js, "\"valid\":true")) { free(js); free(src); continue; }
         char *tj = run(s, "parseTs", src, n, pv.items[i], "{\"asJs\":true}", &tl);
         if (!js || !tj || jl != tl || memcmp(js, tj, jl) != 0) {
             if (differ < 20) fprintf(stderr, "[ts-mode] TS mode changed the JS result: %s\n", pv.items[i]);
@@ -77,7 +88,7 @@ UTEST(js_typescript, ts_mode_minus_refusals_is_js_mode)
     }
     jfd_paths_free(&pv);
     EXPECT_EQ(0, differ);
-    EXPECT_GE(compared, 850);                                  /* the corpus was walked */
+    EXPECT_GE(compared, 650);                                  /* the corpus was walked */
     hl_js_session_destroy(s);
 }
 
@@ -93,8 +104,7 @@ UTEST(js_typescript, typescript_is_off_by_default)
     EXPECT_FALSE(has(o, "typeSpans"));
     free(o);
     o = ts(s, src);
-    EXPECT_TRUE(has(o, "\"code\":\"ts.unsupported\""));
-    EXPECT_TRUE(has(o, "\"typeSpans\":[]"));
+    EXPECT_TRUE(has(o, "\"valid\":true,\"typeSpans\":[{\"start\":6,\"stop\":14}]"));
     free(o);
     hl_js_session_destroy(s);
 }
@@ -113,7 +123,8 @@ UTEST(js_typescript, lang_option)
     EXPECT_STREQ(dflt, js);
     free(dflt); free(js);
     char *o = run(s, "parse", src, n, "t.ts", "{\"lang\":\"ts\"}", NULL);
-    EXPECT_TRUE(has(o, "\"code\":\"ts.unsupported\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));                  /* the annotation is TypeScript */
+    EXPECT_FALSE(has(o, "\"code\":"));
     free(o);
     static const char *const BAD[] = {
         "{\"lang\":\"tsx\"}", "{\"lang\":\"jsx\"}", "{\"lang\":\"TS\"}", "{\"lang\":\"typescript\"}",
@@ -139,16 +150,8 @@ UTEST(js_typescript, lang_option)
 
 typedef struct { const char *src; const char *what; int start, stop; } Refusal;
 static const Refusal REFUSALS[] = {
-    { "let x: number = 1;",                    "type annotations",                    6, 7 },
-    { "let x!: number;",                       "definite assignment assertions",      6, 7 },
-    { "function f(a: T) {}",                   "type annotations",                   13, 14 },
-    { "function f(a?) {}",                     "optional parameters",                13, 14 },
     { "function f(this: W) {}",                "'this' parameters",                  12, 16 },
     { "class C { constructor(private x) {} }", "parameter properties",               23, 30 },
-    { "function f(): T {}",                    "return type annotations",            13, 14 },
-    { "const g = function (): T {};",          "return type annotations",            22, 23 },
-    { "const o = { m(): T {} };",              "return type annotations",            16, 17 },
-    { "const a = (x): T => x;",                "return type annotations",            14, 15 },
     { "function f(a)\nfunction f(a) {}",       "overload signatures",                15, 23 },
     { "function f<T>(a) {}",                   "type parameters",                    11, 12 },
     { "class C<T> {}",                         "type parameters",                     8,  9 },
@@ -156,9 +159,6 @@ static const Refusal REFUSALS[] = {
     { "class C implements I {}",               "implements clauses",                  9, 19 },
     { "class C { private x = 1 }",             "'private' modifiers",                11, 18 },
     { "class C { readonly x = 1 }",            "'readonly' modifiers",               11, 19 },
-    { "class C { x: number }",                 "type annotations",                   12, 13 },
-    { "class C { x? = 1 }",                    "optional members",                   12, 13 },
-    { "class C { x!: number }",                "definite assignment assertions",     12, 13 },
     { "interface I { a: string }",             "interfaces",                          1, 10 },
     { "type T = string;",                      "type aliases",                        1,  5 },
     { "enum E { A }",                          "enums",                               1,  5 },
@@ -166,9 +166,6 @@ static const Refusal REFUSALS[] = {
     { "module M {}",                           "module declarations",                 1,  7 },
     { "declare const x: number;",              "'declare' declarations",              1,  8 },
     { "abstract class A {}",                   "abstract classes",                    1,  9 },
-    { "x as T;",                               "'as' expressions",                    3,  5 },
-    { "x satisfies T;",                        "'satisfies' expressions",             3, 12 },
-    { "a!.b;",                                 "non-null assertions",                 2,  3 },
     { "import type { A } from \"m\";",         "type-only imports",                   8, 12 },
     { "import type A from \"m\";",             "type-only imports",                   8, 12 },
     { "import { type A } from \"m\";",         "type-only import specifiers",        10, 14 },
@@ -204,11 +201,7 @@ UTEST(js_typescript, one_refusal_per_position)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    char *o = ts(s, "class C { private x: number }");
-    EXPECT_EQ(1, count(o, "\"code\":\"ts.unsupported\",\"message\":\"TypeScript type annotations are not supported\""));
-    EXPECT_EQ(2, count(o, "\"code\":\"ts.unsupported\""));
-    free(o);
-    o = ts(s, "function f<T>(a) {}");
+    char *o = ts(s, "function f<T>(a) {}");
     EXPECT_EQ(1, count(o, "\"code\":\"ts.unsupported\""));
     free(o);
     hl_js_session_destroy(s);
@@ -338,16 +331,18 @@ UTEST(js_typescript, erase_byte_rules)
     hl_js_session_destroy(s);
 }
 
-/* typeErasure: in this slice no span is recorded yet, and every refusal is reported. */
+/* typeErasure: the spans of the erased syntax, and every refusal. */
 UTEST(js_typescript, type_erasure_reports_refusals)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    const char *src = "let x: number = 1;\nx as T;";
+    const char *src = "let x: number = 1;\nenum E { A }\nfunction f<T>(a) {}";
     char *o = run(s, "eraseTs", src, strlen(src), "t.ts", NULL, NULL);
-    EXPECT_TRUE(has(o, "\"ok\":true,\"spans\":[],\"refusals\":[{"));
-    EXPECT_EQ(2, count(o, "\"code\":\"ts.unsupported\""));
-    EXPECT_FALSE(has(o, "\"code\":\"js.syntax\",\"message\":\"expected ';'\",\"path\":\"t.ts\",\"range\":{\"start\":6"));
+    EXPECT_TRUE(has(o, "\"ok\":true,\"spans\":[{\"start\":6,\"stop\":14}],\"refusals\":[{"));
+    /* Two refusals (enum, type parameters), each in `refusals` and again in `diagnostics`. */
+    EXPECT_EQ(4, count(o, "\"code\":\"ts.unsupported\""));
+    EXPECT_TRUE(has(o, "TypeScript enums are not supported"));
+    EXPECT_TRUE(has(o, "TypeScript type parameters are not supported"));
     free(o);
     /* Plain JS through TS mode: nothing to erase, nothing refused, bytes unchanged. */
     const char *js = "const a = 1;\n";
@@ -357,6 +352,200 @@ UTEST(js_typescript, type_erasure_reports_refusals)
     EXPECT_TRUE(has(o, "\"spans\":[],\"refusals\":[],\"valid\":true"));
     EXPECT_TRUE(has(o, needle));
     free(o);
+    hl_js_session_destroy(s);
+}
+
+/* ---- the corpus ---- */
+
+#define TS_CORPUS "tests/fixtures/ts_frontend"
+static const char *const EXT_TS[] = { ".ts", NULL };
+
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* The JSON string value of `key` in `json`, unescaped (\n, \", \\ and \uXXXX below 0x80).
+ * malloc'd; NULL when absent or not a string. */
+static char *json_str(const char *json, const char *key)
+{
+    char pat[64]; snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+    const char *p = json ? strstr(json, pat) : NULL;
+    if (!p) return NULL;
+    p += strlen(pat);
+    size_t cap = strlen(p) + 1, n = 0;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    for (; *p && *p != '"'; p++) {
+        if (*p != '\\') { out[n++] = *p; continue; }
+        p++;
+        switch (*p) {
+            case 'n': out[n++] = '\n'; break;
+            case 'r': out[n++] = '\r'; break;
+            case 't': out[n++] = '\t'; break;
+            case 'u': {
+                int v = 0;
+                for (int k = 1; k <= 4; k++) { int d = hex_digit(p[k]); if (d < 0) { free(out); return NULL; } v = v * 16 + d; }
+                out[n++] = (char)v; p += 4; break;
+            }
+            default: out[n++] = *p; break;
+        }
+    }
+    out[n] = '\0';
+    return out;
+}
+
+/* Decode a lowercase hex string; returns the byte count, or (size_t)-1. By hand: scanf's
+ * field width is not honoured alike everywhere (the cosmo build decoded every byte wrong). */
+static size_t unhex(const char *hx, char *out)
+{
+    size_t n = strlen(hx);
+    if (n % 2) return (size_t)-1;
+    for (size_t i = 0; i < n / 2; i++) {
+        int hi = hex_digit(hx[2 * i]), lo = hex_digit(hx[2 * i + 1]);
+        if (hi < 0 || lo < 0) return (size_t)-1;
+        out[i] = (char)(hi * 16 + lo);
+    }
+    return n / 2;
+}
+
+static int write_file(const char *path, const char *data, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    int ok = fwrite(data, 1, n, f) == n;
+    return (fclose(f) == 0 && ok) ? 0 : -1;
+}
+
+/* path with its extension replaced by `ext` (".js", ".expect"); malloc'd. */
+static char *sibling(const char *path, const char *ext)
+{
+    const char *dot = strrchr(path, '.');
+    size_t base = dot ? (size_t)(dot - path) : strlen(path);
+    char *s = (char *)malloc(base + strlen(ext) + 1);
+    if (!s) return NULL;
+    memcpy(s, path, base); strcpy(s + base, ext);
+    return s;
+}
+
+/* M3: QuickJS compiles the erased module (compile only - nothing runs). Imports resolve to a
+ * stub module, so the verdict is about the syntax alone. */
+static JSModuleDef *stub_loader(JSContext *ctx, const char *name, void *opaque)
+{
+    (void)opaque;
+    static const char *SYN = "export const a=1; export default 1;";
+    JSValue v = JS_Eval(ctx, SYN, strlen(SYN), name, JS_EVAL_FLAG_COMPILE_ONLY | JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) { JS_FreeValue(ctx, JS_GetException(ctx)); return NULL; }
+    JSModuleDef *m = (JSModuleDef *)JS_VALUE_GET_PTR(v);
+    JS_FreeValue(ctx, v);
+    return m;
+}
+static int quickjs_compiles(const char *src, size_t n, const char *name)
+{
+    JSRuntime *rt = JS_NewRuntime();
+    if (!rt) return 0;
+    JSContext *ctx = JS_NewContext(rt);
+    if (!ctx) { JS_FreeRuntime(rt); return 0; }
+    JS_SetModuleLoaderFunc(rt, NULL, stub_loader, NULL);
+    char *z = (char *)malloc(n + 1);                /* JS_Eval wants a NUL after the input */
+    int ok = 0;
+    if (z) {
+        memcpy(z, src, n); z[n] = '\0';
+        JSValue v = JS_Eval(ctx, z, n, name, JS_EVAL_FLAG_COMPILE_ONLY | JS_EVAL_TYPE_MODULE);
+        ok = !JS_IsException(v);
+        if (!ok) JS_FreeValue(ctx, JS_GetException(ctx));
+        JS_FreeValue(ctx, v);
+        free(z);
+    }
+    JS_FreeContext(ctx); JS_FreeRuntime(rt);
+    return ok;
+}
+
+/* M1: the erased bytes are the source with some bytes turned into spaces, never CR / LF. */
+static int byte_rules_hold(const char *src, const char *er, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (er[i] == src[i]) continue;
+        if (er[i] != ' ' || src[i] == '\n' || src[i] == '\r') return 0;
+    }
+    return 1;
+}
+
+UTEST(js_typescript, corpus_accept)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    const int update = getenv("HULL_TS_CORPUS_UPDATE") != NULL;
+    JfdPaths pv = {0};
+    ASSERT_EQ(0, jfd_walk(TS_CORPUS "/accept", EXT_TS, &pv));
+    jfd_sort(&pv);
+    int checked = 0;
+    for (size_t i = 0; i < pv.len; i++) {
+        const char *path = pv.items[i];
+        size_t n = 0;
+        char *src = jfd_read(path, &n);
+        ASSERT_TRUE(src != NULL);
+        char *o = run(s, "eraseTs", src, n, path, NULL, NULL);
+        char *hx = json_str(o, "erased_hex");
+        char *er = hx ? (char *)malloc(strlen(hx) / 2 + 1) : NULL;
+        size_t en = (hx && er) ? unhex(hx, er) : (size_t)-1;
+        int clean = has(o, "\"valid\":true") && has(o, "\"diagnostics\":[]") && has(o, "\"refusals\":[]");
+        int m1 = en == n && byte_rules_hold(src, er, n);
+        int m2 = has(o, "\"erased_valid\":true") && has(o, "\"ast_matches\":true");
+        int m3 = m1 && quickjs_compiles(er, en, path);
+        char *jsp = sibling(path, ".js");
+        int m4 = 0;
+        if (m1 && update) m4 = write_file(jsp, er, en) == 0;
+        else if (m1) { size_t wn = 0; char *want = jfd_read(jsp, &wn); m4 = want && wn == en && memcmp(want, er, en) == 0; free(want); }
+        if (!(clean && m1 && m2 && m3 && m4))
+            fprintf(stderr, "[ts-corpus] %s: clean=%d M1=%d M2=%d M3=%d M4=%d\n  %s\n", path, clean, m1, m2, m3, m4, o ? o : "(null)");
+        EXPECT_TRUE(clean && m1 && m2 && m3 && m4);
+        checked++;
+        free(jsp); free(er); free(hx); free(o); free(src);
+    }
+    jfd_paths_free(&pv);
+    EXPECT_GE(checked, 14);
+    hl_js_session_destroy(s);
+}
+
+UTEST(js_typescript, corpus_refuse)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    const int update = getenv("HULL_TS_CORPUS_UPDATE") != NULL;
+    JfdPaths pv = {0};
+    ASSERT_EQ(0, jfd_walk(TS_CORPUS "/refuse", EXT_TS, &pv));
+    jfd_sort(&pv);
+    int checked = 0;
+    for (size_t i = 0; i < pv.len; i++) {
+        const char *path = pv.items[i];
+        size_t n = 0;
+        char *src = jfd_read(path, &n);
+        ASSERT_TRUE(src != NULL);
+        char *o = run(s, "eraseTs", src, n, path, NULL, NULL);
+        char *lines = json_str(o, "refusal_lines");
+        int refused = lines && lines[0] && has(o, "\"valid\":false");
+        char *exp = sibling(path, ".expect");
+        int same = 0;
+        if (refused && update) {
+            size_t ln = strlen(lines);
+            char *withnl = (char *)malloc(ln + 2);
+            if (withnl) { memcpy(withnl, lines, ln); withnl[ln] = '\n'; withnl[ln + 1] = '\0'; same = write_file(exp, withnl, ln + 1) == 0; free(withnl); }
+        } else if (refused) {
+            size_t wn = 0; char *want = jfd_read(exp, &wn);
+            same = want && wn == strlen(lines) + 1 && memcmp(want, lines, wn - 1) == 0 && want[wn - 1] == '\n';
+            free(want);
+        }
+        if (!(refused && same)) fprintf(stderr, "[ts-corpus] %s: refused=%d expect=%d\n  %s\n", path, refused, same, lines ? lines : "(none)");
+        EXPECT_TRUE(refused && same);
+        checked++;
+        free(exp); free(lines); free(o); free(src);
+    }
+    jfd_paths_free(&pv);
+    EXPECT_GE(checked, 25);
     hl_js_session_destroy(s);
 }
 
