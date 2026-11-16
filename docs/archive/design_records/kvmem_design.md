@@ -1,7 +1,7 @@
 # `cap/kvmem.c` native cache store — design spike (CONCLUDED: not shipped)
 
 **Status:** CONCLUDED — experiment run, gates measured, **did not ship**. The
-store was implemented on a throwaway branch (`feat/kvmem-native`, unpushed) and
+store was implemented on a throwaway branch (kept as the local tag `archive/kvmem-native`, unpushed) and
 measured against the five gates below. **Gate 2 (performance) and Gate 4
 (resident memory) failed decisively and structurally**, so the native store was
 NOT merged; the pure-Lua/JS `_memstore` remains the sole memory backend. Full

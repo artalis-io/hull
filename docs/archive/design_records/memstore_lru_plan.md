@@ -278,8 +278,8 @@ has its OWN measured RSS gate (§7) and its own layout decision.
 
 ### 7.1 De-native-ized harness (frozen reference vs candidate)
 
-The retired harness (`tests/fixtures/kvmem_bench/`, preserved on
-`feat/kvmem-native`) compared a C `nativemem` store against `_memstore`. Reusing
+The retired harness (`tests/fixtures/kvmem_bench/`, preserved at the local tag
+`archive/kvmem-native`) compared a C `nativemem` store against `_memstore`. Reusing
 it here requires REMOVING every native-backend assumption, or the numbers are
 invalid:
 
@@ -450,7 +450,7 @@ the record of why.
 
 ### 11.1 Eager intrusive-list design — measured gate results
 
-Implemented on the branch `feat/memstore-o1-lru` (preserved locally, unpushed,
+Implemented on a branch now kept as the local tag `archive/memstore-o1-lru` (unpushed,
 NOT proposed for merge) and measured against a frozen `_memstore_ref` with the
 full §7 protocol (12 fresh-process invocations per cell, 2 warm-ups discarded,
 median of 10, hard-fail on any truncated run). Arm64 Darwin:
