@@ -1,0 +1,1 @@
+ts.unsupported 25 26 a line that would continue the expression after the type of 'satisfies' is not supported: end the statement with ';'

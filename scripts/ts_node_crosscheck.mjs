@@ -26,9 +26,12 @@ const NODE_STRIPS = new Map([
     ["abstract_class.ts", "class modifiers: slice 2"],
     ["arrow_return_line_break.ts", "line break before => after a return type: Hull refuses"],
     ["asi_array.ts", "erased statement before `[`: Hull refuses, Node inserts `;`"],
+    ["asi_as_bracket.ts", "line starting `[` after an `as` type: Hull refuses, Node inserts `;`"],
+    ["asi_as_template.ts", "line starting with a template after an `as` type: Hull refuses, Node inserts `;`"],
     ["asi_call.ts", "erased statement before `(`: Hull refuses, Node inserts `;`"],
     ["asi_empty_statement.ts", "erased statement before `;`: Hull refuses, Node inserts `;`"],
     ["asi_semicolon.ts", "erased statement before `;`: Hull refuses, Node inserts `;`"],
+    ["asi_satisfies_call.ts", "line starting `(` after a `satisfies` type: Hull refuses, Node inserts `;`"],
     ["asi_template.ts", "erased statement before a template: Hull refuses, Node inserts `;`"],
     ["declaration_not_in_list.ts", "type declaration outside a statement list: Hull refuses"],
     ["declare_class.ts", "declare class: slice 2"],
@@ -101,6 +104,6 @@ for (const f of list(path.join(CORPUS, "refuse"))) {
 }
 for (const f of NODE_STRIPS.keys()) if (!seen.has(f)) fail(`NODE_STRIPS names refuse/${f}, which does not exist`);
 
-if (accepted < 18 || refused < 29) fail(`corpus too small: ${accepted} accept, ${refused} refuse`);
+if (accepted < 18 || refused < 32) fail(`corpus too small: ${accepted} accept, ${refused} refuse`);
 if (failures) process.exit(1);
 console.log(`ts-node-crosscheck: Node ${process.version}: ${accepted} accept cases match, ${refused} refuse cases agree`);
