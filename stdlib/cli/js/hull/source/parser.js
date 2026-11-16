@@ -26,7 +26,9 @@
 // never chosen from the path. Every TypeScript branch below is guarded by `ts &&`
 // and fires only where JavaScript is a syntax error, so JS mode is unchanged byte for byte
 // (test_js_golden and scripts/js_frontend_diff.sh hold it) and valid JavaScript parses the same
-// in both modes (test_js_typescript holds that). In TS mode the unit also carries `typeSpans` (the
+// in both modes (test_js_typescript holds that) - with one exception TypeScript itself makes: a
+// `<` after an expression is type arguments wherever TypeScript's rule allows them, so
+// `a < b > (c)` is a call in TS mode, as it is to tsc and Node. In TS mode the unit also carries `typeSpans` (the
 // erasable type syntax, sorted half-open byte ranges, see hull:source:ts_erase), read by the
 // type grammar (hull:source:ts_types). Type tokens never move a node's range: a node ends at its
 // last JAVASCRIPT token, so the TS-mode AST is exactly the JS-mode AST of the erased bytes.
@@ -34,7 +36,9 @@
 // returns, class fields), optional `?` on parameters and members, definite assignment `!`,
 // `as` / `satisfies`, non-null `!`, and whole declarations in a statement list - `interface`,
 // `type`, `declare` const / let / var / function, `import type` / `export type` and their
-// `export` forms - plus inline `type` import / export specifiers. An erased declaration builds
+// `export` forms - plus inline `type` import / export specifiers, type parameters (functions,
+// classes, methods, arrows) and type arguments (calls, `new`, tags, instantiation expressions,
+// heritage). An erased declaration builds
 // no node, and JSDoc attaches as it does over the erased bytes. Every other TypeScript construct
 // is refused with a ts.unsupported diagnostic.
 //
@@ -200,6 +204,10 @@ function parseInternal(bytes, opts, inject) {
     let lastJs = null;
     let firstJs = null;              // TS mode: the first consumed token that is not type syntax
     let typeDepth = 0;
+    let advanceTotal = 0;            // TS mode: tokens consumed, rewound ones included (the speculation budget)
+    // TS mode: the first token that is not type syntax consumed while a watch is open (a node
+    // whose first tokens may be erased starts there: `<T>(x) => x;`).
+    let jsWatch = null;
 
     // advance past cur, reading the next token with an explicit grammatical slash goal:
     //   regexAllowed=true  -> the next token is at an operand/statement position
@@ -207,8 +215,12 @@ function parseInternal(bytes, opts, inject) {
     // A buffered lookahead token (already lexed) is consumed as-is; the goal only applies to a
     // fresh read from the tokenizer.
     function advance(regexAllowed) {
+        advanceTotal++;
         prev = cur;
-        if (typeDepth === 0) { lastJs = cur; if (firstJs === null) firstJs = cur; }
+        if (typeDepth === 0) {
+            lastJs = cur; if (firstJs === null) firstJs = cur;
+            if (jsWatch !== null && jsWatch.tok === null) jsWatch.tok = cur;
+        }
         cur = la.length > 0 ? la.shift() : tk.next(regexAllowed === false ? false : true);
         return prev;
     }
@@ -228,8 +240,9 @@ function parseInternal(bytes, opts, inject) {
 
     // Peek the token after cur under a GUESSED slash goal, and take it back unless `keep(tok)`
     // accepts it - rewinding the tokenizer, the lookahead buffer and the diagnostic budget, so a
-    // wrong guess leaves no lexical disagreement or stray diagnostic. O(1): the parser makes no
-    // other speculation (the `async (` cover grammar below parses its list once).
+    // wrong guess leaves no lexical disagreement or stray diagnostic. O(1): in JS mode the parser
+    // makes no other speculation (the `async (` cover grammar below parses its list once); TS
+    // mode's `<` speculation is tsSpeculate, bounded per file.
     function peekOrRewind(goal, keep) {
         if (la.length > 0) return keep(la[0]);       // already lexed: nothing to take back
         const m = tk.peekMark(), b = budget.mark();
@@ -241,7 +254,8 @@ function parseInternal(bytes, opts, inject) {
 
     // Every parser diagnostic flows through the ONE shared budget so the combined tokenizer +
     // parser ordinary count can never exceed maxDiagnostics; terminal js.limit.* are always kept.
-    function diag(sev, code, message, start, stop) { budget.push(sev, code, message, { start: start, stop: stop }); }
+    let diagCount = 0;               // every parser diagnostic, kept or past the budget (speculation reads it)
+    function diag(sev, code, message, start, stop) { diagCount++; budget.push(sev, code, message, { start: start, stop: stop }); }
     function synErr(message, tok) { const t = tok || cur; diag("error", "js.syntax", message, t.start, t.stop); }
     function unsupported(message, tok) { const t = tok || cur; diag("error", "js.unsupported", message, t.start, t.stop); }
     // TS mode: a TypeScript construct this parser does not (yet) accept. The caller then goes on
@@ -308,6 +322,77 @@ function parseInternal(bytes, opts, inject) {
         typeDepth--;
         const stop = prev.stop;
         if (outer && stop > start) typeSpans.push({ start: start, stop: stop });
+    }
+    // TS mode: speculation over any number of tokens, for a `<` that is a type list or a
+    // comparison. Every piece of mutable parse state is saved, `body` runs, and its result is
+    // kept only when it returns true with no diagnostic; otherwise all of it is rewound - the
+    // tokenizer included, so each token is lexed again under its real slash goal. `body` reads
+    // only the type grammar and peeks, so the function-context stack is untouched.
+    //
+    // Bounded: the tokens rewound (plus the lexer context copied per attempt) may total at most
+    // four times the tokens kept plus 65536. Past that, tsSpeculateAllowed() is false and the
+    // caller refuses the construct (an input built to make every `<` a long failed attempt).
+    let specWasted = 0;
+    function tsSpeculateAllowed() { return specWasted <= 4 * (advanceTotal - specWasted) + 65536; }
+    function tsSpeculate(body) {
+        const saved = { cur: cur, prev: prev, la: la.slice(), lastJs: lastJs, firstJs: firstJs, typeDepth: typeDepth, depth: depth,
+            errored: errored, condConsequent: condConsequent, atModuleItem: atModuleItem, tsRefusedAt: tsRefusedAt, asiEnd: asiEnd,
+            stmtListItem: stmtListItem, spans: typeSpans.length, budget: budget.mark(), tk: tk.specMark(), diags: diagCount, adv: advanceTotal };
+        if (body() && diagCount === saved.diags && budget.list.length === saved.budget.len) return true;
+        specWasted += (advanceTotal - saved.adv) + saved.tk.ctx.length + saved.la.length + 1;
+        cur = saved.cur; prev = saved.prev; la.length = 0; for (let i = 0; i < saved.la.length; i++) la.push(saved.la[i]);
+        lastJs = saved.lastJs; firstJs = saved.firstJs; typeDepth = saved.typeDepth; depth = saved.depth;
+        errored = saved.errored; condConsequent = saved.condConsequent; atModuleItem = saved.atModuleItem;
+        tsRefusedAt = saved.tsRefusedAt; asiEnd = saved.asiEnd; stmtListItem = saved.stmtListItem;
+        typeSpans.length = saved.spans; budget.reset(saved.budget); tk.specRewind(saved.tk); diagCount = saved.diags;
+        return false;
+    }
+    // Can the token after a type argument list follow one (TypeScript's
+    // canFollowTypeArgumentsInExpression)? `(` and a template make a call or a tagged template;
+    // `<` `>` `+` `-` make a comparison; otherwise a line break, a binary operator or a token
+    // that cannot start an expression make an instantiation expression (`f<T>;`), and anything
+    // else a comparison (`a < b > c`). Erasing an instantiation's `<...>` leaves exactly what
+    // TypeScript goes on to parse, so it adds no ASI shape. `.` / `?.` after one, and an
+    // assignment, are TypeScript errors: read as a comparison, JS mode reports them.
+    const TS_BINARY = new Set(["??", "||", "&&", "|", "^", "&", "==", "!=", "===", "!==", "<=", ">=", "<<", ">>", ">>>",
+        "*", "/", "%", "**", "instanceof", "in", "as", "satisfies"]);
+    function tsTypeArgumentsCanFollow() {
+        const t = cur;
+        if (t.type === "template") return t.mode === "noSubstitution" || t.mode === "head";
+        if (t.type === "punctuator") {
+            const v = t.value;
+            if (v === "(") return true;
+            if (v === "<" || v === ">" || v === "+" || v === "-" || v === "." || v === "?." || v === "=" ||
+                (v.length >= 2 && v.charCodeAt(v.length - 1) === 0x3d && !TS_BINARY.has(v))) return false;
+        }
+        if (t.nlBefore || t.type === "eof") return true;
+        if ((t.type === "punctuator" || isIdTok(t)) && TS_BINARY.has(t.value)) return true;
+        return !isExprStartTok(t) && !(t.type === "punctuator" && (t.value === "/" || t.value === "/=" || t.value === "#"));
+    }
+    // TS mode: `<T, ...>` at an operator position (cur is `<`) after a call or member callee,
+    // a `new` callee or a `?.`: erase it when it parses as a type argument list that can be
+    // followed by the next token, else leave the `<` to be a comparison. `needCall`: only before
+    // a `(` (after `?.`).
+    function tsTypeArguments(needCall) {
+        const lt = cur;
+        if (!tsSpeculateAllowed()) { tsLookaheadRefuse(lt); return false; }
+        return tsSpeculate(function () {
+            tsSpan(function () { types.parseTypeArguments(); });
+            return needCall ? isP("(") : tsTypeArgumentsCanFollow();
+        });
+    }
+    function tsLookaheadRefuse(t) {
+        if (t.start === tsRefusedAt) return;
+        tsRefusedAt = t.start;
+        diag("error", "ts.unsupported", "TypeScript type lists past this file's lookahead budget are not supported", t.start, t.stop);
+    }
+    // `<T, ...>` type parameters on a declaration (cur is `<`).
+    function tsTypeParameters() { tsSpan(function () { types.parseTypeParameters(); }); }
+    // A generic arrow `<T>(x: T) => x` at an operand position (cur is `<`), or `async <T>(`
+    // (after `async`): the type parameter list is erased when it is followed by `(`.
+    function tsArrowTypeParameters() {
+        if (!tsSpeculateAllowed()) { tsLookaheadRefuse(cur); return false; }
+        return tsSpeculate(function () { tsTypeParameters(); return isP("("); });
     }
     // `: T` (cur is the `:`).
     function tsAnnotation() { tsSpan(function () { advance(false); types.parseType(); }); }
@@ -456,10 +541,11 @@ function parseInternal(bytes, opts, inject) {
         return null;
     }
     // A token that both starts a statement and continues an expression on the previous line.
+    // `<` starts a generic arrow, whose erased `<T>` leaves its `(` to continue the line.
     function tsContinuesExpression(t) {
         if (t.type === "template") return t.mode === "noSubstitution" || t.mode === "head";
         if (t.type === "regex") return true;
-        return t.type === "punctuator" && (t.value === "(" || t.value === "[" || t.value === "+" || t.value === "-" || t.value === "/" || t.value === "/=");
+        return t.type === "punctuator" && (t.value === "(" || t.value === "[" || t.value === "+" || t.value === "-" || t.value === "/" || t.value === "/=" || t.value === "<");
     }
     // `;` or automatic semicolon insertion closing an erased declaration.
     function tsDeclEnd() {
@@ -837,8 +923,13 @@ function parseInternal(bytes, opts, inject) {
     }
 
     function parseExpressionStatement() {
-        const start = cur.start;
+        let start = cur.start;
+        // TS mode: a statement that starts with a generic arrow's `<T>` starts where the
+        // erased JavaScript does.
+        const w = ts && isP("<") ? { tok: null, outer: jsWatch } : null;
+        if (w !== null) jsWatch = w;
         const expr = parseExpression();
+        if (w !== null) { jsWatch = w.outer; if (w.tok !== null && w.tok.start > start && w.tok.start <= expr.start) start = w.tok.start; }
         semicolon();
         const s = mk("ExpressionStatement", start); s.expression = expr; return fin(s);
     }
@@ -875,7 +966,7 @@ function parseInternal(bytes, opts, inject) {
         f.generator = eatP("*", true);
         if (f.generator) { unsupported("generator functions are not supported", prev); }
         f.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
-        if (ts && isP("<")) tsRefuse("type parameters");
+        if (ts && isP("<")) tsTypeParameters();
         const r = withFn(f.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(true); }, f.generator);
         f.params = r.params; f.body = r.body;       // declaration body `}` -> statement follows
         return fin(f);
@@ -888,7 +979,7 @@ function parseInternal(bytes, opts, inject) {
         f.generator = eatP("*", true);
         if (f.generator) unsupported("generator functions are not supported", prev);
         f.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
-        if (ts && isP("<")) tsRefuse("type parameters");
+        if (ts && isP("<")) tsTypeParameters();
         const r = withFn(f.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }, f.generator);
         f.params = r.params; f.body = r.body;       // expression body `}` -> a value (division)
         return fin(f);
@@ -936,12 +1027,16 @@ function parseInternal(bytes, opts, inject) {
         const c = mk(type, cur.start);
         advance(true);                              // past `class`
         c.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
-        if (ts && isP("<")) tsRefuse("type parameters");
+        if (ts && isP("<")) tsTypeParameters();
         c.superClass = null;
         // ClassHeritage : extends LeftHandSideExpression -- which INCLUDES call expressions
         // (`class C extends fn(x) {}` is valid), so allow calls. (Passing false left the call
         // arguments unconsumed, which drove non-terminating error recovery -> heap blowup.)
-        if (isKw("extends")) { advance(true); c.superClass = parseLeftHandSide(true); }
+        if (isKw("extends")) {
+            advance(true); c.superClass = parseLeftHandSide(true);
+            // `extends Base<T>`: the heritage takes type arguments whatever follows them.
+            if (ts && isP("<")) tsSpan(function () { types.parseTypeArguments(); });
+        }
         if (ts && isKw("implements")) tsRefuse("implements clauses");
         c.body = [];
         expectP("{", true);
@@ -987,7 +1082,7 @@ function parseInternal(bytes, opts, inject) {
         if (ts && isP("?")) tsOptional();
         else if (ts && isP("!") && !nl()) tsDefinite();
         else if (ts && isP(":")) tsAnnotation();
-        else if (ts && isP("<")) tsRefuse("type parameters");
+        if (ts && isP("<")) tsTypeParameters();
         const m = mk("MethodDefinition", start); m.static = isStatic; m.kind = kind; m.key = key; m.async = isAsync; m.generator = isGen;
         if (isP("(")) {
             const fe = mk("FunctionExpression", cur.start); fe.async = isAsync; fe.generator = isGen; fe.id = null;
@@ -1233,6 +1328,8 @@ function parseInternal(bytes, opts, inject) {
         for (;;) {
             // TS mode: a non-null assertion `x!` (no line break before it) builds no node.
             if (ts && isP("!") && !nl()) { tsSpan(function () { advance(false); }); continue; }
+            // TS mode: type arguments `f<T>(x)`, `new C<T>()`, `` tag<T>`x` ``, `f<T>;`.
+            if (ts && isP("<") && e.type !== "Error" && tsTypeArguments(false)) continue;
             if (isP(".")) {
                 advance(false);
                 if (isP("#")) {   // a private member access (obj.#name) -- declined, consumed cleanly
@@ -1244,6 +1341,7 @@ function parseInternal(bytes, opts, inject) {
             }
             if (isP("?.")) {
                 advance(false);
+                if (ts && isP("<") && allowCall) tsTypeArguments(true);   // `f?.<T>(x)`
                 if (isP("(") && allowCall) { const c = mk("CallExpression", e.start); c.callee = e; c.optional = true; c.arguments = parseArguments(); e = fin(c); continue; }
                 if (isP("[")) { advance(true); const m = mk("MemberExpression", e.start); m.object = e; m.computed = true; m.optional = true; m.property = parseExpression(); expectP("]", false); e = fin(m); continue; }
                 const m = mk("MemberExpression", e.start); m.object = e; m.computed = false; m.optional = true; m.property = parseIdentifierName(); e = fin(m); continue;
@@ -1369,7 +1467,13 @@ function parseInternal(bytes, opts, inject) {
                 if (cur.value === "{") return parseObjectExpr();
                 // `<` cannot start a JS expression: a generic arrow `<T>(x) => x` or an
                 // angle-bracket assertion `<T>x`.
-                if (ts && cur.value === "<") tsRefuse("type parameters and angle-bracket assertions");
+                if (ts && cur.value === "<") {
+                    const lt = cur;
+                    if (!tsArrowTypeParameters()) { tsRefuse("angle-bracket assertions", lt); break; }
+                    const e = parseParenOrArrow();
+                    if (e.type !== "ArrowFunctionExpression") tsRefuse("angle-bracket assertions", lt);
+                    return e;
+                }
                 break;
         }
         synErr("unexpected token");
@@ -1405,15 +1509,16 @@ function parseInternal(bytes, opts, inject) {
                 // parse that was rewound and re-parsed as a call when no `=>` followed did every
                 // nested `async (` twice per enclosing one - exponential: ~330 bytes of nested
                 // `async(a=` never finished parsing.) A `new` callee's `(...)` is the new's.
+                if (ts && nx.type === "punctuator" && nx.value === "<" && !noCall) {
+                    // `async <T>(x) => x`, or a call `async<T>(x)`: the list reads as type
+                    // parameters when `(` follows; otherwise the call tail tries type arguments.
+                    const callee = parseIdentifier();
+                    if (!tsArrowTypeParameters()) return callee;
+                    return asyncParenTail(start, callee);
+                }
                 if (nx.type === "punctuator" && nx.value === "(" && !noCall) {
                     const callee = parseIdentifier();   // `async` -> cur is `(`
-                    const info = { spreadComma: false, typed: false };
-                    const args = parseArguments(info);
-                    if (ts) tsArrowTail(info);
-                    if (isP("=>") && !nl()) return finishArrow(start, argsToParams(args, info), true);
-                    if (ts && info.typed && !isP("=>")) synErr("expected '=>' after TypeScript parameter types");
-                    const call = mk("CallExpression", start); call.callee = callee; call.optional = false; call.arguments = args;
-                    return fin(call);
+                    return asyncParenTail(start, callee);
                 }
             }
             // otherwise `async` is an ordinary identifier -> fall through
@@ -1422,6 +1527,16 @@ function parseInternal(bytes, opts, inject) {
         const id = parseIdentifier();
         if (isP("=>") && !nl()) return finishArrow(id.start, [id], false);
         return id;
+    }
+    // `async ( ... )` (cur is `(`, `callee` the `async` identifier).
+    function asyncParenTail(start, callee) {
+        const info = { spreadComma: false, typed: false };
+        const args = parseArguments(info);
+        if (ts) tsArrowTail(info);
+        if (isP("=>") && !nl()) return finishArrow(start, argsToParams(args, info), true);
+        if (ts && info.typed && !isP("=>")) synErr("expected '=>' after TypeScript parameter types");
+        const call = mk("CallExpression", start); call.callee = callee; call.optional = false; call.arguments = args;
+        return fin(call);
     }
     function fin2n(type, start) { const e = ts ? lastJs : prev; const n = mk(type, start); n.stop = e.stop < start ? start : e.stop; return n; }
 
@@ -1508,6 +1623,7 @@ function parseInternal(bytes, opts, inject) {
         const computed = isP("[");
         const key = parsePropertyKey();
         const pr = mk("Property", start); pr.computed = computed; pr.key = key; pr.kind = kind === "init" ? "init" : kind;
+        if (ts && isP("<")) tsTypeParameters();     // a generic method `m<T>(x: T) {}`
         if (isP("(")) {   // method
             const fe = mk("FunctionExpression", cur.start); fe.async = isAsync; fe.generator = isGen; fe.id = null;
             const fr = withFn(fe.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }, fe.generator); fe.params = fr.params; fe.body = fr.body;

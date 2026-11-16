@@ -1,1 +1,1 @@
-ts.unsupported 11 12 TypeScript type parameters and angle-bracket assertions are not supported
+ts.unsupported 11 12 TypeScript angle-bracket assertions are not supported

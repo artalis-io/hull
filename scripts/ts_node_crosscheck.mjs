@@ -32,15 +32,13 @@ const NODE_STRIPS = new Map([
     ["asi_empty_statement.ts", "erased statement before `;`: Hull refuses, Node inserts `;`"],
     ["asi_semicolon.ts", "erased statement before `;`: Hull refuses, Node inserts `;`"],
     ["asi_satisfies_call.ts", "line starting `(` after a `satisfies` type: Hull refuses, Node inserts `;`"],
+    ["asi_generic_arrow.ts", "erased statement before a generic arrow's `<`: Hull refuses, Node inserts `;`"],
     ["asi_template.ts", "erased statement before a template: Hull refuses, Node inserts `;`"],
     ["declaration_not_in_list.ts", "type declaration outside a statement list: Hull refuses"],
     ["declare_class.ts", "declare class: slice 2"],
     ["declare_global.ts", "declare global: slice 2"],
     ["declare_initializer.ts", "initializer in a declare declaration: TypeScript rejects it"],
     ["declare_module.ts", "declare module: slice 2"],
-    ["generic_arrow.ts", "generics with < speculation: slice 2"],
-    ["generic_class.ts", "generics with < speculation: slice 2"],
-    ["generic_function.ts", "generics with < speculation: slice 2"],
     ["implements.ts", "implements: slice 2"],
     ["import_type_require.ts", "import type x = require(): slice 2"],
     ["modifiers.ts", "class member modifiers: slice 2"],
@@ -104,6 +102,6 @@ for (const f of list(path.join(CORPUS, "refuse"))) {
 }
 for (const f of NODE_STRIPS.keys()) if (!seen.has(f)) fail(`NODE_STRIPS names refuse/${f}, which does not exist`);
 
-if (accepted < 18 || refused < 32) fail(`corpus too small: ${accepted} accept, ${refused} refuse`);
+if (accepted < 19 || refused < 31) fail(`corpus too small: ${accepted} accept, ${refused} refuse`);
 if (failures) process.exit(1);
 console.log(`ts-node-crosscheck: Node ${process.version}: ${accepted} accept cases match, ${refused} refuse cases agree`);

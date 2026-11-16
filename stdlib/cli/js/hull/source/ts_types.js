@@ -7,7 +7,7 @@
 // limit and diagnostic budget:
 //
 //   createTypeGrammar(p) -> { parseType(opts?), parseReturnType(), parseTypeParameters(),
-//                             parseParameters(), parseObjectType(), startsType() }
+//                             parseTypeArguments(), parseParameters(), parseObjectType(), startsType() }
 //   p: { cur(), advance(goal), peek(k), isP(v), isKw(v), nl(), splitGreater(), synErr(msg, tok),
 //        guard(), unguard() }
 //
@@ -340,6 +340,10 @@ export function createTypeGrammar(p) {
         memberTail();
     }
 
+    // `<A, B>` type arguments (cur is `<`), as in a type reference or after an expression.
+    function parseTypeArguments() { if (isP("<")) typeArguments(); else p.synErr("expected '<'"); }
+
     return { parseType: parseType, parseReturnType: parseReturnType, parseTypeParameters: parseTypeParameters,
-             parseParameters: parameters, parseObjectType: objectOrMappedType, startsType: startsType };
+             parseTypeArguments: parseTypeArguments, parseParameters: parameters, parseObjectType: objectOrMappedType,
+             startsType: startsType };
 }
