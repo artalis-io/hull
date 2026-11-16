@@ -24,6 +24,13 @@ static int count(const char *hay, const char *needle) {
 }
 
 /* parse `src` and return the malloc'd JSON SourceUnit (caller frees). */
+static int count_of(const char *hay, const char *needle)
+{
+    int c = 0;
+    size_t nl = strlen(needle);
+    for (const char *q = hay; q && (q = strstr(q, needle)) != NULL; q += nl) c++;
+    return c;
+}
 static char *parse_str(HlJsSession *s, const char *src)
 {
     char *out = NULL; size_t out_len = 0;
@@ -192,6 +199,16 @@ UTEST(js_parser, imports_exports_hull_scheme)
     o = parse_str(s, "export const x = 1; export default function f(){}");
     EXPECT_TRUE(has(o, "\"type\":\"ExportNamedDeclaration\""));
     EXPECT_TRUE(has(o, "\"type\":\"ExportDefaultDeclaration\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    o = parse_str(s, "export async function f() {} export default async function () {}");
+    EXPECT_EQ(2, count_of(o, "\"type\":\"FunctionDeclaration\""));
+    EXPECT_EQ(2, count_of(o, "\"async\":true"));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    /* a line break after `async` leaves it an identifier: the default export is `async` */
+    o = parse_str(s, "export default async\nfunction g() {}");
+    EXPECT_TRUE(has(o, "\"declaration\":{\"type\":\"Identifier\""));
     EXPECT_TRUE(has(o, "\"valid\":true"));
     free(o); o = NULL;
     o = parse_str(s, "const m = await import(\"hull:jwt\");");

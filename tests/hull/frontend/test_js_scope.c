@@ -269,6 +269,17 @@ UTEST(js_scope, exports)
     EXPECT_TRUE(has(o, "\"access\":\"read\",\"declRange\":{\"start\":25,\"stop\":26}"));
     EXPECT_FALSE(has(o, "\"kind\":\"global\""));
     free(o); o = NULL;
+    /* async ones bind the same way: `export async function` and `export default async
+     * function` are declarations (the first failed to parse, the second was an expression) */
+    o = scope_of(s, "export async function h() { return h; }");
+    EXPECT_TRUE(has(o, "\"name\":\"h\",\"kind\":\"function\",\"scope\":\"module\""));
+    EXPECT_TRUE(has(o, "\"access\":\"read\",\"declRange\":{\"start\":23,\"stop\":24}"));
+    EXPECT_FALSE(has(o, "\"kind\":\"global\""));
+    free(o); o = NULL;
+    o = scope_of(s, "export default async function k() { return k; } k;");
+    EXPECT_TRUE(has(o, "\"name\":\"k\",\"kind\":\"function\",\"scope\":\"module\""));
+    EXPECT_FALSE(has(o, "\"kind\":\"global\""));
+    free(o); o = NULL;
     /* exported class binding used from a method */
     o = scope_of(s, "export class C { m() { return C; } }");
     EXPECT_TRUE(has(o, "\"name\":\"C\",\"kind\":\"class\",\"scope\":\"module\""));

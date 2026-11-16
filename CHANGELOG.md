@@ -46,6 +46,9 @@ release-artifact layout).
 
 ### Fixed
 
+- JS source analysis (`hull agent inspect`, `hull dev --agent`): `export async function f() {}`
+  is no longer a syntax error, and `export default async function g() {}` is a function
+  declaration, its name bound in the module, rather than an expression.
 - JS source analysis (`hull agent inspect`, `hull dev --agent`): an arrow function whose
   parameter list ends in a comma (`(a, b,) => a`, valid since ES2017) is no longer a syntax
   error. A parenthesized expression ending in a comma (`(a, b,)`) still is.
