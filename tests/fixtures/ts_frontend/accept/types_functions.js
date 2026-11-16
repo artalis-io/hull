@@ -1,0 +1,20 @@
+// Function, constructor, generic, conditional, query and indexed access types.
+let f1            ;
+let f2                                                           ;
+let f3                ;
+let f4                           ;
+let f5                           ;
+let f6                                         ;
+let f7                                  ;
+let c1                                                         ;
+let c2                                      ;
+let q1              ;
+let q2                        ;
+let q3                  ;
+let q4                               ;
+let q5                        ;
+let i1          ;
+let i2             ;
+let i3                          ;
+let g1                                     ;
+let p1                             ;

@@ -196,6 +196,10 @@ check("js golden snapshot -> focused js (not full_core)",
        "tests/fixtures/js_frontend_golden/cases/asi_and_regex.src",
        "scripts/js_frontend_diff.sh"],
       want_true=["focused_js_frontend"], want_false=["full_core", "full_all"])
+check("ts corpus -> focused js (not full_core)",
+      ["tests/fixtures/ts_frontend/accept/arrows.ts",
+       "tests/fixtures/ts_frontend/refuse/enum.expect"],
+      want_true=["focused_js_frontend"], want_false=["full_core", "full_all"])
 check("frontend C test -> focused js (not full_core)",
       ["tests/hull/frontend/test_js_conformance.c"],
       want_true=["focused_js_frontend"], want_false=["full_core", "full_all"])

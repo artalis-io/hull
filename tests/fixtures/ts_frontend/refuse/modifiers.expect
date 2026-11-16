@@ -1,0 +1,2 @@
+ts.unsupported 11 18 TypeScript 'private' modifiers are not supported
+ts.unsupported 31 39 TypeScript 'readonly' modifiers are not supported

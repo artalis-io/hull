@@ -50,3 +50,4 @@ fuzz/corpus_*/** binary
 # byte-exact, since the committed digests cover every byte and one case is CRLF on
 # purpose. `-text` (not `binary`) so they still diff as text in review.
 tests/fixtures/js_frontend_golden/cases/** -text
+tests/fixtures/ts_frontend/** -text

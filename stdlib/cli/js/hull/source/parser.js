@@ -27,15 +27,20 @@
 // and fires only where JavaScript is a syntax error, so JS mode is unchanged byte for byte
 // (test_js_golden and scripts/js_frontend_diff.sh hold it) and valid JavaScript parses the same
 // in both modes (test_js_typescript holds that). In TS mode the unit also carries `typeSpans` (the
-// erasable type syntax, sorted half-open byte ranges, see hull:source:ts_erase). This slice
-// recognises the TypeScript constructs and refuses each one with a ts.unsupported diagnostic;
-// the type grammar that erases them comes next.
+// erasable type syntax, sorted half-open byte ranges, see hull:source:ts_erase), read by the
+// type grammar (hull:source:ts_types). Type tokens never move a node's range: a node ends at its
+// last JAVASCRIPT token, so the TS-mode AST is exactly the JS-mode AST of the erased bytes.
+// Erased in this slice: annotations (variables, parameters incl. arrow and async-arrow ones,
+// returns, class fields), optional `?` on parameters and members, definite assignment `!`,
+// `as` / `satisfies`, and non-null `!`. Every other TypeScript construct is refused with a
+// ts.unsupported diagnostic.
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { createTokenizer } from "hull:source:lexer";
 import { newDiagnostic, makeBudget } from "hull:source:diagnostic";
 import { attach as attachAnnotations } from "hull:source:annotations";
+import { createTypeGrammar } from "hull:source:ts_types";
 
 // Reserved words that may NOT be a binding/identifier reference.
 const RESERVED = new Set([
@@ -184,6 +189,10 @@ function parseInternal(bytes, opts, inject) {
     // cur/prev tokens. The goal used to READ cur was decided when we advanced past prev.
     let cur = tk.next(true);         // first token is at statement (operand) position
     let prev = null;
+    // TS mode: the last consumed token that is not type syntax (typeDepth > 0 while a type is
+    // read). Nodes end there, so a trailing type never stretches a node.
+    let lastJs = null;
+    let typeDepth = 0;
 
     // advance past cur, reading the next token with an explicit grammatical slash goal:
     //   regexAllowed=true  -> the next token is at an operand/statement position
@@ -192,6 +201,7 @@ function parseInternal(bytes, opts, inject) {
     // fresh read from the tokenizer.
     function advance(regexAllowed) {
         prev = cur;
+        if (typeDepth === 0) lastJs = cur;
         cur = la.length > 0 ? la.shift() : tk.next(regexAllowed === false ? false : true);
         return prev;
     }
@@ -269,19 +279,106 @@ function parseInternal(bytes, opts, inject) {
         return nx.type === "identifier" || nx.type === "string" || nx.type === "number" ||
                (nx.type === "punctuator" && nx.value === "[");
     }
+    // TS mode: split a `>>`-family token at cur so its first `>` closes a type list. Through the
+    // tokenizer when nothing was read past cur; by hand when a lookahead already was.
+    function splitGreaterTok() {
+        if (la.length === 0) { const g = tk.splitGreater(); if (g) cur = g; return; }
+        const t = cur;
+        la.unshift({ type: "punctuator", value: t.value.substring(1), start: t.start + 1, stop: t.stop, nlBefore: false });
+        cur = { type: "punctuator", value: ">", start: t.start, stop: t.start + 1, nlBefore: t.nlBefore };
+    }
+    const types = ts ? createTypeGrammar({
+        cur: function () { return cur; }, advance: advance, peek: function (k) { return peekTok(k, false); },
+        isP: isP, isKw: isKw, nl: nl, splitGreater: splitGreaterTok,
+        synErr: function (m, t) { synErr(m, t); }, guard: guard, unguard: unguard,
+    }) : null;
+    // TS mode: consume type syntax with `body` (starting at cur) and record it as one span.
+    function tsSpan(body) {
+        const start = cur.start;
+        typeDepth++;
+        body();
+        typeDepth--;
+        const stop = prev.stop;
+        if (stop > start) typeSpans.push({ start: start, stop: stop });
+    }
+    // `: T` (cur is the `:`).
+    function tsAnnotation() { tsSpan(function () { advance(false); types.parseType(); }); }
+    // `: R` for a return type (a type predicate allowed).
+    function tsReturnType() { tsSpan(function () { advance(false); types.parseReturnType(); }); }
+    // `?` [`: T`] (cur is the `?`).
+    function tsOptional() { tsSpan(function () { advance(false); if (isP(":")) { advance(false); types.parseType(); } }); }
+    // `!: T` (cur is the `!`); TypeScript requires the type.
+    function tsDefinite() {
+        tsSpan(function () {
+            advance(false);
+            if (isP(":")) { advance(false); types.parseType(); } else synErr("expected ':' after a definite assignment assertion");
+        });
+    }
+    // A line terminator (LF, CR, U+2028, U+2029) in the bytes [from, to) - 1-based positions.
+    // Erasure keeps them, so one inside a return type lands between `)` and `=>`.
+    function tsLineBreakBetween(from, to) {
+        for (let i = from - 1; i < to - 1; i++) {
+            const b = bytes[i];
+            if (b === 0x0a || b === 0x0d) return true;
+            if (b === 0xe2 && bytes[i + 1] === 0x80 && (bytes[i + 2] === 0xa8 || bytes[i + 2] === 0xa9)) return true;
+        }
+        return false;
+    }
+    // `name?` followed by `:` `,` `)` `=`: an optional arrow parameter (cur is `name`). The token
+    // after `?` is peeked with the operand goal, as JavaScript reads it after a `?`.
+    function tsOptionalParamAhead() {
+        if (!isIdTok(cur) || RESERVED.has(cur.value) || !peekIsP(1, "?")) return false;
+        const t = peekTok(2, true);
+        return t.type === "punctuator" && (t.value === ":" || t.value === "," || t.value === ")" || t.value === "=");
+    }
+    // `item = default` after an annotated arrow parameter: the AssignmentExpression JS mode's
+    // parseAssignment builds for `(item = default)`, which the cover grammar turns into a default.
+    function tsDefaultAfter(item) {
+        if (!isP("=")) return item;
+        if (!isAssignTarget(item)) synErr("invalid assignment target", item);
+        const node = mk("AssignmentExpression", item.start);
+        node.operator = "="; node.left = item; advance(true);
+        node.right = parseAssignment();
+        return fin(node);
+    }
+    // One item of an arrow-candidate list (a parenthesized expression or `async (` arguments) in
+    // TS mode: an optional parameter `a?`, an annotation `a: T`, then a default. Sets info.typed
+    // when the list can only be an arrow's parameters.
+    function tsArrowItem(info) {
+        if (tsOptionalParamAhead()) {
+            const id = parseIdentifier();
+            tsOptional();
+            info.typed = true;
+            return tsDefaultAfter(id);
+        }
+        const item = parseAssignment();
+        if (!isP(":")) return item;
+        tsAnnotation();
+        info.typed = true;
+        return tsDefaultAfter(item);
+    }
+    // After an arrow-candidate list's `)`: a return type, when the list is typed or `(a) :`
+    // cannot be a conditional's or a case's colon. Then `=>` must follow on the same line (a
+    // line break there would make the erased arrow a syntax error, docs/typescript_design.md 3.4).
+    function tsArrowTail(info) {
+        const close = prev;                          // the list's `)`
+        if (isP(":") && (info.typed || condConsequent === 0)) { tsReturnType(); info.typed = true; }
+        if (info.typed && isP("=>") && tsLineBreakBetween(close.stop, cur.start))
+            diag("error", "ts.unsupported", "a line break before '=>' after TypeScript parameter or return types is not supported: keep '=>' on the line the types end", cur.start, cur.stop);
+    }
 
     function mk(type, start) { return { type: type, start: start, stop: start }; }
     // Finalize a node's half-open range. stop = the last consumed token's stop, but NEVER before
     // the node's own start: on an error-recovery path that consumed nothing after the node began
     // (prev is still the token before `start`), clamp to a zero-width span [start, start] rather
     // than emit an inverted range. Keeps the AST range invariant start <= stop <= n+1.
-    function fin(node) { const s = prev ? prev.stop : node.start; node.stop = s < node.start ? node.start : s; return node; }
+    function fin(node) { const e = ts ? lastJs : prev; const s = e ? e.stop : node.start; node.stop = s < node.start ? node.start : s; return node; }
     // An Error recovery node spans [start, end-of-CONSUMED-input] = prev.stop -- NOT cur.start
     // (the next, not-yet-consumed token, which lies past any trailing trivia). Using prev.stop
     // mirrors fin() so an Error child can never escape its enclosing node's range (also fin'd to
     // prev.stop): `import\n;` must not yield an Error that overshoots into the next line. Clamp
     // to >= start for the zero-width case (nothing consumed after `start`).
-    function errNode(start) { const e = mk("Error", start); const s = prev ? prev.stop : start; e.stop = s < start ? start : s; return e; }
+    function errNode(start) { const e = mk("Error", start); const t = ts ? lastJs : prev; const s = t ? t.stop : start; e.stop = s < start ? start : s; return e; }
 
     // Consume a specific punctuator (operator/operand goal after). Returns true if consumed.
     function eatP(v, regexAllowedAfter) { if (isP(v)) { advance(regexAllowedAfter); return true; } return false; }
@@ -407,8 +504,8 @@ function parseInternal(bytes, opts, inject) {
         for (;;) {
             const decl = mk("VariableDeclarator", cur.start);
             decl.id = parseBindingTarget();
-            if (ts && isP("!") && !nl()) tsRefuse("definite assignment assertions");
-            else if (ts && isP(":")) tsRefuse("type annotations");
+            if (ts && isP("!") && !nl()) tsDefinite();
+            else if (ts && isP(":")) tsAnnotation();
             decl.init = null;
             if (eatP("=", true)) decl.init = parseAssignment();
             d.declarations.push(fin(decl));
@@ -636,18 +733,18 @@ function parseInternal(bytes, opts, inject) {
         const params = [];
         if (!expectP("(", true)) return params;
         while (!isP(")") && !atEof()) {
-            if (isP("...")) { const r = mk("RestElement", cur.start); advance(true); r.argument = parseBindingTarget(); params.push(fin(r)); break; }
+            if (isP("...")) { const r = mk("RestElement", cur.start); advance(true); r.argument = parseBindingTarget(); if (ts && isP(":")) tsAnnotation(); params.push(fin(r)); break; }
             if (ts && isKw("this") && (peekIsP(1, ":") || peekIsP(1, ",") || peekIsP(1, ")"))) tsRefuse("'this' parameters");
             else if (ts && tsModifierStart()) tsRefuse("parameter properties");
             let target = parseBindingTarget();
-            if (ts && isP("?")) tsRefuse("optional parameters");
-            else if (ts && isP(":")) tsRefuse("type annotations");
+            if (ts && isP("?")) tsOptional();
+            else if (ts && isP(":")) tsAnnotation();
             if (eatP("=", true)) { const ap = mk("AssignmentPattern", target.start); ap.left = target; ap.right = parseAssignment(); target = fin(ap); }
             params.push(target);
             if (!eatP(",", true)) break;
         }
         expectP(")", true);
-        if (ts && isP(":")) tsRefuse("return type annotations");
+        if (ts && isP(":")) tsReturnType();
         return params;
     }
 
@@ -722,9 +819,9 @@ function parseInternal(bytes, opts, inject) {
         if (isP("*")) { isGen = true; unsupported("generator methods are not supported"); advance(true); }
         if (isKw("get") || isKw("set")) { const nx = peekTok(1, false); if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";"))) { kind = cur.value; advance(true); } }
         const key = parsePropertyKey();
-        if (ts && isP("?")) tsRefuse("optional members");
-        else if (ts && isP("!") && !nl()) tsRefuse("definite assignment assertions");
-        else if (ts && isP(":")) tsRefuse("type annotations");
+        if (ts && isP("?")) tsOptional();
+        else if (ts && isP("!") && !nl()) tsDefinite();
+        else if (ts && isP(":")) tsAnnotation();
         else if (ts && isP("<")) tsRefuse("type parameters");
         const m = mk("MethodDefinition", start); m.static = isStatic; m.kind = kind; m.key = key; m.async = isAsync; m.generator = isGen;
         if (isP("(")) {
@@ -874,7 +971,14 @@ function parseInternal(bytes, opts, inject) {
         for (;;) {
             const op = (cur.type === "punctuator" || cur.type === "identifier") ? cur.value : null;
             const prec = op !== null ? BINPREC[op] : undefined;
-            if (ts && prec === undefined && isIdTok(cur) && (op === "as" || op === "satisfies") && !nl()) { tsRefuse("'" + op + "' expressions"); break; }
+            // `x as T` / `x satisfies T`: relational precedence, left-associative, no line break
+            // before the keyword (as TypeScript). It builds no node: the left operand stands.
+            if (ts && prec === undefined && isIdTok(cur) && (op === "as" || op === "satisfies") && !nl()) {
+                if (8 <= minPrec) break;
+                const asConst = op === "as";
+                tsSpan(function () { advance(false); types.parseType({ asConst: asConst }); });
+                continue;
+            }
             if (prec === undefined || prec <= minPrec) break;
             if ((op === "in" || op === "instanceof") && cur.type !== "identifier") break;
             const node = mk(op === "&&" || op === "||" || op === "??" ? "LogicalExpression" : "BinaryExpression", left.start);
@@ -928,7 +1032,6 @@ function parseInternal(bytes, opts, inject) {
 
     function parsePostfix() {
         let e = parseLeftHandSide(true);
-        if (ts && isP("!") && !nl()) tsRefuse("non-null assertions");
         if ((isP("++") || isP("--")) && !nl()) {
             // Postfix ++/-- requires a simple assignment target (an Identifier or member access);
             // e.g. `import.meta++` (a MetaProperty) is an invalid update target.
@@ -957,6 +1060,8 @@ function parseInternal(bytes, opts, inject) {
 
     function parseCallMemberTail(e, allowCall) {
         for (;;) {
+            // TS mode: a non-null assertion `x!` (no line break before it) builds no node.
+            if (ts && isP("!") && !nl()) { tsSpan(function () { advance(false); }); continue; }
             if (isP(".")) {
                 advance(false);
                 if (isP("#")) {   // a private member access (obj.#name) -- declined, consumed cleanly
@@ -990,8 +1095,12 @@ function parseInternal(bytes, opts, inject) {
         advance(true);                              // past `(`
         while (!isP(")") && !atEof()) {
             const spread = isP("...");
-            if (spread) { const sp = mk("SpreadElement", cur.start); advance(true); sp.argument = parseAssignment(); args.push(fin(sp)); }
-            else args.push(parseAssignment());
+            if (spread) {
+                const sp = mk("SpreadElement", cur.start); advance(true); sp.argument = parseAssignment();
+                if (ts && info && isP(":")) { tsAnnotation(); info.typed = true; }
+                args.push(fin(sp));
+            }
+            else args.push(ts && info ? tsArrowItem(info) : parseAssignment());
             if (!eatP(",", true)) break;
             if (spread && info) info.spreadComma = true;
         }
@@ -1127,9 +1236,11 @@ function parseInternal(bytes, opts, inject) {
                 // `async(a=` never finished parsing.) A `new` callee's `(...)` is the new's.
                 if (nx.type === "punctuator" && nx.value === "(" && !noCall) {
                     const callee = parseIdentifier();   // `async` -> cur is `(`
-                    const info = { spreadComma: false };
+                    const info = { spreadComma: false, typed: false };
                     const args = parseArguments(info);
+                    if (ts) tsArrowTail(info);
                     if (isP("=>") && !nl()) return finishArrow(start, argsToParams(args, info), true);
+                    if (ts && info.typed && !isP("=>")) synErr("expected '=>' after TypeScript parameter types");
                     const call = mk("CallExpression", start); call.callee = callee; call.optional = false; call.arguments = args;
                     return fin(call);
                 }
@@ -1141,26 +1252,37 @@ function parseInternal(bytes, opts, inject) {
         if (isP("=>") && !nl()) return finishArrow(id.start, [id], false);
         return id;
     }
-    function fin2n(type, start) { const n = mk(type, start); n.stop = prev.stop < start ? start : prev.stop; return n; }
+    function fin2n(type, start) { const e = ts ? lastJs : prev; const n = mk(type, start); n.stop = e.stop < start ? start : e.stop; return n; }
 
     function parseParenOrArrow() {
         // Parse a parenthesized expression; if followed by `=>`, reinterpret as arrow params.
         const start = cur.start;
         advance(true);
-        if (isP(")")) { advance(false); if (isP("=>")) return finishArrow(start, [], false); synErr("unexpected ')'"); return errNode(start); }
+        if (isP(")")) {
+            advance(false);
+            if (ts) tsArrowTail({ typed: true });   // `()` is only ever an arrow's parameters
+            if (isP("=>")) return finishArrow(start, [], false);
+            synErr("unexpected ')'"); return errNode(start);
+        }
         const items = [];
         let sawRest = false;
         let trailing = null;                        // a `,` right before `)`: legal for an arrow only
+        const info = { typed: false };              // TS mode: the list holds parameter types
         for (;;) {
-            if (isP("...")) { const r = mk("RestElement", cur.start); advance(true); r.argument = parseBindingTarget(); items.push(fin(r)); sawRest = true; break; }
-            items.push(parseAssignment());
+            if (isP("...")) {
+                const r = mk("RestElement", cur.start); advance(true); r.argument = parseBindingTarget();
+                if (ts && isP(":")) { tsAnnotation(); info.typed = true; }
+                items.push(fin(r)); sawRest = true; break;
+            }
+            items.push(ts ? tsArrowItem(info) : parseAssignment());
             if (!eatP(",", true)) break;
             if (isP(")")) { trailing = prev; break; }
         }
         expectP(")", false);
-        if (ts && isP(":") && condConsequent === 0) tsRefuse("return type annotations");
+        if (ts) tsArrowTail(info);
         if (isP("=>") && !nl()) return finishArrow(start, items, false);
         if (trailing) synErr("unexpected trailing ','", trailing);
+        if (ts && info.typed && !isP("=>")) synErr("expected '=>' after TypeScript parameter types");
         if (sawRest) { synErr("rest element outside arrow parameters"); }
         if (items.length === 1) return items[0];
         const seq = mk("SequenceExpression", start); seq.expressions = items; return fin(seq);
@@ -1393,6 +1515,6 @@ function parseInternal(bytes, opts, inject) {
     const allDiags = budget.list;
     const valid = allDiags.every(function (d) { return d.severity !== "error"; });
     const unit = { ast: ast, comments: tk.comments, diagnostics: allDiags, linemap: tk.linemap, valid: valid };
-    if (ts) unit.typeSpans = typeSpans;
+    if (ts) unit.typeSpans = typeSpans.sort(function (a, b) { return a.start - b.start; });
     return unit;
 }
