@@ -8,3 +8,5 @@ interface I {}
 const t = 1
 type U = string
 let next = 2
+const w = 1;
+interface J {};
