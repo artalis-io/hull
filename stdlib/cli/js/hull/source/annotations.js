@@ -241,7 +241,9 @@ export function attach(ast, comments, bytes, linemap, budget, path) {
             if (top === declLine) return null;
             // Every comment that STARTS in [top, declLine-1] contributes, in source order; ALL
             // comments on a shared line are collected (fixes same-line comment-group loss).
-            const list = [], byName = {};
+            // byName has no prototype: a tag is any name (`@constructor`, `@__proto__`), and
+            // an object literal would read those from Object.prototype (or set its prototype).
+            const list = [], byName = Object.create(null);
             const end = linemap[declLine - 1];                // first byte of the declaration's line
             for (let i = firstStartingAt(linemap[top - 1]); i < sorted.length && sorted[i].start < end; i++) {
                 const c = sorted[i];

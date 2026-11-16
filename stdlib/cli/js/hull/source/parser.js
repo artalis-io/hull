@@ -70,13 +70,15 @@ const UNARY = new Set(["+", "-", "!", "~", "typeof", "void", "delete"]);
 // Assignment operators.
 const ASSIGN = new Set(["=", "+=", "-=", "*=", "/=", "%=", "**=", "<<=", ">>=", ">>>=", "&=", "|=", "^=", "&&=", "||=", "??="]);
 // Binary operator precedence (higher binds tighter). Logical/coalesce handled with these too.
-const BINPREC = {
-    "??": 1, "||": 2, "&&": 3, "|": 4, "^": 5, "&": 6,
-    "==": 7, "!=": 7, "===": 7, "!==": 7,
-    "<": 8, ">": 8, "<=": 8, ">=": 8, "instanceof": 8, "in": 8,
-    "<<": 9, ">>": 9, ">>>": 9,
-    "+": 10, "-": 10, "*": 11, "/": 11, "%": 11, "**": 12,
-};
+// A Map, not an object literal: it is looked up with every identifier at an operator position,
+// and an object would answer `constructor` / `toString` / ... from Object.prototype.
+const BINPREC = new Map([
+    ["??", 1], ["||", 2], ["&&", 3], ["|", 4], ["^", 5], ["&", 6],
+    ["==", 7], ["!=", 7], ["===", 7], ["!==", 7],
+    ["<", 8], [">", 8], ["<=", 8], [">=", 8], ["instanceof", 8], ["in", 8],
+    ["<<", 9], [">>", 9], [">>>", 9],
+    ["+", 10], ["-", 10], ["*", 11], ["/", 11], ["%", 11], ["**", 12],
+]);
 
 // A validated nonnegative-integer option, else the default.
 function nnInt(x, dflt) { return (typeof x === "number" && isFinite(x) && x >= 0 && Math.floor(x) === x) ? x : dflt; }
@@ -1127,7 +1129,7 @@ function parseInternal(bytes, opts, inject) {
         let left = parseUnary();
         for (;;) {
             const op = (cur.type === "punctuator" || cur.type === "identifier") ? cur.value : null;
-            const prec = op !== null ? BINPREC[op] : undefined;
+            const prec = op !== null ? BINPREC.get(op) : undefined;
             // `x as T` / `x satisfies T`: relational precedence, left-associative, no line break
             // before the keyword (as TypeScript). It builds no node: the left operand stands.
             if (ts && prec === undefined && isIdTok(cur) && (op === "as" || op === "satisfies") && !nl()) {

@@ -318,6 +318,14 @@ UTEST(js_parser, automatic_semicolon_insertion)
     EXPECT_TRUE(has(o, "\"name\":\"b\""));
     EXPECT_TRUE(has(o, "\"valid\":true"));
     free(o);
+    /* An identifier named like an Object.prototype member is not a binary operator: the line
+     * after `b` is a new statement (it was a BinaryExpression with operator "toString"), and
+     * a class member named `constructor` follows a field without `;`. */
+    o = parse_str(s, "let a = b\ntoString()\nlet c = d\nconstructor\nclass Z { x = 4\n constructor(y) {} }");
+    EXPECT_FALSE(has(o, "\"type\":\"BinaryExpression\""));
+    EXPECT_TRUE(has(o, "\"type\":\"MethodDefinition\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o);
     hl_js_session_destroy(s);
 }
 
