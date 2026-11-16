@@ -17,6 +17,27 @@
 #include <limits.h>
 #include <dirent.h>
 #include <time.h>
+#include <errno.h>
+#include <signal.h>
+#if defined(__COSMOPOLITAN__)
+/* IsWindows (cosmo's __hostos: the real host, never an environment value a
+ * caller could set) is declared only under _COSMO_SOURCE. */
+#ifndef _COSMO_SOURCE
+#define _COSMO_SOURCE
+#define HL_HOST_UNDEF_COSMO_SOURCE
+#endif
+#include <libc/dce.h>
+#ifdef HL_HOST_UNDEF_COSMO_SOURCE
+#undef _COSMO_SOURCE
+#undef HL_HOST_UNDEF_COSMO_SOURCE
+#endif
+#include <libc/nt/accounting.h>         /* GetExitCodeProcess */
+#include <libc/nt/enum/processaccess.h>
+#include <libc/nt/enum/status.h>        /* kNtStillActive */
+#include <libc/nt/errors.h>
+#include <libc/nt/process.h>            /* OpenProcess */
+#include <libc/nt/runtime.h>            /* CloseHandle, GetLastError */
+#endif
 #if !defined(_WIN32)
 #include <pwd.h>
 #endif
@@ -519,7 +540,8 @@ int hl_host_normalize_path(const char *path, char *out, size_t out_sz)
 
     if (!drive) {
         memcpy(out, path, len + 1);
-        return 0;
+        hl_host_canon_drive(out);
+        return len >= 2 && out[1] != path[1]; /* 1: "/d..." became "/D..." */
     }
 
     /* '/' + letter + the rest, which already starts with its own separator:
@@ -529,11 +551,41 @@ int hl_host_normalize_path(const char *path, char *out, size_t out_sz)
 
     size_t n = 0;
     out[n++] = '/';
-    out[n++] = path[0];
+    out[n++] = (path[0] >= 'a' && path[0] <= 'z') ? (char)(path[0] - 'a' + 'A')
+                                                   : path[0];
     for (size_t i = 2; i < len; i++)
         out[n++] = (path[i] == '\\') ? '/' : path[i];
     out[n] = 0;
     return 1;
+}
+
+void hl_host_canon_drive(char *path)
+{
+    if (!path || !hl_host_is_windows()) return;
+    if (path[0] == '/' && path[1] >= 'a' && path[1] <= 'z' &&
+        (path[2] == '/' || path[2] == '\0'))
+        path[1] = (char)(path[1] - 'a' + 'A');
+}
+
+int hl_host_pid_alive(long pid)
+{
+    if (pid <= 0 || pid > INT_MAX) return 0;
+#if defined(__COSMOPOLITAN__)
+    /* The REAL host, never the test hook: these are Win32 calls. */
+    if (IsWindows()) {
+        int64_t h = OpenProcess(kNtProcessQueryLimitedInformation, 0,
+                                (uint32_t)pid);
+        if (!h)
+            return GetLastError() == kNtErrorInvalidParameter ? 0 : -1;
+        uint32_t code = 0;
+        int got = GetExitCodeProcess(h, &code) != 0;
+        CloseHandle(h);
+        if (!got) return -1;
+        return code == kNtStillActive ? 1 : 0;
+    }
+#endif
+    if (kill((pid_t)pid, 0) == 0) return 1;
+    return errno == ESRCH ? 0 : -1;
 }
 
 /* -- How much a directory grant covers ------------------------------ */

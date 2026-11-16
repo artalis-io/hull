@@ -878,6 +878,13 @@ jobs:
       - name: PROBE - e2e suites on Windows (informational, never gates)
         if: inputs.probe_e2e != ''
         shell: msys2 {0}
+        env:
+          # `ln -s` makes a real (native) symbolic link, dangling ones
+          # included, as on Linux / macOS. MSYS's default copies the target,
+          # so a test of a planted link tested a plain directory, and a link
+          # to a path that does not exist yet failed to be made at all. The
+          # runner has the privilege; nativestrict errors rather than copy.
+          MSYS: winsymlinks:nativestrict
         run: |
           set -uo pipefail
           # /ucrt64/bin last, not first: MSYS-native make is required by this
@@ -1064,6 +1071,13 @@ jobs:
         # runs it too, which is how you exercise the gate on demand.
         if: inputs.probe_e2e == ''
         shell: msys2 {0}
+        env:
+          # `ln -s` makes a real (native) symbolic link, dangling ones
+          # included, as on Linux / macOS. MSYS's default copies the target,
+          # so a test of a planted link tested a plain directory, and a link
+          # to a path that does not exist yet failed to be made at all. The
+          # runner has the privilege; nativestrict errors rather than copy.
+          MSYS: winsymlinks:nativestrict
         run: |
           set -uo pipefail
           export PATH="$PATH:$PWD/cosmo/bin:/ucrt64/bin"
@@ -1180,11 +1194,14 @@ jobs:
       # signal and hides whatever preceded it.
       #
       # The logs are already written per suite; they were simply never kept.
-      - name: Upload the per-suite e2e probe logs
-        if: always() && inputs.probe_e2e != ''
+      # The enforced tier echoes the same tail, so its logs are kept too: a
+      # suite that fails only in the full run (e2e-ssh-tunnel, after ~70 other
+      # suites) passes in a probe, and the full run is then the only evidence.
+      - name: Upload the per-suite e2e logs
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: hull-windows-e2e-probe-logs
+          name: ${{ inputs.probe_e2e != '' && 'hull-windows-e2e-probe-logs' || 'hull-windows-e2e-logs' }}
           path: e2e-*.log
           if-no-files-found: warn
           retention-days: 14

@@ -28,6 +28,8 @@
 #define HL_SHARED_DEV_SESSION_H
 
 #include <limits.h>
+
+#include "hull/shared/host.h" /* hl_host_canon_drive */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -99,6 +101,7 @@ static inline int hl_dev_sidecar_mac_raw(const char *nonce, const char *kind,
         return -1;
     char canon[PATH_MAX];
     if (!realpath(app_dir, canon)) return -1;
+    hl_host_canon_drive(canon); /* "/d" and "/D" are one directory there */
     uint8_t digest[32];
     if (hl_cap_crypto_sha256(content ? content : "", content_len, digest) != 0)
         return -1;

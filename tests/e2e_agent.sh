@@ -513,6 +513,9 @@ app.get("/probe", function(_req, res)
 end)
 LUAEOF
     fi
+    # The link's target exists first: MSYS (Windows) cannot make a link to a
+    # path that does not exist yet. The supervisor uses the directory as is.
+    mkdir -p "$FA/.hull"
     ln -s .hull "$FA/alias"
     $HULL dev --agent -p "$FPORT" "$FA/app.$FEXT" >"$LOG_DIR/forger_$FEXT.log" 2>&1 &
     F_PID=$!

@@ -114,11 +114,10 @@ static void agent_remove_last_error(const char *app_dir)
  * SIGKILL leaves its record behind). A record keys the MACs of its session's
  * sidecars; once its pid is reused by another process, the record would
  * still verify that dead session's (genuine, but stale) sidecars, so it is
- * pruned whenever a new session starts. Not on Windows: kill(pid, 0) there
- * terminates the process (see agent_inspect_stream_live in agent.c). */
+ * pruned whenever a new session starts. hl_host_pid_alive, not kill(pid, 0),
+ * which under Cosmopolitan on Windows terminates the process. */
 static void dev_session_prune(void)
 {
-    if (hl_host_is_windows()) return;
     const char *home = hl_host_home();
     if (!home) return;
     char dir[PATH_MAX];
@@ -135,7 +134,7 @@ static void dev_session_prune(void)
         long pid = strtol(nm, &end, 10);
         if (errno || !end || *end || pid <= 0 || pid > INT_MAX) continue;
         if (pid == (long)getpid()) continue;
-        if (kill((pid_t)pid, 0) == 0 || errno != ESRCH) continue;
+        if (hl_host_pid_alive(pid) != 0) continue;   /* running, or unknown */
         (void)unlinkat(dirfd(d), nm, 0);
     }
     closedir(d);

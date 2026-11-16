@@ -215,7 +215,14 @@ run_hull_reserved_without_policy() {
     d=$(mktemp -d)
     mkdir "${d}/.hull"
     printf 'SECRET-SIDECAR' > "${d}/.hull/secret.html"
-    ln -s .hull "${d}/templates"
+    # A REAL link on Windows: MSYS's default `ln -s` copies the directory,
+    # and reading a copy of .hull named templates is no escape to refuse.
+    MSYS=winsymlinks:nativestrict ln -s .hull "${d}/templates" 2>/dev/null || true
+    if [ ! -L "${d}/templates" ]; then
+        echo "  SKIP: ${runtime} .hull through a symlink - cannot make a symbolic link here"
+        rm -rf "${d}"
+        return 0
+    fi
     if [ "$ext" = "lua" ]; then
         cat > "${d}/app.lua" <<'LUA'
 app.manifest({ modules = { "hull/template@1" } })

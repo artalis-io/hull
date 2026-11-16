@@ -152,6 +152,9 @@ int hl_host_render_exec(const char *path, char *out, size_t out_sz);
  * only in the drive-letter case, so a POSIX filename that legitimately
  * contains a backslash is left alone.
  *
+ * The drive letter is made upper case on Windows, in this form and in the
+ * rooted one ("/d/a" -> "/D/a", hl_host_canon_drive).
+ *
  * On a non-Windows host this is a verbatim copy: the mixed form is not a path
  * there, and rewriting it would corrupt a legal (if odd) relative filename.
  *
@@ -159,6 +162,32 @@ int hl_host_render_exec(const char *path, char *out, size_t out_sz);
  *          oversized argument (@p out is emptied when it can be).
  */
 int hl_host_normalize_path(const char *path, char *out, size_t out_sz);
+
+/**
+ * @brief Make a rooted drive letter upper case, in place, on Windows.
+ *
+ * A Cosmopolitan APE names drive D as "/D" - and as "/d" when the path came
+ * from an MSYS shell (its `cygpath -u` / mktemp spelling), which Windows reads
+ * as the same directory. realpath() keeps whichever case it was given, so a
+ * comparison or a MAC over the two spellings disagreed: a databases.named DSN
+ * under the app directory was refused, and a live `hull dev --agent` session's
+ * sidecars read as forged. "/d" and "/d/..." become "/D" and "/D/...". Only the
+ * drive letter: the rest of a path keeps its case, so any other difference
+ * still compares unequal (refused, not admitted). A no-op off Windows.
+ */
+void hl_host_canon_drive(char *path);
+
+/**
+ * @brief Whether process @p pid exists, without signalling it.
+ *
+ * kill(pid, 0) is POSIX's probe, but under Cosmopolitan on Windows it
+ * TERMINATES a live process (measured; see agent_inspect_stream_live), so
+ * the Windows checks were skipped and a dev session's record outlived its
+ * supervisor. There this asks Win32 instead (OpenProcess +
+ * GetExitCodeProcess). Returns 1 when it is running, 0 when there is no such
+ * process (or it has exited), -1 when it cannot tell (no permission).
+ */
+int hl_host_pid_alive(long pid);
 
 /**
  * @brief Find @p name as an executable on PATH, honouring host conventions.

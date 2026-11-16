@@ -28,6 +28,7 @@
 #include <sys/types.h>   /* uid_t / gid_t (db_fchown) */
 #include <time.h>        /* nanosleep (db_busy) */
 #include "hull/cap/run_watchdog.h"      /* hl_run_deadline_left_ms */
+#include "hull/shared/host.h"   /* hl_host_is_windows */
 #include "hull/shared/dispatch_meter.h" /* hl_meter_exclude_begin / _end */
 #include <unistd.h>      /* fchown */
 
@@ -850,15 +851,49 @@ void hl_cap_db_sqlite_setup(void)
  * `type` is not the one SQLite itself writes for what the SQL builds, fails
  * the open. Rows with NULL or empty `sql` (automatic indexes) build nothing
  * from text. */
+/* A schema read that lost a lock race to another process opening the same
+ * file - SQLITE_PROTOCOL while it converts the file to WAL or recovers its
+ * index (busy_timeout does not cover that one), or SQLITE_BUSY - is retried
+ * rather than failing the open: measured on Windows, 6 of 8 hull processes
+ * started together against one data.db exited "could not read the schema:
+ * locking protocol". */
+static int db_schema_read_transient(sqlite3 *db)
+{
+    int ec = sqlite3_errcode(db) & 0xff;
+    return ec == SQLITE_PROTOCOL || ec == SQLITE_BUSY;
+}
+
+static int db_check_stored_objects_once(sqlite3 *db, int last_try);
+
 static int db_check_stored_objects(sqlite3 *db)
+{
+    /* About 2 s in all: 5 ms doubling to 200 ms between tries. */
+    long wait_ms = 5, waited = 0;
+    for (;;) {
+        int last = waited >= 2000;
+        int rc = db_check_stored_objects_once(db, last);
+        if (rc != -2) return rc;
+        struct timespec ts = { 0, wait_ms * 1000000L };
+        uint64_t mx = hl_meter_exclude_begin();   /* the other opener's time */
+        nanosleep(&ts, NULL);
+        hl_meter_exclude_end(mx);
+        waited += wait_ms;
+        if (wait_ms < 200) wait_ms *= 2;
+    }
+}
+
+/* 0, -1 (logged), or -2 when the read lost a lock race and @p last_try is
+ * 0 (nothing logged; the caller tries again). */
+static int db_check_stored_objects_once(sqlite3 *db, int last_try)
 {
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db,
             "SELECT type, name, tbl_name, sql, rootpage FROM main.sqlite_schema "
             "WHERE sql IS NOT NULL AND sql <> ''", -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_finalize(st);
+        if (!last_try && db_schema_read_transient(db)) return -2;
         hl_eprintf_line("hull: sqlite could not read the schema: %s",
                         sqlite3_errmsg(db));
-        sqlite3_finalize(st);
         return -1;
     }
     int rc = 0, step;
@@ -913,6 +948,10 @@ static int db_check_stored_objects(sqlite3 *db)
         }
     }
     if (rc == 0 && step != SQLITE_DONE) {
+        if (!last_try && db_schema_read_transient(db)) {
+            sqlite3_finalize(st);
+            return -2;
+        }
         hl_eprintf_line("hull: sqlite could not read the schema: %s",
                         sqlite3_errmsg(db));
         rc = -1;
@@ -991,8 +1030,22 @@ int hl_cap_db_init(sqlite3 *db)
      * it already WAL. Hull's default DSN is the relative path data.db
      * (serve.c), which is why processes sharing a working directory share a
      * database, and hit this window at all. */
-    int wal = (sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) == SQLITE_OK);
-    if (!wal) {
+    /* Not on Windows. There (a Cosmopolitan APE) the WAL index - the
+     * memory-mapped -shm file - is not shared between processes: of 8 hull
+     * processes started against one data.db, the losers of the conversion
+     * race got SQLITE_PROTOCOL and then never started, spinning in SQLite's
+     * WAL read retries (the Windows e2e, e2e-cache-concurrent). The rollback
+     * journal locks the file itself (LockFileEx), which works across
+     * processes; a file an earlier run left in WAL is switched back once no
+     * other connection holds it. */
+    if (hl_host_is_windows()) {
+        if (sqlite3_exec(db, "PRAGMA journal_mode=DELETE", NULL, NULL, NULL) != SQLITE_OK)
+            fprintf(stderr, "hull: sqlite could not leave WAL (%s); another "
+                    "process has the database open\n", sqlite3_errmsg(db));
+    }
+    int wal = !hl_host_is_windows() &&
+              sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) == SQLITE_OK;
+    if (!wal && !hl_host_is_windows()) {
         fprintf(stderr,
                 "hull: sqlite could not set WAL (%s); continuing with the "
                 "database's current journal mode\n",

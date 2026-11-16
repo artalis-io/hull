@@ -48,20 +48,29 @@ check_status() {
 }
 
 wait_for_server() {
-    # $1 = port
-    for i in 1 2 3 4 5 6 7 8 9 10; do
+    # $1 = port. Up to 30 s: the Windows CI hull is an -O0 build, and an app
+    # that migrates several stdlib modules' tables took longer than the 5 s
+    # this allowed.
+    i=0
+    while [ "$i" -lt 60 ]; do
         if curl -s -H "Connection: close" "http://127.0.0.1:$1/health" >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.5
+        i=$((i + 1))
     done
     echo "  server did not start on port $1"
+    if [ -n "${SERVER_LOG:-}" ] && [ -s "$SERVER_LOG" ]; then
+        echo "  --- server output (tail) ---"
+        tail -20 "$SERVER_LOG" | sed 's/^/    /'
+    fi
     return 1
 }
 
 start_server() {
     # $1 = port, $2 = app file, $3 = db path
-    $HULL -p "$1" -d "$3" "$2" >/dev/null 2>&1 &
+    SERVER_LOG="$3.server.log"
+    $HULL -p "$1" -d "$3" "$2" >"$SERVER_LOG" 2>&1 &
     SERVER_PID=$!
 }
 

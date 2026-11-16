@@ -12,7 +12,7 @@
 #include "hull/cap/db_budget.h"     /* hl_db_budget_swap */
 #include "hull/cap/db.h"            /* hl_cap_db_ns_trust */
 #include "hull/cap/db_registry.h"
-#include "hull/shared/host.h"       /* HL_HOST_PATH_MAX */
+#include "hull/shared/host.h"       /* HL_HOST_PATH_MAX, hl_host_normalize_path */
 #include "log.h"
 
 #include <errno.h>
@@ -70,6 +70,12 @@ static int at_or_under(const char *path, const char *dir)
  * realpath of its deepest existing ancestor plus the rest. */
 static int canonical(const char *path, char *out, size_t outsz)
 {
+    /* A Windows drive path ("D:/a/x.db", "D:\\a\\x.db" - what an MSYS shell
+     * hands a -d argument) is absolute: without this it was taken as
+     * relative and joined to the working directory, and the beside file
+     * named "<cwd>/D:/a/x.db.hull-internal" failed every lookup. */
+    char norm[HL_HOST_PATH_MAX];
+    if (hl_host_normalize_path(path, norm, sizeof norm) >= 0) path = norm;
     char abs[HL_HOST_PATH_MAX];
     if (path[0] == '/') {
         if (strlen(path) >= sizeof abs) return -1;
@@ -82,6 +88,7 @@ static int canonical(const char *path, char *out, size_t outsz)
     }
     char real[PATH_MAX];
     if (realpath(abs, real)) {
+        hl_host_canon_drive(real);
         if (strlen(real) >= outsz) return -1;
         strcpy(out, real);
         return 0;
@@ -95,6 +102,7 @@ static int canonical(const char *path, char *out, size_t outsz)
         if (cut == 0) break;
         tmp[cut] = '\0';
         if (realpath(tmp, real)) {
+            hl_host_canon_drive(real);
             int n = snprintf(out, outsz, "%s%s",
                              strcmp(real, "/") == 0 ? "" : real, abs + cut);
             return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
@@ -800,7 +808,10 @@ int hl_db_internal_configure_ex(HlDbRegistry *reg, const char *app_dir,
     int in_hull = 0;
     const char *sreal = (state_dir && state_dir[0] && realpath(state_dir, state_real))
                         ? state_real : NULL;
-    int k = realpath(app_dir, app_real)
+    if (sreal) hl_host_canon_drive(state_real);
+    int have_app = realpath(app_dir, app_real) != NULL;
+    if (have_app) hl_host_canon_drive(app_real);   /* as canonical() spells it */
+    int k = have_app
             ? hl_db_internal_default_dsn_ex(app_real, sreal, default_dsn, idsn,
                                             sizeof idsn, &ibase, &in_hull)
             : 0;

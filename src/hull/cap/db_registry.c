@@ -19,10 +19,12 @@
 #include "hull/shared/host.h"     /* hl_host_normalize_path, HL_HOST_PATH_MAX */
 #include "hull/cap/fs_resolve.h"   /* hl_fs_reserved_name */
 #include "hull/host_match.h"      /* hl_dsn_query_param */
+#include "hull/shared/fs_util.h"  /* hl_default_db_path_check */
 
 #include <limits.h>
 #include <sys/stat.h>   /* mkdir */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -215,6 +217,10 @@ int hl_db_registry_set_app_dir(HlDbRegistry *reg, const char *app_dir)
     if (copy_dir(real, reg->app_dir_real, sizeof reg->app_dir_real) != 0 ||
         copy_dir(app_dir, reg->app_dir_raw, sizeof reg->app_dir_raw) != 0)
         return -1;
+    /* One drive-letter spelling on Windows, the one the DSN is normalised
+     * to (hl_host_normalize_path). */
+    hl_host_canon_drive(reg->app_dir_real);
+    hl_host_canon_drive(reg->app_dir_raw);
     reg->has_app_dir = 1;
     return 0;
 }
@@ -226,6 +232,7 @@ int hl_db_registry_set_state_dir(HlDbRegistry *reg, const char *state_dir)
     if (!realpath(state_dir, real)) return -1;
     if (copy_dir(real, reg->state_dir_real, sizeof reg->state_dir_real) != 0)
         return -1;
+    hl_host_canon_drive(reg->state_dir_real);
     reg->has_state_dir = 1;
     return 0;
 }
@@ -451,7 +458,7 @@ static int confine_manifest_path(const HlDbRegistry *reg, const char *path,
                 while (cut > 0 && tmp[cut] != '/') cut--;
                 if (cut == 0) break;
                 tmp[cut] = '\0';
-                if (realpath(tmp, real)) { found = 1; break; }
+                if (realpath(tmp, real)) { hl_host_canon_drive(real); found = 1; break; }
             }
             int m = found ? snprintf(tmp, sizeof tmp, "%s%s", real, abs + cut) : -1;
             if (m < 0 || (size_t)m >= sizeof tmp ||
@@ -519,8 +526,17 @@ static const char *default_internal_dsn(const HlDbRegistry *reg,
     const char *d = reg->default_internal;
     if (strcmp(d, ":memory:") == 0) return d;
     if (hl_db_path_has_symlink(d, reg->default_internal_base)) {
-        *err = "the internal database's path runs through a symbolic link, "
-               "or names something that is not a regular file";
+        /* Say which file and why: the bare refusal left a Windows-only
+         * failure with nothing to go on. Per thread, as *err is borrowed. */
+        static _Thread_local char why[512];
+        char detail[400];
+        if (hl_default_db_path_check(d, detail, sizeof detail) != 0)
+            snprintf(why, sizeof why, "the internal database's path is "
+                     "refused: %s", detail);
+        else
+            snprintf(why, sizeof why, "the internal database's path %.300s "
+                     "runs through a symbolic link", d);
+        *err = why;
         return NULL;
     }
     return d;

@@ -50,7 +50,7 @@ pids=""
 for i in $(seq 1 $NUM_WORKERS); do
     PORT=$((19900 + i))
     HOME="$TMPHOME" "$HULL" examples/hello/app.lua \
-        -p $PORT --no-sandbox --no-migrate \
+        -p $PORT --no-sandbox --no-migrate --verbose \
         >/dev/null 2>"$TMPHOME/worker_$i.err" &
     pids="$pids $!"
 done
@@ -108,7 +108,8 @@ done
     || { fail "only $worker_up/$NUM_WORKERS workers started - the concurrency premise is unmet"
          for i in $(seq 1 $NUM_WORKERS); do
              grep -q "listening on" "$TMPHOME/worker_$i.err" 2>/dev/null && continue
-             echo "      worker_$i: $(head -2 "$TMPHOME/worker_$i.err" 2>/dev/null | tr '\n' ' ')"
+             echo "      worker_$i (last lines):"
+             tail -6 "$TMPHOME/worker_$i.err" 2>/dev/null | sed 's/^/        /'
          done; }
 
 [ "$worker_errors" -eq 0 ] \
