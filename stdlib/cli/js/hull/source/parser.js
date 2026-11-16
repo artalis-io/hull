@@ -847,12 +847,17 @@ function parseInternal(bytes, opts, inject) {
         // `async function ...` declaration (no LineTerminator between `async` and `function`);
         // otherwise `async` is an ordinary identifier -> expression statement.
         const start = cur.start;
-        const nx = peekTok(1, false);
-        if (nx.type === "identifier" && nx.value === "function" && !nx.nlBefore) {
+        if (asyncFunctionAhead()) {
             advance(true);                          // consume `async` -> cur is `function`
             return parseFunctionDeclaration(true, start);
         }
         return parseExpressionStatement();
+    }
+    // `async function` at cur, with no line break between them (else `async` is an identifier).
+    function asyncFunctionAhead() {
+        if (!isKw("async")) return false;
+        const nx = peekTok(1, false);
+        return nx.type === "identifier" && nx.value === "function" && !nx.nlBefore;
     }
 
     function parseFunctionDeclaration(isAsync, start) {
@@ -1611,6 +1616,7 @@ function parseInternal(bytes, opts, inject) {
         if (isKw("default")) {
             s.type = "ExportDefaultDeclaration"; advance(true);
             if (isKw("function")) s.declaration = parseFunctionDeclaration(false);
+            else if (asyncFunctionAhead()) s.declaration = maybeAsyncFunctionDecl();
             else if (isKw("class")) s.declaration = parseClassDeclaration();
             else { s.declaration = parseAssignment(); semicolon(); }
             return fin(s);
@@ -1651,6 +1657,7 @@ function parseInternal(bytes, opts, inject) {
         s.specifiers = []; s.source = null;
         if (isKw("var") || isKw("let") || isKw("const")) s.declaration = parseVarDeclaration();
         else if (isKw("function")) s.declaration = parseFunctionDeclaration(false);
+        else if (asyncFunctionAhead()) s.declaration = maybeAsyncFunctionDecl();
         else if (isKw("class")) s.declaration = parseClassDeclaration();
         else {
             if (ts) {
