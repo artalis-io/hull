@@ -7,7 +7,7 @@
 // limit and diagnostic budget:
 //
 //   createTypeGrammar(p) -> { parseType(opts?), parseReturnType(), parseTypeParameters(),
-//                             startsType() }
+//                             parseParameters(), parseObjectType(), startsType() }
 //   p: { cur(), advance(goal), peek(k), isP(v), isKw(v), nl(), splitGreater(), synErr(msg, tok),
 //        guard(), unguard() }
 //
@@ -340,5 +340,6 @@ export function createTypeGrammar(p) {
         memberTail();
     }
 
-    return { parseType: parseType, parseReturnType: parseReturnType, parseTypeParameters: parseTypeParameters, startsType: startsType };
+    return { parseType: parseType, parseReturnType: parseReturnType, parseTypeParameters: parseTypeParameters,
+             parseParameters: parameters, parseObjectType: objectOrMappedType, startsType: startsType };
 }

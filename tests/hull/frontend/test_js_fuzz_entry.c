@@ -10,6 +10,10 @@
  * Drives the entry through the restricted QuickJS session (precompiled bytecode; no raw JS_Eval),
  * linking the TEST cli-js registry that carries fuzz_parse.
  *
+ * The TypeScript leg (lang "ts", docs/typescript_design.md section 5, M6) adds the span and
+ * erasure invariants; its cases below prove they hold for real TypeScript and that the check
+ * runs (a clean unit is erased and re-parsed).
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #include "utest.h"
@@ -74,6 +78,44 @@ UTEST(js_fuzz_entry, clean_is_strict)
     EXPECT_TRUE(has(o, "\"ok\":true"));
     EXPECT_TRUE(has(o, "\"recovery\":false"));
     free(o);
+    hl_js_session_destroy(s);
+}
+
+/* Run the entry in TypeScript mode. */
+static char *fuzz_ts(HlJsSession *s, const char *src, long md)
+{
+    char opts[64];
+    snprintf(opts, sizeof opts, "{\"maxDiagnostics\":%ld,\"lang\":\"ts\"}", md);
+    char *out = NULL; size_t ol = 0;
+    hl_js_session_analyze(s, "hull:source:tests:fuzz_parse", "fuzz",
+                          (const uint8_t *)src, strlen(src), "t.ts", opts, strlen(opts), &out, &ol);
+    return out;
+}
+
+/* Clean TypeScript passes the erasure invariants; refused and broken TypeScript is bounded. */
+UTEST(js_fuzz_entry, typescript_leg)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    static const char *const OK[] = {
+        "let x: Map<string, Array<number>> = new Map();\nconst f = (a: number, b?: string): number => a;",
+        "interface I { a: string }\ntype T<U> = U[];\nimport type { A } from \"m\";\nexport { type B, c };",
+        "class C { x?: number; y!: string; m(a: T): void {} }\nconst v = obj!.a as unknown as T satisfies U;",
+        "/** @route GET / */\ninterface Q {}\nexport function h(q: Q): void {}",
+        "enum E { A }",                                   /* refused: still ok:true, bounded */
+        "let x: <",                                       /* malformed type */
+        "let a = b\ntype T = number\n(c)",              /* the ASI refusal */
+        "let s: \"\xe2\x80\xa8\" = 1;",              /* U+2028 inside a type: erase refuses, allowed */
+    };
+    for (size_t i = 0; i < sizeof(OK) / sizeof(OK[0]); i++) {
+        for (long md = 0; md <= 4096; md = md ? md * 4096 : 1) {
+            char *o = fuzz_ts(s, OK[i], md);
+            if (!has(o, "\"ok\":true")) fprintf(stderr, "[fuzz-ts] md=%ld %s\n  %s\n", md, OK[i], o ? o : "(null)");
+            EXPECT_TRUE(has(o, "\"ok\":true"));
+            free(o);
+            if (md == 4096) break;
+        }
+    }
     hl_js_session_destroy(s);
 }
 

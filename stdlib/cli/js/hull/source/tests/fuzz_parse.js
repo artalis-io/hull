@@ -10,9 +10,15 @@
 // production API (raw-equality uses the reviewed reference decoder refSlice below, mirroring
 // the lexer's sliceText/decode byte-for-byte -- NOT a unit:text() method).
 //
+// opts.lang = "ts" runs the TypeScript mode (docs/typescript_design.md section 5, M6) and adds
+// its invariants: typeSpans sorted, non-overlapping and in range; and for a clean unit, the
+// erased bytes parse as JavaScript cleanly to exactly the TS-mode AST (unless a span holds
+// U+2028 / U+2029, which typeErasure refuses).
+//
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { parse } from "hull:source:parser";
+import { erase } from "hull:source:ts_erase";
 
 // Reviewed reference byte->string decoder, byte-for-byte identical to lexer.js's
 // decode()/sliceText(): ASCII verbatim; a valid 2/3/4-byte UTF-8 sequence -> its code point;
@@ -61,7 +67,8 @@ function fuzz(srcBuf, path, opts) {
     var n = bytes.length;
     var maxDiagnostics = (opts && isInt(opts.maxDiagnostics) && opts.maxDiagnostics >= 0) ? opts.maxDiagnostics : 4096;
 
-    var u = parse(bytes, { path: path || "f.js", maxDiagnostics: maxDiagnostics });
+    var lang = (opts && opts.lang === "ts") ? "ts" : "js";
+    var u = parse(bytes, { path: path || "f.js", maxDiagnostics: maxDiagnostics, lang: lang });
 
     // -- diagnostics: classification + budget (4.5, 4.6) --
     var ordinary = 0, sawInternal = false, terminalDiag = false;
@@ -78,7 +85,7 @@ function fuzz(srcBuf, path, opts) {
             if (code === "js.limit.diagnostics") terminalDiag = true;
             else if (code === "js.limit.depth") hasDepth = true;
             else if (code === "js.limit.tokens") hasTokens = true;
-        } else { if (code === "js.syntax") hasSyntax = true; ordinary++; }  // js.syntax / js.unsupported / other
+        } else { if (code === "js.syntax") hasSyntax = true; ordinary++; }  // js.syntax / js.unsupported / ts.* / other
     }
 
     // Recovery classification -- gates the nesting exemption below. js.limit.diagnostics is NOT
@@ -98,7 +105,7 @@ function fuzz(srcBuf, path, opts) {
     if (hasSyntax || hasDepth || hasTokens) {
         recovery = true;
     } else if (terminalDiag) {
-        var u2 = parse(bytes, { path: path || "f.js", maxDiagnostics: 2 * n + 64 });
+        var u2 = parse(bytes, { path: path || "f.js", maxDiagnostics: 2 * n + 64, lang: lang });
         var r2syntax = false, r2budget = false, r2incomplete = false, d2 = u2.diagnostics || [];
         for (var j = 0; j < d2.length; j++) {
             var c2 = d2[j] && d2[j].code;
@@ -205,6 +212,32 @@ function fuzz(srcBuf, path, opts) {
             ancestors.delete(fr.node);   // leaving this node -> off the current path
             frames.pop();
         }
+    }
+
+    // -- TypeScript mode (M6) --
+    if (lang === "ts") {
+        var spans = u.typeSpans;
+        if (!Array.isArray(spans)) return { schema_version: 1, ok: false, reason: "ts: no typeSpans" };
+        var last = 1;
+        for (var si = 0; si < spans.length; si++) {
+            var sp = spans[si];
+            var se = checkRange(sp, n, "type span");
+            if (se) return { schema_version: 1, ok: false, reason: se };
+            if (sp.start < last) return { schema_version: 1, ok: false, reason: "ts: type spans overlap or are unsorted" };
+            last = sp.stop;
+        }
+        if (u.valid) {
+            var er = erase(bytes, spans);
+            if (er.ok) {
+                var ju = parse(er.bytes, { path: path || "f.js", maxDiagnostics: 4096 });
+                if (!ju.valid) return { schema_version: 1, ok: false, reason: "ts: a clean unit erases to invalid JavaScript" };
+                if (JSON.stringify(ju.ast) !== JSON.stringify(u.ast)) return { schema_version: 1, ok: false, reason: "ts: erased JavaScript parses to a different AST" };
+            } else if (er.error.indexOf("line separator") < 0) {
+                return { schema_version: 1, ok: false, reason: "ts: erase refused the unit's spans: " + er.error };
+            }
+        }
+    } else if (u.typeSpans !== undefined) {
+        return { schema_version: 1, ok: false, reason: "js: typeSpans in JS mode" };
     }
 
     // `recovery` is surfaced (test-only entry) so a regression can assert the classification --

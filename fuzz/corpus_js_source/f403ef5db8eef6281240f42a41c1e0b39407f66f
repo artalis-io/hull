@@ -1,0 +1,2 @@
+// ts
+import type fs = require("fs");

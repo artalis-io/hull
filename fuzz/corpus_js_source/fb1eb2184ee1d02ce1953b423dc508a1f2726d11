@@ -1,0 +1,20 @@
+// Function, constructor, generic, conditional, query and indexed access types.
+let f1: () => void;
+let f2: (a: number, b?: string, ...c: boolean[]) => Promise<void>;
+let f3: <T>(x: T) => T;
+let f4: new (x: number) => object;
+let f5: abstract new () => object;
+let f6: ({ a, b }: Opts, [c]: number[]) => void;
+let f7: (this: Window, ev: Event) => any;
+let c1: T extends string ? "s" : T extends number ? "n" : never;
+let c2: T extends Array<infer U> ? U : never;
+let q1: typeof value;
+let q2: typeof obj.nested.prop;
+let q3: keyof typeof obj;
+let q4: import("./mod").Thing<string>;
+let q5: typeof import("./mod");
+let i1: T["key"];
+let i2: T[number][];
+let i3: Parameters<typeof fn>[0];
+let g1: Promise<Array<Map<string, number>>>;
+let p1: (x: unknown) => x is string;

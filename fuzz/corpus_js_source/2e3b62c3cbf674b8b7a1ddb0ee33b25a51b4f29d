@@ -1,0 +1,19 @@
+// Types across lines; contextual words used as JavaScript keep their meaning.
+let multi:
+    | "one"
+    | "two" = "one";
+function longParams(
+    first: number,
+    second: {
+        nested: string;
+    },
+): void {}
+const arrow = (
+    a: number,
+    b: string
+) => a;
+const x = y
+as
+z;
+const neg = a
+!b;

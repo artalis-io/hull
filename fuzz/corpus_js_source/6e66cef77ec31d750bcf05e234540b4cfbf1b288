@@ -1,0 +1,2 @@
+// ts
+class C implements I { }
