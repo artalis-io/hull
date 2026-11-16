@@ -10,6 +10,7 @@ import { parse, __parseWithInjection } from "hull:source:parser";
 import { attach as attachAnnotations } from "hull:source:annotations";
 import { makeBudget } from "hull:source:diagnostic";
 import { resolve as resolveScopeModel } from "hull:source:scope";
+import { typeErasure, erase } from "hull:source:ts_erase";
 import { analyze as feAnalyze, declarationSemantics as feSemantics, scope as feScope,
          __analyzeWithFailure as feAnalyzeFail, __mutate as feMutate } from "hull:source:frontend_javascript";
 
@@ -39,8 +40,60 @@ function runParse(srcBuf, path, opts) {
     const o = { path: path || "test.js" };
     if (opts && opts.maxDepth !== undefined) o.maxDepth = opts.maxDepth;
     if (opts && opts.maxDiagnostics !== undefined) o.maxDiagnostics = opts.maxDiagnostics;
+    if (opts && opts.lang !== undefined) o.lang = opts.lang;
     const u = parse(new Uint8Array(srcBuf), o);
     return { schema_version: 1, status: "ok", ast: u.ast, comments: u.comments, diagnostics: u.diagnostics, valid: u.valid };
+}
+
+// TypeScript mode (docs/typescript_design.md section 3): the same SourceUnit as runParse, plus
+// typeSpans. opts.asJs (test-only) drops the ts.* diagnostics and typeSpans and recomputes
+// `valid`, so the result can be compared byte for byte with runParse: the TypeScript hooks
+// only ADD refusals and must never change what JS mode produces. A refusal in a unit that is
+// valid JS is a hook firing on JavaScript, so it changes `status` and fails that comparison.
+function runParseTs(srcBuf, path, opts) {
+    const o = { path: path || "test.ts", lang: "ts" };
+    if (opts && opts.maxDepth !== undefined) o.maxDepth = opts.maxDepth;
+    if (opts && opts.maxDiagnostics !== undefined) o.maxDiagnostics = opts.maxDiagnostics;
+    const u = parse(new Uint8Array(srcBuf), o);
+    if (opts && opts.asJs) {
+        const ds = u.diagnostics.filter(function (d) { return d.code.substring(0, 3) !== "ts."; });
+        const ok = ds.every(function (d) { return d.severity !== "error"; });
+        const misfired = ok && ds.length !== u.diagnostics.length;
+        return { schema_version: 1, status: misfired ? "ts-refusal-in-valid-js" : "ok", ast: u.ast, comments: u.comments, diagnostics: ds, valid: ok };
+    }
+    return { schema_version: 1, status: "ok", ast: u.ast, comments: u.comments, diagnostics: u.diagnostics, valid: u.valid, typeSpans: u.typeSpans };
+}
+
+// Lowercase hex of a byte array (the erased bytes go back to C exactly, whatever they hold).
+function hex(u8) { let s = ""; for (let i = 0; i < u8.length; i++) s += (u8[i] < 16 ? "0" : "") + u8[i].toString(16); return s; }
+
+// typeErasure over a TS-mode parse, then erase() with its spans - or, when opts.spans is given
+// (test-only), erase() with those spans, to exercise the byte rules before the type grammar
+// produces any.
+function runEraseTs(srcBuf, path, opts) {
+    const p = path || "test.ts";
+    const bytes = new Uint8Array(srcBuf);
+    const u = parse(bytes, { path: p, lang: "ts" });
+    const te = typeErasure(u, bytes, p);
+    if (!te.ok) return { schema_version: 1, status: "ok", ok: false, error: te.error };
+    const spans = (opts && opts.spans !== undefined) ? opts.spans : te.spans;
+    const er = erase(bytes, spans);
+    return { schema_version: 1, status: "ok", ok: true, spans: te.spans, refusals: te.refusals, valid: u.valid,
+             erased_ok: er.ok, erased_hex: er.ok ? hex(er.bytes) : null, erase_error: er.ok ? null : er.error };
+}
+
+// splitGreater probe: lex to EOF, splitting every multi-character `>` operator once, so each
+// `>` of `>>=` comes out as its own token with its own range.
+function runLexSplit(srcBuf, path) {
+    const tk = createTokenizer(new Uint8Array(srcBuf), { path: path || "test.ts" });
+    const tokens = [];
+    for (;;) {
+        let t = tk.next(false);
+        if (t.type === "punctuator" && t.value.length > 1 && t.value.charCodeAt(0) === 0x3e) t = tk.splitGreater();
+        tokens.push(t);
+        if (t.type === "eof") break;
+    }
+    return { schema_version: 1, status: "ok", tokens: tokens, diagnostics: tk.diagnostics, split_none: tk.splitGreater() === null };
 }
 
 // Drive the protected boundary with an INJECTED exception (test-only) to prove containment vs.
@@ -146,4 +199,4 @@ function runFrontendMutate(srcBuf, path, opts) {
     return { schema_version: 1, status: "ok", result: feMutate(opts || {}) };
 }
 
-globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse, parseInject: runParseInject, reattach: runReattach, attachCorrupt: runAttachCorrupt, resolveScope: runResolveScope, frontendAnalyze: runFrontendAnalyze, frontendSemantics: runFrontendSemantics, frontendScope: runFrontendScope, frontendAnalyzeFail: runFrontendAnalyzeFail, frontendMutate: runFrontendMutate };
+globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, lexSplit: runLexSplit, parse: runParse, parseTs: runParseTs, eraseTs: runEraseTs, parseInject: runParseInject, reattach: runReattach, attachCorrupt: runAttachCorrupt, resolveScope: runResolveScope, frontendAnalyze: runFrontendAnalyze, frontendSemantics: runFrontendSemantics, frontendScope: runFrontendScope, frontendAnalyzeFail: runFrontendAnalyzeFail, frontendMutate: runFrontendMutate };

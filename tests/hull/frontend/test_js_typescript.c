@@ -1,0 +1,363 @@
+/*
+ * test_js_typescript.c - the JS frontend's TypeScript mode, first slice
+ * (docs/typescript_design.md sections 3 and 5): parse(bytes, { lang: "ts" }), the
+ * lexer's splitGreater(), and hull:source:ts_erase.
+ *
+ * This slice adds the mode and its hook points; every TypeScript construct is refused with a
+ * ts.unsupported diagnostic and JS mode goes on as before. The suite holds three things:
+ *   - TS mode adds refusals and nothing else: over the frozen golden inputs and the repo's own
+ *     JS, a TS-mode parse with its ts.* diagnostics removed is byte-identical to the JS-mode
+ *     parse (no TypeScript peek changes a token), and a file that is valid JS gets no refusal
+ *     at all (no hook misfires on JavaScript);
+ *   - each hook refuses its construct, at the right range, and JS uses of the same words
+ *     (`import type from "m"`, `a ? (b) : c`, `case (x):`) stay JS;
+ *   - the erasure byte rules: span bytes become spaces, CR / LF are kept, U+2028 / U+2029 and
+ *     malformed span lists are refused.
+ * JS mode itself is held by test_js_golden and scripts/js_frontend_diff.sh.
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+#include "utest.h"
+#include "js_frontend_dump.h"
+
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+static int has(const char *hay, const char *needle) { return hay && strstr(hay, needle) != NULL; }
+static int count(const char *hay, const char *needle)
+{
+    int c = 0; size_t nl = strlen(needle);
+    if (!hay || nl == 0) return 0;
+    for (const char *q = hay; (q = strstr(q, needle)) != NULL; q += nl) c++;
+    return c;
+}
+
+/* Run one lextest method; returns the malloc'd JSON (caller frees). */
+static char *run(HlJsSession *s, const char *method, const char *src, size_t len,
+                 const char *path, const char *opts, size_t *out_len)
+{
+    char *out = NULL; size_t n = 0;
+    hl_js_session_analyze(s, "hull:source:lextest", method, (const uint8_t *)src, len, path,
+                          opts, opts ? strlen(opts) : 0, &out, &n);
+    if (out_len) *out_len = out ? n : 0;
+    return out;
+}
+static char *ts(HlJsSession *s, const char *src) { return run(s, "parseTs", src, strlen(src), "t.ts", NULL, NULL); }
+
+/* ---- TS mode adds refusals and nothing else ---- */
+
+static const char *const CORPUS[] = {
+    "tests/fixtures/test262/cases", "tests/fixtures/js_frontend_golden/cases",
+    "stdlib/js", "stdlib/cli/js", "examples", NULL,
+};
+static const char *const CORPUS_EXT[] = { ".js", ".mjs", ".src", NULL };
+
+UTEST(js_typescript, ts_mode_minus_refusals_is_js_mode)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    JfdPaths pv = {0};
+    for (int r = 0; CORPUS[r]; r++) ASSERT_EQ(0, jfd_walk(CORPUS[r], CORPUS_EXT, &pv));
+    jfd_sort(&pv);
+    int compared = 0, differ = 0;
+    for (size_t i = 0; i < pv.len; i++) {
+        size_t n = 0;
+        char *src = jfd_read(pv.items[i], &n);
+        ASSERT_TRUE(src != NULL);
+        size_t jl = 0, tl = 0;
+        char *js = run(s, "parse", src, n, pv.items[i], NULL, &jl);
+        char *tj = run(s, "parseTs", src, n, pv.items[i], "{\"asJs\":true}", &tl);
+        if (!js || !tj || jl != tl || memcmp(js, tj, jl) != 0) {
+            if (differ < 20) fprintf(stderr, "[ts-mode] TS mode changed the JS result: %s\n", pv.items[i]);
+            differ++;
+        }
+        compared++;
+        free(js); free(tj); free(src);
+    }
+    jfd_paths_free(&pv);
+    EXPECT_EQ(0, differ);
+    EXPECT_GE(compared, 850);                                  /* the corpus was walked */
+    hl_js_session_destroy(s);
+}
+
+UTEST(js_typescript, typescript_is_off_by_default)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    const char *src = "let x: number = 1;";
+    /* JS mode, even for a .ts path: a JS syntax error, no TypeScript refusal, no typeSpans. */
+    char *o = run(s, "parse", src, strlen(src), "app.ts", NULL, NULL);
+    EXPECT_TRUE(has(o, "\"code\":\"js.syntax\""));
+    EXPECT_FALSE(has(o, "\"code\":\"ts."));
+    EXPECT_FALSE(has(o, "typeSpans"));
+    free(o);
+    o = ts(s, src);
+    EXPECT_TRUE(has(o, "\"code\":\"ts.unsupported\""));
+    EXPECT_TRUE(has(o, "\"typeSpans\":[]"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* lang: "js" is the default, "ts" turns the mode on, and anything else is refused - never a
+ * silent JS parse. */
+UTEST(js_typescript, lang_option)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    const char *src = "let x: number = 1;";
+    size_t n = strlen(src);
+    char *dflt = run(s, "parse", src, n, "t.ts", NULL, NULL);
+    char *js = run(s, "parse", src, n, "t.ts", "{\"lang\":\"js\"}", NULL);
+    ASSERT_TRUE(dflt != NULL && js != NULL);
+    EXPECT_STREQ(dflt, js);
+    free(dflt); free(js);
+    char *o = run(s, "parse", src, n, "t.ts", "{\"lang\":\"ts\"}", NULL);
+    EXPECT_TRUE(has(o, "\"code\":\"ts.unsupported\""));
+    free(o);
+    static const char *const BAD[] = {
+        "{\"lang\":\"tsx\"}", "{\"lang\":\"jsx\"}", "{\"lang\":\"TS\"}", "{\"lang\":\"typescript\"}",
+        "{\"lang\":\"\"}", "{\"lang\":1}", "{\"lang\":true}", "{\"lang\":null}",
+    };
+    for (size_t i = 0; i < sizeof(BAD) / sizeof(BAD[0]); i++) {
+        o = run(s, "parse", src, n, "t.ts", BAD[i], NULL);
+        if (!has(o, "\"code\":\"js.internal\",\"message\":\"unknown lang "))
+            fprintf(stderr, "[ts-mode] %s\n  got %s\n", BAD[i], o ? o : "(null)");
+        EXPECT_TRUE(has(o, "\"code\":\"js.internal\",\"message\":\"unknown lang "));
+        EXPECT_EQ(1, count(o, "\"severity\":"));                /* nothing parsed */
+        EXPECT_TRUE(has(o, "\"body\":[]"));
+        EXPECT_TRUE(has(o, "\"valid\":false"));
+        free(o);
+    }
+    o = run(s, "parse", src, n, "t.ts", "{\"lang\":\"tsx\"}", NULL);
+    EXPECT_TRUE(has(o, "unknown lang 'tsx' (expected \\\"js\\\" or \\\"ts\\\")"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* ---- every hook refuses its construct ---- */
+
+typedef struct { const char *src; const char *what; int start, stop; } Refusal;
+static const Refusal REFUSALS[] = {
+    { "let x: number = 1;",                    "type annotations",                    6, 7 },
+    { "let x!: number;",                       "definite assignment assertions",      6, 7 },
+    { "function f(a: T) {}",                   "type annotations",                   13, 14 },
+    { "function f(a?) {}",                     "optional parameters",                13, 14 },
+    { "function f(this: W) {}",                "'this' parameters",                  12, 16 },
+    { "class C { constructor(private x) {} }", "parameter properties",               23, 30 },
+    { "function f(): T {}",                    "return type annotations",            13, 14 },
+    { "const g = function (): T {};",          "return type annotations",            22, 23 },
+    { "const o = { m(): T {} };",              "return type annotations",            16, 17 },
+    { "const a = (x): T => x;",                "return type annotations",            14, 15 },
+    { "function f(a)\nfunction f(a) {}",       "overload signatures",                15, 23 },
+    { "function f<T>(a) {}",                   "type parameters",                    11, 12 },
+    { "class C<T> {}",                         "type parameters",                     8,  9 },
+    { "const a = <T>(x) => x;",                "type parameters and angle-bracket assertions", 11, 12 },
+    { "class C implements I {}",               "implements clauses",                  9, 19 },
+    { "class C { private x = 1 }",             "'private' modifiers",                11, 18 },
+    { "class C { readonly x = 1 }",            "'readonly' modifiers",               11, 19 },
+    { "class C { x: number }",                 "type annotations",                   12, 13 },
+    { "class C { x? = 1 }",                    "optional members",                   12, 13 },
+    { "class C { x!: number }",                "definite assignment assertions",     12, 13 },
+    { "interface I { a: string }",             "interfaces",                          1, 10 },
+    { "type T = string;",                      "type aliases",                        1,  5 },
+    { "enum E { A }",                          "enums",                               1,  5 },
+    { "namespace N {}",                        "namespaces",                          1, 10 },
+    { "module M {}",                           "module declarations",                 1,  7 },
+    { "declare const x: number;",              "'declare' declarations",              1,  8 },
+    { "abstract class A {}",                   "abstract classes",                    1,  9 },
+    { "x as T;",                               "'as' expressions",                    3,  5 },
+    { "x satisfies T;",                        "'satisfies' expressions",             3, 12 },
+    { "a!.b;",                                 "non-null assertions",                 2,  3 },
+    { "import type { A } from \"m\";",         "type-only imports",                   8, 12 },
+    { "import type A from \"m\";",             "type-only imports",                   8, 12 },
+    { "import { type A } from \"m\";",         "type-only import specifiers",        10, 14 },
+    { "import x = require(\"m\");",            "import-require declarations",        10, 11 },
+    { "export type { A };",                    "type-only exports",                   8, 12 },
+    { "export type T = string;",               "type aliases",                        8, 12 },
+    { "export interface I {}",                 "interfaces",                          8, 17 },
+    { "export { type A };",                    "type-only export specifiers",        10, 14 },
+    { "export = x;",                           "export assignments",                  8,  9 },
+};
+
+UTEST(js_typescript, each_hook_refuses)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    for (size_t i = 0; i < sizeof(REFUSALS) / sizeof(REFUSALS[0]); i++) {
+        const Refusal *r = &REFUSALS[i];
+        char *o = ts(s, r->src);
+        char want[256];
+        snprintf(want, sizeof(want),
+                 "\"code\":\"ts.unsupported\",\"message\":\"TypeScript %s are not supported\",\"path\":\"t.ts\",\"range\":{\"start\":%d,\"stop\":%d}",
+                 r->what, r->start, r->stop);
+        if (!has(o, want)) fprintf(stderr, "[ts-mode] %s\n  want %s\n  got  %s\n", r->src, want, o ? o : "(null)");
+        EXPECT_TRUE(has(o, want));
+        EXPECT_TRUE(has(o, "\"valid\":false"));
+        free(o);
+    }
+    hl_js_session_destroy(s);
+}
+
+/* A construct is refused once, even when JS recovery comes back to its token. */
+UTEST(js_typescript, one_refusal_per_position)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *o = ts(s, "class C { private x: number }");
+    EXPECT_EQ(1, count(o, "\"code\":\"ts.unsupported\",\"message\":\"TypeScript type annotations are not supported\""));
+    EXPECT_EQ(2, count(o, "\"code\":\"ts.unsupported\""));
+    free(o);
+    o = ts(s, "function f<T>(a) {}");
+    EXPECT_EQ(1, count(o, "\"code\":\"ts.unsupported\""));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* The same words in JavaScript stay JavaScript in TS mode. */
+static const char *const JS_KEEPS[] = {
+    "import type from \"m\";",
+    "import type, { a } from \"m\";",
+    "import { type } from \"m\"; import { type as t2 } from \"n\";",
+    "export { type }; export { type as t3 };",
+    "let type = 1; type = 2; type\nx;",
+    "let as = 1, satisfies = 2; as\nsatisfies;",
+    "let interface_ = 1; declare\nx; abstract\nclass_;",
+    "const r = a ? (b) : c;",
+    "const r2 = a ? x + (b) : c;",
+    "switch (k) { case (a): break; case (b) + 1: break; }",
+    "x\n!y;",
+    "a != b; a !== b;",
+    "class C { public = 1; declare\nx; readonly() {} static private = 2 }",
+    "function f(a, b = 1, ...c) { return a < b > c; }",
+    "x >>= 1; y >>>= 2; z = a >> b >>> c >= d;",
+};
+
+UTEST(js_typescript, js_uses_of_typescript_words_stay_js)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    for (size_t i = 0; i < sizeof(JS_KEEPS) / sizeof(JS_KEEPS[0]); i++) {
+        const char *src = JS_KEEPS[i];
+        char *j = run(s, "parse", src, strlen(src), "t.ts", NULL, NULL);
+        char *o = ts(s, src);
+        if (!has(j, "\"valid\":true") || has(o, "\"code\":\"ts."))
+            fprintf(stderr, "[ts-mode] %s\n  js %s\n  ts %s\n", src, j ? j : "(null)", o ? o : "(null)");
+        EXPECT_TRUE(has(j, "\"valid\":true"));                 /* it IS valid JS */
+        EXPECT_FALSE(has(o, "\"code\":\"ts."));
+        EXPECT_TRUE(has(o, "\"valid\":true"));
+        free(j); free(o);
+    }
+    hl_js_session_destroy(s);
+}
+
+/* ---- the lexer's splitGreater ---- */
+
+UTEST(js_typescript, split_greater)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    /* `>>>=` splits into `>` then `>>=` (split again: `>` then `>=`, then `>` `=`). */
+    const char *src = "a>>>=b>>c>=d";
+    char *o = run(s, "lexSplit", src, strlen(src), "t.ts", NULL, NULL);
+    ASSERT_TRUE(o != NULL);
+    for (int k = 2; k <= 4; k++) {
+        char want[96];
+        snprintf(want, sizeof(want), "\"value\":\">\",\"start\":%d,\"stop\":%d", k, k + 1);
+        EXPECT_TRUE(has(o, want));
+    }
+    EXPECT_TRUE(has(o, "\"value\":\"=\",\"start\":5,\"stop\":6"));
+    EXPECT_TRUE(has(o, "\"value\":\">\",\"start\":7,\"stop\":8"));
+    EXPECT_TRUE(has(o, "\"value\":\">\",\"start\":8,\"stop\":9"));
+    EXPECT_TRUE(has(o, "\"value\":\">\",\"start\":10,\"stop\":11"));
+    EXPECT_TRUE(has(o, "\"value\":\"=\",\"start\":11,\"stop\":12"));
+    EXPECT_FALSE(has(o, "\">>"));
+    EXPECT_TRUE(has(o, "\"split_none\":true"));               /* eof is not split */
+    EXPECT_FALSE(has(o, "\"code\":"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* ---- erasure ---- */
+
+static void hex_of(const char *s, size_t n, char *out)
+{
+    static const char H[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) { out[2 * i] = H[(unsigned char)s[i] >> 4]; out[2 * i + 1] = H[(unsigned char)s[i] & 15]; }
+    out[2 * n] = '\0';
+}
+
+/* eraseTs with injected spans: the result is `want` byte for byte. */
+static int erases_to(HlJsSession *s, const char *src, const char *spans, const char *want)
+{
+    char opts[256]; snprintf(opts, sizeof(opts), "{\"spans\":%s}", spans);
+    char *o = run(s, "eraseTs", src, strlen(src), "t.ts", opts, NULL);
+    char hx[512], needle[560];
+    hex_of(want, strlen(want), hx);
+    snprintf(needle, sizeof(needle), "\"erased_hex\":\"%s\"", hx);
+    int ok = has(o, "\"erased_ok\":true") && has(o, needle);
+    if (!ok) fprintf(stderr, "[ts-erase] %s %s\n  got %s\n", src, spans, o ? o : "(null)");
+    free(o);
+    return ok;
+}
+static int erase_refused(HlJsSession *s, const char *src, const char *spans, const char *why)
+{
+    char opts[256]; snprintf(opts, sizeof(opts), "{\"spans\":%s}", spans);
+    char *o = run(s, "eraseTs", src, strlen(src), "t.ts", opts, NULL);
+    int ok = has(o, "\"erased_ok\":false") && has(o, "\"erased_hex\":null") && has(o, why);
+    if (!ok) fprintf(stderr, "[ts-erase] %s %s\n  got %s\n", src, spans, o ? o : "(null)");
+    free(o);
+    return ok;
+}
+
+UTEST(js_typescript, erase_byte_rules)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    EXPECT_TRUE(erases_to(s, "let x: number = 1;", "[{\"start\":6,\"stop\":14}]", "let x         = 1;"));
+    EXPECT_TRUE(erases_to(s, "abc", "[]", "abc"));
+    EXPECT_TRUE(erases_to(s, "abc", "[{\"start\":2,\"stop\":2}]", "abc"));          /* empty span */
+    EXPECT_TRUE(erases_to(s, "abc", "[{\"start\":1,\"stop\":4}]", "   "));          /* to the end */
+    EXPECT_TRUE(erases_to(s, "ab", "[{\"start\":1,\"stop\":2},{\"start\":2,\"stop\":3}]", "  "));   /* adjacent */
+    /* CR and LF survive, so lines and columns do not move. */
+    EXPECT_TRUE(erases_to(s, "a:\r\n T\nb", "[{\"start\":2,\"stop\":7}]", "a \r\n  \nb"));
+    /* A multi-byte character becomes one space per byte (offsets kept). */
+    EXPECT_TRUE(erases_to(s, "x: \xc3\xa9t\xe2\x82\xac;", "[{\"start\":2,\"stop\":10}]", "x        ;"));
+    /* U+2028 / U+2029 are line terminators: refused, never blanked. */
+    EXPECT_TRUE(erase_refused(s, "a:\xe2\x80\xa8T", "[{\"start\":2,\"stop\":7}]", "line separator"));
+    EXPECT_TRUE(erase_refused(s, "a:\xe2\x80\xa9T", "[{\"start\":3,\"stop\":4}]", "line separator"));
+    /* Malformed span lists. */
+    EXPECT_TRUE(erase_refused(s, "abcd", "[{\"start\":3,\"stop\":4},{\"start\":1,\"stop\":2}]", "out of order"));
+    EXPECT_TRUE(erase_refused(s, "abcd", "[{\"start\":1,\"stop\":3},{\"start\":2,\"stop\":4}]", "out of order"));
+    EXPECT_TRUE(erase_refused(s, "abcd", "[{\"start\":0,\"stop\":2}]", "out of range"));
+    EXPECT_TRUE(erase_refused(s, "abcd", "[{\"start\":2,\"stop\":6}]", "out of range"));
+    EXPECT_TRUE(erase_refused(s, "abcd", "[{\"start\":3,\"stop\":2}]", "out of range"));
+    EXPECT_TRUE(erase_refused(s, "abcd", "[{\"start\":1.5,\"stop\":2}]", "non-integer"));
+    EXPECT_TRUE(erase_refused(s, "abcd", "[3]", "not an object"));
+    EXPECT_TRUE(erase_refused(s, "abcd", "{}", "not an array"));
+    hl_js_session_destroy(s);
+}
+
+/* typeErasure: in this slice no span is recorded yet, and every refusal is reported. */
+UTEST(js_typescript, type_erasure_reports_refusals)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    const char *src = "let x: number = 1;\nx as T;";
+    char *o = run(s, "eraseTs", src, strlen(src), "t.ts", NULL, NULL);
+    EXPECT_TRUE(has(o, "\"ok\":true,\"spans\":[],\"refusals\":[{"));
+    EXPECT_EQ(2, count(o, "\"code\":\"ts.unsupported\""));
+    EXPECT_FALSE(has(o, "\"code\":\"js.syntax\",\"message\":\"expected ';'\",\"path\":\"t.ts\",\"range\":{\"start\":6"));
+    free(o);
+    /* Plain JS through TS mode: nothing to erase, nothing refused, bytes unchanged. */
+    const char *js = "const a = 1;\n";
+    o = run(s, "eraseTs", js, strlen(js), "t.ts", NULL, NULL);
+    char hx[64]; hex_of(js, strlen(js), hx);
+    char needle[96]; snprintf(needle, sizeof(needle), "\"erased_hex\":\"%s\"", hx);
+    EXPECT_TRUE(has(o, "\"spans\":[],\"refusals\":[],\"valid\":true"));
+    EXPECT_TRUE(has(o, needle));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+UTEST_MAIN()

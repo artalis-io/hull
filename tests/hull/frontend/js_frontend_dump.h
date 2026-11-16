@@ -46,8 +46,8 @@ static const uint32_t JFD_K[64] = {
     0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
     0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
     0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2 };
-static uint32_t jfd_ror(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
-static void jfd_block(JfdSha *c, const uint8_t *p)
+static inline uint32_t jfd_ror(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+static inline void jfd_block(JfdSha *c, const uint8_t *p)
 {
     uint32_t w[64], a, b, cc, d, e, f, g, h;
     for (int i = 0; i < 16; i++)
@@ -65,13 +65,13 @@ static void jfd_block(JfdSha *c, const uint8_t *p)
     }
     c->s[0] += a; c->s[1] += b; c->s[2] += cc; c->s[3] += d; c->s[4] += e; c->s[5] += f; c->s[6] += g; c->s[7] += h;
 }
-static void jfd_sha_init(JfdSha *c)
+static inline void jfd_sha_init(JfdSha *c)
 {
     static const uint32_t iv[8] = { 0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
                                     0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19 };
     memcpy(c->s, iv, sizeof(iv)); c->n = 0; c->bl = 0;
 }
-static void jfd_sha_update(JfdSha *c, const void *data, size_t len)
+static inline void jfd_sha_update(JfdSha *c, const void *data, size_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
     c->n += (uint64_t)len * 8;
@@ -81,7 +81,7 @@ static void jfd_sha_update(JfdSha *c, const void *data, size_t len)
         if (c->bl == 64) { jfd_block(c, c->b); c->bl = 0; }
     }
 }
-static void jfd_sha_hex(JfdSha *c, char out[65])
+static inline void jfd_sha_hex(JfdSha *c, char out[65])
 {
     uint64_t n = c->n;
     uint8_t pad = 0x80, zero = 0, len[8];
@@ -99,7 +99,7 @@ static void jfd_sha_hex(JfdSha *c, char out[65])
 
 /* -- fail-closed enumeration (the conformance harness's rules) -- */
 typedef struct { char **items; size_t len, cap; } JfdPaths;
-static int jfd_push(JfdPaths *v, const char *p)
+static inline int jfd_push(JfdPaths *v, const char *p)
 {
     if (v->len == v->cap) {
         size_t nc = v->cap ? v->cap * 2 : 256;
@@ -110,17 +110,17 @@ static int jfd_push(JfdPaths *v, const char *p)
     v->items[v->len] = strdup(p);
     return v->items[v->len++] ? 0 : -1;
 }
-static void jfd_paths_free(JfdPaths *v)
+static inline void jfd_paths_free(JfdPaths *v)
 {
     for (size_t i = 0; i < v->len; i++) free(v->items[i]);
     free(v->items); v->items = NULL; v->len = v->cap = 0;
 }
-static int jfd_cmp(const void *a, const void *b) { return strcmp(*(const char *const *)a, *(const char *const *)b); }
+static inline int jfd_cmp(const void *a, const void *b) { return strcmp(*(const char *const *)a, *(const char *const *)b); }
 
 /* `exts` is a NULL-terminated list of accepted suffixes. Regular files only, no symlinks,
  * dot-directories, `static` and `node_modules` pruned. Any failure returns -1 (never a
  * partial list reported as complete). Sort the result with jfd_sort. */
-static int jfd_walk(const char *dir, const char *const *exts, JfdPaths *out)
+static inline int jfd_walk(const char *dir, const char *const *exts, JfdPaths *out)
 {
     DIR *d = opendir(dir);
     if (!d) return -1;
@@ -154,10 +154,10 @@ static int jfd_walk(const char *dir, const char *const *exts, JfdPaths *out)
     if (closedir(d) != 0 && rc == 0) rc = -1;
     return rc;
 }
-static void jfd_sort(JfdPaths *v) { if (v->len) qsort(v->items, v->len, sizeof(char *), jfd_cmp); }
+static inline void jfd_sort(JfdPaths *v) { if (v->len) qsort(v->items, v->len, sizeof(char *), jfd_cmp); }
 
 /* Exact-size read; NULL on any failure. */
-static char *jfd_read(const char *path, size_t *out_len)
+static inline char *jfd_read(const char *path, size_t *out_len)
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return NULL;
@@ -182,7 +182,7 @@ static char *jfd_read(const char *path, size_t *out_len)
  * (malloc'd; a failed call's structured diagnostic counts as its output) and rcs[i] its
  * return code. `path` is what the frontend sees (it is part of the output: diagnostics
  * carry it). */
-static void jfd_run(HlJsSession *s, const char *src, size_t len, const char *path,
+static inline void jfd_run(HlJsSession *s, const char *src, size_t len, const char *path,
                     char *outs[JFD_NMETHODS], size_t lens[JFD_NMETHODS], int rcs[JFD_NMETHODS])
 {
     for (size_t i = 0; i < JFD_NMETHODS; i++) {
@@ -194,7 +194,7 @@ static void jfd_run(HlJsSession *s, const char *src, size_t len, const char *pat
 }
 
 /* One digest over every method's name, return code and exact output bytes. */
-static void jfd_digest(char *outs[JFD_NMETHODS], size_t lens[JFD_NMETHODS],
+static inline void jfd_digest(char *outs[JFD_NMETHODS], size_t lens[JFD_NMETHODS],
                        int rcs[JFD_NMETHODS], char hex[65])
 {
     JfdSha c;
@@ -208,7 +208,7 @@ static void jfd_digest(char *outs[JFD_NMETHODS], size_t lens[JFD_NMETHODS],
     jfd_sha_hex(&c, hex);
 }
 
-static void jfd_free_outs(char *outs[JFD_NMETHODS])
+static inline void jfd_free_outs(char *outs[JFD_NMETHODS])
 {
     for (size_t i = 0; i < JFD_NMETHODS; i++) { free(outs[i]); outs[i] = NULL; }
 }
