@@ -1194,11 +1194,14 @@ jobs:
       # signal and hides whatever preceded it.
       #
       # The logs are already written per suite; they were simply never kept.
-      - name: Upload the per-suite e2e probe logs
-        if: always() && inputs.probe_e2e != ''
+      # The enforced tier echoes the same tail, so its logs are kept too: a
+      # suite that fails only in the full run (e2e-ssh-tunnel, after ~70 other
+      # suites) passes in a probe, and the full run is then the only evidence.
+      - name: Upload the per-suite e2e logs
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: hull-windows-e2e-probe-logs
+          name: ${{ inputs.probe_e2e != '' && 'hull-windows-e2e-probe-logs' || 'hull-windows-e2e-logs' }}
           path: e2e-*.log
           if-no-files-found: warn
           retention-days: 14

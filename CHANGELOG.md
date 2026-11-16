@@ -15,6 +15,18 @@ release-artifact layout).
   new file's bits came from the process umask applied by hand, which on Windows only shapes the
   `st_mode` cosmo makes up and could leave no owner write bit. A new file is 0644 there again, as
   an `open(O_CREAT, 0644)` gives it.
+- Windows (a cosmo build): a path with a lower-case drive letter (`/d/app`, `d:/app`) and the
+  same path with an upper-case one were two directories to Hull, so a `-d D:/...` database, the
+  app's `.hull` and the dev-session records split in two. The drive letter is upper-cased
+  wherever a path is made canonical. A `-d` drive path (`D:/data/app.db`) was taken as relative,
+  and the internal database landed under the working directory.
+- Windows: a dev session's records and `hull agent inspect` / `errors` / `status` now tell a
+  live supervisor from a gone one (`OpenProcess` / `GetExitCodeProcess`; `kill(pid, 0)` ends the
+  process there), where they skipped the check before.
+- SQLite: reading the schema at open retries for about 2 s when another process holds a lock on
+  the file, instead of failing the open (`could not read schema`). On Windows a database stays in
+  rollback-journal mode: several processes sharing one WAL database there stalled on
+  `SQLITE_PROTOCOL`.
 
 ## [0.22.2] - 2026-11-15
 
