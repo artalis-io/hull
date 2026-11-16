@@ -3020,6 +3020,15 @@ jobs:
         run: make check-types
       - name: hull types E2E
         run: make e2e-types
+      # M5 (docs/typescript_design.md section 5): Node's type stripper agrees with the
+      # TypeScript frontend's corpus. Last, so the pinned Node does not change the steps above.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: 22.22.0
+      - name: TypeScript erasure cross-check against Node (make check-ts-node)
+        env:
+          HULL_REQUIRE_NODE_STRIP: "1"
+        run: make check-ts-node
 
   htmx-browser:
     needs: [classify]
