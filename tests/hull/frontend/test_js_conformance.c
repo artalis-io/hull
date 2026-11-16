@@ -131,6 +131,8 @@ static const Case VALID[] = {
     { "function + defaults",   "function f(a, b = 1, ...r) { return a + b; }" },
     { "arrow",                 "const g = (x) => x * 2;" },
     { "arrow block body",      "const g2 = (x) => { return x; };" },
+    { "arrow trailing comma",  "const g3 = (a, b,) => a; const g4 = ({ a }, [b],) => a;" },
+    { "async arrow trailing ,", "const g5 = async (a, b,) => a;" },
     { "async arrow await",     "const h = async (x) => await x;" },
     { "async function decl",   "async function af() { return 1; }" },
     { "export all",            "export * from \"m\";" },
@@ -192,6 +194,10 @@ static const Case VALID[] = {
 
 /* Malformed source the parser REJECTS (js.syntax) -- invalid in both strict and sloppy. */
 static const Case MALFORMED[] = {
+    { "paren trailing comma",  "const u = (a, b,);" },
+    { "paren lone trailing ,", "const u2 = (a,);" },
+    { "rest then comma",       "const u3 = (...a,) => a;" },
+    { "comma alone",           "const u4 = (,) => 1;" },
     { "missing rhs",           "const a = ;" },
     { "unclosed function",     "function () {" },
     { "unbalanced paren",      "let x = (1 + ;" },

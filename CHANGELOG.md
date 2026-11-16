@@ -19,6 +19,9 @@ release-artifact layout).
 
 ### Fixed
 
+- JS source analysis (`hull agent inspect`, `hull dev --agent`): an arrow function whose
+  parameter list ends in a comma (`(a, b,) => a`, valid since ES2017) is no longer a syntax
+  error. A parenthesized expression ending in a comma (`(a, b,)`) still is.
 - JS source analysis (`hull agent inspect`, `hull dev --agent`): an import with a default
   binding and no comma before `{ ... }` or `* as` (`import type { T } from "m"`,
   `import a * as n from "m"`), a trailing comma after the default binding
