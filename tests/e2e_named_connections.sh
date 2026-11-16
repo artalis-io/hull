@@ -236,7 +236,9 @@ echo "=== E2E: named file DSNs are confined to the app tree ==="
 CONF="$TMPDIR/confine"
 mkdir -p "$CONF/app" "$CONF/elsewhere"
 SECRET="$CONF/secret.db"
-ln -s ../secret.db "$CONF/app/linked.db"
+# A DANGLING link (secret.db must never be created). Windows (MSYS) cannot
+# make one - it needs the target to pick a file or a directory link.
+ln -s ../secret.db "$CONF/app/linked.db" 2>/dev/null || true
 HULL_ABS=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
 confine_case() {
     label="$1"; dsn="$2"; want="$3"
@@ -260,7 +262,11 @@ EOF
         *) fail "$label" "$out" ;;
     esac
 }
-confine_case "a symlinked named DSN is refused" "linked.db" "refused"
+if [ -L "$CONF/app/linked.db" ]; then
+    confine_case "a symlinked named DSN is refused" "linked.db" "refused"
+else
+    echo "  SKIP: a symlinked named DSN is refused - this shell cannot make a dangling link"
+fi
 confine_case "an escaping named DSN is refused" "../secret.db" "refused"
 confine_case "an absolute named DSN outside the tree is refused" "$SECRET" "refused"
 [ ! -e "$SECRET" ] && pass "the outside database was never created" \

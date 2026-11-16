@@ -28,6 +28,7 @@
 #include <sys/types.h>   /* uid_t / gid_t (db_fchown) */
 #include <time.h>        /* nanosleep (db_busy) */
 #include "hull/cap/run_watchdog.h"      /* hl_run_deadline_left_ms */
+#include "hull/shared/host.h"   /* hl_host_is_windows */
 #include "hull/shared/dispatch_meter.h" /* hl_meter_exclude_begin / _end */
 #include <unistd.h>      /* fchown */
 
@@ -1029,8 +1030,22 @@ int hl_cap_db_init(sqlite3 *db)
      * it already WAL. Hull's default DSN is the relative path data.db
      * (serve.c), which is why processes sharing a working directory share a
      * database, and hit this window at all. */
-    int wal = (sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) == SQLITE_OK);
-    if (!wal) {
+    /* Not on Windows. There (a Cosmopolitan APE) the WAL index - the
+     * memory-mapped -shm file - is not shared between processes: of 8 hull
+     * processes started against one data.db, the losers of the conversion
+     * race got SQLITE_PROTOCOL and then never started, spinning in SQLite's
+     * WAL read retries (the Windows e2e, e2e-cache-concurrent). The rollback
+     * journal locks the file itself (LockFileEx), which works across
+     * processes; a file an earlier run left in WAL is switched back once no
+     * other connection holds it. */
+    if (hl_host_is_windows()) {
+        if (sqlite3_exec(db, "PRAGMA journal_mode=DELETE", NULL, NULL, NULL) != SQLITE_OK)
+            fprintf(stderr, "hull: sqlite could not leave WAL (%s); another "
+                    "process has the database open\n", sqlite3_errmsg(db));
+    }
+    int wal = !hl_host_is_windows() &&
+              sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) == SQLITE_OK;
+    if (!wal && !hl_host_is_windows()) {
         fprintf(stderr,
                 "hull: sqlite could not set WAL (%s); continuing with the "
                 "database's current journal mode\n",

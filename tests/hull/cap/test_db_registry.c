@@ -533,6 +533,32 @@ UTEST(db_registry, env_memory_internal_and_no_app_dir)
 
 /* ── audit convergence §7.2: the Hull-owned internal database ─────────── */
 
+/* A -d naming a Windows drive path ("D:/a/x.db", the spelling an MSYS shell
+ * hands a native program) is absolute: it was joined to the working
+ * directory, and the beside file "<cwd>/D:/a/x.db.hull-internal" refused
+ * every example app with stdlib tables on the Windows e2e. */
+UTEST(db_internal, default_dsn_windows_drive_path_is_absolute)
+{
+    char root[PATH_MAX], app[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    char out[PATH_MAX + 64];
+    size_t base = 0;
+    int in_hull = 0;
+    hl_host_test_force_windows(1);
+    int rc = hl_db_internal_default_dsn(app, "D:/hullnope/vol/app.db", out,
+                                        sizeof out, &base, &in_hull);
+    char out2[PATH_MAX + 64];
+    int rc2 = hl_db_internal_default_dsn(app, "d:\\hullnope\\vol\\app.db", out2,
+                                     sizeof out2, NULL, NULL);
+    hl_host_test_force_windows(-1);
+    EXPECT_EQ(1, rc);
+    EXPECT_STREQ("/D/hullnope/vol/app.db.hull-internal", out);
+    EXPECT_EQ(strlen("/D/hullnope/vol"), base);
+    EXPECT_EQ(0, in_hull);
+    EXPECT_EQ(1, rc2);
+    EXPECT_STREQ("/D/hullnope/vol/app.db.hull-internal", out2);
+}
+
 /* Where the default internal database goes, for every kind of default DSN. */
 UTEST(db_internal, default_dsn_resolution)
 {

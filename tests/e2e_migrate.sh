@@ -398,7 +398,12 @@ EOF2
 # Skipped where `ln -s` copies, as above.
 if ln -s ../foreign_migrations "$TMPDIR/app9/migrations" 2>/dev/null && [ -L "$TMPDIR/app9/migrations" ]; then
 
-    if OUTPUT=$($HULL migrate "$TMPDIR/app9" 2>&1); then
+    # Judged by the output, not the status: a Cosmopolitan APE's exit status
+    # reads 0 from an MSYS shell on Windows (CLAUDE.md "A hull exit status is
+    # unusable from a POSIX shell on Windows").
+    OUTPUT=$($HULL migrate "$TMPDIR/app9" 2>&1) || true
+    case "$OUTPUT" in *"migration failed"*|*"refusing"*) refused=1 ;; *) refused=0 ;; esac
+    if [ "$refused" -eq 0 ]; then
         fail "hull migrate succeeded with a symlinked migrations dir: $OUTPUT"
     else
         case "$OUTPUT" in
