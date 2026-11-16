@@ -425,8 +425,9 @@ a `fuzz_js_source` never-crash + range-invariant harness (bounded QuickJS sessio
 transport-validation fuzz on the C bridge; if not fully in this story, a concrete
 continuous-fuzz follow-up is documented (mirrors `fuzz/fuzz_lua_source.c`).
 
-JS-mode output is also held fixed byte for byte while the TypeScript mode is added: the
-golden snapshot (`test_js_golden`) and the base-vs-head comparison
+The parser also has a TypeScript mode, `parse(bytes, { lang: "ts" })` (default `"js"`;
+docs/typescript_design.md §3.5). JS-mode output is held fixed byte for byte while it is
+built: the golden snapshot (`test_js_golden`) and the base-vs-head comparison
 (`scripts/js_frontend_diff.sh`); see docs/typescript_design.md §5.
 
 ## 9. Delivery slices (§33)

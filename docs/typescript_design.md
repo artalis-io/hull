@@ -1,6 +1,7 @@
 # TypeScript - design
 
-Status: **T1 (types + `hull types`) implemented; T2 and T3 design-only.** Builds on
+Status: **T1 (types + `hull types`) implemented; T2 slice 1 (the parser's TypeScript mode,
+internal) implemented (§3.5); the rest of T2, and T3, design-only.** Builds on
 [buildcontext_design.md](buildcontext_design.md) (BuildContext),
 [dev_pipeline_generations_design.md](dev_pipeline_generations_design.md) (pipeline
 generations), [javascript_source_frontend_design.md](javascript_source_frontend_design.md)
@@ -35,7 +36,7 @@ module resolution modes), CommonJS interop.
 | Step | What | Depends on |
 |---|---|---|
 | T1 | `.d.ts` + `hull types` (§2) - implemented | nothing |
-| T2 | TypeScript frontend, analysis only (§3) | the shipped JS frontend |
+| T2 | TypeScript frontend, analysis only (§3) - slice 1 implemented (§3.5) | the shipped JS frontend |
 | BuildContext 1-5 | action core, outputs, artifact seam, tool seam, plugin runtime | - |
 | G1, G2 | pipeline generations: overlay, runner wiring | BuildContext 2, 5 |
 | T3 | type-erasure plugin + `.ts` entry points (§4) | T2, BuildContext 5, G1, G2, and the explicit-route part of BuildContext 6 |
@@ -190,6 +191,61 @@ frontend checks each span's neighbourhood and reports these as `ts.unsupported` 
 fix hint (keep the return type on the arrow's line). The conformance corpus (§5) carries
 one case per shape.
 
+Implemented (slice 1), two rules:
+
+- **Arrow types and `=>`.** A line break between the end of an arrow's typed parameter
+  list or return type and its `=>` is refused ("keep '=>' on the line the types end").
+  It is checked over the bytes between `)` and `=>`, so a line break inside the return
+  type counts.
+- **Erased declarations and ASI.** Whole declarations (`interface`, `type`, `declare`,
+  `import type` / `export type`) erase only as items of a statement list (program,
+  block, function body, `case`); elsewhere they are refused. One is refused when the
+  statement before it ended by automatic semicolon insertion and the token after it
+  could continue that statement (`(`, `[`, a template, a regular expression, `/`, `/=`,
+  `+`, `-`): erased, `x` / `type T = A` / `(y)` would read as `x(y)`. The fix hint is to
+  end the earlier statement with `;`. Node's type stripper writes a `;` in such places
+  instead; Hull does not rewrite, it refuses, and leaves the safe cases blank.
+
+### 3.5 Delivery
+
+T2 lands in three slices.
+
+**Slice 1 (implemented): the parser's TypeScript mode.** Internal; no command reaches it
+yet, and no extension selects it.
+
+- `parse(bytes, { lang: "ts" })` in `hull:source:parser`. `lang` defaults to `"js"`; any
+  other value (`"tsx"`, `"TS"`, `true`, ...) is refused with one `js.internal` diagnostic
+  rather than read as JavaScript. Every TypeScript branch is behind the `ts` flag, and two
+  gates hold JS-mode output fixed (§5).
+- The type grammar is `hull:source:ts_types`, driven by the parser's tokenizer, limits and
+  diagnostic budget; `>>` and its kin are split for nested generics (the lexer's
+  `splitGreater()`).
+- A TS-mode unit carries `typeSpans`: sorted, non-overlapping, half-open byte ranges.
+  Type tokens never move a node's range, so the TS-mode AST equals the JS-mode AST of the
+  erased bytes. `hull:source:ts_erase` gives `typeErasure(unit, bytes, path)` -> `{ ok,
+  spans, refusals }` (§3.2) and `erase(bytes, spans)`: span bytes become spaces, CR and LF
+  are kept, a span holding U+2028 / U+2029 is refused. JSDoc attaches over the erased
+  bytes, as for a `.js` file.
+- Erased: annotations on variables, parameters (arrow and async-arrow included), returns
+  and class fields; optional `?` and definite `!`; `as`, `as const`, `satisfies` and
+  non-null `!`; `interface`, `type`, `declare` const / let / var / function, `import
+  type` / `export type` and their `export` forms, and inline `type` specifiers.
+- Refused, `ts.unsupported` with the construct named: everything else. For good (§3.3):
+  `enum` / `const enum`, `namespace` / `module` with a body, parameter properties,
+  `import x = require()` / `export =`, angle-bracket assertions. For now (slice 2): type
+  parameters and arguments, overload signatures, `this` parameters, `implements`, class
+  and member modifiers (`abstract`, `readonly`, `private`, ...), `declare class` /
+  `declare module` / `declare global`. Also refused: an initializer in a `declare`
+  declaration (TypeScript rejects it) and the §3.4 shapes.
+
+**Slice 2:** generics (`<` speculation between a type argument list and a comparison),
+class and member modifiers, overloads, `this` parameters, `implements`, the remaining
+`declare` forms, and any §3.4 shape they add.
+
+**Slice 3:** the `typescript` registry row (`.ts`, `.mts`; §3.1), the mode passed through
+`tool.frontend_analyze`, the `type_erasure` semantic operation on the handle, and an e2e
+through `hull agent inspect` and `hull dev --agent`.
+
 ## 4. Running TypeScript (T3)
 
 ### 4.1 The erasure plugin
@@ -255,11 +311,33 @@ All through the pipeline, none through a loader transform:
 
 ## 5. Testing
 
-- **Frontend:** the JS frontend's conformance approach (JS frontend design §8) with a
-  TypeScript corpus: every accepted construct erases to JavaScript QuickJS compiles
-  (compile-only, never run), with offsets preserved; every refused construct and every
-  §3.4 shape yields its diagnostic and range; a fuzz target over the TS mode (bytes in,
-  spans + diagnostics out, never a crash, spans always sorted and in range).
+- **Frontend (implemented for slice 1):** the JS frontend's conformance approach (JS
+  frontend design §8) with a TypeScript corpus, `tests/fixtures/ts_frontend/` (byte-exact,
+  `-text` in `.gitattributes`). `test_js_typescript` (every `make test`, and `make
+  test-js-frontend`) checks:
+  - every valid JavaScript file of the JS conformance corpus parses in TS mode to the same
+    AST with no spans and no refusals, and JS uses of TypeScript's contextual words
+    (`type`, `as`, `declare`, ...) stay JavaScript;
+  - each refusing hook fires once at its token, and `lang` takes only `"js"` / `"ts"`;
+  - `accept/NAME.ts`: parses cleanly; **M1** the erasure only turns bytes into spaces and
+    never touches CR / LF; **M2** the erased bytes parse as JavaScript to the TS-mode AST;
+    **M3** QuickJS compiles them (compile only, imports stubbed); **M4** they equal
+    `accept/NAME.js` byte for byte;
+  - `refuse/NAME.ts`: its diagnostics equal `refuse/NAME.expect`, one line per refusal
+    (`<code> <start> <stop> <message>`).
+  To add a case, write the `.ts` and run the suite with `HULL_TS_CORPUS_UPDATE=1`, which
+  writes the `.js` / `.expect`; review them before committing.
+- **M5, Node cross-check** (`make check-ts-node`, `scripts/ts_node_crosscheck.mjs`; CI job
+  `types` on Node 22.22.0): Node's `module.stripTypeScriptTypes()` must accept every
+  accepted file and produce its `.js` byte for byte, except that Node blanks a non-ASCII
+  character with one whitespace character of the same UTF-8 length (Hull: one space per
+  byte) and writes a `;` where it erases a statement (§3.4). Every file Node refuses, Hull
+  refuses; the refused files Node strips are listed in the script with the reason, and the
+  list must be exact. On a Node without the function it skips, unless
+  `HULL_REQUIRE_NODE_STRIP=1`.
+- **M6, fuzzing:** `fuzz-js-source` runs TS mode when the first input byte's bit 2 is set
+  (docs/js_source_fuzz_design.md §5): never a crash, spans sorted and in range, and a clean
+  unit erases to bytes that parse cleanly to the same AST.
 - **Plugin:** the BuildContext acceptance cases (abort on refusal, nothing committed;
   cache hit on unchanged bytes; reuse invalidated by any byte change).
 - **E2E** (`tests/e2e_typescript.sh`, both a modular and a single-file app): `hull dev`
