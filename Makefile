@@ -3896,3 +3896,12 @@ check-types: $(TYPES_TSC) $(BUILDDIR)/hull
 	@echo "check-types: OK"
 
 .PHONY: check-types
+
+# M5 of the TypeScript frontend (docs/typescript_design.md section 5): Node's
+# module.stripTypeScriptTypes() must agree with the corpus in tests/fixtures/ts_frontend
+# (expected .js byte for byte, bar two documented differences; refusals). Needs Node 22.13+;
+# skipped on an older node unless HULL_REQUIRE_NODE_STRIP=1 (CI job `types` sets it).
+check-ts-node:
+	node --no-warnings scripts/ts_node_crosscheck.mjs tests/fixtures/ts_frontend
+
+.PHONY: check-ts-node

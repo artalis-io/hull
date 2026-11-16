@@ -37,6 +37,12 @@ release-artifact layout).
   expected refusals. The JS parser fuzzer gains a TypeScript leg (`fuzz-js-source`, the first
   input byte's bit 2): spans sorted and in range, and a clean unit erases to JavaScript that
   parses cleanly to the same AST.
+- Tests: the TypeScript corpus is cross-checked against Node's `module.stripTypeScriptTypes()`
+  (`make check-ts-node`, CI job `types` on Node 22.22.0): Node's output for every accepted file
+  equals the expected `.js` byte for byte, except that Node blanks a non-ASCII character with
+  one whitespace character of the same length (Hull: a space per byte) and writes a `;` where it
+  erases a statement; every file Node refuses, Hull refuses too, and the refused files Node
+  strips are listed with the reason.
 
 ### Fixed
 
