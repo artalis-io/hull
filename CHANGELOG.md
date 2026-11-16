@@ -14,7 +14,8 @@ release-artifact layout).
   `test_js_golden` compares the lex, parse and scope output of a frozen input set (the Test262
   subset and hand-written edge cases) with a committed snapshot, and
   `scripts/js_frontend_diff.sh` (`make js-frontend-diff`, run by CI on a PR that touches the
-  frontend) compares the output over the repo JS between the PR's base and its head.
+  frontend) compares the output over the repo JS between the PR's base and its head. A difference
+  passes only for an input whose snapshot line the PR regenerated (`make js-frontend-golden`).
 
 ### Fixed
 
