@@ -1,0 +1,13 @@
+// Arrow parameter lists and conditionals: the shapes a TypeScript `(x?: T): R =>` resembles.
+const id = (x) => x;
+const pair = (x, y) => [x, y];
+const def = (x = 1, { y } = {}, [z] = [], ...rest) => x + y + z + rest.length;
+const asy = async (x) => await x;
+const asy2 = async x => x;
+const cond = (a) => a ? (b) => b : (c) => c;
+const nested = (a) => (b) => (c) => a + b + c;
+const obj = () => ({ k: 1 });
+const t = id ? (1) : (2);
+const u = id ? (x) : (y);
+const opt = obj?.()?.k ?? 0;
+const v = (a, b) => { return a ?? b; };

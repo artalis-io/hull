@@ -45,3 +45,8 @@
 # Fuzzer seed corpora: extensionless, byte-exact inputs. Normalising one changes
 # what it exercises without changing anything a reviewer would notice.
 fuzz/corpus_*/** binary
+
+# The JS-mode frontend snapshot's frozen inputs (tests/hull/frontend/test_js_golden.c):
+# byte-exact, since the committed digests cover every byte and one case is CRLF on
+# purpose. `-text` (not `binary`) so they still diff as text in review.
+tests/fixtures/js_frontend_golden/cases/** -text

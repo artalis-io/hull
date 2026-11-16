@@ -1,0 +1,3 @@
+const crlf = 1;
+let two = crlf
++ 1;

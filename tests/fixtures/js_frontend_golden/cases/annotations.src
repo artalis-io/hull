@@ -1,0 +1,12 @@
+/**
+ * @query users.by_id
+ * @param {number} id
+ */
+export function byId(id) { return id; }
+
+/** @compute double */
+export const double = (x) => x * 2;
+
+// A line comment, then a block comment that is not JSDoc.
+/* plain */
+export let counter = 0;

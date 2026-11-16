@@ -1,0 +1,16 @@
+// Class shapes a TypeScript member modifier would sit on.
+class Base { constructor(x) { this.x = x; } }
+class C extends Base {
+  static count = 0;
+  field = 1;
+  other;
+  constructor(x) { super(x); C.count++; }
+  get value() { return this.field; }
+  set value(v) { this.field = v; }
+  static make() { return new C(1); }
+  async load() { return 1; }
+  method(a, b = 2) { return a + b; }
+  "quoted"() { return 1; }
+  [Symbol.iterator]() { return [][Symbol.iterator](); }
+}
+export default C;
