@@ -39,12 +39,8 @@ const NODE_STRIPS = new Map([
     ["asi_template.ts", "erased statement before a template: Hull refuses, Node inserts `;`"],
     ["async_arrow_type_parameters_newline.ts", "line break after an async arrow's type parameters: Hull refuses, Node's output is not valid JavaScript"],
     ["declaration_not_in_list.ts", "type declaration outside a statement list: Hull refuses"],
-    ["declare_class.ts", "declare class: slice 2"],
-    ["declare_global.ts", "declare global: slice 2"],
     ["declare_initializer.ts", "initializer in a declare declaration: TypeScript rejects it"],
-    ["declare_module.ts", "declare module: slice 2"],
     ["this_parameter_not_first.ts", "this parameter after the first: TypeScript rejects it"],
-    ["import_type_require.ts", "import type x = require(): slice 2"],
 ]);
 
 const strip = mod.stripTypeScriptTypes;
@@ -103,6 +99,6 @@ for (const f of list(path.join(CORPUS, "refuse"))) {
 }
 for (const f of NODE_STRIPS.keys()) if (!seen.has(f)) fail(`NODE_STRIPS names refuse/${f}, which does not exist`);
 
-if (accepted < 21 || refused < 33) fail(`corpus too small: ${accepted} accept, ${refused} refuse`);
+if (accepted < 22 || refused < 30) fail(`corpus too small: ${accepted} accept, ${refused} refuse`);
 if (failures) process.exit(1);
 console.log(`ts-node-crosscheck: Node ${process.version}: ${accepted} accept cases match, ${refused} refuse cases agree`);

@@ -1,7 +1,7 @@
 # TypeScript - design
 
-Status: **T1 (types + `hull types`) implemented; T2 slice 1 (the parser's TypeScript mode,
-internal) implemented (§3.5); the rest of T2, and T3, design-only.** Builds on
+Status: **T1 (types + `hull types`) implemented; T2 slices 1 and 2 (the parser's TypeScript
+mode, internal) implemented (§3.5); the rest of T2, and T3, design-only.** Builds on
 [buildcontext_design.md](buildcontext_design.md) (BuildContext),
 [dev_pipeline_generations_design.md](dev_pipeline_generations_design.md) (pipeline
 generations), [javascript_source_frontend_design.md](javascript_source_frontend_design.md)
@@ -36,7 +36,7 @@ module resolution modes), CommonJS interop.
 | Step | What | Depends on |
 |---|---|---|
 | T1 | `.d.ts` + `hull types` (§2) - implemented | nothing |
-| T2 | TypeScript frontend, analysis only (§3) - slice 1 implemented (§3.5) | the shipped JS frontend |
+| T2 | TypeScript frontend, analysis only (§3) - slices 1 and 2 implemented (§3.5) | the shipped JS frontend |
 | BuildContext 1-5 | action core, outputs, artifact seam, tool seam, plugin runtime | - |
 | G1, G2 | pipeline generations: overlay, runner wiring | BuildContext 2, 5 |
 | T3 | type-erasure plugin + `.ts` entry points (§4) | T2, BuildContext 5, G1, G2, and the explicit-route part of BuildContext 6 |
@@ -168,14 +168,16 @@ Hull accepts the subset whose removal leaves valid JavaScript with the same mean
 (TypeScript's `erasableSyntaxOnly`, Node's type stripping):
 
 - erased: type annotations, return types, type parameters and arguments, `interface`,
-  `type` aliases, `declare` declarations (including `declare module` / `declare global`),
-  `import type` / `export type` and inline `type` specifiers, `as` / `satisfies` /
+  `type` aliases, `declare` declarations (including `declare module "m"` / `declare
+  global` / `declare namespace` / `declare enum`), `import type` / `export type` (and
+  `import type X = require("m")`) and inline `type` specifiers, `as` / `satisfies` /
   non-null `!` assertions, `abstract` / `override` / `readonly` /
   `public` / `private` / `protected` modifiers that are type-only, optional `?` on
   parameters and properties, definite assignment `!`, `this` parameters, overload
   signatures, `implements` clauses, class field type annotations;
 - refused (diagnostic, the file does not run): `enum` and `const enum`, a non-`declare`
-  `namespace` / `module` with a body, parameter properties
+  `namespace` / `module` with a body, `declare module N {}` (the old spelling of a
+  namespace, which TypeScript deprecates and Node refuses), parameter properties
   (`constructor(private x: T)`), `import x = require()` / `export =`, legacy
   `experimentalDecorators` metadata, angle-bracket assertions `<T>x`, JSX.
 
@@ -191,7 +193,7 @@ frontend checks each span's neighbourhood and reports these as `ts.unsupported` 
 fix hint (keep the return type on the arrow's line). The conformance corpus (§5) carries
 one case per shape.
 
-Implemented (slice 1), two rules:
+Implemented, six rules (the first two in slice 1):
 
 - **Arrow types and `=>`.** A line break between the end of an arrow's typed parameter
   list or return type and its `=>` is refused ("keep '=>' on the line the types end").
@@ -204,7 +206,34 @@ Implemented (slice 1), two rules:
   could continue that statement (`(`, `[`, a template, a regular expression, `/`, `/=`,
   `+`, `-`): erased, `x` / `type T = A` / `(y)` would read as `x(y)`. The fix hint is to
   end the earlier statement with `;`. Node's type stripper writes a `;` in such places
-  instead; Hull does not rewrite, it refuses, and leaves the safe cases blank.
+  instead; Hull does not rewrite, it refuses, and leaves the safe cases blank. Slice 2
+  adds `<` to those tokens (a generic arrow's erased `<T>` leaves its `(`), extends the
+  rule to overload signatures, which erase with their statement, and refuses a `;` there
+  too: `x` / `interface I {}` / `;` is two statements in TypeScript and one in the erased
+  JavaScript.
+- **`as` and `satisfies` before a line.** TypeScript ends an `as` / `satisfies` type at a
+  line break, and the statement then ends by automatic semicolon insertion; erased, the
+  expression before it would take the next line. Refused when that line starts with a token
+  that would continue the expression (`(`, `[`, `.`, `?.` or a template): `x as T` /
+  `[1].f()` reads `x[1].f()` (`refuse/asi_as_bracket.ts`,
+  `asi_as_template.ts`, `asi_satisfies_call.ts`).
+- **Async arrow type parameters.** `async <T>` followed by a line break and `(x) => x` is an
+  async arrow in TypeScript; erased, `async` / `(x) => x` is a call of `async` and then a
+  plain arrow, so a line break after the type parameters of an async arrow is refused
+  (`refuse/async_arrow_type_parameters_newline.ts`). Node's output there is not valid
+  JavaScript.
+- **Class members.** Erased modifiers, whole members (overload signatures, `abstract` and
+  `declare` members, index signatures) and a field's own type can sit between a class
+  field ended by automatic semicolon insertion and the next member. Refused when what
+  follows would then join the field: a `;` (an erased member takes one `;`, so a second
+  one, `m(): void;;`, would end the field in JavaScript); after an initializer, a member
+  starting `[`, `*`, `in` or `instanceof` (`x = a` / `private [k] = 1` reads `a[k] = 1`);
+  after a field named `static`, `get` or `set` with no initializer, any member (`static:
+  number` / `x = 1` reads `static x = 1`). Node writes a `;` after an erased modifier, but
+  its output for an erased member there joins the lines (`refuse/asi_class_member.ts`).
+- **Instantiation expressions add none.** A `<...>` erased after an expression (§3.6)
+  leaves exactly what TypeScript goes on to parse after it, a line break included, so no
+  shape arises there.
 
 ### 3.5 Delivery
 
@@ -238,13 +267,57 @@ yet, and no extension selects it.
   `declare module` / `declare global`. Also refused: an initializer in a `declare`
   declaration (TypeScript rejects it) and the §3.4 shapes.
 
-**Slice 2:** generics (`<` speculation between a type argument list and a comparison),
-class and member modifiers, overloads, `this` parameters, `implements`, the remaining
-`declare` forms, and any §3.4 shape they add.
+**Slice 2 (implemented):** the rest of the erasable syntax (§3.3).
+
+- Generics: type parameters on functions, classes, methods and arrows (`<T>(x: T) => x`,
+  `async <T>(x) => x`), and type arguments after a callee, a `new` callee, a `?.`, a tag
+  and a heritage class (`f<T>(x)`, `new Map<K, V>()`, `` tag<T>`s` ``, `extends Base<T>`)
+  and as instantiation expressions (`f<T>;`). §3.6 says how a `<` after an expression is
+  told from a comparison.
+- Classes: `abstract class` (with `export` / `export default`), `implements`, member
+  modifiers (`public`, `private`, `protected`, `readonly`, `override`), and members erased
+  whole: `abstract` and `declare` members, index signatures, method and constructor
+  overload signatures. A member's node starts at its first JavaScript token. A field named
+  like a modifier stays a field (`private;`, `readonly` on its own line, `declare: T`).
+- Functions: overload signatures erase with their statement (`function f(a: T): R;`,
+  `export` / `export default` / `async` forms) in a statement list; elsewhere they are
+  refused. A `this` parameter erases with its comma when it is first; later, TypeScript
+  rejects it and Hull refuses it.
+- `declare class` / `abstract class` / `enum` / `const enum` / `namespace` / `module "m"`
+  (with or without a body) / `global`, also after `export`: the header is read and the
+  body, ambient declarations only, is skipped as one balanced `{ ... }` group. `declare
+  interface` / `declare type`, and `import type X = require("m")` (or `= A.B`).
+- The §3.4 rules for generic arrows, overloads, a following `;` and class members.
 
 **Slice 3:** the `typescript` registry row (`.ts`, `.mts`; §3.1), the mode passed through
 `tool.frontend_analyze`, the `type_erasure` semantic operation on the handle, and an e2e
 through `hull agent inspect` and `hull dev --agent`.
+
+### 3.6 `<` after an expression
+
+After an expression a `<` is either type arguments or a comparison, and only what follows
+tells them apart. The parser reads it as type arguments under speculation: the lexer's
+`specMark()` / `specRewind()` save and restore its whole state (the template context
+stack copied), and the parser saves its own. The reading is kept only when the list parses
+with no diagnostic and the token after its `>` can follow one by TypeScript's rule
+(`canFollowTypeArgumentsInExpression`): `(` or a template make a call or a tagged
+template; `<`, `>`, `+` and `-` make a comparison; otherwise a line break, a binary
+operator or a token that cannot start an expression make an instantiation expression, and
+anything that can start one a comparison. `.`, `?.` and an assignment after the list,
+which TypeScript rejects, are read as a comparison so that JS mode reports them. Otherwise
+everything is rewound, and every token is lexed again under its real slash goal (`a <
+/re/` stays a regular expression).
+
+So `i < n`, `a < b > c`, `a < b >= c` and `a < b && c > d` stay comparisons, and `a < b >
+(c)` is a call, as it is to tsc and Node: the one place where valid JavaScript parses
+differently in TS mode. A `<` at an operand position is a generic arrow when a type
+parameter list followed by `(` reads and an arrow follows, else an angle-bracket assertion
+(refused).
+
+Speculation is bounded per file: the rewound tokens, plus the lexer context copied per
+attempt, may total at most four times the tokens kept plus 65536. Past that the construct
+is refused ("type lists past this file's lookahead budget"), so input built to make every
+`<` a long failed attempt stays linear (`speculation_budget` in `test_js_typescript`).
 
 ## 4. Running TypeScript (T3)
 
@@ -311,7 +384,7 @@ All through the pipeline, none through a loader transform:
 
 ## 5. Testing
 
-- **Frontend (implemented for slice 1):** the JS frontend's conformance approach (JS
+- **Frontend (implemented for slices 1 and 2):** the JS frontend's conformance approach (JS
   frontend design §8) with a TypeScript corpus, `tests/fixtures/ts_frontend/` (byte-exact,
   `-text` in `.gitattributes`). `test_js_typescript` (every `make test`, and `make
   test-js-frontend`) checks:

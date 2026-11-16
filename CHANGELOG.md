@@ -37,7 +37,12 @@ release-artifact layout).
   Classes and overloads erase: `abstract class`, `implements`, member modifiers (`public`,
   `private`, `protected`, `readonly`, `override`), members that are types only (`abstract` and
   `declare` members, index signatures), overload signatures of a function in a statement list or
-  of a class method or constructor, and a first `this` parameter with its comma. JSDoc
+  of a class method or constructor, and a first `this` parameter with its comma. So do the
+  remaining `declare` forms (`declare class`, `declare abstract class`, `declare enum` / `const
+  enum`, `declare namespace`, `declare module "m"` with or without a body, `declare global`,
+  `declare interface` / `type`, also after `export`; the body is skipped as one balanced group)
+  and `import type X = require("m")`. `declare module N {}`, the deprecated spelling of a
+  namespace, is refused, as Node refuses it. JSDoc
   attaches as it does over the erased bytes. Every other TypeScript construct is refused with
   `ts.unsupported`, as is a line break between an arrow's types and its `=>`, a line after an
   `as` / `satisfies` type that would continue the expression (`x as T` / `[1].f()`), and an erased

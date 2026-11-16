@@ -1,0 +1,36 @@
+// Ambient declarations erase whole, bodies included.
+                                                         
+                              
+                           
+                         
+                            
+                           
+ 
+                                                         
+                                                        
+                                                        
+                      
+                           
+                              
+                                              
+ 
+                           
+                      
+                                         
+                              
+               
+ 
+                           
+                
+                                       
+                         
+ 
+                                     
+                                     
+                                
+                                      
+                                      
+                                           
+                               
+                             
+export const ok = 1;
