@@ -1,0 +1,2 @@
+ts.unsupported 1 8 TypeScript 'declare' declarations are not supported
+ts.unsupported 9 15 TypeScript module declarations are not supported

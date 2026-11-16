@@ -24,12 +24,19 @@ release-artifact layout).
   grammar (`hull:source:ts_types`) erases annotations (variables, parameters, arrow and
   async-arrow parameters, returns, class fields), optional `?`, definite `!`, `as` / `as const` /
   `satisfies` and non-null `!`; type tokens never move a node's range, so the TS-mode AST is the
-  JS-mode AST of the erased bytes. Every other TypeScript construct is refused with
-  `ts.unsupported`, as is a line break between an arrow's types and its `=>`. `test_js_typescript`
+  JS-mode AST of the erased bytes. Whole declarations in a statement list erase to nothing:
+  `interface`, `type`, `declare` const / let / var / function, `import type` / `export type` and
+  their `export` forms, and inline `type` import / export specifiers (with their comma). JSDoc
+  attaches as it does over the erased bytes. Every other TypeScript construct is refused with
+  `ts.unsupported`, as is a line break between an arrow's types and its `=>`, and an erased
+  declaration that would let the line after it continue the statement before it (`x` /
+  `type T = A` / `(y)`). `test_js_typescript`
   checks that valid JavaScript parses identically in TS mode, and runs the TypeScript corpus
   (`tests/fixtures/ts_frontend`): every accepted file erases byte-safely, parses as JavaScript to
   the same AST, compiles in QuickJS and matches its expected `.js`; every refused file matches its
-  expected refusals.
+  expected refusals. The JS parser fuzzer gains a TypeScript leg (`fuzz-js-source`, the first
+  input byte's bit 2): spans sorted and in range, and a clean unit erases to JavaScript that
+  parses cleanly to the same AST.
 
 ### Fixed
 

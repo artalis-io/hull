@@ -155,7 +155,12 @@ One process-lifetime `HlJsSession` created with tight-but-real `HlJsSessionLimit
 
 1. Derive `maxDiagnostics` deterministically from the input, covering `0` / small / default:
    `n==0 -> 0`; else a small mix keyed off the first byte and length (e.g.
-   `{0, 1, small, 4096}`), passed as the options JSON `{"maxDiagnostics":N}`.
+   `{0, 1, small, 4096}`), passed as the options JSON `{"maxDiagnostics":N,"lang":L}`. Bit 2
+   of the first byte picks `L = "ts"`, the parser's TypeScript mode (docs/typescript_design.md
+   section 5, M6), whose entry adds the span checks (sorted, non-overlapping, in range) and,
+   for a clean unit, erases the spans and requires the JavaScript to parse cleanly to the same
+   AST. The checked-in seeds include the TypeScript corpus (`tests/fixtures/ts_frontend`), each
+   starting with `//`, which selects `"ts"`.
 2. `rc = hl_js_session_analyze(s, "hull:source:tests:fuzz_parse", "fuzz", data, n, "f.js",
    opts_json, opts_len, &out, &out_len)`.
 3. Interpret (matches the real API's two channels):

@@ -159,22 +159,14 @@ static const Refusal REFUSALS[] = {
     { "class C implements I {}",               "implements clauses",                  9, 19 },
     { "class C { private x = 1 }",             "'private' modifiers",                11, 18 },
     { "class C { readonly x = 1 }",            "'readonly' modifiers",               11, 19 },
-    { "interface I { a: string }",             "interfaces",                          1, 10 },
-    { "type T = string;",                      "type aliases",                        1,  5 },
     { "enum E { A }",                          "enums",                               1,  5 },
     { "namespace N {}",                        "namespaces",                          1, 10 },
     { "module M {}",                           "module declarations",                 1,  7 },
-    { "declare const x: number;",              "'declare' declarations",              1,  8 },
     { "abstract class A {}",                   "abstract classes",                    1,  9 },
-    { "import type { A } from \"m\";",         "type-only imports",                   8, 12 },
-    { "import type A from \"m\";",             "type-only imports",                   8, 12 },
-    { "import { type A } from \"m\";",         "type-only import specifiers",        10, 14 },
     { "import x = require(\"m\");",            "import-require declarations",        10, 11 },
-    { "export type { A };",                    "type-only exports",                   8, 12 },
-    { "export type T = string;",               "type aliases",                        8, 12 },
-    { "export interface I {}",                 "interfaces",                          8, 17 },
-    { "export { type A };",                    "type-only export specifiers",        10, 14 },
     { "export = x;",                           "export assignments",                  8,  9 },
+    { "declare module \"m\" {}",              "'declare' declarations",              1,  8 },
+    { "if (x) interface I {}",                 "declarations outside a statement list", 8, 17 },
 };
 
 UTEST(js_typescript, each_hook_refuses)
@@ -507,7 +499,7 @@ UTEST(js_typescript, corpus_accept)
         free(jsp); free(er); free(hx); free(o); free(src);
     }
     jfd_paths_free(&pv);
-    EXPECT_GE(checked, 14);
+    EXPECT_GE(checked, 18);
     hl_js_session_destroy(s);
 }
 
@@ -545,7 +537,7 @@ UTEST(js_typescript, corpus_refuse)
         free(exp); free(lines); free(o); free(src);
     }
     jfd_paths_free(&pv);
-    EXPECT_GE(checked, 25);
+    EXPECT_GE(checked, 27);
     hl_js_session_destroy(s);
 }
 

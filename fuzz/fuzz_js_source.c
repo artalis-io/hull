@@ -90,12 +90,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (!S) LLVMFuzzerInitialize(NULL, NULL);
 
-    /* Deterministically derive maxDiagnostics, covering 0 / small finite / default. */
+    /* Deterministically derive maxDiagnostics, covering 0 / small finite / default, and the
+     * language: bit 2 of the first byte runs the TypeScript mode (its own invariants, M6). */
     long md;
     if (size == 0) md = 0;
     else switch (data[0] & 3) { case 0: md = 0; break; case 1: md = 1; break; case 2: md = 3; break; default: md = 4096; }
-    char opts[48];
-    snprintf(opts, sizeof opts, "{\"maxDiagnostics\":%ld}", md);
+    const char *lang = (size > 0 && (data[0] & 4)) ? "ts" : "js";
+    char opts[64];
+    snprintf(opts, sizeof opts, "{\"maxDiagnostics\":%ld,\"lang\":\"%s\"}", md, lang);
 
     char *out = NULL;
     int rc = run_entry(data, size, opts, &out);

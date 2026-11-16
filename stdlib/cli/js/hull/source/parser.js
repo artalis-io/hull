@@ -32,8 +32,11 @@
 // last JAVASCRIPT token, so the TS-mode AST is exactly the JS-mode AST of the erased bytes.
 // Erased in this slice: annotations (variables, parameters incl. arrow and async-arrow ones,
 // returns, class fields), optional `?` on parameters and members, definite assignment `!`,
-// `as` / `satisfies`, and non-null `!`. Every other TypeScript construct is refused with a
-// ts.unsupported diagnostic.
+// `as` / `satisfies`, non-null `!`, and whole declarations in a statement list - `interface`,
+// `type`, `declare` const / let / var / function, `import type` / `export type` and their
+// `export` forms - plus inline `type` import / export specifiers. An erased declaration builds
+// no node, and JSDoc attaches as it does over the erased bytes. Every other TypeScript construct
+// is refused with a ts.unsupported diagnostic.
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -41,6 +44,7 @@ import { createTokenizer } from "hull:source:lexer";
 import { newDiagnostic, makeBudget } from "hull:source:diagnostic";
 import { attach as attachAnnotations } from "hull:source:annotations";
 import { createTypeGrammar } from "hull:source:ts_types";
+import { erase } from "hull:source:ts_erase";
 
 // Reserved words that may NOT be a binding/identifier reference.
 const RESERVED = new Set([
@@ -192,6 +196,7 @@ function parseInternal(bytes, opts, inject) {
     // TS mode: the last consumed token that is not type syntax (typeDepth > 0 while a type is
     // read). Nodes end there, so a trailing type never stretches a node.
     let lastJs = null;
+    let firstJs = null;              // TS mode: the first consumed token that is not type syntax
     let typeDepth = 0;
 
     // advance past cur, reading the next token with an explicit grammatical slash goal:
@@ -201,7 +206,7 @@ function parseInternal(bytes, opts, inject) {
     // fresh read from the tokenizer.
     function advance(regexAllowed) {
         prev = cur;
-        if (typeDepth === 0) lastJs = cur;
+        if (typeDepth === 0) { lastJs = cur; if (firstJs === null) firstJs = cur; }
         cur = la.length > 0 ? la.shift() : tk.next(regexAllowed === false ? false : true);
         return prev;
     }
@@ -295,11 +300,12 @@ function parseInternal(bytes, opts, inject) {
     // TS mode: consume type syntax with `body` (starting at cur) and record it as one span.
     function tsSpan(body) {
         const start = cur.start;
+        const outer = typeDepth === 0;               // a span inside an erased declaration is part of it
         typeDepth++;
         body();
         typeDepth--;
         const stop = prev.stop;
-        if (stop > start) typeSpans.push({ start: start, stop: stop });
+        if (outer && stop > start) typeSpans.push({ start: start, stop: stop });
     }
     // `: T` (cur is the `:`).
     function tsAnnotation() { tsSpan(function () { advance(false); types.parseType(); }); }
@@ -403,6 +409,144 @@ function parseInternal(bytes, opts, inject) {
     function guard() { if (++depth > maxDepth) { diag("error", "js.limit.depth", "maximum nesting depth exceeded (" + maxDepth + ")", cur.start, cur.stop); return false; } return true; }
     function unguard() { depth--; }
 
+    // -- TS mode: erased declarations --
+    // The declaration a statement starting with token t0 is, for the forms this slice erases:
+    // "interface", "type" (an alias), "declareVar", "declareFunction", or null. peekAt(i) reads
+    // the i-th token after t0 - lazily, and only after `interface` / `type` / `declare` (where
+    // the next token is an operator-position read, as JavaScript would make it), so no other
+    // statement start is ever lexed ahead. With a line break after t0 JS reads two statements,
+    // and so does this.
+    function tsErasableKind(t0, peekAt) {
+        if (!isIdTok(t0) || (t0.value !== "interface" && t0.value !== "type" && t0.value !== "declare")) return null;
+        const t1 = peekAt(1);
+        if (t1.nlBefore || !isIdTok(t1)) return null;
+        if (t0.value === "interface") return "interface";
+        if (t0.value === "type") { const t2 = peekAt(2); return (t2.type === "punctuator" && (t2.value === "=" || t2.value === "<")) ? "type" : null; }
+        if (t1.value === "const" || t1.value === "let" || t1.value === "var") return "declareVar";
+        if (t1.value === "function") return "declareFunction";
+        return null;
+    }
+    function tsPeekFromCur(i) { return peekTok(i, false); }
+    // `import type X from` / `import type { X }` / `import type * as n` at cur `import` (`import
+    // type from "m"` and `import type, { a }` are JS: a default binding named `type`).
+    function tsTypeOnlyImportAhead() {
+        const t1 = peekTok(1, false);
+        if (!isIdTok(t1) || t1.value !== "type") return false;
+        const t2 = peekTok(2, false);
+        return (t2.type === "punctuator" && (t2.value === "{" || t2.value === "*")) || (isIdTok(t2) && t2.value !== "from");
+    }
+    // Erase one whole statement read by `body`, and build no node. A statement ended by automatic
+    // semicolon insertion (`asiEnd`) right before it, followed by a token that would continue
+    // that statement once the erased bytes are blank (`x` / type T = A; / `(y)` reads `x(y)`),
+    // is refused (docs/typescript_design.md 3.4).
+    let asiEnd = null;                               // TS mode: the last token of a statement ended by ASI
+    function tsEraseStatement(body) {
+        const before = lastJs;
+        tsSpan(body);
+        if (before !== null && before === asiEnd && tsContinuesExpression(cur))
+            diag("error", "ts.unsupported", "an erased TypeScript declaration between a statement without ';' and a line that would continue it is not supported: end the statement before it with ';'", cur.start, cur.stop);
+        return null;
+    }
+    // A token that both starts a statement and continues an expression on the previous line.
+    function tsContinuesExpression(t) {
+        if (t.type === "template") return t.mode === "noSubstitution" || t.mode === "head";
+        if (t.type === "regex") return true;
+        return t.type === "punctuator" && (t.value === "(" || t.value === "[" || t.value === "+" || t.value === "-" || t.value === "/" || t.value === "/=");
+    }
+    // `;` or automatic semicolon insertion closing an erased declaration.
+    function tsDeclEnd() {
+        if (isP(";")) { advance(true); return; }
+        if (!(isP("}") || atEof() || nl())) synErr("expected ';'");
+    }
+    // The body of an erasable declaration, cur at its first word.
+    function tsDeclarationBody(kind) {
+        if (kind === "interface") {
+            advance(false); advance(false);         // `interface`, the name
+            if (isP("<")) types.parseTypeParameters();
+            if (isKw("extends")) {
+                advance(false);
+                for (;;) { const b = cur.start; types.parseType({ noConditional: true }); if (cur.start === b || !isP(",")) break; advance(false); }
+            }
+            if (isP("{")) types.parseObjectType(); else synErr("expected '{'");
+            return;
+        }
+        if (kind === "type") {
+            advance(false); advance(false);         // `type`, the name
+            if (isP("<")) types.parseTypeParameters();
+            if (isP("=")) { advance(false); types.parseType(); } else synErr("expected '='");
+            tsDeclEnd();
+            return;
+        }
+        advance(false);                             // `declare`
+        if (kind === "declareVar") {
+            advance(false);                         // const / let / var
+            for (;;) {
+                if (isIdTok(cur) && !RESERVED.has(cur.value)) advance(false); else { synErr("expected a name"); return; }
+                if (isP(":")) { advance(false); types.parseType(); }
+                if (isP("=")) { tsRefuse("initializers in 'declare' declarations"); return; }
+                if (!isP(",")) break;
+                advance(false);
+            }
+            tsDeclEnd();
+            return;
+        }
+        advance(false);                             // `function`
+        if (isIdTok(cur) && !RESERVED.has(cur.value)) advance(false); else { synErr("expected a function name"); return; }
+        if (isP("<")) types.parseTypeParameters();
+        types.parseParameters();
+        if (isP(":")) { advance(false); types.parseReturnType(); }
+        tsDeclEnd();
+    }
+    // `export type { A } [from "m"]`, `export type * [as n] from "m"` after `export type`.
+    function tsTypeOnlyExportRest() {
+        if (isP("*")) {
+            advance(false);
+            if (isKw("as")) { advance(false); advance(false); }
+        } else if (isP("{")) {
+            advance(false);
+            while (!isP("}") && !atEof()) {
+                const b = cur.start;
+                if (cur.type === "identifier" || cur.type === "string") advance(false); else { synErr("expected an export name"); return; }
+                if (isKw("as")) { advance(false); advance(false); }
+                if (cur.start === b || !isP(",")) break;
+                advance(false);
+            }
+            if (!isP("}")) { synErr("expected '}'"); return; }
+            advance(false);
+        } else { synErr("expected '{' or '*'"); return; }
+        if (isKw("from")) { advance(false); if (cur.type === "string") advance(false); else { synErr("expected module specifier"); return; } }
+        tsDeclEnd();
+    }
+    // An inline `type` specifier, `{ type A as B, ... }` (cur at `type`). Peeks only in TS mode.
+    function tsTypeSpecifierAhead() {
+        if (!isKw("type")) return false;
+        const t1 = tsPeek();
+        if (t1.type !== "identifier" && t1.type !== "string") return false;
+        if (t1.type === "identifier" && t1.value === "as") {
+            // `type as as x` / `type as x` (a specifier named `type`): TypeScript reads the
+            // second form as JS; only `type as as x` and `type as,` / `type as }` are types.
+            const t2 = peekTok(2, false);
+            return t2.type === "identifier" && t2.value === "as";
+        }
+        return true;
+    }
+    // Erase `type A [as B]` and the comma after it; returns whether a comma was erased.
+    function tsEraseSpecifier() {
+        let comma = false;
+        tsSpan(function () {
+            advance(false);                         // `type`
+            advance(false);                         // the name
+            if (isKw("as")) { advance(false); advance(false); }
+            if (isP(",")) { advance(true); comma = true; }
+        });
+        return comma;
+    }
+
+    // A statement-list item (Program, block, function body, switch case): the only place a
+    // TypeScript declaration can be erased away entirely.
+    let stmtListItem = false;
+    function parseListStatement() { if (ts) stmtListItem = true; return parseStatement(); }
+
     // -- Program --
     function parseProgram() {
         const prog = mk("Program", cur.start);
@@ -410,18 +554,23 @@ function parseInternal(bytes, opts, inject) {
         while (!atEof()) {
             const before = cur.start;
             atModuleItem = true;                        // direct module body item: import/export legal
-            const st = parseStatement();
+            const st = parseListStatement();
             if (st) prog.body.push(st);
             if (cur.start === before && !atEof()) advance(true);   // stall guard
             errored = false;
         }
         // Drain to EOF is implicit: cur is eof; the tokenizer already produced all tokens,
         // so tk.comments / tk.diagnostics are complete.
+        // TS mode: the erased JavaScript starts at its first token that is not type syntax (or
+        // at EOF when everything was erased).
+        if (ts) prog.start = firstJs !== null ? firstJs.start : cur.start;
         return fin(prog);
     }
 
     // -- Statements --
     function parseStatement() {
+        const listItem = stmtListItem;
+        stmtListItem = false;
         if (!guard()) { synchronize(); unguard(); return errNode(cur.start); }
         let st;
         if (cur.type === "punctuator") {
@@ -462,6 +611,7 @@ function parseInternal(bytes, opts, inject) {
                     // are EXPRESSIONS -> parse an expression statement (parsePrimary handles both).
                     const nx = peekTok(1, false);
                     if (nx.type === "punctuator" && (nx.value === "(" || nx.value === ".")) st = parseExpressionStatement();
+                    else if (ts && tsTypeOnlyImportAhead()) st = tsEraseStatement(function () { parseImport(); });
                     else st = parseImport();
                     break;
                 }
@@ -469,7 +619,9 @@ function parseInternal(bytes, opts, inject) {
                 case "with": { const ws = cur.start; unsupported("with statement is not supported"); advance(true); expectP("(", true); parseExpression(); expectP(")", true); nested(parseStatement); st = errNode(ws); break; }
                 case "debugger": { st = mk("DebuggerStatement", cur.start); advance(true); semicolon(); st = fin(st); break; }
                 default: {
-                    const what = ts ? tsDeclarationStart() : null;
+                    const kind = ts ? tsErasableKind(cur, tsPeekFromCur) : null;
+                    if (kind !== null && listItem) { st = tsEraseStatement(function () { tsDeclarationBody(kind); }); break; }
+                    const what = ts ? (kind !== null ? "declarations outside a statement list" : tsDeclarationStart()) : null;
                     if (what !== null) tsRefuse(what);
                     st = parseExpressionStatement();
                 }
@@ -487,7 +639,7 @@ function parseInternal(bytes, opts, inject) {
         advance(true);                              // past `{` -> statement position
         while (!isP("}") && !atEof()) {
             const before = cur.start;
-            const s = nested(parseStatement);
+            const s = nested(parseListStatement);
             if (s) b.body.push(s);
             if (cur.start === before && !atEof() && !isP("}")) advance(true);
             errored = false;
@@ -630,7 +782,7 @@ function parseInternal(bytes, opts, inject) {
             else { synErr("expected 'case' or 'default'"); advance(true); continue; }
             expectP(":", true);
             while (!isP("}") && !isKw("case") && !isKw("default") && !atEof()) {
-                const before = cur.start; const st = nested(parseStatement); if (st) c.consequent.push(st);
+                const before = cur.start; const st = nested(parseListStatement); if (st) c.consequent.push(st);
                 if (cur.start === before && !atEof()) advance(true);
             }
             s.cases.push(fin(c));
@@ -686,7 +838,7 @@ function parseInternal(bytes, opts, inject) {
     // ASI-aware semicolon consumption.
     function semicolon() {
         if (eatP(";", true)) return;
-        if (isP("}") || atEof() || nl()) return;   // automatic semicolon insertion
+        if (isP("}") || atEof() || nl()) { if (ts) asiEnd = lastJs; return; }   // automatic semicolon insertion
         synErr("expected ';'");
     }
 
@@ -757,7 +909,7 @@ function parseInternal(bytes, opts, inject) {
         b.body = [];
         advance(true);
         while (!isP("}") && !atEof()) {
-            const before = cur.start; const s = parseStatement(); if (s) b.body.push(s);
+            const before = cur.start; const s = parseListStatement(); if (s) b.body.push(s);
             if (cur.start === before && !atEof() && !isP("}")) advance(true);
             errored = false;
         }
@@ -1398,12 +1550,9 @@ function parseInternal(bytes, opts, inject) {
         advance(true);
         s.specifiers = [];
         if (cur.type === "string") { s.source = parseLiteral(); semicolon(); return fin(s); }   // side-effect import
-        // `import type X from` / `import type { X }` / `import type * as n`. (`import type from
-        // "m"` and `import type, { a } from "m"` are JS: a default binding named `type`.)
-        if (ts && isKw("type")) {
-            const nx = tsPeek();
-            if ((nx.type === "punctuator" && (nx.value === "{" || nx.value === "*")) || (isIdTok(nx) && nx.value !== "from")) tsRefuse("type-only imports");
-        }
+        // TS mode, `import type ...` being erased (tsTypeOnlyImportAhead chose it): the rest reads
+        // as an ordinary import clause.
+        if (ts && typeDepth > 0 && isKw("type")) advance(false);
         // ImportClause: a default binding, then - only after a comma - a namespace import or
         // named imports. `import a { b }` / `import a * as n` (no comma) and `import a, from`
         // (a comma with nothing after it) are syntax errors.
@@ -1425,7 +1574,7 @@ function parseInternal(bytes, opts, inject) {
         else if (isP("{")) {
             advance(true);
             while (!isP("}") && !atEof()) {
-                if (ts && isKw("type") && isIdTok(tsPeek()) && tsPeek().value !== "as") tsRefuse("type-only import specifiers");
+                if (ts && tsTypeSpecifierAhead()) { if (!tsEraseSpecifier()) break; continue; }
                 const spec = mk("ImportSpecifier", cur.start); spec.imported = parseIdentifierName(); spec.local = spec.imported;
                 if (isKw("as")) { advance(true); spec.local = parseBindingIdentifier(); }
                 // Without `as`, the imported name IS the local binding, so it must be a valid
@@ -1448,6 +1597,15 @@ function parseInternal(bytes, opts, inject) {
         const s = mk("ExportNamedDeclaration", cur.start);
         // Every export form is a module ITEM: legal only at the module top level.
         if (!atModuleItem) synErr("export declarations may only appear at the top level of a module");
+        if (ts) {
+            // `export type { A }` / `export type * from "m"`, and `export` + an erasable
+            // declaration: the whole statement goes, `export` included.
+            const t1 = peekTok(1, true);
+            if (isIdTok(t1) && t1.value === "type" && !peekTok(2, false).nlBefore && (peekIsP(2, "{") || peekIsP(2, "*")))
+                return tsEraseStatement(function () { advance(false); advance(false); tsTypeOnlyExportRest(); });
+            const kind = tsErasableKind(t1, function (i) { return peekTok(1 + i, false); });
+            if (kind !== null) return tsEraseStatement(function () { advance(false); tsDeclarationBody(kind); });
+        }
         advance(true);
         if (ts && isP("=")) tsRefuse("export assignments");
         if (isKw("default")) {
@@ -1478,7 +1636,7 @@ function parseInternal(bytes, opts, inject) {
         if (isP("{")) {
             s.specifiers = []; s.declaration = null; advance(true);
             while (!isP("}") && !atEof()) {
-                if (ts && isKw("type") && isIdTok(tsPeek()) && tsPeek().value !== "as") tsRefuse("type-only export specifiers");
+                if (ts && tsTypeSpecifierAhead()) { if (!tsEraseSpecifier()) break; continue; }
                 const spec = mk("ExportSpecifier", cur.start); spec.local = parseIdentifierName(); spec.exported = spec.local;
                 if (isKw("as")) { advance(true); spec.exported = parseIdentifierName(); }
                 s.specifiers.push(fin(spec));
@@ -1496,7 +1654,7 @@ function parseInternal(bytes, opts, inject) {
         else if (isKw("class")) s.declaration = parseClassDeclaration();
         else {
             if (ts) {
-                const what = (isKw("type") && peekIsP(1, "{")) ? "type-only exports" : tsDeclarationStart();
+                const what = tsDeclarationStart();
                 if (what !== null) tsRefuse(what);
             }
             synErr("unexpected export"); s.declaration = errNode(cur.start); synchronize();
@@ -1509,12 +1667,32 @@ function parseInternal(bytes, opts, inject) {
     // lua.parse calling annotations.attach. Best-effort + hardened: an internal defect emits
     // js.internal through the SAME budget (so diagnostics-empty guarantees attachment succeeded),
     // malformed tag content does not. The tokenizer's linemap is already computed.
-    attachAnnotations(ast, tk.comments, bytes, tk.linemap, budget, path);
+    if (ts) {
+        // TS mode: attach over the erased bytes, without the comments erased with the types, so
+        // JSDoc attaches exactly as it would to the erased JavaScript (a line holding only an
+        // erased declaration is blank there).
+        typeSpans.sort(function (a, b) { return a.start - b.start; });
+        const er = erase(bytes, typeSpans);
+        if (er.ok) {
+            const kept = [];
+            let k = 0;
+            for (let i = 0; i < tk.comments.length; i++) {
+                const c = tk.comments[i];
+                while (k < typeSpans.length && typeSpans[k].stop <= c.start) k++;
+                if (!(k < typeSpans.length && typeSpans[k].start <= c.start && c.stop <= typeSpans[k].stop)) kept.push(c);
+            }
+            attachAnnotations(ast, kept, er.bytes, tk.linemap, budget, path);
+        } else {
+            attachAnnotations(ast, tk.comments, bytes, tk.linemap, budget, path);   // refused by typeErasure
+        }
+    } else {
+        attachAnnotations(ast, tk.comments, bytes, tk.linemap, budget, path);
+    }
     // Lexical + parser diagnostics already share ONE budget list (tk.diagnostics === budget.list),
     // so it is a single authoritative sequence -- no merge, no double-counting.
     const allDiags = budget.list;
     const valid = allDiags.every(function (d) { return d.severity !== "error"; });
     const unit = { ast: ast, comments: tk.comments, diagnostics: allDiags, linemap: tk.linemap, valid: valid };
-    if (ts) unit.typeSpans = typeSpans.sort(function (a, b) { return a.start - b.start; });
+    if (ts) unit.typeSpans = typeSpans;
     return unit;
 }

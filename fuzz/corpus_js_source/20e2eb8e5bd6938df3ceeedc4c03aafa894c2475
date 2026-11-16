@@ -1,0 +1,2 @@
+// ts
+class Box<T> { value?: T; }

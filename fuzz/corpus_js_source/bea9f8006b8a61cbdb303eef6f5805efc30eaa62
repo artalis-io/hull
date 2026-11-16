@@ -1,0 +1,4 @@
+// ts
+let a = b
+type T = number
+(c)
