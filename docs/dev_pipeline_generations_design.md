@@ -93,8 +93,10 @@ The pipeline runs in a tool process: the `hull dev` supervisor (which already ru
 the same binary spawned before the app context loads - the pattern the JS
 manifest-extraction child already uses. So:
 
-- the app process never loads the plugin runtime, BuildContext bindings, frontends
-  or tools (BuildContext §11.1 holds structurally, not only by API absence);
+- the app process never loads BuildContext bindings, frontends or tools, and never
+  runs a plugin: each plugin is a Hull application in a process of its own that the
+  tool process spawns (BuildContext §9.1), so §11.1 holds structurally, not only by API
+  absence;
 - the tool sandbox and the app sandbox are never applied in one process (both are
   irreversible per process);
 - a crash or limit trip in a plugin cannot take the app process with it.
@@ -316,7 +318,7 @@ These interleave with BuildContext's (BuildContext §13); each stops for review.
   payload reads, the loader lookup order and its lint rule, refusal in built binaries
   and under `--verify-sig`. Fed by test fixtures (a hand-built generation over
   committed fixture results); no plugin runs.
-- **G2. Runner wiring** (after BuildContext checkpoint 5, plugin runtime). The
+- **G2. Runner wiring** (after BuildContext checkpoint 5, plugin runner). The
   supervisor and the one-shot child plan and run the pipeline, publish, hand off; the
   failure rules of §4; the watcher union of §4.2. Proven with checkpoint 5's
   demonstration plugin.

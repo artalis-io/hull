@@ -37,7 +37,7 @@ module resolution modes), CommonJS interop.
 |---|---|---|
 | T1 | `.d.ts` + `hull types` (§2) - implemented | nothing |
 | T2 | TypeScript frontend, analysis only (§3) - implemented (§3.5) | the shipped JS frontend |
-| BuildContext 1, 2, 5 | action core (1, implemented), outputs (2), plugin runtime (5) | - |
+| BuildContext 1, 2, 5 | action core (1, implemented), outputs (2), plugin runner (5) | - |
 | G1, G2 | pipeline generations: overlay, runner wiring | BuildContext 2, 5 |
 | T3 | type-erasure plugin + `.ts` entry points (§4) | T2, BuildContext 1, 2, 5, G1, G2, and the explicit-route part of BuildContext 6 |
 
@@ -358,8 +358,10 @@ is refused ("type lists past this file's lookahead budget"), so input built to m
 
 ### 4.1 The erasure plugin
 
-A bundled source plugin, `stdlib:ts-erase@1`, Lua-authored (BuildContext v1 has no
-JavaScript plugin runtime, and needs none here: it parses nothing).
+A bundled source plugin, `stdlib:ts-erase@1`: a small Hull application embedded in the
+`hull` binary, like every plugin (BuildContext §9.1). It parses nothing - the spans come
+from the host's frontend session over the channel - so its language does not matter;
+it is written in Lua.
 
 - **Input:** a source selection of `typescript` units (BuildContext §1.3: chosen by the
   planner; the plugin rescans nothing).
