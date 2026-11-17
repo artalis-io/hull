@@ -108,6 +108,20 @@ UTEST(js_annotations, unknown_survival_and_repeat)
     hl_js_session_destroy(s);
 }
 
+/* A tag named like an Object.prototype member is indexed like any other: `@constructor`
+ * (a real JSDoc tag) was dropped from `annotations`, and `@__proto__` set its prototype. */
+UTEST(js_annotations, prototype_tag_names)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *o = parse_str(s, "/**\n * @constructor\n * @__proto__ p\n * @toString t\n */\nfunction F() {}");
+    EXPECT_TRUE(has(o, "\"constructor\":{\"name\":\"constructor\""));
+    EXPECT_TRUE(has(o, "\"__proto__\":{\"name\":\"__proto__\",\"text\":\"p\""));
+    EXPECT_TRUE(has(o, "\"toString\":{\"name\":\"toString\",\"text\":\"t\""));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
 /* Malformed tags (docs 3.2): unmatched ( -> text; nested parens balanced; quoted ) closes
  * early; prose @ on a continuation line folded into text. None emits js.internal. */
 UTEST(js_annotations, malformed_tags_deterministic)

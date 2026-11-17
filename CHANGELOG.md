@@ -49,6 +49,12 @@ release-artifact layout).
 - JS source analysis (`hull agent inspect`, `hull dev --agent`): `export async function f() {}`
   is no longer a syntax error, and `export default async function g() {}` is a function
   declaration, its name bound in the module, rather than an expression.
+- JS source analysis (`hull agent inspect`, `hull dev --agent`): an identifier named like an
+  `Object.prototype` member is no longer an operator. After a line without `;`, a line starting
+  with `toString(...)` or `constructor` parsed as a binary expression with that name as its
+  operator, with no diagnostic, and a class member named `constructor` after a field without
+  `;` was a syntax error. A JSDoc tag named `@constructor` (or `@toString`, `@__proto__`) is
+  now indexed in `annotations` like any other tag.
 - JS source analysis (`hull agent inspect`, `hull dev --agent`): an arrow function whose
   parameter list ends in a comma (`(a, b,) => a`, valid since ES2017) is no longer a syntax
   error. A parenthesized expression ending in a comma (`(a, b,)`) still is.
