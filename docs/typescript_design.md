@@ -471,6 +471,28 @@ All through the pipeline, none through a loader transform:
    yes, same rules, with T3).
 2. `hull new --runtime ts`: a scaffold variant once T3 ships (recommended), with
    `hull types` run by default.
-3. Whether `hull check` should run an installed `tsc` as a registered tool (BuildContext
-   §7) for type checking. Recommended: no in v1 - type checking stays the developer's
-   `tsc --noEmit`, and Hull never makes types a runtime or build gate.
+3. Whether `hull check` should run a type checker. **Answered: yes, tsgo, as an
+   installable Hull tool; still advisory.** The "no" this question recommended was about
+   `tsc`, which needs Node and npm. tsgo - the native Go port of the TypeScript compiler
+   (`@typescript/native-preview`, Apache-2.0) - is one self-contained binary per
+   platform, so it fits `hull tools install` exactly as `wamrc` does
+   ([tools_install.md](tools_install.md)):
+   - **Install:** `hull tools install tsgo`. Hull re-publishes a pinned tsgo build per
+     native platform (`linux-x86_64`, `linux-aarch64`, `darwin-arm64`, and Windows for
+     a cosmo `hull` there) as a release asset covered by the signed `hull.sha256`: the
+     same trust chain as every tool, version-coupled to the running `hull`, nothing
+     fetched from npm. One row in the tool registry (`src/hull/tools_install.c`).
+   - **Run:** `hull check --types [app_dir]` (and `hull agent check`) runs the installed
+     tsgo with `--noEmit` on the app, using the `tsconfig.json` and `types/hull` that
+     `hull types` writes (§2.2), through the tool spawn allowlist (`hl_tool_spawn`), and
+     prints its diagnostics. With tsgo absent it says how to install it and passes.
+   - **Advisory, never a gate.** Type errors are reported and set `hull check`'s exit
+     status; they never stop `hull dev`, `hull test`, `hull build` or a running app.
+     Hull erases types and does not check them (§0); the pipeline never runs tsgo, so it
+     needs no BuildContext tool seam (checkpoint 4).
+   - **Pinned preview.** tsgo is a preview: each Hull release pins one tsgo version and
+     its notes name it; a change of pin is a release-note line.
+   - **Order:** independent of T3 - it needs neither the pipeline nor `.ts` execution,
+     and works for a typed JavaScript app too. Scheduled after T3 as one small PR (the
+     registry row, the release asset, `hull check --types`, an e2e that type-checks an
+     example app).
