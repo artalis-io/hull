@@ -186,7 +186,10 @@ Hull accepts the subset whose removal leaves valid JavaScript with the same mean
   `experimentalDecorators` metadata, angle-bracket assertions `<T>x`, JSX.
 
 A refusal is never "transformed anyway": the developer rewrites it (an object literal
-`as const` for an enum), exactly as Node requires.
+`as const` for an enum), exactly as Node requires. A refused declaration (`enum`, `const
+enum`, `namespace`, `module`, or an erasable one outside a statement list) is still read
+whole, so its refusal is the only diagnostic it produces and the code after it is parsed as
+usual.
 
 ### 3.4 Erasure that would change the parse
 

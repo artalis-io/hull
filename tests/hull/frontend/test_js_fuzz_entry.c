@@ -103,6 +103,13 @@ UTEST(js_fuzz_entry, typescript_leg)
         "class C { x?: number; y!: string; m(a: T): void {} }\nconst v = obj!.a as unknown as T satisfies U;",
         "/** @route GET / */\ninterface Q {}\nexport function h(q: Q): void {}",
         "enum E { A }",                                   /* refused: still ok:true, bounded */
+        /* a refused declaration read whole stays inside the statement that holds it */
+        "// ts\nif (ready) type T = number;\n",          /* fuzz_js_source crash, PR #1124 */
+        "if (x) interface I { a: 1 }\nelse f();",
+        "while (x) type T = 1;",
+        "{ enum E { A } }\nfunction g() { namespace N { const r = /}/; } }",
+        "export const enum E { A }\nexport namespace N {}\nmodule \"m\" {}",
+        "if (x) const enum K { B }",
         "let x: <",                                       /* malformed type */
         "let a = b\ntype T = number\n(c)",              /* the ASI refusal */
         "let s: \"\xe2\x80\xa8\" = 1;",              /* U+2028 inside a type: erase refuses, allowed */

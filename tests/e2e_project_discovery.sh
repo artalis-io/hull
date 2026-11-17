@@ -368,12 +368,16 @@ assert_no_leaked_keys "TypeScript discovery leaks no internal key" "$OUT"
 rm -f "$TSAPP/v.tsx" "$TSAPP/c.cts"
 
 # ── hull dev --agent publishes generations; inspect reads the LIVE one ──
+# The app SERVES (a route), so the supervisor never restarts it: an app that registers nothing
+# exits and is restarted every second, which republishes whatever changed, and the reload checks
+# below would pass without the watcher. Each edit keeps the app loadable for the same reason.
 DEVAPP="$TMP/devapp"
 mkdir -p "$DEVAPP"
 cat > "$DEVAPP/app.lua" <<'EOF'
+app.manifest({ modules = { "hull/http-server@1" } })
 ---@route GET /
-local function home() end
-return home
+local function home(req, res) res:text("ok") end
+app.get("/", home)
 EOF
 "$HULL" dev --agent -p "$((PORT_BASE + 0))" "$DEVAPP/app.lua" >"$TMP/devapp.log" 2>&1 &
 DEV_PID=$!
@@ -401,7 +405,8 @@ if [ -f "$DEVAPP/.hull/discovery.json" ]; then
 
     GEN1=$(printf '%s' "$OUTD" | python3 -c 'import json,sys;print(json.load(sys.stdin)["generation"])' 2>/dev/null || echo 0)
     # a source change triggers a reload -> a NEW generation
-    printf '\n---@added\nlocal x = 1\nreturn home, x\n' >> "$DEVAPP/app.lua"
+    sleep 1   # dev compares whole-second mtimes
+    printf '\n---@added\nlocal function added() end\n' >> "$DEVAPP/app.lua"
     NEWGEN=0; i=0
     while [ "$i" -lt 30 ]; do
         G=$("$HULL" agent inspect "$DEVAPP" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("generation",0))' 2>/dev/null || echo 0)
@@ -416,6 +421,7 @@ if [ -f "$DEVAPP/.hull/discovery.json" ]; then
     # the next reload's publish fails. The prior same-session generation must be REMOVED
     # (dev.c) so inspect falls back to standalone rather than serving a stale generation.
     mkdir "$DEVAPP/.hull/discovery.json.tmp"
+    sleep 1
     printf '\n-- force another reload\n' >> "$DEVAPP/app.lua"
     STANDALONE=0; i=0
     while [ "$i" -lt 30 ]; do
@@ -427,6 +433,10 @@ if [ -f "$DEVAPP/.hull/discovery.json" ]; then
         && pass "publisher failure -> stale generation removed -> standalone" \
         || fail "stale generation still served after publisher failure"
     rmdir "$DEVAPP/.hull/discovery.json.tmp" 2>/dev/null || true
+    if grep -q "restarting" "$TMP/devapp.log"; then
+        fail "dev: the serving app restarted (the reload checks prove nothing)"
+        sed 's/^/    DIAG: /' "$TMP/devapp.log"
+    fi
 
     kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""
     { [ ! -f "$DEVAPP/.hull/discovery.json" ] && [ ! -f "$DEVAPP/.hull/dev.json" ]; } \
@@ -439,7 +449,7 @@ else
     kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""
 fi
 
-# ── hull dev --agent publishes TypeScript sources, and a .ts edit republishes ──
+# ── hull dev --agent publishes TypeScript sources, and a .ts / .mjs / .cjs edit republishes ──
 # The app SERVES (a route), so the supervisor does not restart it: a new generation here can
 # only come from the watcher seeing the .ts change.
 if [ "$JS_ANALYZABLE" = "1" ]; then
@@ -447,6 +457,8 @@ if [ "$JS_ANALYZABLE" = "1" ]; then
     mkdir -p "$TSDEV"
     printf 'app.manifest({ modules = { "hull/http-server@1" } })\napp.get("/", function(req, res) res:text("ok") end)\n' > "$TSDEV/app.lua"
     printf '/** @route GET /t */\nexport function t(a: number): number { return a; }\n' > "$TSDEV/lib.ts"
+    printf '/** @route GET /m */\nexport function m() { return 1; }\n' > "$TSDEV/mod.mjs"
+    printf '/** @route GET /c */\nexport function c() { return 1; }\n' > "$TSDEV/old.cjs"
     "$HULL" dev --agent -p "$((PORT_BASE + 5))" "$TSDEV/app.lua" >"$TMP/tsdev.log" 2>&1 &
     DEV_PID=$!
     wait_for_file "$DEV_PID" "$TSDEV/.hull/discovery.json" "$TMP/tsdev.log" || true
@@ -467,8 +479,27 @@ print(d["generation"] if d["source"]=="dev" and any(x["name"]=="u" and x["langua
     done
     [ "$TSOK" = "1" ] && pass "dev: editing a .ts source reloads and republishes" \
         || fail "dev: a .ts edit did not republish (gen $TSGEN)"
+    # .mjs and .cjs are JavaScript sources the discovery reads: an edit to each republishes too
+    for EXT in mjs cjs; do
+        F="$TSDEV/mod.mjs"; [ "$EXT" = cjs ] && F="$TSDEV/old.cjs"
+        NAME="added_$EXT"
+        G0=$("$HULL" agent inspect "$TSDEV" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["generation"])' 2>/dev/null || echo 0)
+        sleep 1   # dev compares whole-second mtimes
+        printf '/** @query */\nexport const %s = 1;\n' "$NAME" >> "$F"
+        OK=0; i=0
+        while [ "$i" -lt 30 ]; do
+            G=$("$HULL" agent inspect "$TSDEV" 2>/dev/null | NAME="$NAME" python3 -c '
+import json,os,sys
+d=json.load(sys.stdin)
+print(d["generation"] if d["source"]=="dev" and any(x["name"]==os.environ["NAME"] for x in d["declarations"]) else 0)' 2>/dev/null || echo 0)
+            if [ "$G" -gt "$G0" ] 2>/dev/null; then OK=1; break; fi
+            sleep 0.5; i=$((i + 1))
+        done
+        [ "$OK" = "1" ] && pass "dev: editing a .$EXT source reloads and republishes" \
+            || fail "dev: a .$EXT edit did not republish (gen $G0)"
+    done
     if grep -q "restarting" "$TMP/tsdev.log"; then
-        fail "dev: the serving TypeScript app restarted (the reload check proves nothing)"
+        fail "dev: the serving TypeScript app restarted (the reload checks prove nothing)"
         sed 's/^/    DIAG: /' "$TMP/tsdev.log"
     fi
     kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""
@@ -612,9 +643,10 @@ fi
 MIX="$TMP/mixdev"
 mkdir -p "$MIX"
 cat > "$MIX/app.lua" <<'EOF'
+app.manifest({ modules = { "hull/http-server@1" } })
 ---@route GET /
-local function home() end
-return home
+local function home(req, res) res:text("ok") end
+app.get("/", home)
 EOF
 cat > "$MIX/client.js" <<'EOF'
 /** @route GET /js */
@@ -638,6 +670,7 @@ if [ "$JS_ANALYZABLE" = "1" ]; then
         # C5 re-proven with JS present (amendment 3): EDIT client.js and require a strictly
         # higher generation whose live document carries the CHANGED JS declaration/annotation.
         GEN_MIX=$(printf '%s' "$LIVE" | python3 -c 'import json,sys;print(json.load(sys.stdin)["generation"])' 2>/dev/null || echo 0)
+        sleep 1   # dev compares whole-second mtimes
         cat > "$MIX/client.js" <<'EOF'
 /** @route GET /js */
 export function handler() { return 1; }
@@ -659,6 +692,10 @@ EOF
         assert_py "both JS @route annotations present after the edit (handler + handler2)" "$LIVE" \
             'sum(1 for x in d["declarations"] if x["path"].endswith("client.js") for a in x["annotations"] if a["name"]=="route")==2'
         printf '%s' "$LIVE" > "$MIX/live.json"
+        if grep -q "restarting" "$TMP/mix.log"; then
+            fail "dev: the serving mixed app restarted (the JS reload check proves nothing)"
+            sed 's/^/    DIAG: /' "$TMP/mix.log"
+        fi
 
         # STOP dev so the standalone read CANNOT take the C live-sidecar fast path (amendment 3).
         kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""

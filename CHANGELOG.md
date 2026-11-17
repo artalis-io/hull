@@ -18,7 +18,9 @@ release-artifact layout).
   frontend summary lists them apart, as `unsupported_extensions`. The analyzer gains
   `analyze.type_erasure(disc, path)` on a retained discovery (the erasable spans and the
   refusals of one source; unsupported for other frontends), and `tool.frontend_analyze` takes
-  the parser mode. `hull dev` also reloads when a `.ts` / `.mts` file changes.
+  the parser mode. `hull dev` also reloads when a `.ts` / `.mts` file changes. A refused
+  declaration (`enum`, `namespace`, ...) is read whole, so its refusal is its only diagnostic:
+  its body is no longer parsed as JavaScript, which added `js.syntax` errors after it.
 - Tests: the JS frontend's JS-mode output is held fixed while the TypeScript mode is built.
   `test_js_golden` compares the lex, parse and scope output of a frozen input set (the Test262
   subset and hand-written edge cases) with a committed snapshot, and
@@ -72,6 +74,9 @@ release-artifact layout).
 
 ### Fixed
 
+- `hull dev` reloads when a `.mjs` or `.cjs` file changes. Project discovery reads both as
+  JavaScript, but the watcher looked only at `.js`, so `hull dev --agent` did not publish a new
+  generation for an edit to one.
 - JS source analysis (`hull agent inspect`, `hull dev --agent`): `export async function f() {}`
   is no longer a syntax error, and `export default async function g() {}` is a function
   declaration, its name bound in the module, rather than an expression.

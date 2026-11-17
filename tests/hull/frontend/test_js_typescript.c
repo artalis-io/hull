@@ -194,6 +194,39 @@ UTEST(js_typescript, one_refusal_per_position)
     hl_js_session_destroy(s);
 }
 
+/* A refused declaration is read whole: its body is not parsed as JavaScript, so the
+ * refusal is the only diagnostic, and the declaration after it is still read. */
+static const char *const REFUSED_WHOLE[] = {
+    "enum E { A, B = 2 }",
+    "const enum K { B }",
+    "export enum E { A }",
+    "export const enum E { A }",
+    "namespace N { export const a = 1; }",
+    "namespace N.M { const r = /}/; }",
+    "export namespace N {}",
+    "module M { let x = 1; }",
+    "module \"m\" {}",
+    "if (x) interface I { a: 1 }",
+    "if (x) type T = 1;",
+};
+
+UTEST(js_typescript, refused_declaration_read_whole)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    for (size_t i = 0; i < sizeof(REFUSED_WHOLE) / sizeof(REFUSED_WHOLE[0]); i++) {
+        char src[256];
+        snprintf(src, sizeof(src), "%s\nfunction after(a) { return a; }\n", REFUSED_WHOLE[i]);
+        char *o = ts(s, src);
+        int ok = count(o, "\"code\":\"ts.unsupported\"") == 1 && count(o, "\"code\":\"js.") == 0 &&
+                 has(o, "\"name\":\"after\"");
+        if (!ok) fprintf(stderr, "[ts-mode] %s\n  got %s\n", REFUSED_WHOLE[i], o ? o : "(null)");
+        EXPECT_TRUE(ok);
+        free(o);
+    }
+    hl_js_session_destroy(s);
+}
+
 /* The same words in JavaScript stay JavaScript in TS mode. */
 static const char *const JS_KEEPS[] = {
     "import type from \"m\";",
