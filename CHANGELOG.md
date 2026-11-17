@@ -10,6 +10,13 @@ release-artifact layout).
 
 ### Added
 
+- Build pipeline, internal (BuildContext checkpoint 2, docs/buildcontext_design.md §13.2): a
+  BuildAction's outputs and committed result - bounded in-memory staging of blobs and file trees,
+  declared generated outputs and artifacts, diagnostics (an error refuses the action), a
+  canonical result installed atomically under the action key, and a lookup that answers a result
+  only while its inputs still hold and every payload is present. The store is the blob store with
+  every entry sealed under the tool key (`hull.buildctx._store`). The sealed cache put now
+  reports failure and accepts an empty payload; `tool.blob_store_put_from` reports it too.
 - Build pipeline, internal (BuildContext checkpoint 1, docs/buildcontext_design.md §13.1): the
   BuildAction core, in Lua tool code (`hull.buildctx.action`) over one small native binding
   (`hull.buildctx._fs`, the grants compiled and read through the shipped fs policy) - the action

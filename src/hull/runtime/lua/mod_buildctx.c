@@ -1,8 +1,10 @@
 /*
- * mod_buildctx_fs.c - hull.buildctx._fs: a BuildAction's declared workspace
- * inputs, read through the shipped fs grant policy (docs/buildcontext_design.md
- * §4.1, §13.1). The one native piece of a BuildAction's inputs; the action itself (state
- * machine, observations, manifest, revalidation) is Lua, hull.buildctx.action.
+ * mod_buildctx.c - the native pieces of a BuildAction (docs/buildcontext_design.md
+ * §13.1, §13.2); the action itself (state machine, observations, outputs,
+ * manifests, revalidation) is Lua, hull.buildctx.action.
+ *
+ * hull.buildctx._fs: the declared workspace inputs, read through the shipped
+ * fs grant policy (§4.1).
  *
  * Tool VM only: never registered in an app runtime.
  *
@@ -21,9 +23,11 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
-#include "mod_buildctx_fs.h"
+#include "mod_buildctx.h"
 
 #include "hull/cap/crypto.h"
+#include "hull/runtime/cache_common.h"
+#include "hull/shared/blob_store.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/fs_policy.h"
 #include "hull/cap/fs_resolve.h"
@@ -266,6 +270,170 @@ int luaopen_hull_buildctx_fs(lua_State *L)
     lua_pop(L, 1);
     lua_createtable(L, 0, 1);
     lua_pushcfunction(L, l_open);
+    lua_setfield(L, -2, "open");
+    return 1;
+}
+
+/* ── hull.buildctx._store ──────────────────────────────────────────────
+ *
+ * The result store (§2.2, §13.2): one blob store at an absolute root, every
+ * entry sealed under the tool key ($HOME/.hull/tool-cache.key, which no app
+ * process loads), so an app that can write the cache pool cannot forge one.
+ *
+ *   local st, tok = store.open(root)
+ *   st:put_payload(bytes)  -> sha256_hex | nil, token   (keyed by its own hash)
+ *   st:get_payload(sha)    -> bytes      | nil, token   ("miss", "corrupt")
+ *   st:put_result(key, b)  -> true       | nil, token   (key: 64 lowercase hex)
+ *   st:get_result(key)     -> bytes      | nil, "miss"
+ *   st:close()
+ *
+ * Payloads and results are sealed in separate domains, so a payload never
+ * verifies as a result. A put is atomic (temp + rename) and a key names one
+ * content: a second put of a present key is a no-op.
+ */
+
+#define BCST_MT          "hull.buildctx._store"
+#define BCST_PAYLOAD     "build-payload"
+#define BCST_RESULT      "build-result"
+
+typedef struct {
+    HlBlobStore *store;
+    uint8_t     *pending;   /* a get in progress, freed by the next call or the finalizer */
+} BcStore;
+
+static void st_drop_pending(BcStore *st)
+{
+    free(st->pending);
+    st->pending = NULL;
+}
+
+static BcStore *st_check(lua_State *L)
+{
+    BcStore *st = luaL_checkudata(L, 1, BCST_MT);
+    if (!st->store) luaL_error(L, "hull.buildctx._store: closed");
+    st_drop_pending(st);
+    return st;
+}
+
+static int hex_key_ok(const char *k, size_t n)
+{
+    if (n != 64) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!((k[i] >= '0' && k[i] <= '9') || (k[i] >= 'a' && k[i] <= 'f'))) return 0;
+    return 1;
+}
+
+static int st_open(lua_State *L)
+{
+    size_t rlen;
+    const char *root = luaL_checklstring(L, 1, &rlen);
+    if (rlen == 0 || root[0] != '/') return fail(L, "invalid_args");
+    BcStore *st = lua_newuserdatauv(L, sizeof(*st), 0);
+    st->store = NULL;
+    st->pending = NULL;
+    luaL_setmetatable(L, BCST_MT);
+    if (hl_blob_store_open(&st->store, NULL, root, /*shard_depth=*/1, 0) != 0) {
+        st->store = NULL;
+        return fail(L, "io_error");
+    }
+    return 1;
+}
+
+static int st_put_payload(lua_State *L)
+{
+    BcStore *st = st_check(L);
+    size_t len;
+    const char *bytes = luaL_checklstring(L, 2, &len);
+    uint8_t sha[32];
+    char hex[65];
+    hl_cap_crypto_sha256(bytes, len, sha);
+    hl_hex_encode(sha, 32, hex, sizeof(hex));
+    if (hl_tool_cache_put_sealed(st->store, BCST_PAYLOAD, hex, (const uint8_t *)bytes, len) != 0)
+        return fail(L, "io_error");
+    lua_pushlstring(L, hex, 64);
+    return 1;
+}
+
+static int st_get_payload(lua_State *L)
+{
+    BcStore *st = st_check(L);
+    size_t klen;
+    const char *key = luaL_checklstring(L, 2, &klen);
+    if (!hex_key_ok(key, klen)) return fail(L, "invalid_args");
+    size_t len = 0;
+    if (hl_tool_cache_get_sealed(st->store, BCST_PAYLOAD, key, &st->pending, &len) != 0) {
+        st->pending = NULL;
+        return fail(L, "miss");
+    }
+    uint8_t sha[32];
+    char hex[65];
+    hl_cap_crypto_sha256(st->pending, len, sha);
+    hl_hex_encode(sha, 32, hex, sizeof(hex));
+    if (memcmp(hex, key, 64) != 0) { st_drop_pending(st); return fail(L, "corrupt"); }
+    lua_pushlstring(L, (const char *)st->pending, len);
+    st_drop_pending(st);
+    return 1;
+}
+
+static int st_put_result(lua_State *L)
+{
+    BcStore *st = st_check(L);
+    size_t klen, len;
+    const char *key = luaL_checklstring(L, 2, &klen);
+    const char *bytes = luaL_checklstring(L, 3, &len);
+    if (!hex_key_ok(key, klen)) return fail(L, "invalid_args");
+    if (hl_tool_cache_put_sealed(st->store, BCST_RESULT, key, (const uint8_t *)bytes, len) != 0)
+        return fail(L, "io_error");
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int st_get_result(lua_State *L)
+{
+    BcStore *st = st_check(L);
+    size_t klen;
+    const char *key = luaL_checklstring(L, 2, &klen);
+    if (!hex_key_ok(key, klen)) return fail(L, "invalid_args");
+    size_t len = 0;
+    if (hl_tool_cache_get_sealed(st->store, BCST_RESULT, key, &st->pending, &len) != 0) {
+        st->pending = NULL;
+        return fail(L, "miss");
+    }
+    lua_pushlstring(L, (const char *)st->pending, len);
+    st_drop_pending(st);
+    return 1;
+}
+
+static int st_close(lua_State *L)
+{
+    BcStore *st = luaL_checkudata(L, 1, BCST_MT);
+    st_drop_pending(st);
+    if (st->store) { hl_blob_store_close(st->store); st->store = NULL; }
+    return 0;
+}
+
+static const luaL_Reg STORE_METHODS[] = {
+    { "put_payload", st_put_payload },
+    { "get_payload", st_get_payload },
+    { "put_result",  st_put_result  },
+    { "get_result",  st_get_result  },
+    { "close",       st_close       },
+    { NULL, NULL },
+};
+
+int luaopen_hull_buildctx_store(lua_State *L)
+{
+    if (luaL_newmetatable(L, BCST_MT)) {
+        luaL_newlib(L, STORE_METHODS);
+        lua_setfield(L, -2, "__index");
+        lua_pushcfunction(L, st_close);
+        lua_setfield(L, -2, "__gc");
+        lua_pushcfunction(L, st_close);
+        lua_setfield(L, -2, "__close");
+    }
+    lua_pop(L, 1);
+    lua_createtable(L, 0, 1);
+    lua_pushcfunction(L, st_open);
     lua_setfield(L, -2, "open");
     return 1;
 }

@@ -1,6 +1,6 @@
 # BuildContext action and authority design
 
-Status: **checkpoint 1 implemented (§13.1); the rest design-only.** This document refines checkpoint 4
+Status: **checkpoints 1 and 2 implemented (§13.1, §13.2); the rest design-only.** This document refines checkpoint 4
 of [hull_fs_design.md](hull_fs_design.md) and supersedes the still-unimplemented
 BuildContext portions of
 [hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md). The shipped
@@ -725,7 +725,7 @@ same action boundary.
 
 Host-owned tool code, mostly Lua: `stdlib/cli/lua/hull/buildctx/action.lua` holds the action
 state machine, the observation table, the limits, cancellation, the dependency manifest and its
-revalidation. The one native piece is `hull.buildctx._fs` (`src/hull/runtime/lua/mod_buildctx_fs.c`):
+revalidation. The one native piece is `hull.buildctx._fs` (`src/hull/runtime/lua/mod_buildctx.c`):
 it compiles the grants and reads, stats and lists through the shipped fs policy, returning the
 content and projection hashes - the part that has to hold descriptors. "Host-owned" (§1.1) means
 the scheduler and transaction live in Hull's tool layer, not in `build.lua` and not in a plugin;
@@ -763,11 +763,58 @@ binding and a real workspace.
   order give the same bytes. `action.check(root, manifest)` recompiles the recorded grants,
   replays every observation and answers fresh / stale; a malformed manifest or another version
   is an error, not a miss.
-- **Commit** in this checkpoint only moves the action to committed: the result store and the
-  atomic install are checkpoint 2.
+- **Commit** installs the action's result: §13.2.
 - **Resources:** the binding holds a descriptor only inside one call; a Lua error that unwinds
   past a read or a listing leaves it to the next call or the finalizer. The test checks that
   open descriptors return to their count over repeated actions, aborted ones included.
+
+### 13.2 Checkpoint 2 as built
+
+`ctx.outputs`, diagnostics, the committed result and its lookup, in the same split: Lua tool
+code (`hull.buildctx.outputs` for staging, `hull.buildctx.action` for the transaction) over one
+more small native piece, `hull.buildctx._store` (in `mod_buildctx.c` beside `_fs`). Tested by the
+`outputs_and_results` leg of `test_buildctx` (`buildctx/tests/test_outputs.lua`).
+
+- **Staging is in memory**, bounded (a missing limit takes the default: 32 MiB of output bytes,
+  4096 files - blobs plus tree entries - and 32 path components in a tree). A plugin builds
+  payloads - `create_blob(name)` then `write` / `close`, or `create_tree(name)` then
+  `write(path, bytes, "regular" | "executable")` / `close` - and declares them:
+  `declare_generated_output({ name = "./app.ts" }, handle)`, `declare_artifact({ name, ... },
+  handle)`. Generic constraints only (§6): canonical, collision-free names (a generated output
+  may carry the `./` of its source name); a tree path is canonical, unique, and never both a file
+  and a directory; descriptors are plain values (string-keyed maps, arrays, strings, integers,
+  booleans - no floats), encoded canonically. Trees hold files only: no symlink, special file or
+  mode beyond regular / executable can be expressed. There is no publication primitive.
+- **Diagnostics** (§8): `emit({ severity, code, message, path?, range? })`. An error prevents
+  PREPARING; warnings and infos are recorded in the result, in the order emitted.
+- **PREPARING** refuses, and aborts the action on, a failed input (`input_failed`), an open writer
+  (`open_writer`), a payload created but not declared (`undeclared_payload`) or an error
+  diagnostic (`diagnostic_error`). It then stores every payload - the dependency manifest among
+  them - in the store under its own SHA-256 (Hull hashes the staged bytes; nothing is taken from
+  the plugin) and builds the result. A payload stored here is referenced by nothing until the
+  result is installed, so nothing is visible.
+- **The result** is canonical JSON: `{"deps":{"sha256"},"diagnostics":[...],
+  "format":"hull-build-result","key","outputs":[...],"version":1}`, outputs sorted by kind then
+  name, each with its descriptor and its payload (`{"type":"blob","sha256","size"}`, or a tree's
+  entries sorted by path with mode, hash and size). The same outputs declared in any order give
+  the same bytes.
+- **COMMITTED** is one atomic put of the result under the action key (64 hex, chosen by the
+  caller; the full key of §10 comes with the planner). A failed store write at prepare or commit
+  aborts the action (`store_failed`) and leaves no result.
+- **The store** (`_store.open(root)`) is a blob store whose every entry is sealed under the tool
+  key (`$HOME/.hull/tool-cache.key`, which no app process loads), payloads and results in
+  separate seal domains so a payload never verifies as a result; a put is atomic (temp + rename),
+  and a key names one content, so two actions committing the same key race harmlessly. The
+  sealed put now reports failure and accepts an empty payload (an erased file can be empty).
+  Where the store lives in `~/.hull` is set when the pipeline first uses it (checkpoint 5), with
+  its `hull cache` registry row.
+- **Lookup** (`action.lookup(store, key, root)`): the result must be present and sealed, its
+  dependency manifest must still hold for the workspace (`action.check`), and every payload must
+  be present with its hash and size; it answers the outputs' bytes and the diagnostics, or
+  `miss`, `stale` or `corrupt`.
+- **Abandoned work**: staging is never on disk, so a crash leaves no staging to recover - only
+  payloads no result references, which `hull cache prune` removes, and the blob store's own
+  temporary files, which it sweeps when opened.
 
 ## 14. Non-scope
 
