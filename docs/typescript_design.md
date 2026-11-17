@@ -27,7 +27,8 @@ Until (2) lands, a TypeScript app is compiled by the developer (`tsc`, esbuild) 
 runs the emitted `.js`; (1) makes that workflow typed. Documented as the supported
 interim, not a workaround.
 
-Non-goals: type checking inside Hull, `.tsx` / JSX, decorators beyond what the JS runtime
+Non-goals: a type checker inside Hull (Hull runs TypeScript's own, tsgo or `tsc`, as a
+tool: §6, question 3), `.tsx` / JSX, decorators beyond what the JS runtime
 runs natively, downlevel transforms, `tsconfig.json` interpretation (paths, baseUrl,
 module resolution modes), CommonJS interop.
 
@@ -471,28 +472,46 @@ All through the pipeline, none through a loader transform:
    yes, same rules, with T3).
 2. `hull new --runtime ts`: a scaffold variant once T3 ships (recommended), with
    `hull types` run by default.
-3. Whether `hull check` should run a type checker. **Answered: yes, tsgo, as an
-   installable Hull tool; still advisory.** The "no" this question recommended was about
-   `tsc`, which needs Node and npm. tsgo - the native Go port of the TypeScript compiler
-   (`@typescript/native-preview`, Apache-2.0) - is one self-contained binary per
-   platform, so it fits `hull tools install` exactly as `wamrc` does
-   ([tools_install.md](tools_install.md)):
+3. Whether Hull should run a type checker. **Answered: yes - tsgo, preferred, or an
+   installed `tsc`, run by Hull outside the build pipeline; reported in the dev loop,
+   an opt-in gate for `build` and `test` while tsgo is a preview.** The "no" this
+   question recommended was about `tsc`, which needs Node and npm. tsgo - the native Go
+   port of the TypeScript compiler (`@typescript/native-preview`, Apache-2.0) - is one
+   self-contained binary per platform. Erasure stays the runtime model (Node, Bun and
+   Deno run TypeScript the same way); checking is the real TypeScript checker, which
+   Hull runs rather than reimplements.
    - **Install:** `hull tools install tsgo`. Hull re-publishes a pinned tsgo build per
      native platform (`linux-x86_64`, `linux-aarch64`, `darwin-arm64`, and Windows for
      a cosmo `hull` there) as a release asset covered by the signed `hull.sha256`: the
-     same trust chain as every tool, version-coupled to the running `hull`, nothing
-     fetched from npm. One row in the tool registry (`src/hull/tools_install.c`).
-   - **Run:** `hull check --types [app_dir]` (and `hull agent check`) runs the installed
-     tsgo with `--noEmit` on the app, using the `tsconfig.json` and `types/hull` that
-     `hull types` writes (§2.2), through the tool spawn allowlist (`hl_tool_spawn`), and
-     prints its diagnostics. With tsgo absent it says how to install it and passes.
-   - **Advisory, never a gate.** Type errors are reported and set `hull check`'s exit
-     status; they never stop `hull dev`, `hull test`, `hull build` or a running app.
-     Hull erases types and does not check them (§0); the pipeline never runs tsgo, so it
-     needs no BuildContext tool seam (checkpoint 4).
-   - **Pinned preview.** tsgo is a preview: each Hull release pins one tsgo version and
-     its notes name it; a change of pin is a release-note line.
+     same trust chain as `wamrc` ([tools_install.md](tools_install.md)),
+     version-coupled to the running `hull`, nothing fetched from npm. One row in the
+     tool registry (`src/hull/tools_install.c`).
+   - **The runner:** a thin Lua tool module spawns the checker with `--noEmit` on the
+     app, using the `tsconfig.json` and `types/hull` that `hull types` writes (§2.2),
+     through the tool spawn allowlist (`hl_tool_spawn`). It prefers an installed tsgo
+     and falls back to a `tsc` on PATH: the two take the same flags and print the same
+     diagnostic format, so one adapter turns either into Hull diagnostics, and a change
+     in tsgo is a one-file fix. With neither, it says how to install tsgo.
+   - **Where it runs:**
+     - `hull check --types [app_dir]` (and `hull agent check`, as JSON): on request.
+     - `hull dev`: in the background beside the watcher, its diagnostics in the dev log,
+       `hull agent errors` and `--tui`; it never blocks a reload.
+     - `hull build` and `hull test`: with `--type-check`, or `"typeCheck": true` in
+       `hull.build.json` (BuildContext §9.2), a type error fails them. Off by default
+       while tsgo is a preview.
+     Never in a running app or a built binary.
+   - **Outside the pipeline, for now.** The checker is not a BuildContext action:
+     inside the pipeline its version would enter action keys and its behaviour every
+     cached result, and a preview tool's crash or false positive could stop a sound
+     build. T3's path stays BuildContext 1, 2 and 5 (§1).
+   - **When tsgo is stable** (TypeScript 7 GA): the check becomes on by default for
+     `build` and `test` of an app with TypeScript sources (`--no-type-check` to opt
+     out), and moves into the pipeline as a cached project-wide action through the
+     BuildContext tool seam (checkpoint 4, which lands with Compute IR) if caching
+     matters by then.
+   - **Pinned preview.** Each Hull release pins one tsgo version and its notes name it;
+     a change of pin is a release-note line.
    - **Order:** independent of T3 - it needs neither the pipeline nor `.ts` execution,
      and works for a typed JavaScript app too. Scheduled after T3 as one small PR (the
-     registry row, the release asset, `hull check --types`, an e2e that type-checks an
-     example app).
+     registry row, the release asset, the runner, `hull check --types`, the dev-loop
+     report, the opt-in gate, an e2e that type-checks an example app).
