@@ -358,10 +358,11 @@ is refused ("type lists past this file's lookahead budget"), so input built to m
 
 ### 4.1 The erasure plugin
 
-A bundled source plugin, `stdlib:ts-erase@1`: a small Hull application embedded in the
-`hull` binary, like every plugin (BuildContext §9.1). It parses nothing - the spans come
-from the host's frontend session over the channel - so its language does not matter;
-it is written in Lua.
+A bundled source plugin, `stdlib:ts-erase@1`: a small JavaScript Hull application
+embedded in the `hull` binary, like every plugin (BuildContext §9.1). It parses nothing:
+it calls the host's `type_erasure` operation over its channel, and the TypeScript parse
+runs once, in the host's JavaScript frontend session - the one ProjectDiscovery
+analyzed.
 
 - **Input:** a source selection of `typescript` units (BuildContext §1.3: chosen by the
   planner; the plugin rescans nothing).
