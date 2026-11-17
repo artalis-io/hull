@@ -2,13 +2,14 @@
 -- hull.project.registry - the ONE canonical extension -> frontend mapping.
 --
 -- Design: docs/project_discovery_design.md D3/D11. Adding a frontend is one row here;
--- hull dev / hull agent / build consumers ask the registry and never change. Lua is the
--- only ANALYZABLE frontend today. JavaScript is a KNOWN language, reserved
--- architecturally, analyzable = false (no parser, no regex scanner, no parity pretence):
--- a `.js` application source is honestly reported unsupported, never parsed as Lua.
+-- hull dev / hull agent / build consumers ask the registry and never change. Lua, JavaScript
+-- and TypeScript (docs/typescript_design.md 3.1) are analyzable; JavaScript and TypeScript only
+-- when the QuickJS tooling engine is compiled in. A row may also be KNOWN but never analyzable
+-- (`unsupported` holds the reason: `.tsx`, `.cts`): such a source is honestly reported
+-- unsupported (D11), never parsed as something else.
 --
--- Pure Lua; the Lua frontend module is loaded lazily (require) only when a `.lua` source
--- is actually analyzed.
+-- Pure Lua; a frontend module is loaded lazily (require) only when one of its sources is
+-- actually analyzed.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
@@ -28,6 +29,16 @@ local FRONTENDS = {
             extra_capabilities = {} },
     cjs = { language = "javascript", engine = "javascript", frontend_module = "hull.project.frontend_javascript",
             extra_capabilities = {} },
+    -- TypeScript is the JavaScript parser's TypeScript mode, in the same tooling session.
+    ts  = { language = "typescript", engine = "javascript", frontend_module = "hull.project.frontend_typescript",
+            extra_capabilities = {} },
+    mts = { language = "typescript", engine = "javascript", frontend_module = "hull.project.frontend_typescript",
+            extra_capabilities = {} },
+    -- Known, never analyzable (docs/typescript_design.md 3.1).
+    tsx = { language = "typescript", engine = nil, frontend_module = nil, extra_capabilities = {},
+            unsupported = "TSX (JSX in TypeScript) is not supported; use '.ts'" },
+    cts = { language = "typescript", engine = nil, frontend_module = nil, extra_capabilities = {},
+            unsupported = "'.cts' (CommonJS TypeScript) is not supported; use '.ts' or '.mts'" },
 }
 
 -- True iff the tooling engine for a row is compiled into this hull. Lua is always in; JavaScript
@@ -58,13 +69,15 @@ function M.for_ext(ext)
     if not row then return nil end
     local r = {}
     for k, v in pairs(row) do r[k] = v end
-    r.analyzable = engine_available(row.engine)
+    r.analyzable = row.unsupported == nil and engine_available(row.engine)
     return r
 end
 
 -- The frontend modules this registry names: the only names M.load will require.
 local FRONTEND_MODULES = {}
-for _, row in pairs(FRONTENDS) do FRONTEND_MODULES[row.frontend_module] = true end
+for _, row in pairs(FRONTENDS) do
+    if row.frontend_module then FRONTEND_MODULES[row.frontend_module] = true end
+end
 
 -- Load (require) the frontend module for an analyzable row. Returns the frontend table,
 -- or nil for a non-analyzable / unknown row. The module name must be one of FRONTENDS':
@@ -77,11 +90,19 @@ end
 
 -- Frontend summary for the ProjectDiscovery model: one entry per distinct LANGUAGE with
 -- its extensions grouped, its capabilities (from the loaded frontend, or the row's
--- reserved set), and analyzable flag. Deterministic order.
+-- reserved set), and analyzable flag. Extensions that are known but never analyzable
+-- (a row with `unsupported`) are listed apart, as `unsupported_extensions`, so they do not
+-- decide the language's flag or capabilities. Deterministic order.
 function M.frontends()
-    local by_lang = {}
+    local by_lang, unsupported = {}, {}
     for _, ext in ipairs(M.known_exts()) do
         local row = M.for_ext(ext)                 -- computed analyzable (engine availability)
+        if row.unsupported then
+            local list = unsupported[row.language] or {}
+            list[#list + 1] = ext
+            unsupported[row.language] = list
+            goto continue
+        end
         local e = by_lang[row.language]
         if not e then
             local caps = {}
@@ -96,8 +117,18 @@ function M.frontends()
             by_lang[row.language] = e
         end
         e.extensions[#e.extensions + 1] = ext
+        ::continue::
     end
     local out = {}
+    for lang, list in pairs(unsupported) do
+        local e = by_lang[lang]
+        if not e then
+            e = { language = lang, extensions = {}, capabilities = {}, analyzable = false }
+            by_lang[lang] = e
+        end
+        table.sort(list)
+        e.unsupported_extensions = list
+    end
     for _, e in pairs(by_lang) do table.sort(e.extensions); out[#out + 1] = e end
     table.sort(out, function(a, b) return a.language < b.language end)
     return out

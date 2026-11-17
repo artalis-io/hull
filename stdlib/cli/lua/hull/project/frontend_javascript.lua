@@ -36,11 +36,13 @@ local function decode(raw, what)
     return data, nil
 end
 
--- analyze_source(session, path, src) -> (unit, decls, diags). Calls the C bridge once, decodes the
--- facts, and builds the JS `unit` object + one JS `declaration` object per fact. `diags` are the
--- normalized per-source diagnostics; on a bridge/transport failure a single internal diagnostic.
-function M.analyze_source(session, path, src)
-    local raw = tool.frontend_analyze("javascript", session, path, src)
+-- analyze_source(session, path, src, lang?) -> (unit, decls, diags). Calls the C bridge once,
+-- decodes the facts, and builds the JS `unit` object + one JS `declaration` object per fact. `lang`
+-- is the parser mode, "js" (default) or "ts" (hull.project.frontend_typescript passes "ts").
+-- `diags` are the normalized per-source diagnostics; on a bridge/transport failure a single
+-- internal diagnostic.
+function M.analyze_source(session, path, src, lang)
+    local raw = tool.frontend_analyze("javascript", session, path, src, lang or "js")
     local facts, derr = decode(raw, "analyze")
     if not facts then
         return nil, {}, { derr }
@@ -54,7 +56,7 @@ function M.analyze_source(session, path, src)
             _is_method = f.is_method == true, _anns = f.annotations or {},
         }
     end
-    local unit = { _session = session, _unit_id = facts.unit_id, _declarations = decls }
+    local unit = { _session = session, _unit_id = facts.unit_id, _declarations = decls, _lang = lang or "js" }
     return unit, decls, facts.diagnostics or {}
 end
 

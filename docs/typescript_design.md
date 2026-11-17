@@ -158,9 +158,13 @@ type_erasure(unit) -> { spans: [ {start, stop} ... ], refusals: [ diagnostic ...
 `spans` are half-open byte ranges of erasable type syntax, sorted, non-overlapping;
 erasing them (§4.1) yields JavaScript with the same byte offsets. `refusals` are the
 non-erasable constructs (§3.3), each a `ts.unsupported` error diagnostic with its range.
-Other frontends report the operation unsupported. It is a semantic operation reached
-through the opaque handle (project discovery D3 / D3.1), so a plugin consuming it never
-sees the TypeScript AST.
+Other frontends report the operation unsupported. It is a semantic operation behind the
+analyzer's generation boundary (project discovery D3 / D3.1), so a plugin consuming it never
+sees the TypeScript AST: `analyze.type_erasure(disc, path)` on a discovery made with
+`retain_frontend = true`, gated by the same lease as `declaration_semantics` and `scope`. It is
+keyed by the source's project-relative path rather than a declaration handle: erasure is per
+unit, and a unit may declare nothing. `project.operation_unsupported` for a source of another
+frontend, `project.handle_invalid` for a path with no analyzed unit.
 
 ### 3.3 Accepted syntax: erasable only
 
@@ -289,9 +293,33 @@ yet, and no extension selects it.
   interface` / `declare type`, and `import type X = require("m")` (or `= A.B`).
 - The §3.4 rules for generic arrows, overloads, a following `;` and class members.
 
-**Slice 3:** the `typescript` registry row (`.ts`, `.mts`; §3.1), the mode passed through
-`tool.frontend_analyze`, the `type_erasure` semantic operation on the handle, and an e2e
-through `hull agent inspect` and `hull dev --agent`.
+**Slice 3 (implemented):** TypeScript reaches project discovery.
+
+- Registry: `ts` and `mts` rows, language `typescript`, frontend
+  `hull.project.frontend_typescript` (the JavaScript proxy with the mode set, plus
+  `type_erasure`), engine `javascript`, so they are analyzable exactly when JavaScript is. `tsx`
+  and `cts` are rows that are never analyzable: each such source is reported unsupported with
+  its reason and makes the generation incomplete (D11). The frontend summary lists them apart,
+  as `unsupported_extensions`, so they decide neither the language's `analyzable` nor its
+  capabilities; TypeScript adds a sixth capability, `type_erasure`.
+- The mode: `tool.frontend_analyze(lang, token, path, src, mode)`, where `mode` is `"js"`
+  (default) or `"ts"` and anything else is an argument error; `hl_js_gen_analyze` builds the
+  options JSON from those two literals only and refuses any other value before QuickJS is
+  entered. The session keeps a TypeScript unit's SourceUnit and bytes for the erasure.
+- `type_erasure`: `typeErasure(unitId)` in the JS adapter (`hull:source:ts_erase` over the
+  retained unit, refusal ranges normalized with line and column),
+  `tool.frontend_type_erasure`, and `analyze.type_erasure` (§3.2).
+- `hull dev` reloads on a `.ts` / `.mts` change, so `hull dev --agent` publishes a new
+  generation for it.
+- Tests: `test_js_generation` (the real session: spans, refusals, a JavaScript unit, a stale
+  token, every rejected mode), `test_project` (the analyzer over a mocked bridge: the mode per
+  extension, the lease, the unit keying, the summary) and `tests/e2e_project_discovery.sh`
+  (`hull agent inspect` on `.ts` / `.mts` / `.tsx` / `.cts` on both the full and the lua-only
+  build, and `hull dev --agent` republishing on a `.ts` edit, on an app that serves so that only
+  the watcher can cause the reload).
+
+Not in slice 3 (T3, §4): running a `.ts` file, entry discovery of `app.ts`, and the analyzed
+bytes on the handle.
 
 ### 3.6 `<` after an expression
 
