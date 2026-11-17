@@ -573,7 +573,7 @@ UTEST(js_typescript, corpus_refuse)
         free(exp); free(lines); free(o); free(src);
     }
     jfd_paths_free(&pv);
-    EXPECT_GE(checked, 31);
+    EXPECT_GE(checked, 32);
     hl_js_session_destroy(s);
 }
 

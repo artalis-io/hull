@@ -1514,7 +1514,7 @@ function parseInternal(bytes, opts, inject) {
                     // parameters when `(` follows; otherwise the call tail tries type arguments.
                     const callee = parseIdentifier();
                     if (!tsArrowTypeParameters()) return callee;
-                    return asyncParenTail(start, callee);
+                    return asyncParenTail(start, callee, cur.nlBefore ? cur : null);
                 }
                 if (nx.type === "punctuator" && nx.value === "(" && !noCall) {
                     const callee = parseIdentifier();   // `async` -> cur is `(`
@@ -1528,12 +1528,18 @@ function parseInternal(bytes, opts, inject) {
         if (isP("=>") && !nl()) return finishArrow(id.start, [id], false);
         return id;
     }
-    // `async ( ... )` (cur is `(`, `callee` the `async` identifier).
-    function asyncParenTail(start, callee) {
+    // `async ( ... )` (cur is `(`, `callee` the `async` identifier). `nlParen` (TS mode): the
+    // `(` when a line break separates it from erased type parameters (`async <T>` LF `(x) => x`):
+    // TypeScript reads an async arrow, but erased it would be `async` LF `(x) => x`, which is not.
+    function asyncParenTail(start, callee, nlParen) {
         const info = { spreadComma: false, typed: false };
         const args = parseArguments(info);
         if (ts) tsArrowTail(info);
-        if (isP("=>") && !nl()) return finishArrow(start, argsToParams(args, info), true);
+        if (isP("=>") && !nl()) {
+            if (nlParen)
+                diag("error", "ts.unsupported", "a line break between an async arrow's type parameters and its parameters is not supported", nlParen.start, nlParen.stop);
+            return finishArrow(start, argsToParams(args, info), true);
+        }
         if (ts && info.typed && !isP("=>")) synErr("expected '=>' after TypeScript parameter types");
         const call = mk("CallExpression", start); call.callee = callee; call.optional = false; call.arguments = args;
         return fin(call);
