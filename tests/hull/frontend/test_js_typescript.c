@@ -160,7 +160,7 @@ static const Refusal REFUSALS[] = {
     { "module M {}",                           "module declarations",                 1,  7 },
     { "import x = require(\"m\");",            "import-require declarations",        10, 11 },
     { "export = x;",                           "export assignments",                  8,  9 },
-    { "declare module \"m\" {}",              "'declare' declarations",              1,  8 },
+    { "declare x;",                            "'declare' declarations",              1,  8 },
     { "if (x) interface I {}",                 "declarations outside a statement list", 8, 17 },
 };
 
@@ -531,7 +531,7 @@ UTEST(js_typescript, corpus_accept)
         free(jsp); free(er); free(hx); free(o); free(src);
     }
     jfd_paths_free(&pv);
-    EXPECT_GE(checked, 21);
+    EXPECT_GE(checked, 22);
     hl_js_session_destroy(s);
 }
 
@@ -569,7 +569,7 @@ UTEST(js_typescript, corpus_refuse)
         free(exp); free(lines); free(o); free(src);
     }
     jfd_paths_free(&pv);
-    EXPECT_GE(checked, 33);
+    EXPECT_GE(checked, 30);
     hl_js_session_destroy(s);
 }
 

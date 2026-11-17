@@ -28,19 +28,23 @@
 // (test_js_golden and scripts/js_frontend_diff.sh hold it) and valid JavaScript parses the same
 // in both modes (test_js_typescript holds that) - with one exception TypeScript itself makes: a
 // `<` after an expression is type arguments wherever TypeScript's rule allows them, so
-// `a < b > (c)` is a call in TS mode, as it is to tsc and Node. In TS mode the unit also carries `typeSpans` (the
-// erasable type syntax, sorted half-open byte ranges, see hull:source:ts_erase), read by the
-// type grammar (hull:source:ts_types). Type tokens never move a node's range: a node ends at its
-// last JAVASCRIPT token, so the TS-mode AST is exactly the JS-mode AST of the erased bytes.
-// Erased in this slice: annotations (variables, parameters incl. arrow and async-arrow ones,
-// returns, class fields), optional `?` on parameters and members, definite assignment `!`,
-// `as` / `satisfies`, non-null `!`, and whole declarations in a statement list - `interface`,
-// `type`, `declare` const / let / var / function, `import type` / `export type` and their
-// `export` forms - plus inline `type` import / export specifiers, type parameters (functions,
-// classes, methods, arrows) and type arguments (calls, `new`, tags, instantiation expressions,
-// heritage). An erased declaration builds
-// no node, and JSDoc attaches as it does over the erased bytes. Every other TypeScript construct
-// is refused with a ts.unsupported diagnostic.
+// `a < b > (c)` is a call in TS mode, as it is to tsc and Node (docs/typescript_design.md 3.6).
+// In TS mode the unit also carries `typeSpans` (the erasable type syntax, sorted half-open byte
+// ranges, see hull:source:ts_erase), read by the type grammar (hull:source:ts_types). Type
+// tokens never move a node's range: a node ends at its last JAVASCRIPT token, so the TS-mode AST
+// is exactly the JS-mode AST of the erased bytes.
+// Erased: annotations (variables, parameters incl. arrow and async-arrow ones, returns,
+// class fields), optional `?` on parameters and members, definite assignment `!`, `as` /
+// `satisfies`, non-null `!`, type parameters (functions, classes, methods, arrows) and type
+// arguments (calls, `new`, tags, instantiation expressions, heritage), `implements`, class
+// member modifiers, `abstract class`, `this` parameters, and - each as a whole, with no node
+// built - declarations in a statement list (`interface`, `type`, every `declare` form,
+// `import type` / `export type` and their `export` forms, overload signatures), class members
+// that are types only (`abstract` / `declare` members, index signatures, overload
+// signatures), and inline `type` import / export specifiers. JSDoc attaches as it does over
+// the erased bytes. Every other TypeScript construct is refused with a ts.unsupported
+// diagnostic, as are the erasures that would change the JavaScript parse
+// (docs/typescript_design.md 3.4).
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -509,8 +513,17 @@ function parseInternal(bytes, opts, inject) {
         if (t1.nlBefore || !isIdTok(t1)) return null;
         if (t0.value === "interface") return "interface";
         if (t0.value === "type") { const t2 = peekAt(2); return (t2.type === "punctuator" && (t2.value === "=" || t2.value === "<")) ? "type" : null; }
-        if (t1.value === "const" || t1.value === "let" || t1.value === "var") return "declareVar";
+        if (t1.value === "const") { const t2 = peekAt(2); return isIdTok(t2) && t2.value === "enum" && !t2.nlBefore ? "declareBlock" : "declareVar"; }
+        if (t1.value === "let" || t1.value === "var") return "declareVar";
+        if (t1.value === "interface") { const t2 = peekAt(2); return isIdTok(t2) && !t2.nlBefore ? "declareInterface" : null; }
+        if (t1.value === "type") { const t2 = peekAt(2), t3 = peekAt(3); return isIdTok(t2) && !t2.nlBefore && t3.type === "punctuator" && (t3.value === "=" || t3.value === "<") ? "declareType" : null; }
         if (t1.value === "function") return "declareFunction";
+        if (t1.value === "class" || t1.value === "enum" || t1.value === "namespace") return "declareBlock";
+        // `declare module "m"` only: `declare module N {}` is the old spelling of a namespace,
+        // which TypeScript deprecates and Node refuses.
+        if (t1.value === "module") { const t2 = peekAt(2); return t2.type === "string" && !t2.nlBefore ? "declareBlock" : null; }
+        if (t1.value === "abstract") { const t2 = peekAt(2); return isIdTok(t2) && t2.value === "class" && !t2.nlBefore ? "declareBlock" : null; }
+        if (t1.value === "global") { const t2 = peekAt(2); return t2.type === "punctuator" && t2.value === "{" ? "declareBlock" : null; }
         return null;
     }
     function tsPeekFromCur(i) { return peekTok(i, false); }
@@ -596,6 +609,9 @@ function parseInternal(bytes, opts, inject) {
             return;
         }
         advance(false);                             // `declare`
+        if (kind === "declareBlock") { tsDeclareBlock(); return; }
+        if (kind === "declareInterface") { tsDeclarationBody("interface"); return; }
+        if (kind === "declareType") { tsDeclarationBody("type"); return; }
         if (kind === "declareVar") {
             advance(false);                         // const / let / var
             for (;;) {
@@ -613,6 +629,53 @@ function parseInternal(bytes, opts, inject) {
         if (isP("<")) types.parseTypeParameters();
         types.parseParameters();
         if (isP(":")) { advance(false); types.parseReturnType(); }
+        tsDeclEnd();
+    }
+    // `declare class` / `abstract class` / `enum` / `const enum` / `namespace` / `module` /
+    // `global` after `declare` (cur at that word): the header is read, then the body - ambient
+    // declarations only, all of it erased - is skipped as one balanced `{ ... }` group (its
+    // tokens lexed with the operator slash goal: ambient code holds no regex). `declare module
+    // "m";` has no body.
+    function tsDeclareBlock() {
+        const w = cur.value;
+        if (w === "abstract" || w === "const") advance(false);
+        const kw = cur.value;
+        advance(false);                             // class / enum / namespace / module / global
+        if (kw === "class") {
+            if (isIdTok(cur) && cur.value !== "extends" && cur.value !== "implements") advance(false);
+            if (isP("<")) types.parseTypeParameters();
+            if (isKw("extends")) { advance(false); types.parseType({ noConditional: true }); }
+            if (isKw("implements")) {
+                advance(false);
+                for (;;) { const b = cur.start; types.parseType({ noConditional: true }); if (cur.start === b || !isP(",")) break; advance(false); }
+            }
+        } else if (kw === "module" && cur.type === "string") {
+            advance(false);
+            if (!isP("{")) { tsDeclEnd(); return; }  // `declare module "m";`
+        } else if (kw !== "global") {
+            if (isIdTok(cur)) advance(false); else { synErr("expected a name"); return; }
+            while (kw === "namespace" && isP(".") && isIdTok(tsPeek())) { advance(false); advance(false); }
+        }
+        if (!isP("{")) { synErr("expected '{'"); return; }
+        let d = 0;
+        for (;;) {
+            if (atEof()) { synErr("expected '}'"); return; }
+            if (isP("{")) d++;
+            else if (isP("}")) { d--; if (d === 0) { advance(true); return; } }
+            advance(false);
+        }
+    }
+    // `= require("m")` or `= A.B` after `import type X` (cur at `=`), then the statement end.
+    function tsImportEqualsRest() {
+        advance(false);                             // `=`
+        if (isKw("require") && tsPeek().type === "punctuator" && tsPeek().value === "(") {
+            advance(false); advance(false);
+            if (cur.type === "string") advance(false); else { synErr("expected module specifier"); return; }
+            if (isP(")")) advance(false); else { synErr("expected ')'"); return; }
+        } else {
+            if (isIdTok(cur)) advance(false); else { synErr("expected a name"); return; }
+            while (isP(".") && tsPeek().type === "identifier") { advance(false); advance(false); }
+        }
         tsDeclEnd();
     }
     // `export type { A } [from "m"]`, `export type * [as n] from "m"` after `export type`.
@@ -1842,7 +1905,12 @@ function parseInternal(bytes, opts, inject) {
         let needMore = true;
         if (cur.type === "identifier" && !RESERVED.has(cur.value)) {
             const d = mk("ImportDefaultSpecifier", cur.start); d.local = parseIdentifier(); s.specifiers.push(fin(d));
-            if (ts && isP("=")) tsRefuse("import-require declarations");
+            if (ts && isP("=")) {
+                // `import type X = require("m")` erases with its statement; without `type` it
+                // is runtime code, refused for good.
+                if (typeDepth === 0) tsRefuse("import-require declarations");
+                else { tsImportEqualsRest(); return fin(s); }
+            }
             needMore = eatP(",", true);
             // Missing comma before `{` / `*`: report it, then read them as if it were there.
             if (!needMore && (isP("{") || isP("*"))) { synErr("expected ','"); needMore = true; }
