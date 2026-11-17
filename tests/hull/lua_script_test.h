@@ -42,8 +42,10 @@
 #include "lauxlib.h"
 #include "lualib.h"
 
-static inline int run_lua_test(const char *script_path, long long *pass_out,
-                               long long *fail_out)
+/* As run_lua_test, with @p setup run on the state after its libraries open
+ * (a suite preloads the native modules it tests). NULL = none. */
+static inline int run_lua_test_with(const char *script_path, void (*setup)(lua_State *L),
+                                    long long *pass_out, long long *fail_out)
 {
     *pass_out = 0;
     *fail_out = -1;
@@ -51,6 +53,7 @@ static inline int run_lua_test(const char *script_path, long long *pass_out,
     lua_State *L = luaL_newstate();
     if (!L) return -1;
     luaL_openlibs(L);
+    if (setup) setup(L);
 
     /* Resolve require("hull.X") from the source tree (repo-root relative).
      * stdlib/cli/lua covers the tooling layers (hull.source.*, hull.project.*);
@@ -83,6 +86,12 @@ static inline int run_lua_test(const char *script_path, long long *pass_out,
     fprintf(stderr, "  %s: %lld passed, %lld failed\n", script_path, *pass_out, *fail_out);
     lua_close(L);
     return 0;
+}
+
+static inline int run_lua_test(const char *script_path, long long *pass_out,
+                               long long *fail_out)
+{
+    return run_lua_test_with(script_path, NULL, pass_out, fail_out);
 }
 
 #endif /* HULL_TEST_LUA_SCRIPT_TEST_H */

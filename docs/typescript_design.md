@@ -1,7 +1,7 @@
 # TypeScript - design
 
-Status: **T1 (types + `hull types`) implemented; T2 slices 1 and 2 (the parser's TypeScript
-mode, internal) implemented (§3.5); the rest of T2, and T3, design-only.** Builds on
+Status: **T1 (types + `hull types`) and T2 (the TypeScript frontend, §3.5) implemented;
+T3 design-only, its prerequisites in progress (§1).** Builds on
 [buildcontext_design.md](buildcontext_design.md) (BuildContext),
 [dev_pipeline_generations_design.md](dev_pipeline_generations_design.md) (pipeline
 generations), [javascript_source_frontend_design.md](javascript_source_frontend_design.md)
@@ -36,10 +36,14 @@ module resolution modes), CommonJS interop.
 | Step | What | Depends on |
 |---|---|---|
 | T1 | `.d.ts` + `hull types` (§2) - implemented | nothing |
-| T2 | TypeScript frontend, analysis only (§3) - slices 1 and 2 implemented (§3.5) | the shipped JS frontend |
-| BuildContext 1-5 | action core, outputs, artifact seam, tool seam, plugin runtime | - |
+| T2 | TypeScript frontend, analysis only (§3) - implemented (§3.5) | the shipped JS frontend |
+| BuildContext 1, 2, 5 | action core (1, implemented), outputs (2), plugin runtime (5) | - |
 | G1, G2 | pipeline generations: overlay, runner wiring | BuildContext 2, 5 |
-| T3 | type-erasure plugin + `.ts` entry points (§4) | T2, BuildContext 5, G1, G2, and the explicit-route part of BuildContext 6 |
+| T3 | type-erasure plugin + `.ts` entry points (§4) | T2, BuildContext 1, 2, 5, G1, G2, and the explicit-route part of BuildContext 6 |
+
+BuildContext checkpoints 3 (artifact inputs) and 4 (the tool seam) are not on T3's path:
+erasure takes a source selection, not artifacts, and runs no tool. They follow when Compute
+IR needs them.
 
 T2 is analysis, like the JS frontend before it: it makes `.ts` files visible to
 ProjectDiscovery (declarations, annotations, `hull agent inspect`) and lowers nothing, so

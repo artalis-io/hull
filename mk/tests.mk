@@ -15,7 +15,7 @@ TEST_SRCS := $(shell find $(TESTDIR)/hull -name 'test_*.c')
 
 # Filter test binaries based on RUNTIME selection
 ifeq ($(RUNTIME),js)
-  TEST_SRCS := $(filter-out %/test_lua.c %/test_lua_tui_poll.c,$(TEST_SRCS))
+  TEST_SRCS := $(filter-out %/test_lua.c %/test_lua_tui_poll.c %/test_buildctx.c,$(TEST_SRCS))
 else ifeq ($(RUNTIME),lua)
   TEST_SRCS := $(filter-out %/test_js_tui_poll.c,$(TEST_SRCS))
   # test_js_session + test_js_lexer + test_js_parser (the JS tooling runtime + frontend) need
@@ -459,6 +459,12 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TUI_CAP_TEST_OBJS) $(TEST_COM
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS) $(LDFLAGS)
+
+# BuildContext checkpoint 1 (tests/hull/buildctx/): the Lua action core
+# (stdlib/cli/lua/hull/buildctx/) over its one native binding, hull.buildctx._fs,
+# in a plain Lua state with the cap layer linked for the fs policy.
+$(BUILDDIR)/test_buildctx: $(TESTDIR)/hull/buildctx/test_buildctx.c $(BUILDDIR)/lua_rt_mod_buildctx_fs.o $(LUA_OBJS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDDIR)/lua_rt_mod_buildctx_fs.o $(LUA_OBJS) $(TEST_COMMON_LIBS) $(LDFLAGS)
 
 # hull.source.lua (pure-Lua source-analysis layer): a vanilla lua_State harness
 # linking ONLY the vendored Lua 5.4 objects (no Hull sandbox / cap layer). The
