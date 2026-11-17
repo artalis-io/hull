@@ -463,8 +463,8 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDI
 # BuildContext (tests/hull/buildctx/): the Lua action core
 # (stdlib/cli/lua/hull/buildctx/) over its one native binding, hull.buildctx._fs,
 # in a plain Lua state with the cap layer linked for the fs policy.
-$(BUILDDIR)/test_buildctx: $(TESTDIR)/hull/buildctx/test_buildctx.c $(BUILDDIR)/lua_rt_mod_buildctx_fs.o $(LUA_OBJS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDDIR)/lua_rt_mod_buildctx_fs.o $(LUA_OBJS) $(TEST_COMMON_LIBS) $(LDFLAGS)
+$(BUILDDIR)/test_buildctx: $(TESTDIR)/hull/buildctx/test_buildctx.c $(BUILDDIR)/lua_rt_mod_buildctx.o $(RUNTIME_CACHE_COMMON_OBJ) $(LUA_OBJS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDDIR)/lua_rt_mod_buildctx.o $(RUNTIME_CACHE_COMMON_OBJ) $(LUA_OBJS) $(TEST_COMMON_LIBS) $(LDFLAGS)
 
 # hull.source.lua (pure-Lua source-analysis layer): a vanilla lua_State harness
 # linking ONLY the vendored Lua 5.4 objects (no Hull sandbox / cap layer). The

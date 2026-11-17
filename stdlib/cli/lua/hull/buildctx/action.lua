@@ -1,20 +1,25 @@
--- hull.buildctx.action - the BuildAction core and its declared workspace inputs
--- (docs/buildcontext_design.md §2, §4, §13.1).
+-- hull.buildctx.action - the BuildAction: its transaction, declared workspace
+-- inputs, outputs and committed result (docs/buildcontext_design.md §2, §4, §6,
+-- §13.1, §13.2).
 --
--- Host-owned tool code: it runs in the tool VM, never in a plugin's runtime, and
--- holds the one native piece, hull.buildctx._fs (the grants compiled with the
--- shipped fs policy, and read / stat / list through it).
+-- Host-owned tool code: it runs in the tool VM, never in a plugin's process. Its
+-- native pieces are hull.buildctx._fs (the grants compiled with the shipped fs
+-- policy, and read / stat / list through it) and hull.buildctx._store (the
+-- sealed result store).
 --
 --   local action = require("hull.buildctx.action")
---   local a, err = action.new({ root = "/abs/app", grants = { "src/" } })
+--   local a, err = action.new({ root = "/abs/app", grants = { "src/" },
+--                               key = <64 hex>, store = <hull.buildctx._store> })
 --   a:start()
 --   local bytes, err = a:read("src/a.lua")       -- recorded, repeatable
 --   local st, err    = a:stat("bin/x", { exec = true })
 --   local list, err  = a:list("src")             -- { {name=, type=}, ... }
---   a:prepare()                                  -- freezes; builds the manifest
---   a:commit()
---   local manifest   = a:deps()
---   local fresh, err = action.check(root, manifest)
+--   local w = a:create_blob("out"); w:write(js); w:close()
+--   a:declare_generated_output({ name = "./app.ts" }, w)
+--   a:emit({ severity = "warning", code = "x.y", message = "..." })
+--   a:prepare()          -- validates, stores the payloads, builds the result
+--   a:commit()           -- installs the result: now visible to lookup
+--   local r, why = action.lookup(store, key, root)   -- a fresh committed result
 --
 -- Lifecycle, monotonic: created -> running -> preparing -> committed; created /
 -- running / preparing -> aborted. Errors are nil, token. A method on a committed
@@ -32,6 +37,7 @@
 --              its plugin read.
 
 local json = require("hull.json")
+local outputs = require("hull.buildctx.outputs")
 
 local M = {}
 
@@ -53,18 +59,12 @@ local OBSERVED = {
 }
 local OP_ORDER = { list = 1, read = 2, stat = 3 }
 
--- One file, one spelling: relative, '/'-separated, no empty, "." or ".." part
--- ("." alone names the root, for stat and list), and valid UTF-8 with no control
--- byte, so every path round-trips through the JSON manifest unchanged.
+-- One file, one spelling (outputs.canonical: relative, '/'-separated, no empty,
+-- "." or ".." part, valid UTF-8 with no control byte), so every path round-trips
+-- through the JSON manifest; "." alone names the root, for stat and list.
 local function path_ok(path, root_ok)
-    if type(path) ~= "string" or #path == 0 or #path >= 4096 then return false end
     if path == "." then return root_ok end
-    if not utf8.len(path) or path:find("[%c\127]") then return false end
-    if path:sub(1, 1) == "/" or path:sub(-1) == "/" then return false end
-    for part in (path .. "/"):gmatch("([^/]*)/") do
-        if part == "" or part == "." or part == ".." then return false end
-    end
-    return true
+    return outputs.canonical(path)
 end
 
 local function fields_key(fields)
@@ -116,10 +116,16 @@ end
 local Action = {}
 Action.__index = Action
 
--- spec: { root = absolute path, grants = { ... }, limits = { ... } }.
+local function hex64(s) return type(s) == "string" and #s == 64 and not s:find("[^0-9a-f]") end
+
+-- spec: { root = absolute path, grants = { ... }, limits = { ... },
+--         key = the action key (64 lowercase hex), store = a hull.buildctx._store }.
 -- opts.fs replaces hull.buildctx._fs (tests).
 function M.new(spec, opts)
-    if type(spec) ~= "table" or type(spec.root) ~= "string" then return nil, "invalid_args" end
+    if type(spec) ~= "table" or type(spec.root) ~= "string" or not hex64(spec.key) or
+       spec.store == nil then
+        return nil, "invalid_args"
+    end
     local fs = (opts and opts.fs) or require("hull.buildctx._fs")
     local grants = {}
     for i, gr in ipairs(spec.grants or {}) do
@@ -136,6 +142,7 @@ function M.new(spec, opts)
     return setmetatable({
         state = "created", grants = grants, limits = limits, g = g,
         obs = {}, n_obs = 0, total = 0, failed = false, cancelled = false,
+        key = spec.key, store = spec.store, out = outputs.new(spec.limits),
     }, Action)
 end
 
@@ -149,6 +156,8 @@ function Action:abort()
     if terminal(self) then return true end
     self.state = "aborted"
     self.manifest = nil
+    self.result = nil
+    self.out.live = false
     close_inputs(self)
     return true
 end
@@ -276,6 +285,25 @@ local function encode(grants, obs)
     return table.concat(out)
 end
 
+-- ctx.outputs and ctx.diagnostics (§6, §8): gated like the inputs.
+local function out_op(self, method, ...)
+    local e = gate(self, "running")
+    if e then return nil, e end
+    return self.out[method](self.out, ...)
+end
+function Action:create_blob(name) return out_op(self, "create_blob", name) end
+function Action:create_tree(name) return out_op(self, "create_tree", name) end
+function Action:declare_generated_output(desc, h) return out_op(self, "declare_generated_output", desc, h) end
+function Action:declare_artifact(desc, h) return out_op(self, "declare_artifact", desc, h) end
+function Action:emit(d) return out_op(self, "emit", d) end
+
+M.RESULT_FORMAT = "hull-build-result"
+M.RESULT_VERSION = 1
+
+-- PREPARING (§2.1): refuse a failed input, an open writer, an undeclared
+-- payload or an error diagnostic; build the dependency manifest; store every
+-- payload (the manifest among them) by its hash - unreferenced until the result
+-- is installed - and build the result. Any refusal aborts the action.
 function Action:prepare()
     local e = gate(self, "running")
     if e then return nil, e == "stale_handle" and "bad_state" or e end
@@ -283,25 +311,58 @@ function Action:prepare()
         self:abort()
         return nil, "input_failed"
     end
+    e = self.out:freeze()
+    if e then
+        self:abort()
+        return nil, e
+    end
     self.manifest = encode(self.grants, self.obs)
     close_inputs(self)
+
+    local shas, failed = {}, nil
+    local function put(bytes)
+        if shas[bytes] or failed then return end
+        local sha, err = self.store:put_payload(bytes)
+        if not sha then failed = err or "io_error" else shas[bytes] = sha end
+    end
+    put(self.manifest)
+    self.out:each_payload(put)
+    if failed then
+        self:abort()
+        return nil, "store_failed"
+    end
+    local outs, diags = self.out:encode_result(function(b) return shas[b] end)
+    self.result = '{"deps":{"sha256":' .. json.encode(shas[self.manifest]) .. '},"diagnostics":' ..
+                  diags .. ',"format":' .. json.encode(M.RESULT_FORMAT) .. ',"key":' ..
+                  json.encode(self.key) .. ',"outputs":' .. outs .. ',"version":' ..
+                  M.RESULT_VERSION .. "}"
     self.state = "preparing"
     return true
 end
 
--- There is no result store yet: commit moves the action to committed and installs
--- nothing (§13.1).
+-- COMMITTED: install the result under the action key - one atomic put. Until
+-- then no lookup sees it; a failed install aborts the action.
 function Action:commit()
     local e = gate(self, "preparing")
     if e then return nil, e end
+    local ok = self.store:put_result(self.key, self.result)
+    if not ok then
+        self:abort()
+        return nil, "store_failed"
+    end
     self.state = "committed"
     return true
 end
 
--- The dependency manifest, from preparing on.
+-- The dependency manifest and the result, from preparing on.
 function Action:deps()
     if self.state ~= "preparing" and self.state ~= "committed" then return nil, "bad_state" end
     return self.manifest
+end
+
+function Action:get_result()
+    if self.state ~= "preparing" and self.state ~= "committed" then return nil, "bad_state" end
+    return self.result
 end
 
 function Action:get_state() return self.state end
@@ -363,6 +424,53 @@ function M.check(root, manifest, opts)
     end
     g:close()
     return fresh
+end
+
+-- A committed result, if it is still valid for the workspace at @root: the
+-- result is in the store and sealed, its dependency manifest still holds
+-- (M.check), and every payload is present with its hash. Returns
+-- { outputs = { { declared, descriptor, bytes | entries = { {path, mode, bytes} } } },
+--   diagnostics = { ... } }, or nil, "miss" | "stale" | "corrupt".
+function M.lookup(store, key, root, opts)
+    if not hex64(key) then return nil, "invalid_args" end
+    local raw = store:get_result(key)
+    if not raw then return nil, "miss" end
+    local ok, r = pcall(json.decode, raw)
+    if not ok or type(r) ~= "table" or r.format ~= M.RESULT_FORMAT or r.version ~= M.RESULT_VERSION or
+       r.key ~= key or type(r.deps) ~= "table" or type(r.outputs) ~= "table" then
+        return nil, "corrupt"
+    end
+    local deps = store:get_payload(r.deps.sha256 or "")
+    if not deps then return nil, "corrupt" end
+    local fresh = M.check(root, deps, opts)
+    if fresh == nil then return nil, "corrupt" end
+    if not fresh then return nil, "stale" end
+    local function fetch(p)
+        if type(p) ~= "table" then return nil end
+        local b = store:get_payload(type(p.sha256) == "string" and p.sha256 or "")
+        if not b or #b ~= p.size then return nil end
+        return b
+    end
+    local out = {}
+    for i, o in ipairs(r.outputs) do
+        if type(o) ~= "table" or type(o.payload) ~= "table" then return nil, "corrupt" end
+        local e = { declared = o.declared, descriptor = o.descriptor }
+        if o.payload.type == "blob" then
+            e.bytes = fetch(o.payload)
+            if not e.bytes then return nil, "corrupt" end
+        elseif o.payload.type == "tree" and type(o.payload.entries) == "table" then
+            e.entries = {}
+            for j, ent in ipairs(o.payload.entries) do
+                local b = fetch(ent)
+                if not b then return nil, "corrupt" end
+                e.entries[j] = { path = ent.path, mode = ent.mode, bytes = b }
+            end
+        else
+            return nil, "corrupt"
+        end
+        out[i] = e
+    end
+    return { outputs = out, diagnostics = r.diagnostics or {} }
 end
 
 M._path_ok = path_ok   -- tests

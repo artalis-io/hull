@@ -271,7 +271,7 @@ static int cache_get_sealed(int tool, HlBlobStore *store, const char *kind,
     if (hl_blob_store_get(store, key, /*track_access=*/1, &buf, &len) != 0)
         return -1;
     uint8_t mac[SEAL_MAC_LEN];
-    int ok = len > SEAL_MAC_LEN &&
+    int ok = len >= SEAL_MAC_LEN &&
              seal_mac(k, kind, key, buf + SEAL_MAC_LEN, len - SEAL_MAC_LEN, mac) == 0;
     if (ok) {
         uint8_t diff = 0;
@@ -289,21 +289,25 @@ static int cache_get_sealed(int tool, HlBlobStore *store, const char *kind,
     return 0;
 }
 
-static void cache_put_sealed(int tool, HlBlobStore *store, const char *kind,
-                             const char *key, const uint8_t *data, size_t len)
+/* 0 when the sealed entry is in the store (written now, or already there:
+ * a key names one content). An empty @p data is an entry too. */
+static int cache_put_sealed(int tool, HlBlobStore *store, const char *kind,
+                            const char *key, const uint8_t *data, size_t len)
 {
-    if (!store || !kind || !key || !data || len == 0) return;
-    if (!tool && g_code_cache_off) return;
+    if (!store || !kind || !key || (len && !data)) return -1;
+    if (!tool && g_code_cache_off) return -1;
     const SealKey *k = seal_key(tool);
-    if (!k) return;
-    if (len > SIZE_MAX - SEAL_MAC_LEN) return;
+    if (!k) return -1;
+    if (len > SIZE_MAX - SEAL_MAC_LEN) return -1;
     uint8_t *buf = malloc(len + SEAL_MAC_LEN);
-    if (!buf) return;
+    if (!buf) return -1;
+    int rc = -1;
     if (seal_mac(k, kind, key, data, len, buf) == 0) {
-        memcpy(buf + SEAL_MAC_LEN, data, len);
-        (void)hl_blob_store_put_keyed(store, key, buf, len + SEAL_MAC_LEN);
+        if (len) memcpy(buf + SEAL_MAC_LEN, data, len);
+        rc = hl_blob_store_put_keyed(store, key, buf, len + SEAL_MAC_LEN);
     }
     free(buf);
+    return rc;
 }
 
 int hl_runtime_cache_get_sealed(HlBlobStore *store, const char *kind,
@@ -312,10 +316,10 @@ int hl_runtime_cache_get_sealed(HlBlobStore *store, const char *kind,
     return cache_get_sealed(0, store, kind, key, out, out_len);
 }
 
-void hl_runtime_cache_put_sealed(HlBlobStore *store, const char *kind,
-                                 const char *key, const uint8_t *data, size_t len)
+int hl_runtime_cache_put_sealed(HlBlobStore *store, const char *kind,
+                                const char *key, const uint8_t *data, size_t len)
 {
-    cache_put_sealed(0, store, kind, key, data, len);
+    return cache_put_sealed(0, store, kind, key, data, len);
 }
 
 int hl_tool_cache_get_sealed(HlBlobStore *store, const char *kind,
@@ -324,10 +328,10 @@ int hl_tool_cache_get_sealed(HlBlobStore *store, const char *kind,
     return cache_get_sealed(1, store, kind, key, out, out_len);
 }
 
-void hl_tool_cache_put_sealed(HlBlobStore *store, const char *kind,
-                              const char *key, const uint8_t *data, size_t len)
+int hl_tool_cache_put_sealed(HlBlobStore *store, const char *kind,
+                             const char *key, const uint8_t *data, size_t len)
 {
-    cache_put_sealed(1, store, kind, key, data, len);
+    return cache_put_sealed(1, store, kind, key, data, len);
 }
 
 /* ── GPU shader compile-helper verdicts (cap/gpu_helper.c) ──────────── */

@@ -21,10 +21,10 @@
 # (lua_rt_mod_tool.o: tool.extract_manifest_js etc., toolchain-only; whole-
 # archiving the runtime must not force-load them - they pull the JS manifest
 # extractor the runtime-less base no longer carries). hull links them directly.
-# The same for lua_rt_mod_buildctx_fs.o (hull.buildctx._fs, the build pipeline's
+# The same for lua_rt_mod_buildctx.o (hull.buildctx._fs, the build pipeline's
 # workspace inputs): tool VM only.
 
-FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(BUILDDIR)/lua_rt_mod_buildctx_fs.o $(BUILDDIR)/lua_rt_mod_compute.o $(BUILDDIR)/lua_rt_mod_db_udf.o $(BUILDDIR)/lua_rt_mod_image.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
+FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(BUILDDIR)/lua_rt_mod_buildctx.o $(BUILDDIR)/lua_rt_mod_compute.o $(BUILDDIR)/lua_rt_mod_db_udf.o $(BUILDDIR)/lua_rt_mod_image.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
                     $(LUA_OBJS) $(BUILDDIR)/manifest_lua.o $(STDLIB_LUA_REGISTRY_O)
 FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(BUILDDIR)/js_mod_compute.o $(BUILDDIR)/js_mod_db_udf.o $(BUILDDIR)/js_mod_image.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
                     $(QJS_OBJS) $(BUILDDIR)/manifest_js.o $(STDLIB_JS_REGISTRY_O)

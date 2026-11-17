@@ -1945,9 +1945,9 @@ static int l_tool_blob_store_put_from(lua_State *L)
         free(bytes); lua_pushboolean(L, 0); return 1;
     }
 
-    hl_tool_cache_put_sealed(s, kind, key, bytes, (size_t)sz);   /* see get_to */
+    int ok = hl_tool_cache_put_sealed(s, kind, key, bytes, (size_t)sz) == 0;   /* see get_to */
     free(bytes);
-    lua_pushboolean(L, 1);
+    lua_pushboolean(L, ok);
     return 1;
 }
 

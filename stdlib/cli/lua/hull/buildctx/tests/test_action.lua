@@ -17,12 +17,16 @@ end
 local root
 local roots = {}
 local function fresh(name) root = T.tmpdir(name); roots[#roots + 1] = root end
+
+local store = assert(require("hull.buildctx._store").open(T.tmpdir("store")))
+local nkey = 0
+local function key() nkey = nkey + 1; return ("%064x"):format(nkey) end
 local function put(rel, data) local f = assert(io.open(root .. "/" .. rel, "wb")); f:write(data); f:close() end
 local function dir(rel) T.mkdir(root .. "/" .. rel) end
 local function rm(rel) os.remove(root .. "/" .. rel) end
 
 local function started(grants, limits)
-    local a, err = action.new({ root = root, grants = grants, limits = limits })
+    local a, err = action.new({ root = root, grants = grants, limits = limits, key = key(), store = store })
     assert(a, err)
     assert(a:start())
     return a
@@ -33,7 +37,7 @@ end
 do
     fresh("lifecycle")
     put("a.txt", "hello")
-    local a = assert(action.new({ root = root, grants = { "a.txt" } }))
+    local a = assert(action.new({ root = root, grants = { "a.txt" }, key = key(), store = store }))
     eq(a:get_state(), "created", "created")
     local _, e = a:read("a.txt"); eq(e, "bad_state", "no input before start")
     _, e = a:prepare(); eq(e, "bad_state", "no prepare before start")
@@ -55,7 +59,7 @@ do
     fresh("abort")
     put("a.txt", "x")
     for stop = 0, 2 do
-        local a = assert(action.new({ root = root, grants = { "a.txt" } }))
+        local a = assert(action.new({ root = root, grants = { "a.txt" }, key = key(), store = store }))
         if stop >= 1 then a:start() end
         if stop >= 2 then a:prepare() end
         a:abort()
@@ -107,7 +111,7 @@ do
                  T.symlink("/etc/hosts", root .. "/src/abs") and
                  T.symlink("other/t.txt", root .. "/lnk.txt")
     if made then
-        local _, e = action.new({ root = root, grants = { "lnk.txt" } })
+        local _, e = action.new({ root = root, grants = { "lnk.txt" }, key = key(), store = store })
         eq(e, "symlink_denied", "an EXACT grant on a link is refused at compile")
         local a = started({ "src/", "exact.txt" })
         eq(a:read("src/in_root"), "inside", "SUBTREE follows a link inside its anchor")

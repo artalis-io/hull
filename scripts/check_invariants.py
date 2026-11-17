@@ -300,7 +300,7 @@ def rule(rid, title):
 # charged itself. So a binding must be REGISTERED with the dispatcher; an
 # explicit charge alone no longer satisfies the rule. Two checks:
 #   (a) Registration sites. In src/hull/runtime/lua/ (budget.c, the
-#       dispatcher itself, and the tool VM's mod_tool.c and mod_buildctx_fs.c
+#       dispatcher itself, and the tool VM's mod_tool.c and mod_buildctx.c
 #       excepted) a raw
 #       luaL_setfuncs / luaL_newlib / luaL_register is a finding: modules
 #       register through hl_lua_setfuncs / hl_lua_newlib. In
@@ -322,7 +322,7 @@ def rule(rid, title):
 
 LUA_SIG = re.compile(r"^\s*lua_State\s*\*\s*\w+\s*$")
 INV1_LUA_SKIP = {"src/hull/runtime/lua/mod_tool.c",
-                 "src/hull/runtime/lua/mod_buildctx_fs.c",   # tool VM only, like mod_tool.c
+                 "src/hull/runtime/lua/mod_buildctx.c",   # tool VM only, like mod_tool.c
                  "src/hull/runtime/lua/budget.c"}
 INV1_LUA_RAW_REG = re.compile(r"\b(luaL_setfuncs|luaL_newlib|luaL_register)\s*\(")
 INV1_JS_RAW_REG = re.compile(

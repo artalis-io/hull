@@ -1,7 +1,9 @@
 /*
- * test_buildctx.c - runs stdlib/cli/lua/hull/buildctx/tests/test_action.lua
- * (the BuildContext action core) against the real hull.buildctx._fs binding and
- * a real workspace, with the few filesystem helpers a plain Lua state lacks.
+ * test_buildctx.c - runs the BuildContext suites (stdlib/cli/lua/hull/buildctx/
+ * tests/: the action's inputs, its outputs and results) against the real
+ * hull.buildctx._fs / _store bindings and a real workspace, with the few
+ * filesystem helpers a plain Lua state lacks. HOME is a temporary directory, so
+ * the tool seal key the store makes is never the user's.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -12,7 +14,7 @@
 #include "utest.h"
 #include "../lua_script_test.h"
 #include "../test_tmpdir.h"
-#include "../../../src/hull/runtime/lua/mod_buildctx_fs.h"
+#include "../../../src/hull/runtime/lua/mod_buildctx.h"
 
 #include <fcntl.h>
 #include <ftw.h>
@@ -63,11 +65,20 @@ static int t_open_fds(lua_State *L)
     return 1;
 }
 
+static char g_home[HL_TEST_PATH_MAX];
+
 static void setup(lua_State *L)
 {
+    if (!g_home[0]) {
+        hl_test_path(g_home, sizeof(g_home), "hull_buildctx_home_%d", (int)getpid());
+        mkdir(g_home, 0700);
+        setenv("HOME", g_home, 1);
+    }
     luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
     lua_pushcfunction(L, luaopen_hull_buildctx_fs);
     lua_setfield(L, -2, "hull.buildctx._fs");
+    lua_pushcfunction(L, luaopen_hull_buildctx_store);
+    lua_setfield(L, -2, "hull.buildctx._store");
     lua_pop(L, 1);
     static const luaL_Reg T[] = {
         { "tmpdir", t_tmpdir }, { "rmtree", t_rmtree }, { "mkdir", t_mkdir },
@@ -87,4 +98,20 @@ UTEST(buildctx, action_core)
     EXPECT_GT(pass, 0LL);
 }
 
-UTEST_MAIN()
+UTEST(buildctx, outputs_and_results)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_with("stdlib/cli/lua/hull/buildctx/tests/test_outputs.lua", setup, &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
+int main(int argc, const char *const argv[])
+{
+    int rc = utest_main(argc, argv);
+    if (g_home[0]) nftw(g_home, rm_e, 16, FTW_DEPTH | FTW_PHYS);
+    return rc;
+}
+
+UTEST_STATE();
