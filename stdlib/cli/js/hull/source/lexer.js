@@ -8,7 +8,8 @@
 //
 // Public:
 //   createTokenizer(bytes, opts?) -> { next(regexAllowed?), comments, diagnostics, linemap,
-//                                      peekMark, peekRewind, splitGreater }
+//                                      peekMark, peekRewind, splitGreater, specMark, specRewind,
+//                                      ctxDepth }
 //       INCREMENTAL. The parser calls next(regexAllowed) with the grammar-directed lexical
 //       goal so it controls regex-vs-division at a `/` (the token stream alone cannot tell
 //       `if (ok) {} /re/` from `const f = function(){} / 2`).
@@ -605,6 +606,21 @@ export function createTokenizer(bytes, opts) {
         comments.length = m.commentsLen;
     }
 
+    // TypeScript mode only: mark/rewind ANY number of next() calls, for the parser's `<`
+    // speculation (a type argument list or a comparison). Unlike peekMark it copies the context
+    // stack, so it costs O(stack depth); the parser bounds how often it is used.
+    function specMark() {
+        const m = peekMark();
+        m.ctx = ctx.slice();
+        return m;
+    }
+    function specRewind(m) {
+        peekRewind(m);
+        ctx.length = 0;
+        for (let i = 0; i < m.ctx.length; i++) ctx.push(m.ctx[i]);
+    }
+    function ctxDepth() { return ctx.length; }
+
     // TypeScript mode only (docs/typescript_design.md section 3): a type argument list closes
     // with `>`, but the scanner reads `>>`, `>>>`, `>=`, `>>=` and `>>>=` as one operator
     // (`Array<Array<T>>`). Called with the LAST token produced still current (no lookahead
@@ -622,7 +638,8 @@ export function createTokenizer(bytes, opts) {
     }
 
     const _linemap = buildLinemap(bytes);
-    return { next: next, comments: comments, diagnostics: budget.list, linemap: _linemap, peekMark: peekMark, peekRewind: peekRewind, splitGreater: splitGreater };
+    return { next: next, comments: comments, diagnostics: budget.list, linemap: _linemap, peekMark: peekMark, peekRewind: peekRewind, splitGreater: splitGreater,
+             specMark: specMark, specRewind: specRewind, ctxDepth: ctxDepth };
 }
 
 // lex(bytes, opts) -> { tokens, comments, diagnostics, linemap }. Convenience that drives the

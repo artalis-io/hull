@@ -26,7 +26,14 @@ release-artifact layout).
   `satisfies` and non-null `!`; type tokens never move a node's range, so the TS-mode AST is the
   JS-mode AST of the erased bytes. Whole declarations in a statement list erase to nothing:
   `interface`, `type`, `declare` const / let / var / function, `import type` / `export type` and
-  their `export` forms, and inline `type` import / export specifiers (with their comma). JSDoc
+  their `export` forms, and inline `type` import / export specifiers (with their comma). Generics
+  erase: type parameters on functions, classes, methods and arrows (`<T>(x: T) => x`, `async
+  <T>(x) => x`), and type arguments after a callee, a `new` callee, a `?.`, a tag and a heritage
+  class (`f<T>(x)`, `new Map<K, V>()`, `` tag<T>`s` ``, `f<T>;`, `extends Base<T>`). A `<` after
+  an expression is read as type arguments by TypeScript's rule (what can follow the `>`) and stays
+  a comparison otherwise; each attempt is rewound in full, the lexer included, and the rewound
+  tokens are bounded per file (past the bound the construct is refused). An async arrow whose
+  type parameters end a line (`async <T>` LF `(x) => x`) is refused: erased, it is not one. JSDoc
   attaches as it does over the erased bytes. Every other TypeScript construct is refused with
   `ts.unsupported`, as is a line break between an arrow's types and its `=>`, a line after an
   `as` / `satisfies` type that would continue the expression (`x as T` / `[1].f()`), and an erased

@@ -153,9 +153,8 @@ static const Refusal REFUSALS[] = {
     { "function f(this: W) {}",                "'this' parameters",                  12, 16 },
     { "class C { constructor(private x) {} }", "parameter properties",               23, 30 },
     { "function f(a)\nfunction f(a) {}",       "overload signatures",                15, 23 },
-    { "function f<T>(a) {}",                   "type parameters",                    11, 12 },
-    { "class C<T> {}",                         "type parameters",                     8,  9 },
-    { "const a = <T>(x) => x;",                "type parameters and angle-bracket assertions", 11, 12 },
+    { "const a = <T>x;",                       "angle-bracket assertions",           11, 12 },
+    { "const b = <T>(x);",                     "angle-bracket assertions",           11, 12 },
     { "class C implements I {}",               "implements clauses",                  9, 19 },
     { "class C { private x = 1 }",             "'private' modifiers",                11, 18 },
     { "class C { readonly x = 1 }",            "'readonly' modifiers",               11, 19 },
@@ -193,7 +192,7 @@ UTEST(js_typescript, one_refusal_per_position)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    char *o = ts(s, "function f<T>(a) {}");
+    char *o = ts(s, "const a = <T>x;");
     EXPECT_EQ(1, count(o, "\"code\":\"ts.unsupported\""));
     free(o);
     hl_js_session_destroy(s);
@@ -216,6 +215,8 @@ static const char *const JS_KEEPS[] = {
     "class C { public = 1; declare\nx; readonly() {} static private = 2 }",
     "function f(a, b = 1, ...c) { return a < b > c; }",
     "x >>= 1; y >>>= 2; z = a >> b >>> c >= d;",
+    "for (let i = 0; i < n; i++) {} const t = a < b > c, u = a < b >= c, v = a << b >> c, w = a < b && c > d;",
+    "const r = a < /x/.source; const q = a < b > -c; const p = a < b > +c; const o = a < (b) > [c];",
 };
 
 UTEST(js_typescript, js_uses_of_typescript_words_stay_js)
@@ -233,6 +234,41 @@ UTEST(js_typescript, js_uses_of_typescript_words_stay_js)
         EXPECT_TRUE(has(o, "\"valid\":true"));
         free(j); free(o);
     }
+    hl_js_session_destroy(s);
+}
+
+/* `<` speculation is bounded: input built so that every `<` is a long failed attempt (each
+ * reads the nested rest of the file, a long tuple included, as type arguments) stops
+ * speculating, and refuses, once the rewound tokens pass four times the kept ones plus 65536 -
+ * instead of going quadratic. */
+UTEST(js_typescript, speculation_budget)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    /* Shallow enough for a sanitizer build's stack, wide enough to pass the budget: each of the
+     * 16 attempts rewinds the ~16000-token tuple. */
+    const int depth = 16, terms = 8000;
+    size_t cap = (size_t)depth * 8 + (size_t)terms * 4 + 16, n = 0;
+    char *src = (char *)malloc(cap);
+    ASSERT_TRUE(src != NULL);
+    n += (size_t)snprintf(src + n, cap - n, "x = ");
+    for (int i = 0; i < depth; i++) n += (size_t)snprintf(src + n, cap - n, "a < (");
+    n += (size_t)snprintf(src + n, cap - n, "[");
+    for (int i = 0; i < terms; i++) n += (size_t)snprintf(src + n, cap - n, i ? ", b" : "b");
+    n += (size_t)snprintf(src + n, cap - n, "]");
+    for (int i = 0; i < depth; i++) n += (size_t)snprintf(src + n, cap - n, ")");
+    n += (size_t)snprintf(src + n, cap - n, ";");
+    char *o = run(s, "parseTs", src, n, "t.ts", NULL, NULL);
+    const char *dg = o ? strstr(o, "\"diagnostics\"") : NULL;
+    if (!has(o, "lookahead budget")) fprintf(stderr, "[ts-mode] budget: %.400s\n", dg ? dg : (o ? o : "(null)"));
+    EXPECT_TRUE(has(o, "TypeScript type lists past this file's lookahead budget are not supported"));
+    EXPECT_TRUE(has(o, "\"valid\":false"));
+    free(o);
+    /* The same input as JavaScript parses cleanly. */
+    o = run(s, "parse", src, n, "t.ts", NULL, NULL);
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o);
+    free(src);
     hl_js_session_destroy(s);
 }
 
@@ -328,13 +364,13 @@ UTEST(js_typescript, type_erasure_reports_refusals)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    const char *src = "let x: number = 1;\nenum E { A }\nfunction f<T>(a) {}";
+    const char *src = "let x: number = 1;\nenum E { A }\nconst a = <T>b;";
     char *o = run(s, "eraseTs", src, strlen(src), "t.ts", NULL, NULL);
     EXPECT_TRUE(has(o, "\"ok\":true,\"spans\":[{\"start\":6,\"stop\":14}],\"refusals\":[{"));
-    /* Two refusals (enum, type parameters), each in `refusals` and again in `diagnostics`. */
+    /* Two refusals (enum, angle-bracket assertion), each in `refusals` and again in `diagnostics`. */
     EXPECT_EQ(4, count(o, "\"code\":\"ts.unsupported\""));
     EXPECT_TRUE(has(o, "TypeScript enums are not supported"));
-    EXPECT_TRUE(has(o, "TypeScript type parameters are not supported"));
+    EXPECT_TRUE(has(o, "TypeScript angle-bracket assertions are not supported"));
     free(o);
     /* Plain JS through TS mode: nothing to erase, nothing refused, bytes unchanged. */
     const char *js = "const a = 1;\n";
@@ -499,7 +535,7 @@ UTEST(js_typescript, corpus_accept)
         free(jsp); free(er); free(hx); free(o); free(src);
     }
     jfd_paths_free(&pv);
-    EXPECT_GE(checked, 18);
+    EXPECT_GE(checked, 19);
     hl_js_session_destroy(s);
 }
 
