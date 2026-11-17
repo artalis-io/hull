@@ -228,10 +228,14 @@ function Action:stat(path, fields)
     return { type = o.type, size = o.size, exec = o.exec }
 end
 
+-- A copy: the recorded listing is the observation the manifest hashes, and a
+-- caller that edits what it got must not change it.
 function Action:list(path)
     local o, e = self:_record("list", path)
     if not o then return nil, e end
-    return o.entries
+    local out = {}
+    for i, ent in ipairs(o.entries) do out[i] = { name = ent.name, type = ent.type } end
+    return out
 end
 
 -- The canonical manifest: grants in declared order, observations sorted by

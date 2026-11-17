@@ -138,7 +138,11 @@ do
     local l2 = a:list("src")
     eq(#l2, 1, "a repeat list returns the first listing")
     eq(l2[1].name, "a.lua", "listing name"); eq(l2[1].type, "file", "listing type")
-    ok(l1 == l2, "the same listing object")
+    l2[1].name = "edited"; l2[2] = { name = "x", type = "file" }
+    local l3 = a:list("src")
+    eq(#l3, 1, "editing a returned listing does not change the observation")
+    eq(l3[1].name, "a.lua", "the recorded name is intact")
+    ok(l1 ~= l3, "each call returns its own copy")
     eq(a:stat("src/a.lua", { size = true }).size, 3, "a repeat stat returns the first")
     _, e = a:read("src/gone.lua"); eq(e, "not_found", "a repeat absence stays absent")
     eq(a:stat("src/new.lua").type, "file", "other fields: a new observation")
