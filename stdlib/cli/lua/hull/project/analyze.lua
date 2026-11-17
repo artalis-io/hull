@@ -73,7 +73,7 @@ end
 -- session token (opened lazily, latched on failure). Returns a per_source entry. Lua runs the
 -- in-process frontend; JavaScript makes one C-bridge call, both producing the identical facts
 -- shape and the SAME { frontend, unit, declaration } handle payload (via collect_decls).
-local function analyze_one(fe, row, src, rel, handles, ctx)
+local function analyze_one(fe, row, src, rel, handles, ctx, units)
     if row.engine == "javascript" then
         if ctx.js_open_failed then
             return { path = rel, language = row.language, role = "app", status = "error", declarations = {},
@@ -97,6 +97,7 @@ local function analyze_one(fe, row, src, rel, handles, ctx)
             return { path = rel, language = row.language, role = "app", status = "error",
                      declarations = {}, diagnostics = diags }
         end
+        units[rel] = { frontend = fe, unit = unit }
         return { path = rel, language = row.language, role = "app",
                  status = any_error(diags) and "error" or "analyzed",
                  declarations = collect_decls(fe, unit, row.language, rel, handles),
@@ -109,6 +110,7 @@ local function analyze_one(fe, row, src, rel, handles, ctx)
         return { path = rel, language = row.language, role = "app", status = "error",
                  declarations = {}, diagnostics = diags }
     end
+    units[rel] = { frontend = fe, unit = unit }
     return { path = rel, language = row.language, role = "app",
              status = any_error(diags) and "error" or "analyzed",
              declarations = collect_decls(fe, unit, row.language, rel, handles),
@@ -147,6 +149,7 @@ local function analyze_unprotected(root_in, opts)
     local retain = (opts.retain_frontend == true)     -- strict boolean; only `true` retains
     local ctx = { js_token = nil, js_open_failed = false }
     local handles = { n = 0, map = {} }
+    local units = {}                     -- source path -> { frontend, unit } (generation-internal)
 
     -- The per-file loop + model.build run under a pcall so the generation's JS session is ALWAYS
     -- closed on a fault (finally-style), then the fault is re-raised for M.analyze's boundary.
@@ -169,21 +172,23 @@ local function analyze_unprotected(root_in, opts)
                             status = "error", declarations = {},
                             diagnostics = { diag("project.unreadable", "cannot read source file", rel) } }
                     else
-                        per_source[#per_source + 1] = analyze_one(fe, row, src, rel, handles, ctx)
+                        per_source[#per_source + 1] = analyze_one(fe, row, src, rel, handles, ctx, units)
                     end
                 elseif row then
-                    -- Known but NON-analyzable language (e.g. JavaScript with the engine not
-                    -- compiled in): honest unsupported app source -> complete=false (D11).
+                    -- Known but NON-analyzable (JavaScript with the engine not compiled in, or a
+                    -- `.tsx`): honest unsupported app source -> complete=false (D11).
                     per_source[#per_source + 1] = { path = rel, language = row.language, role = "app",
                         status = "unsupported",
                         diagnostics = { { severity = "warning", code = "project.frontend.unsupported",
-                            message = "no analyzable frontend for language '" .. row.language .. "'",
+                            message = row.unsupported
+                                or ("no analyzable frontend for language '" .. row.language .. "'"),
                             path = rel, language = row.language } } }
                 end
             end
         end
         local d = model.build(root, gen, per_source, op_diags, source_kind)
         d._handles = handles.map            -- generation-internal; NOT serialized (D6)
+        d._units = units                    -- likewise: per-source units, for unit operations
         return d
     end)
 
@@ -226,6 +231,7 @@ local function minimal_invalid(root, gen, source_kind, code, message)
                            declarations_total = 0, declarations_annotated = 0, by_language = {} },
         _by_source     = {},
         _handles       = {},
+        _units         = {},
         _frontend_lease = { retained = false, open = false, sessions = {} },  -- not semantically live
     }
 end
@@ -302,6 +308,27 @@ function M.scope(disc, handle)
     local ok2, model_or_nil, ferr = pcall(resolved.frontend.scope, resolved.unit)
     if not ok2 then return nil, diag("project.internal", "frontend scope raised: " .. tostring(model_or_nil)) end
     return model_or_nil, ferr
+end
+
+-- analyze.type_erasure(disc, path) -> ({ spans, refusals }, nil) | (nil, Diagnostic). The
+-- TypeScript type erasure of the analyzed source `path` (its project-relative path, as in
+-- `sources[]`; docs/typescript_design.md 3.2): half-open byte spans of erasable type syntax and
+-- the ts.unsupported refusals. A unit operation, so it is keyed by the source rather than a
+-- declaration handle (a source may declare nothing). Same lifecycle gate as the other semantic
+-- operations; a frontend without the operation reports it unsupported. Never raises.
+function M.type_erasure(disc, path)
+    local ok, err = lease_check(disc)
+    if not ok then return nil, err end
+    local resolved = type(path) == "string" and type(disc._units) == "table" and disc._units[path] or nil
+    if type(resolved) ~= "table" or type(resolved.frontend) ~= "table" or resolved.unit == nil then
+        return nil, diag("project.handle_invalid", "no analyzed source unit for this path in this discovery")
+    end
+    if type(resolved.frontend.type_erasure) ~= "function" then
+        return nil, diag("project.operation_unsupported", "type_erasure is not supported by this source's frontend", path)
+    end
+    local ok2, res, ferr = pcall(resolved.frontend.type_erasure, resolved.unit)
+    if not ok2 then return nil, diag("project.internal", "frontend type_erasure raised: " .. tostring(res)) end
+    return res, ferr
 end
 
 -- analyze.close(disc): frontend-neutral, idempotent generation teardown. Closes any live

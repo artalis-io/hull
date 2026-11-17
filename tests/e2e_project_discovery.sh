@@ -318,6 +318,55 @@ if [ -f "$OK/.hull/discovery.json" ]; then
 else fail "publish did not write the canonical discovery.json"; fi
 rm -rf "$OK/.hull" 2>/dev/null || true
 
+# ── TypeScript sources (docs/typescript_design.md 3.5 slice 3) ──
+# .ts / .mts go to the TypeScript frontend (the JS parser's TypeScript mode, same engine), so
+# they are analyzable exactly when JavaScript is. .tsx / .cts are known and never analyzable.
+TSAPP="$TMP/tsapp"
+mkdir -p "$TSAPP/lib"
+cat > "$TSAPP/app.ts" <<'TSEOF'
+/** @route GET /hello */
+export function hello(name: string): string { return "hi " + name; }
+interface Greeting { text: string }
+const g: Greeting = { text: "x" } as Greeting;
+TSEOF
+printf '/** @query */\nexport const y = <T,>(v: T): T => v;\n' > "$TSAPP/lib/a.mts"
+inspect "$TSAPP"
+assert_py "typescript frontend listed with .mts/.ts, .cts/.tsx apart" "$OUT" \
+    'any(f["language"]=="typescript" and f["extensions"]==["mts","ts"] and f["unsupported_extensions"]==["cts","tsx"] for f in d["frontends"])'
+if [ "$JS_ANALYZABLE" = "1" ]; then
+    assert_py "typescript analyzable, advertises type_erasure" "$OUT" \
+        'any(f["language"]=="typescript" and f["analyzable"] is True and "type_erasure" in f["capabilities"] for f in d["frontends"])'
+    assert_py "app.ts and lib/a.mts analyzed as typescript" "$OUT" \
+        'sorted((s["path"],s["language"],s["status"]) for s in d["sources"])==[("app.ts","typescript","analyzed"),("lib/a.mts","typescript","analyzed")]'
+    assert_py "valid + complete TypeScript project" "$OUT" 'd["valid"] is True and d["complete"] is True'
+    assert_py "TypeScript annotations discovered (@route, @query)" "$OUT" \
+        'sorted(x["name"] for x in d["declarations"])==["hello","y"] and set(d["indexes"]["by_annotation"])=={"route","query"}'
+    assert_py "TypeScript declaration ids carry the typescript language" "$OUT" \
+        'all(x["id"].startswith("typescript:") for x in d["declarations"])'
+    # A refused construct is an error diagnostic on its file.
+    printf 'enum Color { Red }\n' > "$TSAPP/lib/bad.ts"
+    inspect "$TSAPP"
+    assert_py "enum refused: ts.unsupported on lib/bad.ts, valid=false" "$OUT" \
+        'd["valid"] is False and any(x["code"]=="ts.unsupported" and x["path"]=="lib/bad.ts" for x in d["diagnostics"])'
+    rm -f "$TSAPP/lib/bad.ts"
+    TS_UNSUP='["c.cts","v.tsx"]'
+else
+    assert_py "typescript not analyzable without the JS engine (0 capabilities)" "$OUT" \
+        'any(f["language"]=="typescript" and f["analyzable"] is False and len(f["capabilities"])==0 for f in d["frontends"])'
+    assert_py "app.ts honestly unsupported, complete=false" "$OUT" \
+        'd["complete"] is False and any(s["path"]=="app.ts" and s["status"]=="unsupported" for s in d["sources"])'
+    TS_UNSUP='["app.ts","c.cts","lib/a.mts","v.tsx"]'
+fi
+printf 'export const v = <div/>;\n' > "$TSAPP/v.tsx"
+printf 'export = 1;\n' > "$TSAPP/c.cts"
+inspect "$TSAPP"
+assert_py ".tsx / .cts unsupported on every build, complete=false" "$OUT" \
+    'd["complete"] is False and sorted(s["path"] for s in d["sources"] if s["status"]=="unsupported")=='"$TS_UNSUP"
+assert_py ".tsx diagnostic says why" "$OUT" \
+    'any(x["code"]=="project.frontend.unsupported" and x["path"]=="v.tsx" and "TSX" in x["message"] for x in d["diagnostics"])'
+assert_no_leaked_keys "TypeScript discovery leaks no internal key" "$OUT"
+rm -f "$TSAPP/v.tsx" "$TSAPP/c.cts"
+
 # ── hull dev --agent publishes generations; inspect reads the LIVE one ──
 DEVAPP="$TMP/devapp"
 mkdir -p "$DEVAPP"
@@ -387,6 +436,41 @@ if [ -f "$DEVAPP/.hull/discovery.json" ]; then
         'd["source"]=="standalone" and d["generation"]==0'
 else
     fail "dev did not publish discovery.json within timeout"
+    kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""
+fi
+
+# ── hull dev --agent publishes TypeScript sources, and a .ts edit republishes ──
+# The app SERVES (a route), so the supervisor does not restart it: a new generation here can
+# only come from the watcher seeing the .ts change.
+if [ "$JS_ANALYZABLE" = "1" ]; then
+    TSDEV="$TMP/tsdev"
+    mkdir -p "$TSDEV"
+    printf 'app.manifest({ modules = { "hull/http-server@1" } })\napp.get("/", function(req, res) res:text("ok") end)\n' > "$TSDEV/app.lua"
+    printf '/** @route GET /t */\nexport function t(a: number): number { return a; }\n' > "$TSDEV/lib.ts"
+    "$HULL" dev --agent -p "$((PORT_BASE + 5))" "$TSDEV/app.lua" >"$TMP/tsdev.log" 2>&1 &
+    DEV_PID=$!
+    wait_for_file "$DEV_PID" "$TSDEV/.hull/discovery.json" "$TMP/tsdev.log" || true
+    OUTT=$("$HULL" agent inspect "$TSDEV" 2>/dev/null || true)
+    assert_py "dev: lib.ts published as analyzed typescript" "$OUTT" \
+        'd["source"]=="dev" and any(s["path"]=="lib.ts" and s["language"]=="typescript" and s["status"]=="analyzed" for s in d["sources"])'
+    TSGEN=$(printf '%s' "$OUTT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["generation"])' 2>/dev/null || echo 0)
+    sleep 1   # dev compares whole-second mtimes
+    printf '/** @query */\nexport const u = 1 as number;\n' >> "$TSDEV/lib.ts"
+    TSOK=0; i=0
+    while [ "$i" -lt 30 ]; do
+        G=$("$HULL" agent inspect "$TSDEV" 2>/dev/null | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print(d["generation"] if d["source"]=="dev" and any(x["name"]=="u" and x["language"]=="typescript" for x in d["declarations"]) else 0)' 2>/dev/null || echo 0)
+        if [ "$G" -gt "$TSGEN" ] 2>/dev/null; then TSOK=1; break; fi
+        sleep 0.5; i=$((i + 1))
+    done
+    [ "$TSOK" = "1" ] && pass "dev: editing a .ts source reloads and republishes" \
+        || fail "dev: a .ts edit did not republish (gen $TSGEN)"
+    if grep -q "restarting" "$TMP/tsdev.log"; then
+        fail "dev: the serving TypeScript app restarted (the reload check proves nothing)"
+        sed 's/^/    DIAG: /' "$TMP/tsdev.log"
+    fi
     kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""
 fi
 

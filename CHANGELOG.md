@@ -10,6 +10,15 @@ release-artifact layout).
 
 ### Added
 
+- Project discovery reads TypeScript: `.ts` and `.mts` sources go to a `typescript` frontend (the
+  JS parser's TypeScript mode, in the same tooling session), so `hull agent inspect` and `hull
+  dev --agent` report their declarations and JSDoc annotations, and a construct Hull refuses
+  (`enum`, ...) as a `ts.unsupported` error on its file. `.tsx` and `.cts` are known but not
+  analyzed: each is reported unsupported with the reason, and the generation is incomplete. The
+  frontend summary lists them apart, as `unsupported_extensions`. The analyzer gains
+  `analyze.type_erasure(disc, path)` on a retained discovery (the erasable spans and the
+  refusals of one source; unsupported for other frontends), and `tool.frontend_analyze` takes
+  the parser mode. `hull dev` also reloads when a `.ts` / `.mts` file changes.
 - Tests: the JS frontend's JS-mode output is held fixed while the TypeScript mode is built.
   `test_js_golden` compares the lex, parse and scope output of a frozen input set (the Test262
   subset and hand-written edge cases) with a committed snapshot, and

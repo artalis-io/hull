@@ -2233,11 +2233,13 @@ Two layers:
   exclude-dirs pruned during traversal, canonical containment, deterministic/regular/no-symlink)
   - the ONE recursive source walker in Hull. Design: [docs/lua_source_analysis_design.md](docs/lua_source_analysis_design.md), [docs/hull_analyze_design.md](docs/hull_analyze_design.md).
 - **`hull.project.*`** (`stdlib/cli/lua/hull/project/`) - the frontend-neutral project layer
-  on top: `registry` (extension → frontend map; `lua` and `js`/`mjs`/`cjs` are both analyzable
-  frontends, `analyzable` computed per build from `tool.frontend_available(engine)` - JS is on
-  by default and reported unsupported only on a `RUNTIME=lua` build; a `.js` is never parsed as
-  Lua), `frontend_lua` (knows Lua AST layouts) + the JS frontend (`stdlib/cli/js/hull/source/`,
-  run in a QuickJS tool session via `HL_FRONTEND_JS`), `model` (the `ProjectDiscovery` -
+  on top: `registry` (extension → frontend map; `lua`, `js`/`mjs`/`cjs` and TypeScript
+  `ts`/`mts` are analyzable frontends, `analyzable` computed per build from
+  `tool.frontend_available(engine)` - JS and TypeScript are on by default and reported
+  unsupported only on a `RUNTIME=lua` build; a `.js` is never parsed as Lua; `tsx`/`cts` are
+  known and never analyzable), `frontend_lua` (knows Lua AST layouts) + the JS frontend
+  (`stdlib/cli/js/hull/source/`, run in a QuickJS tool session via `HL_FRONTEND_JS`; TypeScript
+  is its TypeScript mode, `frontend_typescript`, which adds `analyze.type_erasure`), `model` (the `ProjectDiscovery` -
   deterministic textual IDs, per-name facts sharing
   a `group_id` with each annotation carrying `target_group_id` + `frontend`, annotated-only
   public `declarations[]`, independent `valid` / `complete` axes, `by_annotation`/`by_source`/

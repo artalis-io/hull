@@ -5,7 +5,7 @@
 -- (standalone) and `hull dev`'s discovery.json publication call M.project so
 -- there is a SINGLE definition of the serialized shape. It copies only named public
 -- fields and DROPS every generation-internal value -- the per-declaration opaque `handle`,
--- the internal `_by_source` and `_handles` tables, and the `by_id` decl map (its ids are
+-- the internal `_by_source`, `_handles` and `_units` tables, and the `by_id` decl map (its ids are
 -- already in `annotated` + each decl's `id`). Design: docs/project_discovery_design.md D6.
 --
 -- Returns a plain serializable Lua table (the caller json.encodes it). Never raises.

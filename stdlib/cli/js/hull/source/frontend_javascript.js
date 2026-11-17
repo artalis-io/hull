@@ -4,8 +4,10 @@
 // the scope capability, all over a session-retained AST. Runs INSIDE the QuickJS tooling session.
 //
 //   analyze(bytes, path, opts)   -> { schema_version, status, unit_id, diagnostics, declarations }
+//                                   opts.lang is "js" (default) or "ts" (docs/typescript_design.md)
 //   declarationSemantics(declId) -> a frontend-specific record | { error }
 //   scope(unitId)                -> the Slice-4 { ok, bindings, refs } | { ok:false, error }
+//   typeErasure(unitId)          -> { ok, spans, refusals } | { ok:false, error } (TypeScript units)
 //
 // Bridge-private handles are INTEGERS (unit_id, decl_id); the retained AST / node / path never
 // cross the wire. Session module-scope state is dropped on JS_FreeRuntime (a closed generation).
@@ -16,11 +18,13 @@
 import { parse } from "hull:source:parser";
 import { resolve as scopeResolve } from "hull:source:scope";
 import { position } from "hull:source:range";
+import { typeErasure as tsTypeErasure } from "hull:source:ts_erase";
 
 export const capabilities = ["declarations", "annotations", "source_ranges", "scope", "semantics"];
 
 // ---- session module-scope retained state (per QuickJS runtime = per generation) ----
-const units = new Map();     // unit_id -> { ast, comments, linemap, nodes: Set<declarationNode> }
+const units = new Map();     // unit_id -> { ast, comments, linemap, nodes: Set<declarationNode>,
+                             //             lang, and for "ts": unit (the SourceUnit), bytes, path }
 const decls = new Map();     // decl_id -> { unit_id, formKind, kind, node, declarator_index, binding_path, name }
 let nextUnitId = 0;
 let nextDeclId = 0;
@@ -138,10 +142,13 @@ function collectDeclarations(ast, unit_id, linemap, nodes, inject) {
 function analyzeImpl(bytes, path, opts, inject) {
     const unitFloor = nextUnitId, declFloor = nextDeclId;
     try {
-        const u = parse(bytes, { path: path || null });          // parser is never-raise
+        const lang = (opts && opts.lang !== undefined) ? opts.lang : "js";
+        const u = parse(bytes, { path: path || null, lang: lang });   // parser is never-raise; refuses a bad lang
         const unit_id = ++nextUnitId;
         const nodes = new Set();
-        units.set(unit_id, { ast: u.ast, comments: u.comments, linemap: u.linemap, nodes: nodes });
+        const rec = { ast: u.ast, comments: u.comments, linemap: u.linemap, nodes: nodes, lang: lang };
+        if (lang === "ts") { rec.unit = u; rec.bytes = bytes; rec.path = path || null; }   // for typeErasure
+        units.set(unit_id, rec);
         const linemap = u.linemap;
         let hasError = false;
         const diagnostics = [];
@@ -246,5 +253,29 @@ export function scope(unitId) {
     } catch (e) {
         const msg = (e && e.message !== undefined) ? String(e.message) : String(e);
         return { ok: false, error: { severity: "error", code: "js.internal", message: "scope: internal fault: " + msg, range: null } };
+    }
+}
+
+// ---- type_erasure (TypeScript units only; docs/typescript_design.md 3.2) ----
+// Spans are half-open byte ranges { start, stop }; refusals are ts.* diagnostics normalized like
+// analyze's (range with line / col). A JavaScript unit reports the operation unsupported.
+function teErr(code, msg) { return { ok: false, error: { severity: "error", code: code, message: "type_erasure: " + msg, range: null } }; }
+export function typeErasure(unitId) {
+    try {
+        const u = units.get(unitId);
+        if (!u) return teErr("js.internal", "unknown unit handle");
+        if (u.lang !== "ts" || !u.unit) return teErr("project.operation_unsupported", "not a TypeScript unit");
+        const r = tsTypeErasure(u.unit, u.bytes, u.path);
+        if (!r.ok) return teErr("js.internal", r.error);
+        const spans = [];
+        for (const sp of r.spans) spans.push({ start: sp.start, stop: sp.stop });
+        const refusals = [];
+        for (const d of r.refusals)
+            refusals.push({ severity: d.severity, code: d.code, message: d.message,
+                            range: d.range ? nrange(u.linemap, d.range.start, d.range.stop) : null });
+        return { ok: true, spans: spans, refusals: refusals };
+    } catch (e) {
+        const msg = (e && e.message !== undefined) ? String(e.message) : String(e);
+        return teErr("js.internal", "internal fault: " + msg);
     }
 }

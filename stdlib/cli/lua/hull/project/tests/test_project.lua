@@ -146,7 +146,7 @@ end
 -- ── registry: honest capabilities + reserved JS ─────────────────────
 do
     local exts = registry.known_exts()
-    eq(table.concat(exts, ","), "cjs,js,lua,mjs", "known_exts sorted + reserves JS variants")
+    eq(table.concat(exts, ","), "cjs,cts,js,lua,mjs,mts,ts,tsx", "known_exts sorted + reserves JS / TS variants")
     ok(registry.for_ext("lua").analyzable, "lua is analyzable")
     ok(not registry.for_ext("js").analyzable, "js is known but NOT analyzable")
     ok(registry.for_ext("py") == nil, "unknown extension is not registered")
@@ -167,6 +167,26 @@ do
     ok(registry.load({ analyzable = true, frontend_module = "hull.db._internal_conn" }) == nil,
        "load() refuses the internal-connection module")
     ok(registry.load(registry.for_ext("lua")) ~= nil, "load() still loads the lua frontend")
+    -- TypeScript: .ts / .mts go to the TS frontend (engine-gated like JS); .tsx / .cts are known
+    -- and never analyzable, even with the engine in, and are listed apart in the summary.
+    eq(registry.for_ext("ts").language, "typescript", ".ts is the typescript language")
+    eq(registry.for_ext("mts").frontend_module, "hull.project.frontend_typescript", ".mts -> the TS frontend")
+    ok(not registry.for_ext("ts").analyzable, "without the JS engine .ts is not analyzable")
+    local saved = _G.tool
+    _G.tool = { frontend_available = function(lang) return lang == "javascript" end }
+    ok(registry.for_ext("ts").analyzable and registry.for_ext("mts").analyzable, "with the engine .ts / .mts analyze")
+    ok(not registry.for_ext("tsx").analyzable and not registry.for_ext("cts").analyzable,
+       ".tsx / .cts stay unanalyzable with the engine in")
+    ok(registry.load(registry.for_ext("tsx")) == nil, "no frontend loads for .tsx")
+    local ts_e
+    for _, e in ipairs(registry.frontends()) do if e.language == "typescript" then ts_e = e end end
+    _G.tool = saved
+    ok(ts_e and ts_e.analyzable, "typescript summary is analyzable (decided by .ts / .mts)")
+    eq(ts_e and table.concat(ts_e.extensions, ","), "mts,ts", "typescript summary extensions")
+    eq(ts_e and table.concat(ts_e.unsupported_extensions, ","), "cts,tsx", "typescript unsupported extensions")
+    local tcaps = {}
+    for _, c in ipairs(ts_e and ts_e.capabilities or {}) do tcaps[c] = true end
+    ok(tcaps.type_erasure and tcaps.scope and tcaps.semantics, "typescript advertises type_erasure + the JS five")
 end
 
 -- ── orchestrator end-to-end (stubbed tool over an in-memory tree) ────
@@ -678,6 +698,84 @@ do
     local _, fe2 = analyze.declaration_semantics(dfail, 1)
     ok(fe2 ~= nil and (fe2.code == "project.frontend_not_retained" or fe2.code == "project.handle_invalid"),
         "a failed discovery is not semantically live")
+end
+
+-- ── TypeScript: the mode reaches the bridge, type_erasure is a gated unit operation ──
+-- The bridge is MOCKED (test_js_generation covers the real session); this proves the analyzer
+-- passes lang "ts" for .ts / .mts and "js" for .js, keys type_erasure by source path, reports
+-- it unsupported for other frontends, and gates it by the same lease as the other operations.
+do
+    local analyze = require("hull.project.analyze")
+    local json    = require("hull.json")
+    local function make_ts_tool(fs, track)
+        local t = make_tool(fs)
+        t.frontend_available = function(lang) return lang == "javascript" end
+        t.frontend_open = function() return 7 end
+        t.frontend_close = function() track.closed = (track.closed or 0) + 1 end
+        local next_unit = 0
+        t.frontend_analyze = function(lang, token, path, src, mode)
+            next_unit = next_unit + 1
+            track.modes = track.modes or {}
+            track.modes[path] = mode
+            track.units = track.units or {}
+            track.units[next_unit] = path
+            return json.encode({ schema_version = 1, status = "analyzed", unit_id = next_unit,
+                                 diagnostics = {}, declarations = {} })
+        end
+        t.frontend_type_erasure = function(lang, token, unit_id)
+            track.erased = track.units[unit_id]
+            return json.encode({ ok = true, spans = { { start = 8, stop = 16 } },
+                refusals = { { severity = "error", code = "ts.unsupported", message = "m",
+                               range = { start = 1, stop = 5, line = 1, col = 1 } } } })
+        end
+        return t
+    end
+    local FS = {
+        ["t/app.ts"]    = "const x: number = 1;\n",
+        ["t/lib/a.mts"] = "export const y = 1;\n",
+        ["t/old.js"]    = "export const z = 1;\n",
+        ["t/q.lua"]     = "local q = 1\nreturn q\n",
+        ["t/v.tsx"]     = "export const v = <div/>;\n",
+    }
+
+    local trk = {}
+    _G.tool = make_ts_tool(FS, trk)
+    local disc = analyze.analyze("t", { retain_frontend = true })
+    eq(trk.modes["app.ts"], "ts", ".ts analyzed in TypeScript mode")
+    eq(trk.modes["lib/a.mts"], "ts", ".mts analyzed in TypeScript mode")
+    eq(trk.modes["old.js"], "js", ".js analyzed in JavaScript mode")
+    local status = {}
+    for _, s in ipairs(disc.sources) do status[s.path] = s.language .. ":" .. s.status end
+    eq(status["app.ts"], "typescript:analyzed", "app.ts is an analyzed typescript source")
+    eq(status["v.tsx"], "typescript:unsupported", ".tsx is an unsupported typescript source")
+    ok(not disc.complete, "a .tsx source makes the generation complete=false")
+    local tsx_msg
+    for _, d in ipairs(disc.diagnostics) do if d.path == "v.tsx" then tsx_msg = d.message end end
+    ok(tsx_msg and tsx_msg:find("TSX", 1, true), "the .tsx diagnostic names TSX")
+
+    local res, err = analyze.type_erasure(disc, "app.ts")
+    ok(res ~= nil and err == nil, "type_erasure resolves for a .ts source that declares nothing")
+    eq(trk.erased, "app.ts", "type_erasure reached app.ts's own unit")
+    eq(res and res.spans[1].start, 8, "spans come back from the bridge")
+    eq(res and res.refusals[1].code, "ts.unsupported", "refusals come back from the bridge")
+    local _, e_js = analyze.type_erasure(disc, "old.js")
+    eq(e_js and e_js.code, "project.operation_unsupported", "a .js source reports type_erasure unsupported")
+    local _, e_lua = analyze.type_erasure(disc, "q.lua")
+    eq(e_lua and e_lua.code, "project.operation_unsupported", "a .lua source reports type_erasure unsupported")
+    local _, e_none = analyze.type_erasure(disc, "v.tsx")
+    eq(e_none and e_none.code, "project.handle_invalid", "an unanalyzed source has no unit")
+    local _, e_bad = analyze.type_erasure(disc, 1)
+    eq(e_bad and e_bad.code, "project.handle_invalid", "a non-path key does not resolve")
+    analyze.close(disc)
+    local _, e_closed = analyze.type_erasure(disc, "app.ts")
+    eq(e_closed and e_closed.code, "project.frontend_closed", "type_erasure is refused after close")
+
+    local dflt = analyze.analyze("t")
+    _G.tool = nil
+    local _, e_nr = analyze.type_erasure(dflt, "app.ts")
+    eq(e_nr and e_nr.code, "project.frontend_not_retained", "type_erasure needs a retained discovery")
+    local blob = json.encode(require("hull.project.projection").project(dflt))
+    ok(not blob:find("_units", 1, true), "projection drops the per-source unit table")
 end
 
 print(string.format("test_project: %d passed, %d failed", pass, fail))

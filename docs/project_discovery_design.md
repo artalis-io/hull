@@ -239,7 +239,9 @@ dependency direction clean (`project` depends on `source`, never the reverse).
   `declarations`, `annotations`, `source_ranges`, `scope`, `semantics`. **Not**
   `bindings`/`lowering` - no consumer yet; advertising them would violate "do not
   advertise capabilities that are not implemented." Lua reports all five (scope +
-  semantics ship). *The neutral discovery consumers (model / projection / analyze)
+  semantics ship). TypeScript adds a sixth, `type_erasure` (docs/typescript_design.md
+  §3.2: a unit operation, `analyze.type_erasure(disc, path)`, keyed by source path), which
+  its first consumer, the T3 erasure plugin, needs. *The neutral discovery consumers (model / projection / analyze)
   talk only to this contract, never to Lua AST field layouts.*
 
 ### D3.1 - Frontend semantic recovery (`declaration_semantics`) [added]

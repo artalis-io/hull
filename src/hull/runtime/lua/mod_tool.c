@@ -2218,8 +2218,11 @@ static int l_tool_frontend_analyze(lua_State *L)
     int64_t token = (int64_t)luaL_checkinteger(L, 2);
     const char *path = luaL_optstring(L, 3, NULL);
     size_t slen = 0; const char *src = luaL_checklstring(L, 4, &slen);
+    const char *lang = luaL_optstring(L, 5, "js");
+    if (strcmp(lang, "js") != 0 && strcmp(lang, "ts") != 0)
+        return luaL_argerror(L, 5, "expected \"js\" or \"ts\"");
     char *out = NULL; size_t olen = 0;
-    hl_js_gen_analyze(token, (const uint8_t *)src, slen, path, &out, &olen);
+    hl_js_gen_analyze(token, (const uint8_t *)src, slen, path, lang, &out, &olen);
     return frontend_push_json(L, out, olen);
 #else
     return luaL_error(L, "javascript frontend engine not available");
@@ -2246,6 +2249,19 @@ static int l_tool_frontend_scope(lua_State *L)
     int64_t unit_id = (int64_t)luaL_checkinteger(L, 3);
     char *out = NULL; size_t olen = 0;
     hl_js_gen_scope(token, unit_id, &out, &olen);
+    return frontend_push_json(L, out, olen);
+#else
+    return luaL_error(L, "javascript frontend engine not available");
+#endif
+}
+static int l_tool_frontend_type_erasure(lua_State *L)
+{
+#ifdef HL_FRONTEND_JS
+    if (!frontend_lang_is_js(L, 1)) return luaL_error(L, "unknown frontend language");
+    int64_t token = (int64_t)luaL_checkinteger(L, 2);
+    int64_t unit_id = (int64_t)luaL_checkinteger(L, 3);
+    char *out = NULL; size_t olen = 0;
+    hl_js_gen_type_erasure(token, unit_id, &out, &olen);
     return frontend_push_json(L, out, olen);
 #else
     return luaL_error(L, "javascript frontend engine not available");
@@ -2347,6 +2363,7 @@ static const luaL_Reg tool_funcs[] = {
     { "frontend_analyze",            l_tool_frontend_analyze },
     { "frontend_declaration_semantics", l_tool_frontend_declaration_semantics },
     { "frontend_scope",              l_tool_frontend_scope },
+    { "frontend_type_erasure",       l_tool_frontend_type_erasure },
     { "frontend_close",              l_tool_frontend_close },
     { "spawn",                       l_tool_spawn },
     { "sha256_file",                 l_tool_sha256_file },

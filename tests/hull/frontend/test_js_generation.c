@@ -13,11 +13,69 @@
 #include <inttypes.h>
 
 static int has(const char *hay, const char *needle) { return hay && strstr(hay, needle) != NULL; }
-static char *an(int64_t t, const char *src) { char *o = NULL; size_t l = 0; hl_js_gen_analyze(t, (const uint8_t *)src, strlen(src), "a.js", &o, &l); return o; }
+static char *an(int64_t t, const char *src) { char *o = NULL; size_t l = 0; hl_js_gen_analyze(t, (const uint8_t *)src, strlen(src), "a.js", NULL, &o, &l); return o; }
 static char *sem(int64_t t, int64_t d) { char *o = NULL; size_t l = 0; hl_js_gen_declaration_semantics(t, d, &o, &l); return o; }
 static char *scp(int64_t t, int64_t u) { char *o = NULL; size_t l = 0; hl_js_gen_scope(t, u, &o, &l); return o; }
 
+static char *an_lang(int64_t t, const char *src, const char *lang) { char *o = NULL; size_t l = 0; hl_js_gen_analyze(t, (const uint8_t *)src, strlen(src), "a.ts", lang, &o, &l); return o; }
+static char *te(int64_t t, int64_t u) { char *o = NULL; size_t l = 0; hl_js_gen_type_erasure(t, u, &o, &l); return o; }
+
 UTEST(js_generation, available) { EXPECT_TRUE(hl_js_gen_available()); }
+
+/* TypeScript mode reaches the parser through lang "ts"; type_erasure on the unit returns its
+ * spans (1-based half-open) and its refusals. A JavaScript unit reports the operation unsupported. */
+UTEST(js_generation, typescript_unit_type_erasure)
+{
+    int64_t t = hl_js_gen_open();
+    ASSERT_TRUE(t > 0);
+    char *a = an_lang(t, "const x: number = 1;", "ts");             /* unit 1 */
+    EXPECT_TRUE(has(a, "\"status\":\"analyzed\""));
+    EXPECT_TRUE(has(a, "\"name\":\"x\""));
+    free(a);
+    char *e = te(t, 1);
+    EXPECT_TRUE(has(e, "\"ok\":true"));
+    EXPECT_TRUE(has(e, "\"spans\":[{\"start\":8,\"stop\":16}]"));   /* ": number" */
+    EXPECT_TRUE(has(e, "\"refusals\":[]"));
+    free(e);
+    char *r = an_lang(t, "enum E { A }", "ts");                      /* unit 2 */
+    free(r);
+    char *re = te(t, 2);
+    EXPECT_TRUE(has(re, "\"ok\":true") && has(re, "\"code\":\"ts.unsupported\""));
+    EXPECT_TRUE(has(re, "\"line\":1"));                            /* normalized range */
+    free(re);
+    char *j = an(t, "const y = 1;");                                 /* unit 3, JavaScript */
+    free(j);
+    char *je = te(t, 3);
+    EXPECT_TRUE(has(je, "\"ok\":false") && has(je, "project.operation_unsupported"));
+    free(je);
+    char *ue = te(t, 999);
+    EXPECT_TRUE(has(ue, "\"ok\":false") && has(ue, "unknown unit handle"));
+    free(ue);
+    /* The same source in JS mode is a syntax error, not an erasure. */
+    char *js = an_lang(t, "const x: number = 1;", "js");
+    EXPECT_TRUE(has(js, "\"status\":\"error\"") && has(js, "js.syntax"));
+    free(js);
+    hl_js_gen_close(t);
+    char *st = te(t, 1);                                             /* stale token */
+    EXPECT_TRUE(has(st, "\"ok\":false") && has(st, "stale frontend session"));
+    free(st);
+}
+
+/* Only "js" / "ts" (or NULL) reach QuickJS; any other lang is refused with facts-shaped JSON. */
+UTEST(js_generation, analyze_refuses_unknown_lang)
+{
+    int64_t t = hl_js_gen_open();
+    ASSERT_TRUE(t > 0);
+    const char *bad[] = { "tsx", "TS", "", "ts ", "javascript" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char *o = NULL; size_t l = 0;
+        int rc = hl_js_gen_analyze(t, (const uint8_t *)"x", 1, "a.ts", bad[i], &o, &l);
+        EXPECT_EQ(rc, -1);
+        EXPECT_TRUE(has(o, "\"unit_id\":-1") && has(o, "unknown frontend lang"));
+        free(o);
+    }
+    hl_js_gen_close(t);
+}
 
 /* Open issues a positive token; analyze/semantics/scope on it work; close destroys it. */
 UTEST(js_generation, open_analyze_close)

@@ -71,19 +71,27 @@ static int emit_stale(const char *json, char **out_json, size_t *out_len)
 static const char *STALE_ANALYZE = "{\"schema_version\":1,\"status\":\"error\",\"unit_id\":-1,\"declarations\":[],\"diagnostics\":[" STALE_DIAG "]}";
 static const char *STALE_SEM     = "{\"error\":" STALE_DIAG "}";
 static const char *STALE_SCOPE   = "{\"ok\":false,\"error\":" STALE_DIAG "}";
+static const char *BAD_LANG      = "{\"schema_version\":1,\"status\":\"error\",\"unit_id\":-1,\"declarations\":[],\"diagnostics\":["
+    "{\"severity\":\"error\",\"code\":\"javascript.internal\",\"message\":\"unknown frontend lang (expected js or ts)\",\"range\":null}]}";
 
 int hl_js_gen_analyze(int64_t token, const uint8_t *src, size_t src_len, const char *path,
-                      char **out_json, size_t *out_len)
+                      const char *lang, char **out_json, size_t *out_len)
 {
+    /* The mode travels as the options JSON; only the two literal values are ever built. */
+    const char *opts = NULL;
+    if (lang == NULL || strcmp(lang, "js") == 0) opts = NULL;
+    else if (strcmp(lang, "ts") == 0) opts = "{\"lang\":\"ts\"}";
+    else return emit_stale(BAD_LANG, out_json, out_len);
     pthread_mutex_lock(&G.mu);                   /* held across lookup + invocation (close-safe) */
     HlGenSlot *slot = find_locked(token);
     if (!slot) { pthread_mutex_unlock(&G.mu); return emit_stale(STALE_ANALYZE, out_json, out_len); }
-    int rc = hl_js_session_analyze(slot->session, ENTRY_MODULE, "analyze", src, src_len, path, NULL, 0, out_json, out_len);
+    int rc = hl_js_session_analyze(slot->session, ENTRY_MODULE, "analyze", src, src_len, path,
+                                   opts, opts ? strlen(opts) : 0, out_json, out_len);
     pthread_mutex_unlock(&G.mu);
     return rc;
 }
 
-/* declarationSemantics / scope pass the id via a small options JSON. */
+/* declarationSemantics / scope / typeErasure pass the id via a small options JSON. */
 static int invoke_id(int64_t token, const char *method, const char *opt_key, int64_t id,
                      const char *stale_json, char **out_json, size_t *out_len)
 {
@@ -104,6 +112,10 @@ int hl_js_gen_declaration_semantics(int64_t token, int64_t decl_id, char **out_j
 int hl_js_gen_scope(int64_t token, int64_t unit_id, char **out_json, size_t *out_len)
 {
     return invoke_id(token, "scope", "unitId", unit_id, STALE_SCOPE, out_json, out_len);
+}
+int hl_js_gen_type_erasure(int64_t token, int64_t unit_id, char **out_json, size_t *out_len)
+{
+    return invoke_id(token, "typeErasure", "unitId", unit_id, STALE_SCOPE, out_json, out_len);
 }
 
 void hl_js_gen_close(int64_t token)

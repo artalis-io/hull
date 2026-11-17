@@ -26,10 +26,12 @@ int hl_js_gen_available(void);
 int64_t hl_js_gen_open(void);
 
 /* Analyze one source in the generation `token`. `src`/`src_len` are the raw file bytes; `path` the
- * (project-relative) path. On success returns 0 and sets *out_json (malloc'd, caller frees) to the
- * validated facts JSON; a stale token yields the facts-shaped stale JSON (rc -1). */
+ * (project-relative) path; `lang` the parser mode, "js" or "ts" (NULL = "js"; anything else yields
+ * facts-shaped error JSON, rc -1, before QuickJS is entered). On success returns 0 and sets
+ * *out_json (malloc'd, caller frees) to the validated facts JSON; a stale token yields the
+ * facts-shaped stale JSON (rc -1). */
 int hl_js_gen_analyze(int64_t token, const uint8_t *src, size_t src_len, const char *path,
-                      char **out_json, size_t *out_len);
+                      const char *lang, char **out_json, size_t *out_len);
 
 /* Recover the declaration semantics of `decl_id` in `token`. Success -> the record JSON; stale ->
  * { "error": Diagnostic }. */
@@ -38,6 +40,11 @@ int hl_js_gen_declaration_semantics(int64_t token, int64_t decl_id, char **out_j
 /* Resolve the scope model for `unit_id` in `token`. Success -> the model JSON; stale ->
  * { "ok":false, "error": Diagnostic }. */
 int hl_js_gen_scope(int64_t token, int64_t unit_id, char **out_json, size_t *out_len);
+
+/* The type erasure of TypeScript unit `unit_id` in `token` (docs/typescript_design.md 3.2).
+ * Success -> { "ok":true, "spans":[...], "refusals":[...] }; a JavaScript unit or a stale token ->
+ * { "ok":false, "error": Diagnostic }. */
+int hl_js_gen_type_erasure(int64_t token, int64_t unit_id, char **out_json, size_t *out_len);
 
 /* Close (destroy) the generation session for `token`. Idempotent; an unknown/closed/<=0 token is a
  * safe no-op. The token integer is permanently dead (never reissued). */
