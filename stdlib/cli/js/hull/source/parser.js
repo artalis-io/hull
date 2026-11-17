@@ -441,12 +441,18 @@ function parseInternal(bytes, opts, inject) {
     // semicolon insertion (`asiEnd`) right before it, followed by a token that would continue
     // that statement once the erased bytes are blank (`x` / type T = A; / `(y)` reads `x(y)`),
     // is refused (docs/typescript_design.md 3.4).
+    // So is one followed by a `;`, which the statement before it would take once the erased
+    // bytes are blank (`x` / `interface I {}` / `;`: one statement in JavaScript, two here).
     let asiEnd = null;                               // TS mode: the last token of a statement ended by ASI
     function tsEraseStatement(body) {
         const before = lastJs;
         tsSpan(body);
-        if (before !== null && before === asiEnd && tsContinuesExpression(cur))
-            diag("error", "ts.unsupported", "an erased TypeScript declaration between a statement without ';' and a line that would continue it is not supported: end the statement before it with ';'", cur.start, cur.stop);
+        if (before !== null && before === asiEnd) {
+            if (tsContinuesExpression(cur))
+                diag("error", "ts.unsupported", "an erased TypeScript declaration between a statement without ';' and a line that would continue it is not supported: end the statement before it with ';'", cur.start, cur.stop);
+            else if (isP(";"))
+                diag("error", "ts.unsupported", "an erased TypeScript declaration between a statement without ';' and a ';' is not supported: end the statement before it with ';'", cur.start, cur.stop);
+        }
         return null;
     }
     // A token that both starts a statement and continues an expression on the previous line.

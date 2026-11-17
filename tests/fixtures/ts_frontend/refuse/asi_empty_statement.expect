@@ -1,0 +1,1 @@
+ts.unsupported 28 29 an erased TypeScript declaration between a statement without ';' and a ';' is not supported: end the statement before it with ';'

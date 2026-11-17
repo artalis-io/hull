@@ -537,7 +537,7 @@ UTEST(js_typescript, corpus_refuse)
         free(exp); free(lines); free(o); free(src);
     }
     jfd_paths_free(&pv);
-    EXPECT_GE(checked, 27);
+    EXPECT_GE(checked, 29);
     hl_js_session_destroy(s);
 }
 
