@@ -28,7 +28,8 @@ release-artifact layout).
   `interface`, `type`, `declare` const / let / var / function, `import type` / `export type` and
   their `export` forms, and inline `type` import / export specifiers (with their comma). JSDoc
   attaches as it does over the erased bytes. Every other TypeScript construct is refused with
-  `ts.unsupported`, as is a line break between an arrow's types and its `=>`, and an erased
+  `ts.unsupported`, as is a line break between an arrow's types and its `=>`, a line after an
+  `as` / `satisfies` type that would continue the expression (`x as T` / `[1].f()`), and an erased
   declaration that would let the line after it continue the statement before it (`x` /
   `type T = A` / `(y)`) or hand it a `;` (`x` / `interface I {}` / `;`). `test_js_typescript`
   checks that valid JavaScript parses identically in TS mode, and runs the TypeScript corpus

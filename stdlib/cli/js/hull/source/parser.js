@@ -1142,6 +1142,12 @@ function parseInternal(bytes, opts, inject) {
                 if (8 <= minPrec) break;
                 const asConst = op === "as";
                 tsSpan(function () { advance(false); types.parseType({ asConst: asConst }); });
+                // The type ends the expression, so TypeScript ends the statement at a line break
+                // before `(` `[` `.` `?.` or a template; once erased, JavaScript would continue it
+                // (`x as T` / `[1].f()` reads `x[1].f()`; docs/typescript_design.md 3.4).
+                if (nl() && (isP("(") || isP("[") || isP(".") || isP("?.") ||
+                             (cur.type === "template" && (cur.mode === "noSubstitution" || cur.mode === "head"))))
+                    diag("error", "ts.unsupported", "a line that would continue the expression after the type of '" + op + "' is not supported: end the statement with ';'", cur.start, cur.stop);
                 continue;
             }
             if (prec === undefined || prec <= minPrec) break;

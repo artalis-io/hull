@@ -10,3 +10,9 @@ type U = string
 let next = 2
 const w = 1;
 interface J {};
+
+// A line after an `as` type that cannot continue the expression stays its own statement.
+const e = v as number
++1
+const f2 = w as T
+next()
