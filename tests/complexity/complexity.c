@@ -335,9 +335,12 @@ static const LuaCase lua_cases[] = {
       "function setup(n) return string.rep('abcdefgh', n // 8) end\n"
       "function work(s) local b = { string.byte(s, 1, 4000) } for i = 1, #s, 4000 do"
       " local c = string.char(string.byte(s, i, i + 3999)) end end\n" },
-    { "lua.gc.full_collect", 500000,
+    /* A full collect walks the whole heap, so it is memory-bound: at 500000 objects (a 2n heap
+     * of ~200 MB) a CI runner read 3.68, the cache misses and not the collector. 25000 keeps the
+     * 2n heap near 7 MB, and 20 collects a run keep t(n) measurable. */
+    { "lua.gc.full_collect", 25000,
       "function setup(n) local t = {} for i = 1, n do t[i] = { i, tostring(i) } end return t end\n"
-      "function work(t) collectgarbage('collect') end\n" },
+      "function work(t) for k = 1, 20 do collectgarbage('collect') end end\n" },
     { "lua.coroutine.create_resume", 100000,
       "function setup(n) return n end\n"
       "function work(n) for i = 1, n do local co = coroutine.create(function(a) return coroutine.yield(a) end)"

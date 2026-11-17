@@ -635,8 +635,10 @@ function parseInternal(bytes, opts, inject) {
     // `global` after `declare` (cur at that word): the header is read, then the body - ambient
     // declarations only, all of it erased - is skipped as one balanced `{ ... }` group (its
     // tokens lexed with the operator slash goal: ambient code holds no regex). `declare module
-    // "m";` has no body.
-    function tsDeclareBlock() {
+    // "m";` has no body. `code` (a refused `enum` / `namespace` / `module`, whose body is code):
+    // each token is lexed with the regex goal after a punctuator other than `)` `]` `}`, so a
+    // regex literal holding a brace does not unbalance the skip.
+    function tsDeclareBlock(code) {
         const w = cur.value;
         if (w === "abstract" || w === "const") advance(false);
         const kw = cur.value;
@@ -662,8 +664,27 @@ function parseInternal(bytes, opts, inject) {
             if (atEof()) { synErr("expected '}'"); return; }
             if (isP("{")) d++;
             else if (isP("}")) { d--; if (d === 0) { advance(true); return; } }
-            advance(false);
+            advance(code === true && cur.type === "punctuator" && cur.value !== ")" && cur.value !== "]" && cur.value !== "}");
         }
+    }
+    // A TypeScript declaration this mode refuses, at its first word: the refusal, then the whole
+    // declaration is read - its body skipped as tsDeclareBlock skips an ambient one, or read with
+    // the type grammar for an erasable kind outside a statement list - so none of it is parsed
+    // as JavaScript (which only added js.syntax errors after the refusal). Returns an error node,
+    // or null when `what` names no form read whole (the caller recovers as JavaScript).
+    function tsRefusedDeclaration(what, kind) {
+        const start = cur.start;
+        if (kind !== null) { tsRefuse(what); tsSpan(function () { tsDeclarationBody(kind); }); return errNode(start); }
+        if (what !== "enums" && what !== "namespaces" && what !== "module declarations") return null;
+        tsRefuse(what, isKw("const") ? peekTok(1, false) : undefined);   // `const enum`: at `enum`
+        tsDeclareBlock(true);
+        return errNode(start);
+    }
+    // `const enum` at cur `const` (on one line): a refused enum, not a declaration of `enum`.
+    function tsConstEnumAhead() {
+        if (!isKw("const")) return false;
+        const t1 = peekTok(1, false);
+        return isIdTok(t1) && t1.value === "enum" && !t1.nlBefore;
     }
     // `= require("m")` or `= A.B` after `import type X` (cur at `=`), then the statement end.
     function tsImportEqualsRest() {
@@ -773,7 +794,9 @@ function parseInternal(bytes, opts, inject) {
                 st = fin(lbl);
             } else
             switch (cur.value) {
-                case "var": case "let": case "const": st = parseVarDeclaration(); break;
+                case "var": case "let": case "const":
+                    st = ts && tsConstEnumAhead() ? tsRefusedDeclaration("enums", null) : parseVarDeclaration();
+                    break;
                 case "function": st = parseFunctionDeclaration(false, undefined, tsMk); break;
                 case "async": st = maybeAsyncFunctionDecl(tsMk); break;
                 case "class": st = parseClassDeclaration(); break;
@@ -805,7 +828,7 @@ function parseInternal(bytes, opts, inject) {
                     const kind = ts ? tsErasableKind(cur, tsPeekFromCur) : null;
                     if (kind !== null && listItem) { st = tsEraseStatement(function () { tsDeclarationBody(kind); }); break; }
                     const what = ts ? (kind !== null ? "declarations outside a statement list" : tsDeclarationStart()) : null;
-                    if (what !== null) tsRefuse(what);
+                    if (what !== null) { st = tsRefusedDeclaration(what, kind); if (st !== null) break; tsRefuse(what); }
                     st = parseExpressionStatement();
                 }
             }
@@ -2003,16 +2026,19 @@ function parseInternal(bytes, opts, inject) {
         // export <declaration>
         s.specifiers = []; s.source = null;
         if (ts && tsAbstractClassAhead()) tsSpan(function () { advance(true); });
-        if (isKw("var") || isKw("let") || isKw("const")) s.declaration = parseVarDeclaration();
+        if (ts && tsConstEnumAhead()) s.declaration = tsRefusedDeclaration("enums", null);
+        else if (isKw("var") || isKw("let") || isKw("const")) s.declaration = parseVarDeclaration();
         else if (isKw("function")) { s.declaration = parseFunctionDeclaration(false, undefined, tsMk); if (s.declaration === null) return null; }
         else if (asyncFunctionAhead()) { s.declaration = maybeAsyncFunctionDecl(tsMk); if (s.declaration === null) return null; }
         else if (isKw("class")) s.declaration = parseClassDeclaration();
         else {
-            if (ts) {
-                const what = tsDeclarationStart();
+            const what = ts ? tsDeclarationStart() : null;
+            const refused = what !== null ? tsRefusedDeclaration(what, null) : null;
+            if (refused !== null) s.declaration = refused;
+            else {
                 if (what !== null) tsRefuse(what);
+                synErr("unexpected export"); s.declaration = errNode(cur.start); synchronize();
             }
-            synErr("unexpected export"); s.declaration = errNode(cur.start); synchronize();
         }
         return fin(s);
     }
