@@ -486,7 +486,10 @@ through one channel.
 - **The channel.** The host spawns the plugin process with a descriptor it inherits
   (taken and closed before any app code runs, as `HULL_DEV_SESSION` and the GPU compile
   helper's socket are), and `hull/build-plugin` exposes `ctx.inputs`, `ctx.outputs`,
-  `ctx.diagnostics`, `ctx.meta` and the source operations as calls over it. Each call
+  `ctx.diagnostics`, `ctx.meta` and `ctx.source` as calls over it. `ctx.source` is the
+  action's source selection (`units()`) and the semantic operations its frontends
+  offer on those units, answered by the host's frontend session (for TypeScript,
+  `erasedSource(unit)`: typescript_design.md §4.1). Each call
   is one framed request and one reply: a named host operation and plain values. The
   operations, their argument checks, their error tokens and their authority are
   defined once, on the host side; the framing and the value codec are written once in

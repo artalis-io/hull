@@ -359,29 +359,44 @@ is refused ("type lists past this file's lookahead budget"), so input built to m
 ### 4.1 The erasure plugin
 
 A bundled source plugin, `stdlib:ts-erase@1`: a small JavaScript Hull application
-embedded in the `hull` binary, like every plugin (BuildContext §9.1). It parses nothing:
-it calls the host's `type_erasure` operation over its channel, and the TypeScript parse
-runs once, in the host's JavaScript frontend session - the one ProjectDiscovery
-analyzed.
+embedded in the `hull` binary, like every plugin (BuildContext §9.1). It parses nothing.
+The TypeScript parse runs once, in the host's JavaScript frontend session - the one
+ProjectDiscovery analyzed - and the host does the erasure too; the plugin turns its
+answer into the action's result.
 
+- **The host operation, `erased_source(unit)`.** Offered by the `typescript` frontend
+  only (another frontend answers `project.operation_unsupported`). It returns
+  `{ bytes, refusals }`: the frontend's `typeErasure` over the unit it retained gives
+  the spans and refusals, and the frontend's `erase()` blanks the spans in the bytes it
+  analyzed - each span byte replaced by a space, CR and LF kept, a span holding U+2028 /
+  U+2029 refused - so offsets, lines and columns are unchanged (position map
+  `identity`, generations design §5). With any refusal, `bytes` is absent. It extends
+  slice 3's `type_erasure` (spans + refusals, §3.5), which stays for analysis.
 - **Input:** a source selection of `typescript` units (BuildContext §1.3: chosen by the
   planner; the plugin rescans nothing).
-- **Work:** per unit, `type_erasure(unit)` through the semantic handle; any refusal is
+- **Work:** per unit, `erased_source(unit)` over the plugin's channel; any refusal is
   emitted as an error diagnostic (BuildContext §8) and the action aborts; otherwise the
-  unit's analyzed source bytes with every span replaced byte for byte by spaces, newline
-  bytes kept (so offsets, lines and columns are unchanged - position map `identity`,
-  generations design §5).
+  bytes are the unit's output.
 - **Output:** one generated output per unit through `ctx.outputs`
   (`declare_generated_output`), logical name = the unit's source name (`./app.ts`,
   `./lib/a.ts`), payload = the erased JavaScript.
-- **Authority:** no workspace grants beyond the source selection, no tools, no
-  configuration that changes output. Deterministic and cacheable (BuildContext §10).
+- **Authority:** no workspace grants, no `ctx.inputs` reads, no tools, no configuration
+  that changes output. Deterministic and cacheable (BuildContext §10); its key covers
+  the units' analyzed bytes, which the source selection records.
 
-The source bytes it erases are the bytes the frontend analyzed - reached through the
-source selection, recorded as the action's observation - never a second read of the
-workspace (no time-of-check gap between the spans and the bytes). Exposing the analyzed
-bytes through the semantic handle is an addition to the frontend-neutral operations
-BuildContext §9 lists; it is to be ratified with checkpoint 5.
+```js
+app.transform(async (ctx) => {
+  for (const unit of ctx.source.units()) {
+    const r = await ctx.source.erasedSource(unit);
+    if (r.refusals.length) { r.refusals.forEach((d) => ctx.diagnostics.emit(d)); return; }
+    ctx.outputs.declareGeneratedOutput({ name: unit.name }, r.bytes);
+  }
+});
+```
+
+The bytes erased are the bytes the frontend analyzed: the host erases them in the same
+session, so there is no second read of the workspace and no time-of-check gap between
+the spans and the bytes, and the erasure rules exist once, in the frontend's `erase()`.
 
 ### 4.2 Activation
 
