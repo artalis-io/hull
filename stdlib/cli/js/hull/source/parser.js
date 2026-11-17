@@ -674,7 +674,9 @@ function parseInternal(bytes, opts, inject) {
     // or null when `what` names no form read whole (the caller recovers as JavaScript).
     function tsRefusedDeclaration(what, kind) {
         const start = cur.start;
-        if (kind !== null) { tsRefuse(what); tsSpan(function () { tsDeclarationBody(kind); }); return errNode(start); }
+        // No erasure span: read as JavaScript tokens, the declaration stays inside the range of
+        // the statement that holds it (`if (x) type T = 1;`).
+        if (kind !== null) { tsRefuse(what); tsDeclarationBody(kind); return errNode(start); }
         if (what !== "enums" && what !== "namespaces" && what !== "module declarations") return null;
         tsRefuse(what, isKw("const") ? peekTok(1, false) : undefined);   // `const enum`: at `enum`
         tsDeclareBlock(true);
