@@ -973,16 +973,17 @@ function parseInternal(bytes, opts, inject) {
         }
         if (ts && tsModifierStart()) tsRefuse("'" + cur.value + "' modifiers");
         // Non-destructive one-token lookahead decides whether a keyword-like token is a
-        // modifier or the member NAME (e.g. a field named `static` / `async` / `get`).
+        // modifier or the member NAME (e.g. a field named `static` / `async` / `get`, which may
+        // end the class body: `class C { get }`).
         let isStatic = false;
         if (isKw("static")) {
             const nx = peekTok(1, false);
-            if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";"))) { isStatic = true; advance(true); }
+            if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";" || nx.value === "}"))) { isStatic = true; advance(true); }
         }
         let kind = "method", isAsync = false, isGen = false;
-        if (isKw("async")) { const nx = peekTok(1, false); if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";")) && !nx.nlBefore) { isAsync = true; advance(true); } }
+        if (isKw("async")) { const nx = peekTok(1, false); if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";" || nx.value === "}")) && !nx.nlBefore) { isAsync = true; advance(true); } }
         if (isP("*")) { isGen = true; unsupported("generator methods are not supported"); advance(true); }
-        if (isKw("get") || isKw("set")) { const nx = peekTok(1, false); if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";"))) { kind = cur.value; advance(true); } }
+        if (isKw("get") || isKw("set")) { const nx = peekTok(1, false); if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";" || nx.value === "}"))) { kind = cur.value; advance(true); } }
         const key = parsePropertyKey();
         if (ts && isP("?")) tsOptional();
         else if (ts && isP("!") && !nl()) tsDefinite();
@@ -1251,8 +1252,10 @@ function parseInternal(bytes, opts, inject) {
             if (isP("[")) { advance(true); const m = mk("MemberExpression", e.start); m.object = e; m.computed = true; m.optional = false; m.property = parseExpression(); expectP("]", false); e = fin(m); continue; }
             if (isP("(") && allowCall) { const c = mk("CallExpression", e.start); c.callee = e; c.optional = false; c.arguments = parseArguments(); e = fin(c); continue; }
             // A tagged template only begins on a NEW template (noSubstitution/head); a
-            // middle/tail token is the continuation of an enclosing template, not a tag.
-            if (cur.type === "template" && (cur.mode === "noSubstitution" || cur.mode === "head") && !nl()) { const t = mk("TaggedTemplateExpression", e.start); t.tag = e; t.quasi = parseTemplate(); e = fin(t); continue; }
+            // middle/tail token is the continuation of an enclosing template, not a tag. A line
+            // break before it does not end the expression (`tag` LF `` `s` `` is one tagged
+            // template: no ASI rule stops it).
+            if (cur.type === "template" && (cur.mode === "noSubstitution" || cur.mode === "head")) { const t = mk("TaggedTemplateExpression", e.start); t.tag = e; t.quasi = parseTemplate(); e = fin(t); continue; }
             break;
         }
         return e;

@@ -50,6 +50,10 @@ release-artifact layout).
 - JS source analysis (`hull agent inspect`, `hull dev --agent`): `export async function f() {}`
   is no longer a syntax error, and `export default async function g() {}` is a function
   declaration, its name bound in the module, rather than an expression.
+- JS source analysis (`hull agent inspect`, `hull dev --agent`): a class field named `static`,
+  `get`, `set` or `async` as the body's last member with no `;` (`class C { get }`) is no
+  longer a syntax error, and a template on the line after an expression is that expression's
+  tagged template (`tag` LF `` `s` ``) rather than a separate statement, as JavaScript reads it.
 - JS source analysis (`hull agent inspect`, `hull dev --agent`): an identifier named like an
   `Object.prototype` member is no longer an operator. After a line without `;`, a line starting
   with `toString(...)` or `constructor` parsed as a binary expression with that name as its

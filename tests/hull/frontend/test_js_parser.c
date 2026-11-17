@@ -379,6 +379,44 @@ UTEST(js_parser, speculation_valid_forms)
     hl_js_session_destroy(s);
 }
 
+/* A field named `static` / `get` / `set` / `async` may be the class body's last member, with no
+ * `;`: the `}` after it ends the body, it does not name a member (Hull reported "expected a
+ * name"). Found by fuzzing the TypeScript leg, which erases `get: string` to `get`. */
+UTEST(js_parser, keyword_named_field_before_close)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    static const char *const SRC[] = {
+        "class C { static }", "class C { get }", "class C { set }", "class C { async }",
+        "class C {\n  get\n}", "class C { x = 1; static }",
+    };
+    for (size_t i = 0; i < sizeof SRC / sizeof SRC[0]; i++) {
+        char *o = parse_str(s, SRC[i]);
+        EXPECT_TRUE(has(o, "\"type\":\"PropertyDefinition\""));
+        EXPECT_FALSE(has(o, "\"static\":true"));
+        EXPECT_TRUE(has(o, "\"valid\":true"));
+        free(o);
+    }
+    hl_js_session_destroy(s);
+}
+
+/* A template on the line after an expression is still that expression's tagged template: no ASI
+ * rule ends the expression before it (Hull read `tag` and a separate template statement). */
+UTEST(js_parser, tagged_template_after_line_break)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *o = parse_str(s, "const t = tag\n`a${1}b`;");
+    EXPECT_TRUE(has(o, "\"type\":\"TaggedTemplateExpression\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o);
+    o = parse_str(s, "f()\n`x`");
+    EXPECT_TRUE(has(o, "\"type\":\"TaggedTemplateExpression\""));
+    EXPECT_FALSE(has(o, "\"type\":\"ExpressionStatement\",\"start\":4"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
 /* async function DECLARATION (not an expression statement), plus async arrows. */
 UTEST(js_parser, async_declaration_and_arrows)
 {
