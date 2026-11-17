@@ -1,5 +1,5 @@
 -- hull.buildctx.action - the BuildAction core and its declared workspace inputs
--- (docs/buildcontext_design.md §2, §4; checkpoint 1 of §13, recorded in §13.1).
+-- (docs/buildcontext_design.md §2, §4, §13.1).
 --
 -- Host-owned tool code: it runs in the tool VM, never in a plugin's runtime, and
 -- holds the one native piece, hull.buildctx._fs (the grants compiled with the
@@ -289,8 +289,8 @@ function Action:prepare()
     return true
 end
 
--- Checkpoint 1 has no result store: commit only moves the action to committed
--- (checkpoint 2 adds the staged result and its atomic install).
+-- There is no result store yet: commit moves the action to committed and installs
+-- nothing (§13.1).
 function Action:commit()
     local e = gate(self, "preparing")
     if e then return nil, e end

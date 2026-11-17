@@ -1,4 +1,4 @@
--- BuildContext checkpoint 1: the action core and ctx.inputs over the real
+-- BuildContext: the action core and ctx.inputs over the real
 -- hull.buildctx._fs binding (docs/buildcontext_design.md §12, "Action
 -- transaction" and "Workspace inputs"). Run by tests/hull/buildctx/test_buildctx.c,
 -- which provides T (tmpdir, mkdir, symlink, set_mtime, chmod, open_fds).

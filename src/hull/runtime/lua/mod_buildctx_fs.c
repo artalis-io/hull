@@ -1,7 +1,7 @@
 /*
  * mod_buildctx_fs.c - hull.buildctx._fs: a BuildAction's declared workspace
  * inputs, read through the shipped fs grant policy (docs/buildcontext_design.md
- * §4.1, §13.1). The one native piece of checkpoint 1; the action itself (state
+ * §4.1, §13.1). The one native piece of a BuildAction's inputs; the action itself (state
  * machine, observations, manifest, revalidation) is Lua, hull.buildctx.action.
  *
  * Tool VM only: never registered in an app runtime.

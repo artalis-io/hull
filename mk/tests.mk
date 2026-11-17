@@ -460,7 +460,7 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TUI_CAP_TEST_OBJS) $(TEST_COM
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS) $(LDFLAGS)
 
-# BuildContext checkpoint 1 (tests/hull/buildctx/): the Lua action core
+# BuildContext (tests/hull/buildctx/): the Lua action core
 # (stdlib/cli/lua/hull/buildctx/) over its one native binding, hull.buildctx._fs,
 # in a plain Lua state with the cap layer linked for the fs policy.
 $(BUILDDIR)/test_buildctx: $(TESTDIR)/hull/buildctx/test_buildctx.c $(BUILDDIR)/lua_rt_mod_buildctx_fs.o $(LUA_OBJS) $(TEST_COMMON_DEPS) | $(BUILDDIR)

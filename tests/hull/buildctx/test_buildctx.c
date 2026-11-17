@@ -1,6 +1,6 @@
 /*
  * test_buildctx.c - runs stdlib/cli/lua/hull/buildctx/tests/test_action.lua
- * (BuildContext checkpoint 1) against the real hull.buildctx._fs binding and
+ * (the BuildContext action core) against the real hull.buildctx._fs binding and
  * a real workspace, with the few filesystem helpers a plain Lua state lacks.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
