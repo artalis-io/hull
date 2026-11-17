@@ -98,8 +98,9 @@ stdlib; an application plugin is one in the app tree (its own directory, with it
 Bundled status does not grant hidden filesystem, process, environment, or network
 authority. A bundled plugin can have a predefined descriptor and default
 configuration, but the resulting action receives only the authority compiled
-into its BuildContext. Application plugins are activated explicitly; Hull does
-not recursively execute every file under a magic plugin directory.
+into its BuildContext. Application plugins are activated explicitly, in
+`hull.build.json` (§9.2); Hull does not recursively execute every file under a
+magic plugin directory.
 
 Plugin identity includes the exact implementation hash. Replacing local plugin
 bytes changes the action identity and invalidates prior results.
@@ -517,6 +518,60 @@ through one channel.
   diagnostics (§12). A JavaScript plugin parses no project source either: it uses the
   semantic operations like a Lua one.
 
+### 9.2 Registration
+
+Three things decide which plugins a pipeline run has.
+
+- **What a plugin is: its own manifest.** A plugin application declares its
+  descriptor (§9) in its manifest, beside `hull/build-plugin@1`:
+
+  ```js
+  app.manifest({
+    modules: ["hull/build-plugin@1"],
+    buildPlugin: {                 // Lua: build_plugin
+      id: "sql-codegen", version: 1,
+      input: "source",             // or "artifact"
+      languages: ["lua", "javascript"],
+      annotations: ["query"],      // the units it consumes
+      output: "generated",
+      config: { /* schema */ },
+    },
+  });
+  app.transform(async (ctx) => { /* ... */ });
+  ```
+
+  Hull reads it with the existing manifest-extraction child; a plugin's entry is
+  `app.lua` or `app.js`, never TypeScript, so it can always be extracted. The manifest
+  preset (§9.1) is checked here: a plugin that declares a refused section or module
+  is not registered.
+
+- **Which application plugins an app uses: `hull.build.json`.** A code-free file at
+  the app root, read by Hull without running any app code - so it works for an app
+  whose entry is `app.ts`, which cannot run until it is erased:
+
+  ```json
+  { "plugins": [ { "path": "plugins/sql_codegen", "config": { "dialect": "pg" } } ] }
+  ```
+
+  Strict schema: unknown keys are refused. `path` is relative, inside the app tree,
+  through no symbolic link and not into `.hull`, and names a directory holding exactly
+  one of `app.lua` / `app.js`. `config` is checked against the plugin's schema. Nothing
+  else activates an application plugin: Hull never scans the tree for plugins. The
+  file's bytes are part of every action's key (§10) and it is signed with the app. A
+  plugin directory named here is not part of the application being built: build
+  embedding, discovery and `hull test` of the app skip it.
+
+- **Bundled plugins: compiled into Hull.** A fixed list (`stdlib:ts-erase@1`, later the
+  compute plugins), each on a Hull-defined route that is active whenever its input
+  exists - TypeScript units for `ts-erase`. An app neither lists nor replaces them in
+  v1.
+
+Identity: `stdlib:<id>@<major>` for a bundled plugin, `app:<path>#<sha256>` for an
+application plugin, the hash over every file of its directory (as signing hashes
+them), so editing a plugin invalidates its results. The planner's registry for a run
+is the bundled list plus the activated plugins; it routes each input kind to the
+plugin that claims it, and two plugins claiming the same input kind is an error.
+
 ## 10. Cache-key envelope
 
 The action key includes:
@@ -651,7 +706,8 @@ Each checkpoint stops for review.
 5. **Plugin runner + parity proof.** Plugins as Hull applications (§9.1): the channel
    and its value codec, the `hull/build-plugin` module and `app.transform` in both
    runtimes, the plugin manifest preset, the runner that spawns and supervises plugin
-   processes, one descriptor contract, identical bundled/application registration, and
+   processes, registration (§9.2: descriptors from plugin manifests, `hull.build.json`,
+   the bundled list), identical bundled/application registration, and
    one demonstration plugin over both Lua and JavaScript semantic source selections,
    written in Lua and in JavaScript with byte-identical results.
 6. **BuildArtifact + planner.** Canonical artifact schemas, explicit pipeline
