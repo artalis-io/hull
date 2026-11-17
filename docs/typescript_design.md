@@ -1,7 +1,7 @@
 # TypeScript - design
 
-Status: **T1 (types + `hull types`) implemented; T2 slices 1 and 2 (the parser's TypeScript
-mode, internal) implemented (§3.5); the rest of T2, and T3, design-only.** Builds on
+Status: **T1 (types + `hull types`) and T2 (the TypeScript frontend, §3.5) implemented;
+T3 design-only, its prerequisites in progress (§1).** Builds on
 [buildcontext_design.md](buildcontext_design.md) (BuildContext),
 [dev_pipeline_generations_design.md](dev_pipeline_generations_design.md) (pipeline
 generations), [javascript_source_frontend_design.md](javascript_source_frontend_design.md)
@@ -36,10 +36,14 @@ module resolution modes), CommonJS interop.
 | Step | What | Depends on |
 |---|---|---|
 | T1 | `.d.ts` + `hull types` (§2) - implemented | nothing |
-| T2 | TypeScript frontend, analysis only (§3) - slices 1 and 2 implemented (§3.5) | the shipped JS frontend |
-| BuildContext 1-5 | action core, outputs, artifact seam, tool seam, plugin runtime | - |
+| T2 | TypeScript frontend, analysis only (§3) - implemented (§3.5) | the shipped JS frontend |
+| BuildContext 1, 2, 5 | action core (1, implemented), outputs (2), plugin runner (5) | - |
 | G1, G2 | pipeline generations: overlay, runner wiring | BuildContext 2, 5 |
-| T3 | type-erasure plugin + `.ts` entry points (§4) | T2, BuildContext 5, G1, G2, and the explicit-route part of BuildContext 6 |
+| T3 | type-erasure plugin + `.ts` entry points (§4) | T2, BuildContext 1, 2, 5, G1, G2, and the explicit-route part of BuildContext 6 |
+
+BuildContext checkpoints 3 (artifact inputs) and 4 (the tool seam) are not on T3's path:
+erasure takes a source selection, not artifacts, and runs no tool. They follow when Compute
+IR needs them.
 
 T2 is analysis, like the JS frontend before it: it makes `.ts` files visible to
 ProjectDiscovery (declarations, annotations, `hull agent inspect`) and lowers nothing, so
@@ -354,27 +358,45 @@ is refused ("type lists past this file's lookahead budget"), so input built to m
 
 ### 4.1 The erasure plugin
 
-A bundled source plugin, `stdlib:ts-erase@1`, Lua-authored (BuildContext v1 has no
-JavaScript plugin runtime, and needs none here: it parses nothing).
+A bundled source plugin, `stdlib:ts-erase@1`: a small JavaScript Hull application
+embedded in the `hull` binary, like every plugin (BuildContext §9.1). It parses nothing.
+The TypeScript parse runs once, in the host's JavaScript frontend session - the one
+ProjectDiscovery analyzed - and the host does the erasure too; the plugin turns its
+answer into the action's result.
 
+- **The host operation, `erased_source(unit)`.** Offered by the `typescript` frontend
+  only (another frontend answers `project.operation_unsupported`). It returns
+  `{ bytes, refusals }`: the frontend's `typeErasure` over the unit it retained gives
+  the spans and refusals, and the frontend's `erase()` blanks the spans in the bytes it
+  analyzed - each span byte replaced by a space, CR and LF kept, a span holding U+2028 /
+  U+2029 refused - so offsets, lines and columns are unchanged (position map
+  `identity`, generations design §5). With any refusal, `bytes` is absent. It extends
+  slice 3's `type_erasure` (spans + refusals, §3.5), which stays for analysis.
 - **Input:** a source selection of `typescript` units (BuildContext §1.3: chosen by the
   planner; the plugin rescans nothing).
-- **Work:** per unit, `type_erasure(unit)` through the semantic handle; any refusal is
+- **Work:** per unit, `erased_source(unit)` over the plugin's channel; any refusal is
   emitted as an error diagnostic (BuildContext §8) and the action aborts; otherwise the
-  unit's analyzed source bytes with every span replaced byte for byte by spaces, newline
-  bytes kept (so offsets, lines and columns are unchanged - position map `identity`,
-  generations design §5).
+  bytes are the unit's output.
 - **Output:** one generated output per unit through `ctx.outputs`
   (`declare_generated_output`), logical name = the unit's source name (`./app.ts`,
   `./lib/a.ts`), payload = the erased JavaScript.
-- **Authority:** no workspace grants beyond the source selection, no tools, no
-  configuration that changes output. Deterministic and cacheable (BuildContext §10).
+- **Authority:** no workspace grants, no `ctx.inputs` reads, no tools, no configuration
+  that changes output. Deterministic and cacheable (BuildContext §10); its key covers
+  the units' analyzed bytes, which the source selection records.
 
-The source bytes it erases are the bytes the frontend analyzed - reached through the
-source selection, recorded as the action's observation - never a second read of the
-workspace (no time-of-check gap between the spans and the bytes). Exposing the analyzed
-bytes through the semantic handle is an addition to the frontend-neutral operations
-BuildContext §9 lists; it is to be ratified with checkpoint 5.
+```js
+app.transform(async (ctx) => {
+  for (const unit of ctx.source.units()) {
+    const r = await ctx.source.erasedSource(unit);
+    if (r.refusals.length) { r.refusals.forEach((d) => ctx.diagnostics.emit(d)); return; }
+    ctx.outputs.declareGeneratedOutput({ name: unit.name }, r.bytes);
+  }
+});
+```
+
+The bytes erased are the bytes the frontend analyzed: the host erases them in the same
+session, so there is no second read of the workspace and no time-of-check gap between
+the spans and the bytes, and the erasure rules exist once, in the frontend's `erase()`.
 
 ### 4.2 Activation
 

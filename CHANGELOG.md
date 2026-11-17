@@ -10,6 +10,13 @@ release-artifact layout).
 
 ### Added
 
+- Build pipeline, internal (BuildContext checkpoint 1, docs/buildcontext_design.md §13.1): the
+  BuildAction core, in Lua tool code (`hull.buildctx.action`) over one small native binding
+  (`hull.buildctx._fs`, the grants compiled and read through the shipped fs policy) - the action
+  state machine, recorded and repeatable read / stat / list observations, limits, cancellation,
+  a canonical dependency manifest and its revalidation (content and type decide freshness, never
+  mtime). Nothing in `hull` uses it yet: it is the first step toward running TypeScript
+  (docs/typescript_design.md §1).
 - Project discovery reads TypeScript: `.ts` and `.mts` sources go to a `typescript` frontend (the
   JS parser's TypeScript mode, in the same tooling session), so `hull agent inspect` and `hull
   dev --agent` report their declarations and JSDoc annotations, and a construct Hull refuses
