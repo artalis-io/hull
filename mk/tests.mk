@@ -15,12 +15,12 @@ TEST_SRCS := $(shell find $(TESTDIR)/hull -name 'test_*.c')
 
 # Filter test binaries based on RUNTIME selection
 ifeq ($(RUNTIME),js)
-  TEST_SRCS := $(filter-out %/test_lua.c %/test_lua_tui_poll.c %/test_buildctx.c,$(TEST_SRCS))
+  TEST_SRCS := $(filter-out %/test_lua.c %/test_lua_tui_poll.c %/test_buildctx.c %/test_plain_value.c,$(TEST_SRCS))
 else ifeq ($(RUNTIME),lua)
   TEST_SRCS := $(filter-out %/test_js_tui_poll.c,$(TEST_SRCS))
   # test_js_session + test_js_lexer + test_js_parser (the JS tooling runtime + frontend) need
   # QuickJS, absent in a lua-only build.
-  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c %/test_js_conformance.c %/test_js_annotations.c %/test_js_scope.c %/test_js_frontend.c %/test_js_generation.c %/test_js_fuzz_entry.c %/test_js_golden.c %/test_js_typescript.c,$(TEST_SRCS))
+  TEST_SRCS := $(filter-out %/test_plain_value.c %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c %/test_js_conformance.c %/test_js_annotations.c %/test_js_scope.c %/test_js_frontend.c %/test_js_generation.c %/test_js_fuzz_entry.c %/test_js_golden.c %/test_js_typescript.c,$(TEST_SRCS))
 endif
 
 # The release / verify helpers' rules (below) exist only with the HTTP client:
@@ -465,6 +465,16 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDI
 # in a plain Lua state with the cap layer linked for the fs policy.
 $(BUILDDIR)/test_buildctx: $(TESTDIR)/hull/buildctx/test_buildctx.c $(BUILDDIR)/lua_rt_mod_buildctx_fs.o $(LUA_OBJS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDDIR)/lua_rt_mod_buildctx_fs.o $(LUA_OBJS) $(TEST_COMMON_LIBS) $(LDFLAGS)
+
+# A helper process on one inherited socket (shared/child_channel.c): frames,
+# deadlines, a spawned child on fd 3 with a filtered environment.
+$(BUILDDIR)/test_child_channel: $(TESTDIR)/hull/test_child_channel.c $(CHILD_CHANNEL_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CHILD_CHANNEL_OBJ) $(LDFLAGS)
+
+# The build plugin channel's value encoding and its Lua / QuickJS walkers:
+# the codec, both engines and the two walker objects, nothing else.
+$(BUILDDIR)/test_plain_value: $(TESTDIR)/hull/test_plain_value.c $(PLAIN_VALUE_OBJ) $(BUILDDIR)/lua_rt_plain_value.o $(BUILDDIR)/js_plain_value.o $(LUA_OBJS) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(PLAIN_VALUE_OBJ) $(BUILDDIR)/lua_rt_plain_value.o $(BUILDDIR)/js_plain_value.o $(LUA_OBJS) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
 # hull.source.lua (pure-Lua source-analysis layer): a vanilla lua_State harness
 # linking ONLY the vendored Lua 5.4 objects (no Hull sandbox / cap layer). The
@@ -1463,6 +1473,12 @@ fuzz/fuzz_wasm_log_escape: fuzz/fuzz_wasm_log_escape.c $(SRCDIR)/hull/cap/wasm_l
 # stubbed in fuzz_migrate_name_stubs.c, never reached.
 fuzz/fuzz_migrate_name: fuzz/fuzz_migrate_name.c fuzz/fuzz_migrate_name_stubs.c $(SRCDIR)/hull/migrate.c $(VENDDIR)/log.c/log.c
 	$(CC) $(FUZZ_CFLAGS) -DHL_ENABLE_DB -I$(SRCDIR)/hull -Ivendor/keel/include -I$(VENDDIR)/log.c -o $@ $^
+# The build plugin channel's value encoding (shared/plain_value.c): the bytes
+# a plugin process sends its host. Oracles: no read outside the buffer, an
+# accepted value is canonical (re-written byte for byte), a truncated one is
+# refused.
+fuzz/fuzz_plain_value: fuzz/fuzz_plain_value.c $(SRCDIR)/hull/shared/plain_value.c
+	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 build/fuzz-corpus/js_source: fuzz/corpus_js_source
 	@mkdir -p $@
 	@cp fuzz/corpus_js_source/* $@/ 2>/dev/null || true
@@ -1474,7 +1490,8 @@ fuzz-js-source: fuzz/fuzz_js_source build/fuzz-corpus/js_source
 
 fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window fuzz/fuzz_lua_source fuzz/fuzz_js_source fuzz/fuzz_ssh \
       fuzz/fuzz_log_escape fuzz/fuzz_http_guard fuzz/fuzz_sql_kw fuzz/fuzz_dsn_redact fuzz/fuzz_mysql_stmt \
-      fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name fuzz/fuzz_pg_msg fuzz/fuzz_mysql_rows
+      fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name fuzz/fuzz_pg_msg fuzz/fuzz_mysql_rows \
+      fuzz/fuzz_plain_value
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -1502,6 +1519,7 @@ fuzz-run: fuzz
 	./fuzz/fuzz_mysql_rows fuzz/corpus_mysql_rows/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_wasm_log_escape fuzz/corpus_wasm_log_escape/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_migrate_name fuzz/corpus_migrate_name/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_plain_value fuzz/corpus_plain_value/ -max_total_time=$(FUZZ_TIME)
 	$(MAKE) fuzz-lua-source FUZZ_TIME=$(FUZZ_TIME)   # stages the full .lua corpus first
 	$(MAKE) fuzz-js-source FUZZ_TIME=$(FUZZ_TIME)    # stages the full .js corpus first
 

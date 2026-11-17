@@ -1111,6 +1111,17 @@ CAP_OBJS += $(MAIN_SIGNAL_OBJ)
 # CAP_OBJS like host.
 STATE_DIR_OBJ := $(BUILDDIR)/state_dir.o
 CAP_OBJS += $(STATE_DIR_OBJ)
+# child_channel is a helper process on one inherited socket: spawn with fd 3,
+# length-framed messages under deadlines, reap / kill (shared/child_channel.h).
+# Used by the GPU compile helper and the build plugin runner. libc-only; rides
+# CAP_OBJS like host.
+CHILD_CHANNEL_OBJ := $(BUILDDIR)/child_channel.o
+CAP_OBJS += $(CHILD_CHANNEL_OBJ)
+# plain_value is the build plugin channel's value encoding (nil / bool / int64 /
+# text / bytes / array / map, canonical; shared/plain_value.h), driven by the
+# Lua and QuickJS walkers. libc-only; rides CAP_OBJS like host.
+PLAIN_VALUE_OBJ := $(BUILDDIR)/plain_value.o
+CAP_OBJS += $(PLAIN_VALUE_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -3348,6 +3359,12 @@ $(MAIN_SIGNAL_OBJ): $(SRCDIR)/hull/shared/main_signal.c $(INCDIR)/hull/shared/ma
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(STATE_DIR_OBJ): $(SRCDIR)/hull/shared/state_dir.c $(INCDIR)/hull/shared/state_dir.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(CHILD_CHANNEL_OBJ): $(SRCDIR)/hull/shared/child_channel.c $(INCDIR)/hull/shared/child_channel.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(PLAIN_VALUE_OBJ): $(SRCDIR)/hull/shared/plain_value.c $(INCDIR)/hull/shared/plain_value.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # QuickJS sources (relaxed warnings)

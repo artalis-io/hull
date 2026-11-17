@@ -23,6 +23,7 @@ fuzz_dsn_redact
 fuzz_mysql_stmt
 fuzz_pg_msg
 fuzz_mysql_rows
+fuzz_plain_value
 # Debug symbol bundles (macOS)
 *.dSYM/
 # libFuzzer artifacts
