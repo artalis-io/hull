@@ -150,18 +150,14 @@ UTEST(js_typescript, lang_option)
 
 typedef struct { const char *src; const char *what; int start, stop; } Refusal;
 static const Refusal REFUSALS[] = {
-    { "function f(this: W) {}",                "'this' parameters",                  12, 16 },
+    { "function f(a, this: W) {}",             "'this' parameters after the first parameter", 15, 19 },
     { "class C { constructor(private x) {} }", "parameter properties",               23, 30 },
-    { "function f(a)\nfunction f(a) {}",       "overload signatures",                15, 23 },
+    { "if (x) function f(a);",                 "overload signatures",                21, 22 },
     { "const a = <T>x;",                       "angle-bracket assertions",           11, 12 },
     { "const b = <T>(x);",                     "angle-bracket assertions",           11, 12 },
-    { "class C implements I {}",               "implements clauses",                  9, 19 },
-    { "class C { private x = 1 }",             "'private' modifiers",                11, 18 },
-    { "class C { readonly x = 1 }",            "'readonly' modifiers",               11, 19 },
     { "enum E { A }",                          "enums",                               1,  5 },
     { "namespace N {}",                        "namespaces",                          1, 10 },
     { "module M {}",                           "module declarations",                 1,  7 },
-    { "abstract class A {}",                   "abstract classes",                    1,  9 },
     { "import x = require(\"m\");",            "import-require declarations",        10, 11 },
     { "export = x;",                           "export assignments",                  8,  9 },
     { "declare module \"m\" {}",              "'declare' declarations",              1,  8 },
@@ -535,7 +531,7 @@ UTEST(js_typescript, corpus_accept)
         free(jsp); free(er); free(hx); free(o); free(src);
     }
     jfd_paths_free(&pv);
-    EXPECT_GE(checked, 19);
+    EXPECT_GE(checked, 21);
     hl_js_session_destroy(s);
 }
 
@@ -573,7 +569,7 @@ UTEST(js_typescript, corpus_refuse)
         free(exp); free(lines); free(o); free(src);
     }
     jfd_paths_free(&pv);
-    EXPECT_GE(checked, 32);
+    EXPECT_GE(checked, 33);
     hl_js_session_destroy(s);
 }
 
