@@ -99,7 +99,7 @@ int hl_chan_frame_read(int fd, HlChanFrame *r, uint64_t deadline);
 
 /* Spawn @p exe with @p argv and the environment entries @p env_ok accepts
  * (NULL = none), @p fd as its fd 3, stdin / stdout / stderr on /dev/null,
- * signals unblocked and defaulted. The pid, or -1. */
+ * signals unblocked and defaulted. The pid, or -1 with errno set. */
 pid_t hl_chan_spawn(const char *exe, char *const argv[], int fd,
                     int (*env_ok)(const char *kv));
 

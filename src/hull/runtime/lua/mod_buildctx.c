@@ -472,7 +472,8 @@ int luaopen_hull_buildctx_store(lua_State *L)
  *   P.empty_array                          -- encodes as []
  *   P.preset_check(manifest)               -> true | nil, reason
  *
- * Tokens: "unsupported" (no channel on this host), "spawn_failed",
+ * Tokens: "unsupported" (no channel on this host), "spawn_failed" (and the
+ * system's reason),
  * "timeout", "eof" (the plugin closed its end or exited), "protocol" (a
  * frame with another magic or past the payload limit), "malformed" (a value
  * outside the value model), "too_big", "unsupported_value", "closed".
@@ -568,10 +569,14 @@ static int pl_spawn(lua_State *L)
     hl_chan_set_nosigpipe(sv[0]);
     static const char *const extra[] = { HL_BUILD_PLUGIN_ENV "=3", NULL };
     pid_t pid = hl_chan_spawn_env(exe, (char *const *)(uintptr_t)argv, sv[1], plugin_env_ok, extra);
+    int err = errno;
     close(sv[1]);
     if (pid < 0) {
         close(sv[0]);
-        return fail(L, "spawn_failed");
+        lua_pushnil(L);
+        lua_pushliteral(L, "spawn_failed");
+        lua_pushstring(L, strerror(err));
+        return 3;
     }
     p->fd = sv[0];
     p->pid = pid;

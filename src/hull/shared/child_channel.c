@@ -225,11 +225,12 @@ pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
     ok = ok && posix_spawnattr_setsigdefault(&at, &all) == 0;
     char **env = ok ? filtered_env(env_ok, extra) : NULL;
     pid_t pid = -1;
-    if (ok && env && posix_spawn(&pid, exe, &fa, &at, argv, env) != 0)
-        pid = -1;
+    int err = ok && env ? posix_spawn(&pid, exe, &fa, &at, argv, env) : ENOMEM;
+    if (err != 0) pid = -1;
     free(env);
     posix_spawnattr_destroy(&at);
     posix_spawn_file_actions_destroy(&fa);
+    if (pid < 0) errno = err;
     return pid;
 }
 

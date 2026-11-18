@@ -249,6 +249,9 @@ int hl_tool_sandbox_plan(HlToolSandboxPlan *plan,
     plan_add(plan, "/bin", "rx", 1);     /* APE shebang invokes /bin/sh */
     plan_add(plan, "/lib", "rx", 1);     /* shared libs need execute for mmap */
     plan_add(plan, "/lib64", "rx", 1);
+    /* A build plugin's process gets /dev/null as its stdio (child_channel's
+     * spawn opens it in the child, under this domain). */
+    plan_add(plan, "/dev/null", "rw", 1);
     /* /opt: `make fetch-cosmocc COSMOCC_DIR=/opt/cosmo` (CI) and other
      * package managers commonly install toolchains here. */
     plan_add(plan, "/opt", "rx", 1);
