@@ -610,6 +610,10 @@ jobs:
         timeout-minutes: 3
         run: make e2e-build-plugin
 
+      - name: hull plugins E2E tests (registration, the demonstration plugin, the result store)
+        timeout-minutes: 5
+        run: make e2e-plugins
+
       - name: hull test (examples)
         timeout-minutes: 2
         run: make hull-test-examples

@@ -43,6 +43,7 @@ _hull() {
         'doctor:Check environment for hull build readiness'
         'update:Self-update from GitHub releases'
         'tools:Install / list / uninstall side-loaded tools (e.g. wamrc)'
+        'plugins:List / run build plugins (hull.build.json)'
         'help:Show top-level usage'
     )
     local -a modules_subs sbom_formats
@@ -288,6 +289,14 @@ _hull() {
                         '--force[Reinstall even if version matches]' \
                         '--repo[GitHub repo]:repo:' \
                         '--repo=[GitHub repo]:repo:'
+                    ;;
+
+                plugins)
+                    if (( CURRENT == 3 )); then
+                        _values 'plugins verb' 'list[List registered build plugins]' 'run[Run them over their source selections]'
+                    else
+                        _arguments '--json[Machine-readable JSON output]' '*:app dir:_directories'
+                    fi
                     ;;
 
                 tools)

@@ -26,7 +26,7 @@ end
 
 function __hull_no_subcommand
     set -l cmd (commandline -opc)
-    set -l commands keygen build verify verify-self verify-release sign-release sbom inspect manifest test new init types dev eject sign-platform migrate modules agent mcp check compute deploy version doctor update tools help
+    set -l commands keygen build verify verify-self verify-release sign-release sbom inspect manifest test new init types dev eject sign-platform migrate modules agent mcp check compute deploy version doctor update tools plugins help
     for c in $cmd[2..-1]
         if contains -- $c $commands
             return 1
@@ -64,6 +64,9 @@ complete -c hull -n __hull_no_subcommand -f -a version        -d 'Print hull ver
 complete -c hull -n __hull_no_subcommand -f -a doctor         -d 'Check hull build readiness'
 complete -c hull -n __hull_no_subcommand -f -a update         -d 'Self-update from GitHub releases'
 complete -c hull -n __hull_no_subcommand -f -a tools          -d 'Install / list / uninstall side-loaded tools'
+complete -c hull -n __hull_no_subcommand -f -a plugins        -d 'List / run build plugins (hull.build.json)'
+complete -c hull -n '__fish_seen_subcommand_from plugins; and not __fish_seen_subcommand_from list run' -f -a 'list run'
+complete -c hull -n '__fish_seen_subcommand_from plugins' -l json -d 'Machine-readable JSON output'
 complete -c hull -n __hull_no_subcommand -f -a help           -d 'Show top-level usage'
 
 complete -c hull -n __hull_no_subcommand -s v -l version     -d 'Print hull version'

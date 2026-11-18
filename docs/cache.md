@@ -36,6 +36,9 @@ loads `cache.key` before its sandbox applies and keeps write access to the
 shared pool, so an app compromised at native level could read that key from
 its own memory and seal a forged AOT blob under a known `.wasm`'s key - native
 code the next `hull build` of another app would have embedded as a cache hit.
+`build-results` (build plugin results and payloads, `hull plugins run`) is sealed
+under the same tool key, for the same reason: a forged result would be a
+generated source the next build takes as a plugin's output.
 
 For the same reason a process that must not trust other apps of the user
 loads no code from the runtime-key caches at all: the build tool (audit 22)
@@ -81,7 +84,9 @@ $HOME/.hull/blobs/
 │   │   └── blobs/<XX>/<sha256>
 │   ├── js-templates/
 │   │   └── blobs/<XX>/<sha256>
-│   └── gpu-shaders/
+│   ├── gpu-shaders/
+│   │   └── blobs/<XX>/<sha256>
+│   └── build-results/
 │       └── blobs/<XX>/<sha256>
 └── tools/                    ← signed system store (NOT swept)
     └── blobs/<XX>/<sha256>
@@ -102,6 +107,7 @@ directory becomes pathological at ~50K entries - sharding keeps
 | `templates` | Generated Lua render function (bytecode) for every `templates/*.html` | template source sha256 + engine version | template parse + Lua codegen + `luaL_loadbuffer` |
 | `js-templates` | Generated JS render function (bytecode) for every `templates/*.html` | template source sha256 + engine version + name | template parse + JS codegen + `JS_Eval` |
 | `gpu-shaders` | `"ok"` for a WGSL source the GPU compile helper process compiled cleanly ([design](design/gpu_compile_helper.md)). Read only: since C audit L6 the helper writes no entry, because every source it checks is runtime `gpu.dynamic_shaders` source, possibly request text. Verdicts stay in memory | Hull version + backend + arch + device + adapter + source sha256 | a helper round trip (~50 ms - 0.3 s): spawn a sandboxed worker, init the GPU, compile |
+| `build-results` | Build plugin action results and their payloads (`hull plugins run`, [design](buildcontext_design.md) §13.4-§13.5): a result under its action key, each payload under its own SHA-256, sealed under the tool key (`$HOME/.hull/tool-cache.key`, which no app process loads) in separate domains | plugin identity + descriptor + configuration + source selection + `hull.build.json` hash; a result is used only while its dependency manifest still holds | running the plugin process over its selection |
 | `tools` | Signed binaries downloaded by `hull tools install` (e.g. `wamrc`) | sha256 of the binary | full `~6 MB` HTTPS download + Ed25519 verify |
 
 Only NAMED templates (`template.render` / `compile` of a `templates/*`
@@ -138,6 +144,7 @@ compute-aot         4       2.1 MB  ok      /Users/me/.hull/blobs/runtime/comput
 templates          11        38 KB  ok      /Users/me/.hull/blobs/runtime/templates
 js-templates        0          0 B  ok      /Users/me/.hull/blobs/runtime/js-templates
 gpu-shaders         0          0 B  ok      /Users/me/.hull/blobs/runtime/gpu-shaders
+build-results       0          0 B  ok      /Users/me/.hull/blobs/runtime/build-results
 tools               1       6.4 MB  n/a     /Users/me/.hull/blobs/tools
 
 set HULL_NO_<KIND>_CACHE=1 to disable a single cache (e.g.
@@ -244,6 +251,7 @@ debugging "why isn't my warm path warm".
 | `HULL_NO_TEMPLATE_CACHE=1` | unset | Disable just the Lua template cache. |
 | `HULL_NO_JS_TEMPLATE_CACHE=1` | unset | Disable just the JS template cache. |
 | `HULL_NO_GPU_SHADER_CACHE=1` | unset | Disable just the GPU compile-helper verdict cache (verdicts are then kept in memory only). |
+| `HULL_NO_BUILD_CACHE=1` | unset | Disable reuse of committed build plugin results: `hull plugins run` runs every plugin again (results are still committed). |
 
 **Truthiness.** All `HULL_NO_*` variables follow the same rule: set to
 any non-empty value other than the case-insensitive strings `0`, `false`,

@@ -1826,6 +1826,12 @@ $(BUILDDIR)/e2e_build_plugin_drive: $(TESTDIR)/e2e_build_plugin_drive.c $(CHILD_
 e2e-build-plugin: $(BUILDDIR)/hull $(BUILDDIR)/e2e_build_plugin_drive
 	HULL=$(BUILDDIR)/hull DRIVE=$(BUILDDIR)/e2e_build_plugin_drive sh tests/e2e_build_plugin.sh
 
+.PHONY: e2e-plugins
+# `hull plugins list|run`: registration, the inventory demonstration plugin in
+# Lua and JavaScript over a Lua and a JavaScript app, the build result store.
+e2e-plugins: $(BUILDDIR)/hull
+	HULL=$(BUILDDIR)/hull sh tests/e2e_plugins.sh
+
 .PHONY: e2e-project-discovery
 # This E2E runs late in the CI job, after many steps that churn the shared build/ tree
 # with config-sentinel flag flips (feature/flavor/cross-build tests). Those can leave

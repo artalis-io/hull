@@ -1469,6 +1469,21 @@ static int l_tool_hull_cache_dir(lua_State *L)
     return 1;
 }
 
+/* ── tool.self_path() → the running hull binary's absolute path | nil ──
+ *
+ * What the build plugin runner spawns (hull.buildctx.plugin): __hull_exe is
+ * argv[0], which may be relative or a bare name found on PATH. */
+static int l_tool_self_path(lua_State *L)
+{
+    char out[PATH_MAX];
+    if (hl_release_io_self_path(out, sizeof out) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushstring(L, out);
+    return 1;
+}
+
 /* ── tool.platform_cache_dir() → "$HOME/.hull/platform" | nil ──
  *
  * Where `hull flavor install` stores fetched per-flavor platform libs.
@@ -2374,6 +2389,7 @@ static const luaL_Reg tool_funcs[] = {
     { "find_files",                  l_tool_find_files },
     { "find_tool",                   l_tool_find_tool },
     { "hull_cache_dir",              l_tool_hull_cache_dir },
+    { "self_path",                   l_tool_self_path },
     { "platform_cache_dir",          l_tool_platform_cache_dir },
     { "feature_cache_dir",           l_tool_feature_cache_dir },
     { "platform_verify",             l_tool_platform_verify },

@@ -29,6 +29,7 @@
 #endif
 #include "hull/commands/eject.h"
 #include "hull/commands/analyze.h"
+#include "hull/commands/plugins.h"
 #ifdef HL_ENABLE_DB
 #include "hull/commands/jobs.h"
 #include "hull/commands/migrate.h"
@@ -89,6 +90,7 @@ static const HlCommand commands[] = {
 #endif
     { "check",         hl_cmd_check },
     { "analyze",       hl_cmd_analyze },
+    { "plugins",       hl_cmd_plugins },
     { "compute",       hl_cmd_compute },
     { "deploy",        hl_cmd_deploy },
     { "version",       hl_cmd_version },

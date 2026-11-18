@@ -31,6 +31,7 @@ static const HlCacheKind REGISTRY[] = {
     { "templates",    "Lua template render functions (parse + pcall skip)",    1, "template",     0 },
     { "js-templates", "JS template render functions (parse + IIFE skip)",      1, "js_template",  0 },
     { "gpu-shaders",  "GPU shader compile-helper verdicts (sha-keyed, OK only)", 1, "gpu_shader",   0 },
+    { "build-results", "Build plugin action results and payloads (tool key)",  1, "build",        0 },
     { "tools",        "Signed side-loaded tool binaries (wamrc, ...)",         0, NULL,           1 },
     { NULL, NULL, 0, NULL, 0 }
 };

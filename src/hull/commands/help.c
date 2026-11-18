@@ -78,6 +78,7 @@ int hl_cmd_help(int argc, char **argv, const HlCommandEnv *env)
     row(f, "doctor",        "check readiness; --fix installs what is missing");
     row(f, "check",         "validate an app's manifest before running");
     row(f, "analyze",       "static syntax analysis of an app's Lua source");
+    row(f, "plugins",       "list / run an app's build plugins (hull.build.json)");
     row(f, "modules",       "list / explain the first-party module registry");
     row(f, "version",       "print version (also --version / -v)");
 

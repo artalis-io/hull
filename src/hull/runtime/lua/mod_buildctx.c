@@ -298,8 +298,10 @@ int luaopen_hull_buildctx_fs(lua_State *L)
  *   st:close()
  *
  * Payloads and results are sealed in separate domains, so a payload never
- * verifies as a result. A put is atomic (temp + rename) and a key names one
- * content: a second put of a present key is a no-op.
+ * verifies as a result. A put is atomic (temp + rename). A payload's key is
+ * its hash, so a second put of it is a no-op; a result's key is the action's
+ * pre-run key, which a later run with other dependencies shares (a stale
+ * result), so put_result replaces what is there.
  */
 
 #define BCST_MT          "hull.buildctx._store"
@@ -392,6 +394,9 @@ static int st_put_result(lua_State *L)
     const char *key = luaL_checklstring(L, 2, &klen);
     const char *bytes = luaL_checklstring(L, 3, &len);
     if (!hex_key_ok(key, klen)) return fail(L, "invalid_args");
+    /* Replace: the keyed put skips a present key. A lookup between the two
+     * finds no result and runs the action itself. */
+    if (hl_blob_store_delete(st->store, key) < 0) return fail(L, "io_error");
     if (hl_tool_cache_put_sealed(st->store, BCST_RESULT, key, (const uint8_t *)bytes, len) != 0)
         return fail(L, "io_error");
     lua_pushboolean(L, 1);
