@@ -352,6 +352,10 @@ static inline const char *hl_lua_chunkname(char *buf, size_t n,
  * internal modules to app code - a C caller has no Lua frame to check. */
 int hl_lua_require_trusted(lua_State *L);
 
+/* app.transform for a manifest declaring hull/build-plugin (build_plugin.c):
+ * hands the stdlib's hull._build_plugin the live `app` and the channel. */
+void hl_lua_install_app_transform(lua_State *L);
+
 /* Pushes app code's read-only view of the table at @p idx (readonly_view.c,
  * audit 43): reads go through to it, writes raise, nested tables read through
  * it are views too, one view per table per VM. A non-table, or a view, is

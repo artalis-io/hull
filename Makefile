@@ -1122,6 +1122,11 @@ CAP_OBJS += $(CHILD_CHANNEL_OBJ)
 # Lua and QuickJS walkers. libc-only; rides CAP_OBJS like host.
 PLAIN_VALUE_OBJ := $(BUILDDIR)/plain_value.o
 CAP_OBJS += $(PLAIN_VALUE_OBJ)
+# build_plugin is the plugin side of a build plugin's channel: the inherited
+# fd, the frames, the manifest preset (shared/build_plugin.h). Over
+# child_channel; rides CAP_OBJS like host.
+BUILD_PLUGIN_OBJ := $(BUILDDIR)/build_plugin.o
+CAP_OBJS += $(BUILD_PLUGIN_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -3365,6 +3370,9 @@ $(CHILD_CHANNEL_OBJ): $(SRCDIR)/hull/shared/child_channel.c $(INCDIR)/hull/share
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(PLAIN_VALUE_OBJ): $(SRCDIR)/hull/shared/plain_value.c $(INCDIR)/hull/shared/plain_value.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(BUILD_PLUGIN_OBJ): $(SRCDIR)/hull/shared/build_plugin.c $(INCDIR)/hull/shared/build_plugin.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # QuickJS sources (relaxed warnings)

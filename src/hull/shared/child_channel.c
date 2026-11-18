@@ -8,6 +8,26 @@
 
 #include "hull/shared/child_channel.h"
 
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+uint64_t hl_chan_mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+void hl_chan_frame_reset(HlChanFrame *r)
+{
+    free(r->buf);
+    uint32_t magic = r->magic, max = r->max;
+    memset(r, 0, sizeof *r);
+    r->magic = magic;
+    r->max = max;
+}
+
 #ifdef HL_CHAN_SUPPORTED
 
 #include <errno.h>
@@ -38,13 +58,6 @@ extern char **environ;
 #else
 #define CHAN_SEND_FLAGS 0
 #endif
-
-uint64_t hl_chan_mono_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
-}
 
 void hl_chan_set_nonblock(int fd)
 {
@@ -107,15 +120,6 @@ int hl_chan_write_frame(int fd, uint32_t magic, uint32_t type, uint32_t id,
     if (alen && hl_chan_write_all(fd, a, alen, deadline) != 0) return -1;
     if (blen && hl_chan_write_all(fd, b, blen, deadline) != 0) return -1;
     return 0;
-}
-
-void hl_chan_frame_reset(HlChanFrame *r)
-{
-    free(r->buf);
-    uint32_t magic = r->magic, max = r->max;
-    memset(r, 0, sizeof *r);
-    r->magic = magic;
-    r->max = max;
 }
 
 int hl_chan_frame_read_some(int fd, HlChanFrame *r)

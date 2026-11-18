@@ -513,6 +513,10 @@ int hl_js_harden_intrinsics(JSContext *ctx);
 /* Freeze a Hull-owned object and what its own properties reach (stops at
  * non-extensible objects; does not follow [[Prototype]]). 0 / -1. */
 int hl_js_freeze_value(JSContext *ctx, JSValueConst v);
+/* app.transform for a manifest declaring hull/build-plugin (build_plugin.c):
+ * evaluates the stdlib's hull/_build_plugin.js and calls it with @p app and
+ * the channel. 0, or -1 with an exception pending. */
+int hl_js_install_app_transform(JSContext *ctx, JSValueConst app);
 /* JS_SetModuleExport of a frozen value (a native module's export object is
  * shared by app code and the stdlib). Exports undefined if freezing fails. */
 int hl_js_export_frozen(JSContext *ctx, JSModuleDef *m, const char *name,

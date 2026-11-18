@@ -41,6 +41,53 @@ declare module "hull:app" {
         localtime?: boolean;
     }
 
+    /** Bytes a build plugin writes: text (its UTF-8 bytes) or a buffer. */
+    export type BuildPluginBytes = string | ArrayBuffer | ArrayBufferView;
+
+    /** A blob a build plugin writes (`ctx.outputs.createBlob`). */
+    export interface BuildPluginBlob {
+        write(bytes: BuildPluginBytes): true;
+        close(): true;
+    }
+
+    /** A file tree a build plugin writes (`ctx.outputs.createTree`). */
+    export interface BuildPluginTree {
+        write(path: string, bytes: BuildPluginBytes, mode?: "regular" | "executable"): true;
+        close(): true;
+    }
+
+    /** What `app.transform`'s function is given for one action. Every call is
+     * one request to the build host; a refused call throws an Error whose
+     * `code` is the host's token. Values are plain (no functions, no class
+     * instances); bytes arrive as an ArrayBuffer. */
+    export interface BuildPluginContext {
+        /** The action's metadata. */
+        meta: Record<string, unknown>;
+        /** The plugin's configuration (`hull.build.json`). */
+        config: Record<string, unknown>;
+        inputs: {
+            read(path: string): ArrayBuffer;
+            stat(path: string, opts?: { exec?: boolean }): unknown;
+            list(path: string): unknown;
+        };
+        outputs: {
+            createBlob(name: string): BuildPluginBlob;
+            createTree(name: string): BuildPluginTree;
+            declareGeneratedOutput(descriptor: { name: string; [k: string]: unknown },
+                                   blob: BuildPluginBlob): true;
+            declareArtifact(descriptor: { name: string; [k: string]: unknown },
+                            tree: BuildPluginTree | BuildPluginBlob): true;
+        };
+        diagnostics: {
+            emit(d: { severity: "error" | "warning" | "info"; code: string; message: string;
+                      path?: string; range?: { start: number; stop: number } }): true;
+        };
+        source: {
+            units(): unknown[];
+            erasedSource(unit: unknown): unknown;
+        };
+    }
+
     /** The application object. */
     export const app: {
         /** Register the app's entry point (once); see docs/cli_mode.md. */
@@ -77,5 +124,8 @@ declare module "hull:app" {
         every(intervalMs: number, fn: () => unknown): void;
         /** Run `fn` daily at `"HH:MM"` (UTC unless `localtime`). Requires `hull/timers`. */
         daily(time: string, fn: () => unknown, opts?: DailyOptions): void;
+        /** Register a build plugin's transform, run once per action the build host
+         * sends (docs/buildcontext_design.md §9.1). Requires `hull/build-plugin`. */
+        transform(fn: (ctx: BuildPluginContext) => unknown): void;
     };
 }

@@ -81,6 +81,15 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_FS, .deps = {0},
     },
     {
+        /* A build plugin: a Hull app the build host runs as its own process
+         * on one channel (docs/buildcontext_design.md §9.1). Decorates `app`
+         * with app.transform; the manifest preset (shared/build_plugin.c)
+         * admits only pure modules beside it. */
+        .name = "hull/build-plugin",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {0},
+    },
+    {
         /* In-memory key/value cache with TTL + get-or-compute memoization.
          * Bounded (LRU on cap), lazily-expiring, process-local. Pure Lua/JS
          * over time; no persistence, no new authority. */

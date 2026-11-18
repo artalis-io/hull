@@ -24,6 +24,13 @@ release-artifact layout).
   a canonical dependency manifest and its revalidation (content and type decide freshness, never
   mtime). Nothing in `hull` uses it yet: it is the first step toward running TypeScript
   (docs/typescript_design.md §1).
+- Build plugins, plugin side (BuildContext checkpoint 5, docs/buildcontext_design.md §13.3): a
+  Hull app whose manifest declares `hull/build-plugin@1` gets `app.transform(fn)`, in Lua and
+  JavaScript. Run by a build host with a channel on fd 3 (`HULL_BUILD_PLUGIN_FD=3`, taken before
+  app code runs), it serves the host's actions one at a time, each a run of its own; every ctx
+  call (`ctx.inputs`, `ctx.outputs`, `ctx.diagnostics`, `ctx.source`) is one request the host
+  answers. The manifest preset admits no capability section and only pure modules. The host side
+  (the runner, `hull.build.json`) comes next; nothing in `hull build` runs a plugin yet.
 - Build pipeline, internal (BuildContext, docs/buildcontext_design.md §9.1): the pieces a build
   plugin's channel is made of. `shared/child_channel` - a helper process on one inherited socket
   (spawn with fd 3 and a filtered environment, length-framed messages under deadlines, reap) -
