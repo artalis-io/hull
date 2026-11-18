@@ -1127,6 +1127,11 @@ CAP_OBJS += $(PLAIN_VALUE_OBJ)
 # child_channel; rides CAP_OBJS like host.
 BUILD_PLUGIN_OBJ := $(BUILDDIR)/build_plugin.o
 CAP_OBJS += $(BUILD_PLUGIN_OBJ)
+# generation takes the pipeline generation a parent hands an app run from
+# source, checks its payload hashes and installs the loaders' overlay
+# (shared/generation.h). sh_json + the cap SHA-256; rides CAP_OBJS like host.
+GENERATION_OBJ := $(BUILDDIR)/generation.o
+CAP_OBJS += $(GENERATION_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -3373,6 +3378,9 @@ $(PLAIN_VALUE_OBJ): $(SRCDIR)/hull/shared/plain_value.c $(INCDIR)/hull/shared/pl
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(BUILD_PLUGIN_OBJ): $(SRCDIR)/hull/shared/build_plugin.c $(INCDIR)/hull/shared/build_plugin.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(GENERATION_OBJ): $(SRCDIR)/hull/shared/generation.c $(INCDIR)/hull/shared/generation.h $(INCDIR)/hull/vfs.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # QuickJS sources (relaxed warnings)

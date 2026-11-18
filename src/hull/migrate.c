@@ -438,6 +438,26 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
         snprintf(filepath, sizeof(filepath), "%s/migrations/%s",
                  root_dir, ml->names[i]);
 
+        /* A pipeline generation entry shadows the file (shared/
+         * generation.h): its checked bytes are the migration, the file
+         * unread. */
+        char orel[4096];
+        int on = snprintf(orel, sizeof(orel), "migrations/%s", ml->names[i]);
+        const HlEntry *ov = (on > 0 && (size_t)on < sizeof(orel))
+                          ? hl_vfs_overlay_find(orel) : NULL;
+        if (ov) {
+            char *osql = malloc((size_t)ov->len + 1);
+            if (!osql) {
+                migration_list_free(ml);
+                close(lfd);
+                return -2;
+            }
+            memcpy(osql, ov->data, ov->len);
+            osql[ov->len] = '\0';
+            ml->sqls[i] = osql;
+            continue;
+        }
+
         /* A regular file only, opened without blocking (a FIFO named
          * NNN_x.sql hung startup in fopen), relative to the directory
          * descriptor and never through a symlink. */

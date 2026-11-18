@@ -20,6 +20,7 @@
  */
 
 #ifdef HL_ENABLE_JS
+#include "hull/shared/generation.h"
 #include "hull/runtime/js.h"
 #endif
 
@@ -3544,6 +3545,18 @@ int hull_serve(int argc, char **argv)
         log_error("[hull:c] " HL_BUILD_PLUGIN_ENV " is set but fd 3 is not "
                   "a socket");
         return 1;
+    }
+
+    /* A pipeline generation the parent handed over (shared/generation.h):
+     * read and its descriptor closed here, before any app code runs or any
+     * child (the GPU compile helper) is spawned; installed by the app
+     * context once --verify-sig is known. A built binary consults none. */
+    {
+        extern const HlEntry hl_app_entries[];
+        if (hl_generation_take_env(hl_app_entries[0].name != NULL) < 0) {
+            log_error("[hull:c] " HL_GENERATION_TAKE_ERR);
+            return 1;
+        }
     }
 
     /* --verify-sig: no bytecode or compiled template from the shared code

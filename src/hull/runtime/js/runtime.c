@@ -938,57 +938,71 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         }
     }
 
-    FILE *f = NULL;
-    const char *fserr = NULL;
-    int root_fd = hl_fs_open_base(js->app_dir, &fserr);
-    if (root_fd >= 0) {
-        int mfd = hl_fs_open_at(root_fd, relpath, HL_FS_OPEN_READ, 0, &fserr);
-        close(root_fd);
-        if (mfd >= 0) {
-            f = fdopen(mfd, "rb");
-            if (!f) close(mfd);
+    /* A pipeline generation entry shadows the file: its checked bytes load
+     * under the file's name, and the file is not read (shared/
+     * generation.h). */
+    const HlEntry *ov = hl_vfs_overlay_find(relpath);
+    char *buf;
+    size_t nread;
+    if (ov) {
+        buf = js_malloc(ctx, (size_t)ov->len + 1);
+        if (!buf) return NULL;
+        memcpy(buf, ov->data, ov->len);
+        nread = ov->len;
+        buf[nread] = '\0';
+    } else {
+        FILE *f = NULL;
+        const char *fserr = NULL;
+        int root_fd = hl_fs_open_base(js->app_dir, &fserr);
+        if (root_fd >= 0) {
+            int mfd = hl_fs_open_at(root_fd, relpath, HL_FS_OPEN_READ, 0, &fserr);
+            close(root_fd);
+            if (mfd >= 0) {
+                f = fdopen(mfd, "rb");
+                if (!f) close(mfd);
+            }
         }
-    }
-    if (!f) {
-        JS_ThrowReferenceError(ctx, "module not found: %s", module_name);
-        return NULL;
-    }
+        if (!f) {
+            JS_ThrowReferenceError(ctx, "module not found: %s", module_name);
+            return NULL;
+        }
 
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    if (size < 0 || size > HL_MODULE_MAX_SIZE) {
-        fclose(f);
-        JS_ThrowReferenceError(ctx, "module too large: %s", module_name);
-        return NULL;
-    }
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        JS_ThrowInternalError(ctx, "seek failed: %s", module_name);
-        return NULL;
-    }
+        fseek(f, 0, SEEK_END);
+        long size = ftell(f);
+        if (size < 0 || size > HL_MODULE_MAX_SIZE) {
+            fclose(f);
+            JS_ThrowReferenceError(ctx, "module too large: %s", module_name);
+            return NULL;
+        }
+        if (fseek(f, 0, SEEK_SET) != 0) {
+            fclose(f);
+            JS_ThrowInternalError(ctx, "seek failed: %s", module_name);
+            return NULL;
+        }
 
-    char *buf = js_malloc(ctx, (size_t)size + 1);
-    if (!buf) {
+        buf = js_malloc(ctx, (size_t)size + 1);
+        if (!buf) {
+            fclose(f);
+            return NULL;
+        }
+        nread = fread(buf, 1, (size_t)size, f);
+        int read_err = ferror(f);
         fclose(f);
-        return NULL;
-    }
-    size_t nread = fread(buf, 1, (size_t)size, f);
-    int read_err = ferror(f);
-    fclose(f);
-    if (read_err || nread != (size_t)size) {
-        js_free(ctx, buf);
-        return NULL;
-    }
-    buf[nread] = '\0';
+        if (read_err || nread != (size_t)size) {
+            js_free(ctx, buf);
+            return NULL;
+        }
+        buf[nread] = '\0';
 
-    /* Under --verify-sig only a signed module, with the bytes that were
-     * signed, may load (one planted beside the app, or swapped after the
-     * startup check). */
-    if (hl_vfs_disk_gate_check(relpath, buf, nread) != 0) {
-        js_free(ctx, buf);
-        JS_ThrowReferenceError(ctx, "module %s is not a signed file "
-                               "(--verify-sig)", relpath);
-        return NULL;
+        /* Under --verify-sig only a signed module, with the bytes that were
+         * signed, may load (one planted beside the app, or swapped after the
+         * startup check). */
+        if (hl_vfs_disk_gate_check(relpath, buf, nread) != 0) {
+            js_free(ctx, buf);
+            JS_ThrowReferenceError(ctx, "module %s is not a signed file "
+                                   "(--verify-sig)", relpath);
+            return NULL;
+        }
     }
 
     /* JSON file → wrap as: export default JSON.parse(`...`)
@@ -1562,55 +1576,70 @@ static int js_load_app_impl(HlJS *js, const char *filename)
         return -1;
     }
 
-    /* Load from filesystem (development mode) */
-    FILE *f = fopen(filename, "rb");
-    if (!f) {
-        log_error("[hull:c] cannot open %s", filename);
-        return -1;
-    }
-
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return -1;
-    }
-    long size = ftell(f);
-    if (size < 0 || size > HL_MODULE_MAX_SIZE) {
-        fclose(f);
-        log_error("[hull:c] %s too large", filename);
-        return -1;
-    }
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return -1;
-    }
-
     /* Save arena position - buffer is only needed until
      * JS_Eval copies it into QuickJS bytecode. */
     size_t arena_saved = js->scratch->used;
-
-    char *buf = sh_arena_alloc(js->scratch, (size_t)size + 1);
-    if (!buf) {
-        fclose(f);
-        return -1;
-    }
-    size_t nread = fread(buf, 1, (size_t)size, f);
-    int read_err = ferror(f);
-    fclose(f);
-    if (read_err || nread != (size_t)size) {
-        js->scratch->used = arena_saved;
-        return -1;
-    }
-    buf[nread] = '\0';
-
-    /* --verify-sig: the entry runs with the bytes that were signed (the
-     * startup check hashed the file; this is the read that runs). */
-    {
-        const char *base = strrchr(filename, '/');
-        base = base ? base + 1 : filename;
-        if (hl_vfs_disk_gate_check(base, buf, nread) != 0) {
-            js->scratch->used = arena_saved;
-            log_error("[hull:c] %s is not the signed file (--verify-sig)", filename);
+    char *buf;
+    size_t nread;
+    const char *ebase = strrchr(filename, '/');
+    ebase = ebase ? ebase + 1 : filename;
+    const HlEntry *ov = hl_vfs_overlay_find(ebase);
+    if (ov) {
+        /* The pipeline generation's entry shadows the file (shared/
+         * generation.h): its checked bytes run under the file's name, and
+         * the file is never read. */
+        buf = sh_arena_alloc(js->scratch, (size_t)ov->len + 1);
+        if (!buf) return -1;
+        memcpy(buf, ov->data, ov->len);
+        nread = ov->len;
+        buf[nread] = '\0';
+    } else {
+        /* Load from filesystem (development mode) */
+        FILE *f = fopen(filename, "rb");
+        if (!f) {
+            log_error("[hull:c] cannot open %s", filename);
             return -1;
+        }
+
+        if (fseek(f, 0, SEEK_END) != 0) {
+            fclose(f);
+            return -1;
+        }
+        long size = ftell(f);
+        if (size < 0 || size > HL_MODULE_MAX_SIZE) {
+            fclose(f);
+            log_error("[hull:c] %s too large", filename);
+            return -1;
+        }
+        if (fseek(f, 0, SEEK_SET) != 0) {
+            fclose(f);
+            return -1;
+        }
+
+        buf = sh_arena_alloc(js->scratch, (size_t)size + 1);
+        if (!buf) {
+            fclose(f);
+            return -1;
+        }
+        nread = fread(buf, 1, (size_t)size, f);
+        int read_err = ferror(f);
+        fclose(f);
+        if (read_err || nread != (size_t)size) {
+            js->scratch->used = arena_saved;
+            return -1;
+        }
+        buf[nread] = '\0';
+
+        /* --verify-sig: the entry runs with the bytes that were signed (the
+         * startup check hashed the file; this is the read that runs). */
+        {
+            const char *base = strrchr(filename, '/');
+            base = base ? base + 1 : filename;
+            if (hl_vfs_disk_gate_check(base, buf, nread) != 0) {
+                js->scratch->used = arena_saved;
+                log_error("[hull:c] %s is not the signed file (--verify-sig)", filename);
+                return -1;
+            }
         }
     }
 

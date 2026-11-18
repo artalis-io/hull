@@ -2386,6 +2386,16 @@ Both are stored in `HlRuntime` and accessible to all consumers.
 - `hl_vfs_has_prefix(vfs, prefix)`. O(log n) prefix existence check
 - `hl_vfs_path(vfs, name, buf, size)`. Filesystem path construction (`root_dir/name`)
 
+**Pipeline generation overlay (development only).** An app run from source may be handed a
+pipeline generation by its parent (`HULL_GENERATION_FD`, `shared/generation.h`,
+[docs/dev_pipeline_generations_design.md](docs/dev_pipeline_generations_design.md)): taken before
+any app code runs, every payload checked against its manifest hash, then installed once as a
+sealed overlay (`hl_vfs_overlay_install` / `hl_vfs_overlay_find`, app-relative names). An overlay
+entry SHADOWS the file of the same name: the loader runs its bytes and never reads the file. A
+built binary ignores the descriptor; `--verify-sig` refuses a generation; a refused one stops the
+app (never a fallback to the shadowed source). Nothing on disk is ever read as a generation. **A
+new development disk loader asks `hl_vfs_overlay_find` before it opens the file** (INV-14).
+
 **Build-time requirement:** Entry arrays must be sorted by name in C `strcmp` order (the Makefile uses `LC_ALL=C sort`). `hl_vfs_init()` debug-asserts sorted order.
 
 **Consumers:**
@@ -2919,7 +2929,7 @@ Key findings to be aware of:
 - Keel's router stores the method / pattern pointers (and middleware / ws-upgrade config pointers) it is given **without copying**: everything handed to `kl_http_router_add*` / `_use` / `_use_post` / `kl_http_server_route*` / `_use*` / `_ws_upgrade` must be Hull-owned and outlive the server - never a `JS_ToCString` / `lua_tostring` result (the route contexts `HlJSRoute` / `HlLuaRoute` own copies, ws / sse routes a `path[256]`; audit 11 H1). Every registration failure (allocation, conversion, a Keel refusal) fails the wiring so the app refuses to start; a dropped middleware must never fail open
 - Public Hull functions prefixed with `hl_` (capabilities: `hl_cap_*`, tools: `hl_tool_*`, commands: `hl_cmd_*`)
 - Keel functions prefixed with `kl_` (see vendor/keel/CLAUDE.md)
-- **Invariants are linted.** `make check-invariants` (`scripts/check_invariants.py`, CI job `invariants`, also in `make lint`) checks INV-1..INV-13: bindings are registered with the binding dispatcher (`hl_lua_setfuncs` / `hl_lua_newlib` / `hl_lua_pushcfunction`, `hl_js_set_function_list`), no `sqlite3_*` outside `cap/`, JS parking ops call `hl_js_db_refuse_wait`, JS entries end through `hl_js_entry_end_txn_check`, disk loaders check `hl_vfs_embedded`, terminal output goes through the escapers, no `JS_RunGC` outside `hl_js_gc_for_retry`, SQLite opens register with `hl_db_live_file_add` first, Lua resumes pass the resumer, vendored-engine changes carry a documented `HULL PATCH NNNN`, Windows app-path checks use the shared predicate, GPU contexts open through `hl_gpu_ctx_open`, GPU device mutexes are taken through `dev_lock`. Justified exceptions go in `scripts/invariants_allowlist.txt` with a reason (a stale entry fails too). **Any new "a new X must Y" statement added to this file must add a lint rule, with good / bad fixtures under `tests/invariants/fixtures/`, in the same PR** ([docs/invariants/README.md](docs/invariants/README.md)). Audit fixes follow [docs/audit_process.md](docs/audit_process.md): the A1 / A2 / A3 rubric, a `<area>_audit<N>.<case>` test that fails on the pre-fix code, an independent review pass, the batch cap.
+- **Invariants are linted.** `make check-invariants` (`scripts/check_invariants.py`, CI job `invariants`, also in `make lint`) checks INV-1..INV-14: bindings are registered with the binding dispatcher (`hl_lua_setfuncs` / `hl_lua_newlib` / `hl_lua_pushcfunction`, `hl_js_set_function_list`), no `sqlite3_*` outside `cap/`, JS parking ops call `hl_js_db_refuse_wait`, JS entries end through `hl_js_entry_end_txn_check`, disk loaders check `hl_vfs_embedded`, terminal output goes through the escapers, no `JS_RunGC` outside `hl_js_gc_for_retry`, SQLite opens register with `hl_db_live_file_add` first, Lua resumes pass the resumer, vendored-engine changes carry a documented `HULL PATCH NNNN`, Windows app-path checks use the shared predicate, GPU contexts open through `hl_gpu_ctx_open`, GPU device mutexes are taken through `dev_lock`, development disk loaders consult the pipeline generation overlay first. Justified exceptions go in `scripts/invariants_allowlist.txt` with a reason (a stale entry fails too). **Any new "a new X must Y" statement added to this file must add a lint rule, with good / bad fixtures under `tests/invariants/fixtures/`, in the same PR** ([docs/invariants/README.md](docs/invariants/README.md)). Audit fixes follow [docs/audit_process.md](docs/audit_process.md): the A1 / A2 / A3 rubric, a `<area>_audit<N>.<case>` test that fails on the pre-fix code, an independent review pass, the batch cap.
 
 ## App-facing API reference (stdlib, middleware, compute, GPU)
 

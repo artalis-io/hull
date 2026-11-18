@@ -305,7 +305,15 @@ static int gpu_load_source(lua_State *L, HlLua *lua, const char *name,
         }
         /* Opened under the app root: the name check above is lexical, and
          * a symlink below shaders/ used to be followed wherever it led. */
-        FILE *f = hl_fs_fopen_read(lua->base.app_vfs->root_dir, vfs_name);
+        /* A pipeline generation entry shadows the file (shared/
+         * generation.h): its checked bytes, the file unread. */
+        const HlEntry *ov = hl_vfs_overlay_find(vfs_name);
+        if (ov) {
+            wgsl = (const char *)ov->data;
+            wgsl_len = ov->len;
+        }
+        FILE *f = ov ? NULL : hl_fs_fopen_read(lua->base.app_vfs->root_dir,
+                                               vfs_name);
         if (f) {
             long flen = -1;
             if (fseek(f, 0, SEEK_END) == 0) {
