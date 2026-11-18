@@ -183,6 +183,9 @@ static const luaL_Reg chan_funcs[] = {
     {NULL, NULL}
 };
 
+/* The stub runner test.run_transform calls, keyed by this address. */
+static const char STUB_KEY = 0;
+
 void hl_lua_install_app_transform(lua_State *L)
 {
     lua_pushcfunction(L, hl_lua_require_trusted);   /* as mod_fs.c does */
@@ -191,5 +194,14 @@ void hl_lua_install_app_transform(lua_State *L)
     lua_getglobal(L, "app");
     lua_createtable(L, 0, 4);
     hl_lua_setfuncs(L, chan_funcs, 0);
-    lua_call(L, 2, 0);
+    lua_call(L, 2, 1);                 /* the stub runner */
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &STUB_KEY);
+}
+
+int hl_lua_push_transform_stub(lua_State *L)
+{
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &STUB_KEY);
+    if (lua_isfunction(L, -1)) return 1;
+    lua_pop(L, 1);
+    return 0;
 }

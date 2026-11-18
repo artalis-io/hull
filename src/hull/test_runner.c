@@ -6,6 +6,7 @@
  */
 
 #include "hull/test_runner.h"
+#include "hull/shared/build_plugin.h"
 #include "hull/app_context.h"
 #include "hull/cap/test.h"
 #include "hull/cap/tool.h"
@@ -135,6 +136,8 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
     rt->test_env_allow = env_allow;
 
     char **test_files = hl_tool_find_files(app_dir, pattern, NULL);
+    /* A build plugin directory's tests are the plugin's (hull test <dir>). */
+    hl_build_plugin_drop_dirs(app_dir, test_files);
     if (!test_files || !test_files[0]) {
         if (writer && writer->on_file_load_error)
             writer->on_file_load_error(writer->user, "no test files found");

@@ -82,4 +82,12 @@ int hl_build_plugin_module_allowed(const char *name);
 /* Check @p m against the preset. 0, or -1 with the reason in @p err. */
 int hl_build_plugin_preset_check(const HlManifest *m, char *err, size_t errsz);
 
+/* Drop from @p files - a NULL-terminated list of malloc'd paths under
+ * @p app_dir, as hl_tool_find_files returns it - every file inside a build
+ * plugin directory the app's hull.build.json names (freed, the list
+ * compacted): a plugin is not part of the app (§9.2), and `hull test` of the
+ * app does not run its tests. A missing or unreadable hull.build.json drops
+ * nothing; checking it is the registry's job (hull.buildctx.registry). */
+void hl_build_plugin_drop_dirs(const char *app_dir, char **files);
+
 #endif /* HL_SHARED_BUILD_PLUGIN_H */

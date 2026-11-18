@@ -13,6 +13,7 @@
  */
 
 #include "hull/commands/test.h"
+#include "hull/shared/build_plugin.h"
 #include "hull/app_context.h"
 #include "hull/cap/test.h"
 #include "hull/cap/tool.h"
@@ -178,6 +179,7 @@ int hl_cmd_test(int argc, char **argv, const HlCommandEnv *env)
 #ifdef HL_ENABLE_LUA
     if (lua_entry) {
         char **lua_tests = hl_tool_find_files(app_dir, "test_*.lua", NULL);
+        hl_build_plugin_drop_dirs(app_dir, lua_tests);
         if (lua_tests && lua_tests[0]) {
             ran_any = 1;
             result |= run_tests_for_entry(app_dir, lua_entry);
@@ -192,6 +194,7 @@ int hl_cmd_test(int argc, char **argv, const HlCommandEnv *env)
 #ifdef HL_ENABLE_JS
     if (js_entry) {
         char **js_tests = hl_tool_find_files(app_dir, "test_*.js", NULL);
+        hl_build_plugin_drop_dirs(app_dir, js_tests);
         if (js_tests && js_tests[0]) {
             ran_any = 1;
             result |= run_tests_for_entry(app_dir, js_entry);

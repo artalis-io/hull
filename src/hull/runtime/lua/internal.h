@@ -355,6 +355,9 @@ int hl_lua_require_trusted(lua_State *L);
 /* app.transform for a manifest declaring hull/build-plugin (build_plugin.c):
  * hands the stdlib's hull._build_plugin the live `app` and the channel. */
 void hl_lua_install_app_transform(lua_State *L);
+/* Push the stub runner test.run_transform calls (hull._build_plugin's
+ * return): 1, or 0 with nothing pushed when the app is not a build plugin. */
+int hl_lua_push_transform_stub(lua_State *L);
 
 /* Pushes app code's read-only view of the table at @p idx (readonly_view.c,
  * audit 43): reads go through to it, writes raise, nested tables read through

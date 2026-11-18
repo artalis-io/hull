@@ -1,7 +1,8 @@
 /*
  * test_build_plugin.c - the plugin side of a build plugin's channel
  * (shared/build_plugin.c): the manifest preset, section by section and
- * module by module, and taking the inherited descriptor.
+ * module by module, taking the inherited descriptor, and leaving the
+ * plugin directories hull.build.json names out of an app's file list.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -9,6 +10,7 @@
 #include "utest.h"
 
 #include "hull/shared/build_plugin.h"
+#include "test_tmpdir.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -146,5 +148,71 @@ UTEST(build_plugin, take_env)
     if (saved >= 0) { dup2(saved, 3); close(saved); }
 }
 #endif
+
+static void write_text(const char *dir, const char *name, const char *text)
+{
+    char p[HL_TEST_PATH_MAX + 64];
+    snprintf(p, sizeof p, "%s/%s", dir, name);
+    FILE *f = fopen(p, "wb");
+    if (f) { fputs(text, f); fclose(f); }
+}
+
+static char **list_of(const char *dir, const char *const *rel, size_t n)
+{
+    char **out = calloc(n + 1, sizeof *out);
+    for (size_t i = 0; i < n; i++) {
+        size_t len = strlen(dir) + strlen(rel[i]) + 2;
+        out[i] = malloc(len);
+        snprintf(out[i], len, "%s/%s", dir, rel[i]);
+    }
+    return out;
+}
+
+static void free_list(char **l)
+{
+    for (char **p = l; *p; p++) free(*p);
+    free(l);
+}
+
+UTEST(build_plugin, drop_dirs_leaves_plugins_out)
+{
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "hull_bp_drop") != NULL);
+    static const char *const rel[] = {
+        "tests/test_app.lua", "plugins/inv/tests/test_inv.lua", "plugins/inventory/test_x.lua",
+        "plugins/inv", "lib/plugins/inv/test_y.lua",
+    };
+    char **l = list_of(dir, rel, 5);
+    hl_build_plugin_drop_dirs(dir, l);           /* no hull.build.json: nothing dropped */
+    int n = 0;
+    for (char **p = l; *p; p++) n++;
+    EXPECT_EQ(n, 5);
+    free_list(l);
+
+    write_text(dir, "hull.build.json", "{\"plugins\":[{\"path\":\"plugins/inv\"},{\"path\":7}]}");
+    l = list_of(dir, rel, 5);
+    hl_build_plugin_drop_dirs(dir, l);
+    n = 0;
+    for (char **p = l; *p; p++) n++;
+    ASSERT_EQ(n, 4);                              /* only plugins/inv/... went */
+    char want[HL_TEST_PATH_MAX + 64];
+    snprintf(want, sizeof want, "%s/plugins/inventory/test_x.lua", dir);
+    EXPECT_STREQ(l[1], want);                     /* a longer sibling name stays */
+    EXPECT_TRUE(l[4] == NULL);
+    free_list(l);
+
+    write_text(dir, "hull.build.json", "not json");
+    l = list_of(dir, rel, 5);
+    hl_build_plugin_drop_dirs(dir, l);            /* unreadable: nothing dropped */
+    n = 0;
+    for (char **p = l; *p; p++) n++;
+    EXPECT_EQ(n, 5);
+    free_list(l);
+
+    char p[HL_TEST_PATH_MAX + 64];
+    snprintf(p, sizeof p, "%s/hull.build.json", dir);
+    remove(p);
+    rmdir(dir);
+}
 
 UTEST_MAIN()

@@ -120,6 +120,27 @@ end
 -- The UNPROTECTED analysis: root validation/canonicalization + discovery + per-file
 -- frontend dispatch + model assembly. May raise on a frontend/adapter/model defect; the
 -- public M.analyze wraps this in a protected boundary (D1: "never raises").
+-- The build plugin directories hull.build.json names are not the app's
+-- (docs/buildcontext_design.md §9.2): their sources are left out. Read through
+-- the BuildContext registry where its native piece is loaded (the tool VM);
+-- a malformed hull.build.json is the plugin commands' error, not discovery's.
+local function without_plugin_dirs(root, files)
+    local okn = pcall(function() return require("hull.buildctx._fs") end)   -- by name: internal
+    if not okn then return files end
+    local paths = require("hull.buildctx.registry").plugin_paths(root)
+    if not paths or #paths == 0 then return files end
+    local out = {}
+    for _, f in ipairs(files) do
+        local rel = rel_path(root, f)
+        local keep = true
+        for _, p in ipairs(paths) do
+            if rel:sub(1, #p + 1) == p .. "/" then keep = false; break end
+        end
+        if keep then out[#out + 1] = f end
+    end
+    return out
+end
+
 local function analyze_unprotected(root_in, opts)
     local root_disp = tostring(root_in or ".")
     local gen        = opts.generation or 0
@@ -156,6 +177,7 @@ local function analyze_unprotected(root_in, opts)
     local okb, disc = pcall(function()
         local per_source, op_diags = {}, {}
         local files, derr = discover.discover(root, { ext = registry.known_exts(), extra_exclude = { "static" } })
+        if not derr then files = without_plugin_dirs(root, files) end
         if derr then
             op_diags[#op_diags + 1] = { severity = "error", code = "project.discovery_failed",
                                         message = "source discovery failed: " .. tostring(derr), path = root }
