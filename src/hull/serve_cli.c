@@ -83,6 +83,7 @@
 #include <limits.h>
 
 #include "hull/shared/dev_session.h"   /* HL_DEV_SESSION_ENV */
+#include "hull/shared/build_plugin.h"  /* a build plugin's channel */
 
 static const char **build_env_allowlist(const HlManifest *m)
 {
@@ -412,6 +413,12 @@ int hull_serve(int argc, char **argv)
         hl_dev_session_take_env(ds);   /* value scrubbed in place too */
         hl_secure_zero(ds, sizeof ds);
     }
+    /* A build plugin's channel to its host (shared/build_plugin.h): taken,
+     * like the session key, before any app code runs - as serve.c does. */
+    if (hl_build_plugin_take_env() < 0) {
+        fprintf(stderr, "hull: " HL_BUILD_PLUGIN_ENV " is set but fd 3 is not a socket\n");
+        return 1;
+    }
     int app_argc = 0;
     char **app_argv = NULL;
     int no_migrate = 0, no_sandbox = 0, allow_degraded_sandbox = 0;
@@ -658,8 +665,18 @@ int hull_serve(int argc, char **argv)
     /* Sandbox: extract manifest + apply policy. The runtime gates were
      * already applied via gate_modules; this is the OS-level sandbox. */
     HlManifest manifest = {0};
-    if (rt->vt->extract_manifest(rt, &manifest) != 0) {
+    int manifest_ok = rt->vt->extract_manifest(rt, &manifest) == 0;
+    if (!manifest_ok)
         log_warn("[hull:cli] manifest extraction failed; running without policy");
+    /* A build plugin runs under its preset: no capability section and only
+     * pure modules (docs/buildcontext_design.md §9.1), as in serve.c. */
+    if (hl_build_plugin_fd() >= 0) {
+        char bp_err[256] = "a build plugin must declare a manifest";
+        if (!manifest_ok ||
+            hl_build_plugin_preset_check(&manifest, bp_err, sizeof bp_err) != 0) {
+            log_error("[hull:cli] build plugin: %s", bp_err);
+            return cli_fail(ctx, rt, be, async_ctx, pool, &manifest, NULL, NULL);
+        }
     }
     /* No runtime WGSL source to check: the helper goes (the app context
      * applied gpu.dynamic_shaders to the GPU context already). The same
