@@ -1,6 +1,6 @@
 # BuildContext action and authority design
 
-Status: **checkpoints 1 and 2 implemented (§13.1, §13.2); the rest design-only.** This document refines checkpoint 4
+Status: **checkpoints 1 and 2 implemented (§13.1, §13.2), checkpoint 5's plugin side (§13.3); the rest design-only.** This document refines checkpoint 4
 of [hull_fs_design.md](hull_fs_design.md) and supersedes the still-unimplemented
 BuildContext portions of
 [hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md). The shipped
@@ -815,6 +815,61 @@ more small native piece, `hull.buildctx._store` (in `mod_buildctx.c` beside `_fs
 - **Abandoned work**: staging is never on disk, so a crash leaves no staging to recover - only
   payloads no result references, which `hull cache prune` removes, and the blob store's own
   temporary files, which it sweeps when opened.
+
+### 13.3 Checkpoint 5: the plugin side as built
+
+The plugin half of §9.1: the channel, the value model, `app.transform` in both runtimes and the
+manifest preset. The host half - the runner, registration (§9.2) and the host operations - is
+the next part; until it lands, nothing spawns a plugin but the tests' fake host.
+
+- **The channel** is `shared/child_channel` (spawn with the socket as fd 3, stdin / stdout /
+  stderr on `/dev/null` and a filtered environment; length-framed messages under deadlines;
+  reap), the GPU compile helper's code moved out of `cap/gpu_helper.c`, which uses it unchanged.
+  Plain POSIX: both ends are synchronous round trips, and the base stays Keel-free. Not on a cosmo
+  APE or Windows.
+- **The value model** is `shared/plain_value`: nil, booleans, int64, UTF-8 text, bytes, arrays,
+  and maps with text keys in ascending byte order, so one value has one encoding (fuzzed by
+  `fuzz_plain_value`). The Lua walker reads with raw accessors and allocates nothing in the VM, so
+  no metamethod or finalizer runs during an encode; a Lua string is text, and bytes travel in a
+  box (`chan.bytes`). The QuickJS walker reads own data properties of plain objects and arrays
+  only, by class id: a Proxy, a getter, a Date or a boxed primitive is refused before any trap
+  runs; an ArrayBuffer or typed array is bytes, and a string written as bytes becomes its UTF-8
+  (`chan.bytes`, a lone surrogate refused). A float, a function, a hole or a `nil` / `null` in an
+  array is refused; a `nil` / `null` map value is absent. Decoded, text and bytes are a Lua string;
+  in JavaScript a string and an ArrayBuffer, an integer past 2^53 a BigInt.
+- **The protocol** (`shared/build_plugin.h`, magic `HBP1`): the host sends ACTION `{ id, config,
+  meta }`; the plugin answers each ctx call with CALL `{ op, args }` and reads REPLY `{ ok }` or
+  `{ error }` with the same id; it ends the action with DONE `{}` or `{ error }`; STOP (or the
+  host closing the socket) ends the loop and the process exits 0. Any other frame, a frame out of
+  turn or a malformed value ends the channel, and the plugin exits non-zero.
+- **The runner** (`serve.c`) takes fd 3 when `HULL_BUILD_PLUGIN_FD=3` is set, before any app
+  code runs (as it takes the dev session key), and refuses to start when the variable names no
+  socket. Once the module set is validated it applies the preset (`hl_build_plugin_preset_check`):
+  no `fs`, `env`, `secrets`, `hosts`, `databases`, `kv`, `ssh`, `tui`, `state`, `gpu` or
+  `compute`, and only the pure modules `hull/app`, `hull/build-plugin`, `hull/csv`,
+  `hull/encoding`, `hull/json`, `hull/log`, `hull/path`, `hull/template`, `hull/validate` (no time
+  or randomness). The plugin then runs under the shipped app sandbox, budget and run deadline.
+- **`app.transform(fn)`** is the decoration `hull/build-plugin@1` installs: a few lines of C in each
+  runtime hand the stdlib (`hull._build_plugin` in Lua, the script `hull/_build_plugin.js`) the live
+  `app` and the channel - `next`, `call`, `done`, `bytes`, reachable only from that stdlib code. The
+  stdlib registers `app.main` as the loop: read an action, call `fn(ctx)` (awaited in
+  JavaScript), report DONE, repeat. Each action re-arms app.main's budget and run deadline, as a
+  `tui.poll` event does; waits for the host are excluded from the binding meter, and each call
+  pays `HL_WORK_PLUGIN_CALL_UNITS` plus its bytes. A REPLY is awaited at most the run's time left
+  (60 s without a deadline).
+- **The ctx API**, one call each, named for the host operation it sends:
+  `ctx.meta`, `ctx.config`; `ctx.inputs.read / stat / list`;
+  `ctx.outputs.create_blob / create_tree` (writers with `write` / `close`),
+  `declare_generated_output`, `declare_artifact`; `ctx.diagnostics.emit`;
+  `ctx.source.units / erased_source` (JavaScript: camelCase). A writer's host id is kept in a
+  table private to the stdlib, so a handle cannot be made up. A refused call returns `nil, token`
+  in Lua and throws an Error whose `code` is the token in JavaScript; the host defines the
+  operations, their checks and their tokens.
+- **Tests**: `test_plain_value`, `test_child_channel`, `test_build_plugin` (the preset, the
+  descriptor), and `tests/e2e_build_plugin.sh` (`make e2e-build-plugin`): the same transform in
+  Lua and JavaScript drives a fake host (`tests/e2e_build_plugin_drive.c`) with byte-identical
+  calls and results over two actions on one process; a refused preset, an unknown frame, a run
+  by hand and a bad descriptor each end as described.
 
 ## 14. Non-scope
 

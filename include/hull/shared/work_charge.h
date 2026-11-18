@@ -317,6 +317,9 @@ static inline uint64_t hl_work_mime_units(size_t len)
 #define HL_WORK_DB_ED25519_AUTH_UNITS 262144u
 #define HL_WORK_KV_COMMAND_UNITS      8192u
 #define HL_WORK_KV_OPEN_UNITS        16384u
+/* A build plugin's ctx call: one framed round trip to its host over the
+ * inherited socket (shared/build_plugin.h), like a kv command. */
+#define HL_WORK_PLUGIN_CALL_UNITS     8192u
 #define HL_WORK_NET_SQL_UNITS         8192u
 #define HL_WORK_LOG_RECORD_UNITS       256u
 #define HL_WORK_LOG_CALL_UNITS          64u

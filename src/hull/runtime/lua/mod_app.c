@@ -4,6 +4,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"   /* hl_lua_install_app_transform */
 #include "hull/module_registry.h"
 
 #include <string.h>
@@ -699,6 +700,9 @@ static int lua_app_manifest(lua_State *L)
     if (manifest_declares_module(L, 1, "hull/timers")) {
         install_app_timers(L);
     }
+    if (manifest_declares_module(L, 1, "hull/build-plugin")) {
+        hl_lua_install_app_transform(L);
+    }
 
     return 0;
 }
@@ -747,6 +751,7 @@ static int lua_app_main(lua_State *L)
  *   hull/web/ws-server@1   → ws
  *   hull/web/sse@1         → sse
  *   hull/timers@1      → every/daily (existing)
+ *   hull/build-plugin@1 → transform (build_plugin.c)
  *
  * Without the declaration, those methods literally don't exist on
  * `app` - accessing them yields nil (Lua) / undefined (JS) and

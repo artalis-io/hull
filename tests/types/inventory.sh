@@ -64,7 +64,7 @@ JS
 }
 
 # The app intrinsic, with the modules that decorate it declared.
-run_app "hull:app" "" '"hull/http-server@1", "hull/timers@1", "hull/web/ws-server@1", "hull/web/sse@1"' 'import { app as __app } from "hull:app"; const M = { app: __app };'
+run_app "hull:app" "" '"hull/http-server@1", "hull/timers@1", "hull/web/ws-server@1", "hull/web/sse@1", "hull/build-plugin@1"' 'import { app as __app } from "hull:app"; const M = { app: __app };'
 
 "$HULL" modules available --json > "$WORK/mods.json"
 for spec in $(tr "," "\n" < "$WORK/mods.json" | sed -n 's/.*"name": *"\(hull\/[^"]*\)".*/\1/p'); do

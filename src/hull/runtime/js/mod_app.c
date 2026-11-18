@@ -757,6 +757,17 @@ static int js_manifest_declares_module(JSContext *ctx, JSValueConst manifest,
  * The app object is stashed in the internal store (hl_js_internals) under
  * __hull_app_ref by js_app_module_init so this function can reach it.
  * Mirrors the Lua partial-class pattern. */
+/* Install app.transform (hull/build-plugin): runtime/js/build_plugin.c. */
+static int js_install_app_transform(JSContext *ctx)
+{
+    JSValue store = hl_js_internals(ctx);
+    JSValue app = JS_GetPropertyStr(ctx, store, "__hull_app_ref");
+    JS_FreeValue(ctx, store);
+    int rc = JS_IsObject(app) ? hl_js_install_app_transform(ctx, app) : 0;
+    JS_FreeValue(ctx, app);
+    return rc;
+}
+
 static void js_install_app_timers(JSContext *ctx)
 {
     JSValue store = hl_js_internals(ctx);
@@ -1034,6 +1045,13 @@ static JSValue js_app_manifest_store(JSContext *ctx, HlJS *js,
             return JS_EXCEPTION;
         }
         if (d) decorations[i].install(ctx);
+    }
+    {
+        int d = js_manifest_declares_module(ctx, copy, "hull/build-plugin");
+        if (d < 0 || (d && js_install_app_transform(ctx) != 0)) {
+            JS_FreeValue(ctx, copy);
+            return JS_EXCEPTION;
+        }
     }
 
     JS_FreeValue(ctx, copy);

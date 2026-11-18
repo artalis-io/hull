@@ -222,7 +222,8 @@ declare namespace Hull {
 
     /** The first-party module names a manifest may declare (`hull modules available`). */
     type ModuleName =
-        | "hull/app" | "hull/archive/tar" | "hull/attachment" | "hull/blob" | "hull/cache"
+        | "hull/app" | "hull/archive/tar" | "hull/attachment" | "hull/blob"
+        | "hull/build-plugin" | "hull/cache"
         | "hull/compute" | "hull/config" | "hull/crypto" | "hull/crypto/envelope"
         | "hull/crypto/hkdf" | "hull/crypto/otp" | "hull/crypto/sealbox" | "hull/csv"
         | "hull/db" | "hull/email" | "hull/encoding" | "hull/env" | "hull/fs" | "hull/gpu"

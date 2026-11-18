@@ -471,6 +471,11 @@ $(BUILDDIR)/test_buildctx: $(TESTDIR)/hull/buildctx/test_buildctx.c $(BUILDDIR)/
 $(BUILDDIR)/test_child_channel: $(TESTDIR)/hull/test_child_channel.c $(CHILD_CHANNEL_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CHILD_CHANNEL_OBJ) $(LDFLAGS)
 
+# The plugin side of a build plugin's channel (shared/build_plugin.c): the
+# manifest preset and the inherited descriptor.
+$(BUILDDIR)/test_build_plugin: $(TESTDIR)/hull/test_build_plugin.c $(BUILD_PLUGIN_OBJ) $(CHILD_CHANNEL_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILD_PLUGIN_OBJ) $(CHILD_CHANNEL_OBJ) $(LDFLAGS)
+
 # The build plugin channel's value encoding and its Lua / QuickJS walkers:
 # the codec, both engines and the two walker objects, nothing else.
 $(BUILDDIR)/test_plain_value: $(TESTDIR)/hull/test_plain_value.c $(PLAIN_VALUE_OBJ) $(BUILDDIR)/lua_rt_plain_value.o $(BUILDDIR)/js_plain_value.o $(LUA_OBJS) $(QJS_OBJS) | $(BUILDDIR)
@@ -1807,6 +1812,16 @@ e2e-migrate: $(BUILDDIR)/hull
 .PHONY: e2e-analyze
 e2e-analyze: $(BUILDDIR)/hull
 	sh tests/e2e_analyze.sh
+
+# A build plugin as a Hull app on one channel, against a fake host
+# (docs/buildcontext_design.md §9.1): Lua / JS parity, the preset, protocol
+# errors. The host speaks the channel with the shared codec only.
+$(BUILDDIR)/e2e_build_plugin_drive: $(TESTDIR)/e2e_build_plugin_drive.c $(CHILD_CHANNEL_OBJ) $(PLAIN_VALUE_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(CHILD_CHANNEL_OBJ) $(PLAIN_VALUE_OBJ) $(LDFLAGS)
+
+.PHONY: e2e-build-plugin
+e2e-build-plugin: $(BUILDDIR)/hull $(BUILDDIR)/e2e_build_plugin_drive
+	HULL=$(BUILDDIR)/hull DRIVE=$(BUILDDIR)/e2e_build_plugin_drive sh tests/e2e_build_plugin.sh
 
 .PHONY: e2e-project-discovery
 # This E2E runs late in the CI job, after many steps that churn the shared build/ tree

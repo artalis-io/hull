@@ -32,6 +32,7 @@
  * runtime #ifdef - under RUNTIME=lua / HL_ENABLE_JS=0 the declaration would
  * disappear and the call become an implicit declaration (an error on GCC 14). */
 #include "hull/shared/cli_log.h"
+#include "hull/shared/build_plugin.h"
 #include "hull/shared/dev_session.h"   /* HL_DEV_SESSION_ENV (audit 36) */
 
 #include "hull/utils/alloc.h"
@@ -2361,6 +2362,17 @@ static int hl_serve_wire_caps(HlServerState *s)
         }
     }
 
+    /* A build plugin runs under its preset: no capability section and only
+     * pure modules (docs/buildcontext_design.md §9.1). */
+    if (hl_build_plugin_fd() >= 0) {
+        char bp_err[256] = "a build plugin must declare a manifest";
+        if (!s->manifest_extracted ||
+            hl_build_plugin_preset_check(&s->manifest, bp_err, sizeof bp_err) != 0) {
+            log_error("[hull:c] build plugin: %s", bp_err);
+            return -1;
+        }
+    }
+
     /* The manifest is applied: only now may the app take the terminal, and
      * only when it declared both `tui = true` and hull/tui (audit 31). */
     hl_tui_admit_resolved(s->manifest_sealed ? &s->manifest : NULL,
@@ -3525,6 +3537,14 @@ int hull_serve(int argc, char **argv)
     hl_dev_session_take_env(s.cfg.dev_session);
     if (!s.cfg.agent_mode)
         hl_secure_zero(s.cfg.dev_session, sizeof s.cfg.dev_session);
+
+    /* A build plugin's channel to its host (shared/build_plugin.h): taken,
+     * like the session key, before any app code runs. */
+    if (hl_build_plugin_take_env() < 0) {
+        log_error("[hull:c] " HL_BUILD_PLUGIN_ENV " is set but fd 3 is not "
+                  "a socket");
+        return 1;
+    }
 
     /* --verify-sig: no bytecode or compiled template from the shared code
      * cache. Its entries are sealed under ~/.hull/cache.key, which every app

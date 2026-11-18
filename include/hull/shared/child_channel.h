@@ -40,26 +40,12 @@ static inline uint32_t hl_chan_get32(const uint8_t *p)
            (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
-#ifdef HL_CHAN_SUPPORTED
+/* The frame types, the reader and the clock are portable (a caller on a
+ * host with no channel still compiles); everything that touches a socket or
+ * a process is POSIX only. */
 
 /* CLOCK_MONOTONIC in milliseconds; deadlines below are on this clock. */
 uint64_t hl_chan_mono_ms(void);
-
-/* Milliseconds left until @p deadline as a poll timeout (0 = no deadline:
- * -1, wait for ever). */
-int hl_chan_ms_left(uint64_t deadline);
-
-void hl_chan_set_nonblock(int fd);
-void hl_chan_set_nosigpipe(int fd);
-
-/* Write @p n bytes to a non-blocking socket, waiting for room at most until
- * @p deadline (0 = none). 0, or -1 (error, peer gone, deadline). */
-int hl_chan_write_all(int fd, const void *buf, size_t n, uint64_t deadline);
-
-/* One frame: the header, then @p a and @p b (either may be empty). 0 / -1. */
-int hl_chan_write_frame(int fd, uint32_t magic, uint32_t type, uint32_t id,
-                        const void *a, size_t alen, const void *b, size_t blen,
-                        uint64_t deadline);
 
 /* An incremental frame reader over a non-blocking socket. Initialise with
  * the protocol's magic and the largest payload taken:
@@ -82,6 +68,24 @@ typedef struct {
 /* Free the payload and make @p r ready for the next frame (keeps magic and
  * max). */
 void hl_chan_frame_reset(HlChanFrame *r);
+
+#ifdef HL_CHAN_SUPPORTED
+
+/* Milliseconds left until @p deadline as a poll timeout (0 = no deadline:
+ * -1, wait for ever). */
+int hl_chan_ms_left(uint64_t deadline);
+
+void hl_chan_set_nonblock(int fd);
+void hl_chan_set_nosigpipe(int fd);
+
+/* Write @p n bytes to a non-blocking socket, waiting for room at most until
+ * @p deadline (0 = none). 0, or -1 (error, peer gone, deadline). */
+int hl_chan_write_all(int fd, const void *buf, size_t n, uint64_t deadline);
+
+/* One frame: the header, then @p a and @p b (either may be empty). 0 / -1. */
+int hl_chan_write_frame(int fd, uint32_t magic, uint32_t type, uint32_t id,
+                        const void *a, size_t alen, const void *b, size_t blen,
+                        uint64_t deadline);
 
 /* Read what the socket has. HL_CHAN_DONE when a whole frame is in @p r (the
  * caller takes it, then hl_chan_frame_reset), HL_CHAN_MORE when it needs
