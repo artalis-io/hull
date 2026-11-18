@@ -1132,6 +1132,11 @@ CAP_OBJS += $(BUILD_PLUGIN_OBJ)
 # (shared/generation.h). sh_json + the cap SHA-256; rides CAP_OBJS like host.
 GENERATION_OBJ := $(BUILDDIR)/generation.o
 CAP_OBJS += $(GENERATION_OBJ)
+# dev_last_error writes the `hull dev --agent` load-failure sidecar, MAC'd
+# under the session key (shared/dev_session.h): the served child and the
+# supervisor. sh_json + the cap HMAC; rides CAP_OBJS like host.
+DEV_LAST_ERROR_OBJ := $(BUILDDIR)/dev_last_error.o
+CAP_OBJS += $(DEV_LAST_ERROR_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -3378,6 +3383,9 @@ $(PLAIN_VALUE_OBJ): $(SRCDIR)/hull/shared/plain_value.c $(INCDIR)/hull/shared/pl
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(BUILD_PLUGIN_OBJ): $(SRCDIR)/hull/shared/build_plugin.c $(INCDIR)/hull/shared/build_plugin.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(DEV_LAST_ERROR_OBJ): $(SRCDIR)/hull/shared/dev_last_error.c $(INCDIR)/hull/shared/dev_session.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(GENERATION_OBJ): $(SRCDIR)/hull/shared/generation.c $(INCDIR)/hull/shared/generation.h $(INCDIR)/hull/vfs.h | $(BUILDDIR)

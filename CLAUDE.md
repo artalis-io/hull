@@ -2392,8 +2392,12 @@ pipeline generation by its parent (`HULL_GENERATION_FD`, `shared/generation.h`,
 any app code runs, every payload checked against its manifest hash, then installed once as a
 sealed overlay (`hl_vfs_overlay_install` / `hl_vfs_overlay_find`, app-relative names). An overlay
 entry SHADOWS the file of the same name: the loader runs its bytes and never reads the file. A
-built binary ignores the descriptor; `--verify-sig` refuses a generation; a refused one stops the
-app (never a fallback to the shadowed source). Nothing on disk is ever read as a generation. **A
+built binary ignores the descriptor; `--verify-sig` refuses a generation with entries; a refused
+one stops the app (never a fallback to the shadowed source). Nothing on disk is ever read as a
+generation. With no generation handed over, an app whose directory holds a `hull.build.json`
+runs its build pipeline in a child before it loads (`hl_generation_take`: `hull app.*`, `hull
+test`, `hull agent`, `hull mcp`; `hull plugins generation` writes the bundle), and `hull dev`
+runs it before every (re)spawn, keeping the running app on its last good build when it fails. **A
 new development disk loader asks `hl_vfs_overlay_find` before it opens the file** (INV-14).
 
 **Build-time requirement:** Entry arrays must be sorted by name in C `strcmp` order (the Makefile uses `LC_ALL=C sort`). `hl_vfs_init()` debug-asserts sorted order.

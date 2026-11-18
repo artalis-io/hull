@@ -10,6 +10,15 @@ release-artifact layout).
 
 ### Added
 
+- Pipeline generations, the pipeline side (checkpoint G2, docs/dev_pipeline_generations_design.md
+  §9.2): an app run from source whose directory holds a `hull.build.json` runs its build
+  plugins before it loads - `hull app.*`, `hull test`, `hull agent` and `hull mcp` spawn the
+  pipeline (`hull plugins generation`), and every generated output becomes the app file it
+  names; a failed pipeline stops the app. `hull dev` runs the pipeline before every (re)spawn
+  and hands the new child its generation; when the pipeline fails the running app keeps its
+  last good build (reported on stderr and, under `--agent`, in `.hull/last_error.json`), and
+  the paths the plugins observed are watched too. The inventory demonstration plugin can
+  generate `inventory.json` (config `module`).
 - Pipeline generations, the app side (checkpoint G1, docs/dev_pipeline_generations_design.md):
   an app run from source (`hull app.*`, `hull dev`'s child, `hull test`, `hull agent`, `hull mcp`)
   takes a pipeline generation its parent hands it on the descriptor `HULL_GENERATION_FD` names -

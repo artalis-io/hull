@@ -438,7 +438,8 @@ end
 -- result is in the store and sealed, its dependency manifest still holds
 -- (M.check), and every payload is present with its hash. Returns
 -- { outputs = { { declared, descriptor, bytes | entries = { {path, mode, bytes} } } },
---   diagnostics = { ... } }, or nil, "miss" | "stale" | "corrupt".
+--   diagnostics = { ... }, deps = <the dependency manifest> }, or nil, "miss" |
+-- "stale" | "corrupt".
 function M.lookup(store, key, root, opts)
     if not hex64(key) then return nil, "invalid_args" end
     local raw = store:get_result(key)
@@ -478,7 +479,28 @@ function M.lookup(store, key, root, opts)
         end
         out[i] = e
     end
-    return { outputs = out, diagnostics = r.diagnostics or {} }
+    return { outputs = out, diagnostics = r.diagnostics or {}, deps = deps }
+end
+
+-- The workspace paths a dependency manifest observed, each once and sorted
+-- ("." is the root). nil when the manifest is malformed.
+function M.observed_paths(manifest)
+    local ok, doc = pcall(json.decode, manifest)
+    if not ok or type(doc) ~= "table" or doc.format ~= M.FORMAT or
+       type(doc.observations) ~= "table" then
+        return nil
+    end
+    local seen, out = {}, {}
+    for _, j in ipairs(doc.observations) do
+        local o = parse_obs(j)
+        if not o then return nil end
+        if not seen[o.path] then
+            seen[o.path] = true
+            out[#out + 1] = o.path
+        end
+    end
+    table.sort(out)
+    return out
 end
 
 M._path_ok = path_ok   -- tests

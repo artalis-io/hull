@@ -48,11 +48,6 @@
 #define HL_GENERATION_MAX_ENTRIES  16384u
 #define HL_GENERATION_NAME_MAX     1024u
 
-/* What an entry point prints when hl_generation_take_env fails. */
-#define HL_GENERATION_TAKE_ERR \
-    HL_GENERATION_ENV " names no readable descriptor, or the generation " \
-    "cannot be read whole (at most 256 MiB)"
-
 /* Take the generation the parent handed over. `embedded`: this is a built
  * binary, which consults no descriptor (the variable is removed, the
  * descriptor left alone). Otherwise the descriptor is read whole and closed,
@@ -60,11 +55,40 @@
  * call finds nothing. 0 = none (or ignored), 1 = taken, -1 = the variable
  * names no readable descriptor, or the bundle cannot be read whole within
  * HL_GENERATION_MAX_BYTES (not logged: the entry point prints
- * HL_GENERATION_TAKE_ERR and refuses to start). */
+ * hl_generation_error() and refuses to start). */
 int hl_generation_take_env(int embedded);
 
+/* hl_generation_take_env, and when no generation was handed over: run the
+ * app's build pipeline in a child (`<this hull> plugins generation <app_dir>`,
+ * its diagnostics on this process's stderr) when `app_dir` holds a
+ * hull.build.json, and keep its generation for hl_generation_apply
+ * (docs/dev_pipeline_generations_design.md §4.3). Nothing for a built binary,
+ * for a build plugin (a process with a plugin channel) or once per process.
+ * Call before any sandbox forbids spawning. 0 = nothing, 1 = taken, -1 =
+ * failed (hl_generation_error() says why; the entry point refuses to start -
+ * never a fallback to the sources the generation would shadow). */
+int hl_generation_take(int embedded, const char *app_dir);
+
+/* Why the last hl_generation_take / _take_env failed. */
+const char *hl_generation_error(void);
+
+/* Run the build pipeline of the app at `app_dir` in a child and return its
+ * generation (malloc'd, *len bytes). 0, or -1 with hl_generation_error()
+ * set. The `hull dev` supervisor calls it before every (re)spawn. */
+int hl_generation_produce(const char *app_dir, uint8_t **out, size_t *len);
+
+/* 1 when `app_dir` has build plugins to run (a regular hull.build.json). */
+int hl_generation_has_pipeline(const char *app_dir);
+
+/* The workspace paths the generation's inputs name (its manifest's
+ * "inputs"), each passed to `fn`. 0, or -1 for a bundle that is not one. */
+int hl_generation_inputs(const uint8_t *buf, size_t len,
+                         void (*fn)(const char *path, void *ud), void *ud);
+
 /* Install the taken generation as the loaders' overlay (vfs.h) - before the
- * app loads. `verify_sig`: --verify-sig is on, which refuses a generation.
+ * app loads. `verify_sig`: --verify-sig is on, which refuses a generation
+ * with entries (an empty one - pipeline work producing no app file - is
+ * nothing to cover).
  * 0 when nothing was taken or it is installed; -1 when it is refused or
  * invalid (logged; the app must not start - never a fallback to the
  * sources it would have shadowed). The taken bundle is freed either way. */
@@ -74,6 +98,11 @@ int hl_generation_apply(int verify_sig);
  * `err`. (hl_generation_apply's core; tests call it directly.) */
 int hl_generation_install(const uint8_t *buf, size_t len,
                           char *err, size_t errsz);
+
+/* hl_generation_install, refusing a generation with entries when
+ * `verify_sig`; an empty one is then not installed. */
+int hl_generation_install_ex(const uint8_t *buf, size_t len, int verify_sig,
+                             char *err, size_t errsz);
 
 /* 1 when `name` is a name an overlay entry may have: app-relative, '/'
  * separated, no empty, "." or ".." component, no leading "./", no control

@@ -8,7 +8,8 @@ app.manifest({
     id: "inventory", version: 1, input: "source",
     languages: ["lua", "javascript"], annotations: ["demo"],
     output: "demo-inventory",
-    config: { title: { type: "string", required: true } },
+    config: { title: { type: "string", required: true },
+              module: { type: "string" } },
   },
 });
 
@@ -23,6 +24,15 @@ app.transform(async (ctx) => {
   w.write(ctx.config.title + "\n" + lines.join("\n") + "\n");
   w.close();
   ctx.outputs.declareArtifact({ name: "inventory", kind: "demo-inventory" }, w);
+  // With `module` set, the inventory is also an app file the app loads: a
+  // generated output, which `hull dev` and an app run from source are handed.
+  if (ctx.config.module) {
+    const m = ctx.outputs.createBlob("module");
+    m.write('{"items":[' + lines.map((l) => JSON.stringify(l)).join(",") + '],"title":' +
+            JSON.stringify(ctx.config.title) + "}\n");
+    m.close();
+    ctx.outputs.declareGeneratedOutput({ name: ctx.config.module, position_map: "none" }, m);
+  }
   ctx.diagnostics.emit({ severity: "info", code: "inventory.count",
                          message: lines.length + " declarations" });
 });
