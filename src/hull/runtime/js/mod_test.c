@@ -583,6 +583,24 @@ static JSValue js_test_ok(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* test.runTransform(spec): a build plugin's transform against a stub host
+ * (hull:_build_plugin; docs/buildcontext_design.md §13.6). A Promise. */
+static JSValue js_test_run_transform(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    JSValue fn = hl_js_transform_stub(ctx);
+    if (!JS_IsFunction(ctx, fn)) {
+        JS_FreeValue(ctx, fn);
+        return JS_ThrowTypeError(ctx, "test.runTransform: the app is not a build "
+                                      "plugin (declare hull/build-plugin@1)");
+    }
+    JSValueConst spec = argc > 0 ? argv[0] : JS_UNDEFINED;
+    JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 1, &spec);
+    JS_FreeValue(ctx, fn);
+    return r;
+}
+
 /* test.err(fn, pattern?) */
 static JSValue js_test_err(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
@@ -659,6 +677,8 @@ void hl_js_test_register(JSContext *ctx, KlHttpRouter *router, HlJS *js)
                       JS_NewCFunction(ctx, js_test_err, "err", 2));
     JS_SetPropertyStr(ctx, test_fn, "runMain",
                       JS_NewCFunction(ctx, js_test_run_main, "runMain", 2));
+    JS_SetPropertyStr(ctx, test_fn, "runTransform",
+                      JS_NewCFunction(ctx, js_test_run_transform, "runTransform", 1));
 
     JS_SetPropertyStr(ctx, global, "test", test_fn);
     JS_FreeValue(ctx, global);

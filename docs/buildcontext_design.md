@@ -1,6 +1,6 @@
 # BuildContext action and authority design
 
-Status: **checkpoints 1 and 2 implemented (§13.1, §13.2), checkpoint 5's plugin side (§13.3), host side (§13.4) and demonstration (§13.5); the rest design-only.** This document refines checkpoint 4
+Status: **checkpoints 1 and 2 implemented (§13.1, §13.2), checkpoint 5's plugin side (§13.3), host side (§13.4), demonstration (§13.5) and plugin tests (§13.6); the rest design-only.** This document refines checkpoint 4
 of [hull_fs_design.md](hull_fs_design.md) and supersedes the still-unimplemented
 BuildContext portions of
 [hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md). The shipped
@@ -953,8 +953,8 @@ first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the n
   content-addressed.
 - **Plugin directories are not the app's**: `hull build` leaves every file under a directory
   `hull.build.json` names out of the binary (`hull.build.json` itself is embedded and signed), and
-  the selection leaves them out of discovery's declarations. Project discovery's own listing
-  (`hull agent inspect`) and `hull test` do not skip them yet.
+  the selection leaves them out of discovery's declarations; project discovery and `hull test`
+  skip them too (§13.6).
 - **The demonstration** (`tests/fixtures/plugin_demo`): an inventory plugin - it lists the `@demo`
   declarations it is shown, by name and annotation value, as one artifact, and reads each unit's
   file so the source is a dependency - written once in Lua and once in JavaScript, over the same
@@ -966,7 +966,32 @@ first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the n
   configuration and a plugin outside the preset; checks that nothing is written into the app and
   that `hull build` leaves the plugin's sources out.
 - **Not yet**: `hull test` of a transform against a stubbed ctx, and discovery / `hull test`
-  skipping plugin directories.
+  skipping plugin directories: §13.6.
+
+### 13.6 Checkpoint 5: plugin tests as built
+
+- **`test.run_transform(spec)` / `test.runTransform(spec)`** (`hull test` only) runs the transform
+  `app.transform` registered against a stub host held in memory, through the same ctx and the same
+  calls (`hull._build_plugin` / `hull:_build_plugin` route them to the stub instead of the channel),
+  and answers `{ outputs, diagnostics, error? }` (JavaScript: a Promise). `spec`: `config`, `meta`,
+  `units` (what `ctx.source.units()` returns), `inputs` (path -> contents: `read`, `stat` and
+  `list` answer from it, `not_found` / `not_a_regular_file` / `not_a_directory` like the host),
+  `erased` (unit -> contents, for `erased_source`). Each output carries `declared`, `descriptor`,
+  `name` and the bytes (Lua: a string; JavaScript: an ArrayBuffer, and `text` when every write was a
+  string), or a tree's entries. The stub is a test double, written once per stdlib language: the
+  host's own checks (limits, names, grants, descriptors) are the real host's, which
+  `hull plugins run` exercises. The runner is handed to the runtime by the stdlib and kept where
+  only `test` reaches it (the Lua registry, the JS runtime's internal store); an app that is not a
+  build plugin gets an error naming `hull/build-plugin@1`.
+- **Plugin directories are skipped** by project discovery (`hull.project.analyze`, so
+  `hull agent inspect` and `hull dev --agent` generations) and by `hull test` of the app
+  (`hl_build_plugin_drop_dirs`, `shared/build_plugin.c`: the directories `hull.build.json` names,
+  read leniently - a malformed file drops nothing; checking it is the registry's job). A plugin's
+  own tests run with `hull test <plugin dir>`.
+- **Tests**: the demonstration plugins carry their tests (`tests/fixtures/plugin_demo/inventory_*/
+  tests/`), which `tests/e2e_plugins.sh` runs with `hull test` in both languages; the e2e also
+  checks that the app's `hull test` and `hull agent inspect` leave the plugin out;
+  `build_plugin.drop_dirs_leaves_plugins_out` covers the C filter.
 
 ## 14. Non-scope
 

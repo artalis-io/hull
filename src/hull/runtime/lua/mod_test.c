@@ -427,6 +427,19 @@ static int l_test_err(lua_State *L)
     return 0;
 }
 
+/* test.run_transform(spec): a build plugin's transform against a stub host
+ * (hull._build_plugin; docs/buildcontext_design.md §13.6). */
+static int l_test_run_transform(lua_State *L)
+{
+    lua_settop(L, 1);
+    if (!hl_lua_push_transform_stub(L))
+        return luaL_error(L, "test.run_transform: the app is not a build plugin "
+                             "(declare hull/build-plugin@1)");
+    lua_insert(L, 1);
+    lua_call(L, 1, 1);
+    return 1;
+}
+
 /* ── Registration ──────────────────────────────────────────────────── */
 
 static const luaL_Reg test_methods[] = {
@@ -439,6 +452,7 @@ static const luaL_Reg test_methods[] = {
     { "ok",     l_test_ok },
     { "err",    l_test_err },
     { "run_main", hl_lua_test_run_main },
+    { "run_transform", l_test_run_transform },
     { NULL, NULL }
 };
 

@@ -7,15 +7,16 @@
 
 #include "hull/shared/build_plugin.h"
 
+#include "sh_arena.h"
+#include "sh_json.h"
+
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef HL_CHAN_SUPPORTED
-#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#endif
 
 static int g_fd = -1;
 
@@ -137,4 +138,63 @@ int hl_build_plugin_preset_check(const HlManifest *m, char *err, size_t errsz)
         return -1;
     }
     return 0;
+}
+
+#define BP_CONFIG_MAX (1024 * 1024)
+
+/* hull.build.json's bytes (NUL-terminated, malloc'd), or NULL. Not through
+ * a link, a regular file, at most BP_CONFIG_MAX bytes. */
+static char *read_config(const char *app_dir, size_t *len)
+{
+    char path[4096];
+    int n = snprintf(path, sizeof path, "%s/hull.build.json", app_dir);
+    if (n < 0 || (size_t)n >= sizeof path) return NULL;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    struct stat st;
+    char *buf = NULL;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= 0 &&
+        st.st_size <= BP_CONFIG_MAX && (buf = malloc((size_t)st.st_size + 1))) {
+        size_t got = 0;
+        while (got < (size_t)st.st_size) {
+            ssize_t r = read(fd, buf + got, (size_t)st.st_size - got);
+            if (r <= 0) break;
+            got += (size_t)r;
+        }
+        buf[got] = '\0';
+        *len = got;
+    }
+    close(fd);
+    return buf;
+}
+
+void hl_build_plugin_drop_dirs(const char *app_dir, char **files)
+{
+    if (!app_dir || !files || !files[0]) return;
+    size_t len = 0;
+    char *json = read_config(app_dir, &len);
+    if (!json) return;
+    SHArena *arena = sh_arena_create(4 * BP_CONFIG_MAX);
+    ShJsonValue *root = NULL;
+    if (arena && sh_json_parse(json, len, arena, &root) == SH_JSON_OK) {
+        ShJsonValue *list = sh_json_get(root, "plugins");
+        size_t np = sh_json_array_len(list);
+        size_t alen = strlen(app_dir);
+        size_t w = 0;
+        for (size_t r = 0; files[r]; r++) {
+            const char *f = files[r];
+            int drop = 0;
+            for (size_t i = 0; i < np && !drop; i++) {
+                const char *p = sh_json_as_string(sh_json_get(sh_json_array_get(list, i), "path"), NULL);
+                size_t pl = p ? strlen(p) : 0;
+                drop = pl > 0 && strncmp(f, app_dir, alen) == 0 && f[alen] == '/' &&
+                       strncmp(f + alen + 1, p, pl) == 0 && f[alen + 1 + pl] == '/';
+            }
+            if (drop) free(files[r]);
+            else files[w++] = files[r];
+        }
+        files[w] = NULL;
+    }
+    if (arena) sh_arena_free(arena);
+    free(json);
 }

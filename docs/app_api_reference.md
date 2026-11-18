@@ -2901,6 +2901,7 @@ under it; `test` is a global in those files.
 | `test(name, fn)` | `test(name, [opts,] fn)` | register a case (JS: `fn` may be async; `opts.timeout` ms) |
 | `test.get/post/put/delete/patch(path, opts?)` | same | in-process request through the app's routes and middleware: `{ status, body, json?, headers }` |
 | `test.run_main(args, opts?)` | `test.runMain(args, opts?)` | run `app.main` once: `{ code, stdout, stderr }` |
+| `test.run_transform(spec)` | `test.runTransform(spec)` (a Promise) | a build plugin: run its `app.transform` once against a stub host: `{ outputs, diagnostics, error? }` ([design](buildcontext_design.md) §13.6) |
 | `test.eq(a, b, msg?)`, `test.ok(v, msg?)`, `test.err(fn, pattern?)` | same | assertions |
 
 `test.eq` is strict equality - Lua raw equality (no `__eq`), JS `===`: values

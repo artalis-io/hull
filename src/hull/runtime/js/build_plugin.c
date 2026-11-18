@@ -238,6 +238,8 @@ static const JSCFunctionListEntry chan_funcs[] = {
 
 /* Evaluate the stdlib script and call it with the app and the channel. 0, or
  * -1 with an exception pending (the manifest call fails). */
+#define BP_STUB_KEY "__hull_transform_stub"
+
 int hl_js_install_app_transform(JSContext *ctx, JSValueConst app)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
@@ -276,6 +278,18 @@ int hl_js_install_app_transform(JSContext *ctx, JSValueConst app)
     JS_FreeValue(ctx, chan);
     JS_FreeValue(ctx, init);
     if (JS_IsException(r)) return -1;
-    JS_FreeValue(ctx, r);
-    return 0;
+    /* The stub runner test.runTransform calls: kept in the runtime's internal
+     * store, which app code cannot reach. */
+    JSValue store = hl_js_internals(ctx);
+    int rc = JS_SetPropertyStr(ctx, store, BP_STUB_KEY, r) < 0 ? -1 : 0;   /* takes r */
+    JS_FreeValue(ctx, store);
+    return rc;
+}
+
+JSValue hl_js_transform_stub(JSContext *ctx)
+{
+    JSValue store = hl_js_internals(ctx);
+    JSValue fn = JS_GetPropertyStr(ctx, store, BP_STUB_KEY);
+    JS_FreeValue(ctx, store);
+    return fn;
 }

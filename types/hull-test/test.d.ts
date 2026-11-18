@@ -49,6 +49,42 @@ declare namespace Hull {
         stderrBytes: ArrayBuffer;
     }
 
+    /** A build plugin action for `test.runTransform`, answered by a stub host. */
+    interface TestTransformSpec {
+        /** `ctx.config`. */
+        config?: Record<string, unknown>;
+        /** `ctx.meta`. */
+        meta?: Record<string, unknown>;
+        /** What `ctx.source.units()` returns. */
+        units?: unknown[];
+        /** The workspace `ctx.inputs` reads: path -> contents. */
+        inputs?: Record<string, string | Bytes>;
+        /** What `ctx.source.erasedSource(unit)` returns, by unit. */
+        erased?: Record<string, string | Bytes>;
+    }
+
+    /** One output the transform declared. */
+    interface TestTransformOutput {
+        declared: "generated" | "artifact";
+        descriptor: Record<string, unknown>;
+        /** The payload's name (`createBlob` / `createTree`). */
+        name: string;
+        /** A blob's bytes. */
+        bytes?: ArrayBuffer;
+        /** A blob's text, when every write was a string. */
+        text?: string;
+        /** A tree's entries. */
+        entries?: { path: string; mode: string; bytes: ArrayBuffer; text?: string }[];
+    }
+
+    /** The result of `test.runTransform`. */
+    interface TestTransformResult {
+        outputs: TestTransformOutput[];
+        diagnostics: Record<string, unknown>[];
+        /** The transform's error message, when it threw. */
+        error?: string;
+    }
+
     /** Options of a test case. */
     interface TestCaseOptions {
         /** Per-test timeout of an async body, in ms (default 5000). */
@@ -82,6 +118,8 @@ declare namespace Hull {
         err(fn: () => unknown, pattern?: string): void;
         /** Run `app.main` once with captured stdio. */
         runMain(args?: string[], opts?: TestRunMainOptions): TestRunMainResult;
+        /** Run a build plugin's transform once against a stub host. */
+        runTransform(spec?: TestTransformSpec): Promise<TestTransformResult>;
     }
 }
 

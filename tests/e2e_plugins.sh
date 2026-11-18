@@ -11,8 +11,10 @@
 #     bytes); HULL_NO_BUILD_CACHE runs every time;
 #   - `hull plugins list` reads a JavaScript plugin's manifest through the
 #     extraction child; a refused preset or configuration stops the run;
-#   - nothing is written into the app; `hull build` leaves the plugin's
-#     sources out of the app.
+#   - nothing is written into the app; `hull build`, project discovery and
+#     the app's `hull test` leave the plugin out;
+#   - `hull test` of the plugin runs its transform against a stub host
+#     (test.run_transform / test.runTransform).
 set -eu
 
 HULL=${HULL:-build/hull}
@@ -112,5 +114,20 @@ echo "== plugins: hull build leaves the plugin out"
 d=$(make_app lua lua)
 "$HULL" build "$d" > "$WORK/build.txt" 2>&1 || true
 has "$WORK/build.txt" "hull build: 1 Lua file(s) from" && ok "the plugin's sources are not the app's" || { bad "build"; cat "$WORK/build.txt"; }
+
+echo "== plugins: hull test, discovery"
+for pl in lua js; do
+    d=$(make_app lua "$pl")
+    "$HULL" test "$d/plugins/inventory" > "$WORK/ptest.txt" 2>&1 || true
+    has "$WORK/ptest.txt" "2/2 tests passed" && ok "$pl plugin: hull test runs the transform against a stub host" || { bad "$pl plugin test"; cat "$WORK/ptest.txt"; }
+    "$HULL" test "$d" > "$WORK/atest.txt" 2>&1 || true
+    ! has "$WORK/atest.txt" "test_inventory" && ok "$pl plugin: the app's hull test leaves the plugin's tests out" || { bad "$pl app test"; cat "$WORK/atest.txt"; }
+done
+"$HULL" agent inspect "$d" > "$WORK/inspect.json" 2>&1 || true
+if has "$WORK/inspect.json" '"path":"app.lua"' && ! has "$WORK/inspect.json" 'plugins/inventory'; then
+    ok "project discovery leaves the plugin's sources out"
+else
+    bad "discovery"; head -c 2000 "$WORK/inspect.json"
+fi
 
 [ "$fail" -eq 0 ] && echo "e2e_plugins: OK" || { echo "e2e_plugins: FAILED"; exit 1; }

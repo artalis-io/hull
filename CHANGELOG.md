@@ -51,6 +51,11 @@ release-artifact layout).
   `hull build` leaves a plugin directory's sources out of the app. A demonstration inventory
   plugin, written in Lua and in JavaScript, commits byte-identical results over the same app
   written in Lua and in JavaScript (`make e2e-plugins`).
+- `test.run_transform(spec)` (JS `test.runTransform`): `hull test` of a build plugin runs its
+  transform against an in-memory stub host - inputs, units and configuration from the spec, the
+  outputs, diagnostics and error it produced returned (docs/buildcontext_design.md §13.6). The
+  app's `hull test` and project discovery (`hull agent inspect`) now leave the plugin directories
+  `hull.build.json` names out; a plugin's tests run with `hull test <plugin dir>`.
 - Build pipeline, internal (BuildContext, docs/buildcontext_design.md §9.1): the pieces a build
   plugin's channel is made of. `shared/child_channel` - a helper process on one inherited socket
   (spawn with fd 3 and a filtered environment, length-framed messages under deadlines, reap) -
