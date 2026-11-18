@@ -1,7 +1,7 @@
 /*
  * test_buildctx.c - runs the BuildContext suites (stdlib/cli/lua/hull/buildctx/
- * tests/: the action's inputs, its outputs and results, the plugin host and
- * registration) against the real hull.buildctx._fs / _store / _plugin
+ * tests/: the action's inputs, its outputs and results, the plugin host,
+ * registration and the pipeline plan) against the real hull.buildctx._fs / _store / _plugin
  * bindings and a real workspace, with the few filesystem helpers a plain Lua
  * state lacks. HOME is a temporary directory, so the tool seal key the store
  * makes is never the user's. The plugin host leg runs real plugin processes:
@@ -178,6 +178,15 @@ UTEST(buildctx, pipeline_generation)
 {
     long long pass = 0, fail = -1;
     int rc = run_lua_test_with("stdlib/cli/lua/hull/buildctx/tests/test_generation.lua", setup, &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
+UTEST(buildctx, pipeline_plan)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_with("stdlib/cli/lua/hull/buildctx/tests/test_plan.lua", setup, &pass, &fail);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(fail, 0LL);
     EXPECT_GT(pass, 0LL);

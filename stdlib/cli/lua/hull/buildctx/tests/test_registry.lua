@@ -170,26 +170,74 @@ manifest_for("plugins/c", { modules = { "hull/build-plugin@1" }, build_plugin = 
     output = "generated" } })
 refused({ plugins = { { path = "plugins/a", config = { dialect = "pg" } }, { path = "plugins/c" } } },
         "both claim source:lua:*", "two plugins claiming one kind")
+-- ── routes: bundled plugins run only on Hull-defined routes ──────────
+local ERASE = { id = "ts-erase", major = 1, entry = "/hull/bundled/ts-erase/app.js", language = "javascript",
+                descriptor = { id = "ts-erase", version = 1, input = "source", languages = { "typescript" },
+                               output = "generated" } }
+local ROUTE = { id = "typescript-erase", unit = "module", language = "typescript", plugin = "ts-erase" }
+local function with_routes(bundled, routes)
+    return registry.load(root, { extract = extract, sha256_hex = T.sha256, bundled = bundled, routes = routes })
+end
+local function copy(t, k, v)
+    local c = {}
+    for kk, vv in pairs(t) do c[kk] = vv end
+    c[k] = v
+    return c
+end
 do
     put("hull.build.json", json.encode({ plugins = { { path = "plugins/c" } } }))
-    local reg, err = registry.load(root, {
-        extract = extract, sha256_hex = T.sha256,
-        bundled = { { id = "ts-erase", major = 1, descriptor = {
-            id = "ts-erase", version = 1, input = "source", languages = { "typescript" },
-            output = "javascript" } } },
-    })
-    ok(reg, "a bundled plugin and an application plugin (" .. tostring(err) .. ")")
+    local reg, err = with_routes({ ERASE }, { ROUTE })
+    ok(reg, "a routed bundled plugin and an application plugin (" .. tostring(err) .. ")")
     if reg then
         eq(reg.plugins[1].identity, "stdlib:ts-erase@1", "a bundled identity: stdlib:<id>@<major>")
-        eq(reg:route("source:typescript:*").identity, "stdlib:ts-erase@1", "the bundled route")
+        eq(reg.plugins[1].entry, ERASE.entry, "its entry")
+        eq(reg:route("module:typescript").identity, "stdlib:ts-erase@1", "the route claims module:<language>")
+        eq(reg:route("source:typescript:*"), nil, "a bundled plugin claims no source kind")
+        eq(#reg.routes, 1, "one active route")
+        eq(reg.routes[1].kind, "module:typescript", "the route's kind")
+        eq(reg.routes[1].plugin, reg.plugins[1], "the route names its plugin")
+        eq(table.concat(reg.plugins[1].claims, " "), "module:typescript", "the bundled claims")
+        eq(table.concat(reg.plugins[2].claims, " "), "source:javascript:* source:lua:*", "the application claims")
     end
-    reg, err = registry.load(root, {
-        extract = extract, sha256_hex = T.sha256,
-        bundled = { { id = "js", major = 1, descriptor = {
-            id = "js", version = 1, input = "source", languages = { "javascript" }, output = "x" } } },
-    })
-    ok(reg == nil, "an application plugin cannot take a bundled plugin's kind")
-    has(err, "both claim source:javascript:*", "the bundled conflict")
+
+    -- An application plugin over annotated TypeScript does not touch the route.
+    put("plugins/t/app.lua", "")
+    manifest_for("plugins/t", { modules = { "hull/build-plugin@1" }, build_plugin = {
+        id = "ts-anno", version = 1, input = "source", languages = { "typescript" },
+        output = "generated" } })
+    put("hull.build.json", json.encode({ plugins = { { path = "plugins/t" } } }))
+    reg, err = with_routes({ ERASE }, { ROUTE })
+    ok(reg, "an application TypeScript plugin beside the route (" .. tostring(err) .. ")")
+    if reg then eq(reg:route("source:typescript:*").identity:sub(1, 4), "app:", "it claims its own kind") end
+    put("hull.build.json", json.encode({ plugins = { { path = "plugins/c" } } }))
+
+    local function refused_route(bundled, routes, needle, name)
+        local r, e = with_routes(bundled, routes)
+        ok(r == nil, name .. " is refused")
+        has(e, needle, name)
+    end
+    refused_route({ ERASE }, {}, "stdlib:ts-erase@1 is on no route", "a bundled plugin on no route")
+    refused_route({}, { ROUTE }, "names no bundled plugin", "a route naming no bundled plugin")
+    refused_route({ ERASE }, { ROUTE, ROUTE }, "defined twice", "a route defined twice")
+    refused_route({ ERASE }, { ROUTE, copy(ROUTE, "language", "lua") }, "takes no lua source",
+                  "a route over a language its plugin does not take")
+    refused_route({ ERASE }, { copy(ROUTE, "unit", "declaration") }, "unit must be", "an unknown route unit")
+    refused_route({ ERASE }, { copy(ROUTE, "extra", 1) }, "unknown route key", "an unknown route key")
+    refused_route({ ERASE }, { copy(ROUTE, "language", "cobol") }, "language must be", "a route language")
+    refused_route({ copy(ERASE, "entry", nil) }, { ROUTE }, "no entry", "a bundled plugin with no entry")
+    refused_route({ copy(ERASE, "entry", "rel/app.js") }, { ROUTE }, "no entry", "a relative bundled entry")
+    refused_route({ copy(ERASE, "language", "typescript") }, { ROUTE }, "language must be lua or javascript",
+                  "a bundled plugin's own language")
+    refused_route({ copy(ERASE, "major", 0) }, { ROUTE }, "major must be", "a bundled major")
+    refused_route({ copy(ERASE, "id", "other") }, { ROUTE }, "descriptor id is", "a bundled id unlike its descriptor")
+    refused_route({ ERASE, ERASE }, { ROUTE }, "bundled twice", "a plugin bundled twice")
+    refused_route({ copy(ERASE, "descriptor", { id = "ts-erase", version = 1, input = "artifact",
+                                                kinds = { "x" }, output = "y" }) }, { ROUTE },
+                  "takes no typescript source", "an artifact plugin on a module route")
+
+    -- The default lists: no route, no bundled plugin, until stdlib:ts-erase@1.
+    eq(#registry.ROUTES, 0, "no Hull route ships yet")
+    eq(#registry.BUNDLED, 0, "no bundled plugin ships yet")
 end
 
 for _, r in ipairs(roots) do T.rmtree(r) end

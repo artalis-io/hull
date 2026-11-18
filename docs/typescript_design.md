@@ -406,8 +406,10 @@ one explicit, Hull-defined route (`typescript source -> erased JavaScript genera
 output`), fixed in the pipeline plan like any route of BuildContext checkpoint 6 - not an
 "automatic execution of every compatible plugin" (BuildContext §14) and not a domain
 special case in Hull core (§1.2): the planner maps a frontend's units to the route
-registered for it. An app plugin cannot replace or shadow it in v1. To be ratified with
-the checkpoint-6 route model.
+registered for it. An app plugin cannot replace or shadow it in v1. The route model is
+BuildContext §13.7: a `module` route over `typescript`, claiming `module:typescript`, its
+units whole files carrying the hash of the bytes discovery analyzed, and no workspace
+grants.
 
 ### 4.3 Module names and imports
 

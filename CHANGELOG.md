@@ -10,6 +10,17 @@ release-artifact layout).
 
 ### Added
 
+- BuildContext checkpoint 6, the explicit routes (docs/buildcontext_design.md §13.7): a bundled
+  build plugin runs only on a Hull-defined route, active whenever its input exists. A route of
+  unit `module` hands its plugin every analyzed source file of its language, whole (`kind =
+  "module"`, named `./<path>`, carrying the SHA-256 of the bytes discovery analyzed), with no
+  workspace grants, and claims `module:<language>` - a kind no application plugin can claim, so
+  an app plugin cannot replace or shadow a route. A new planner (`hull.buildctx.plan`) orders a
+  pipeline run: the routes, by id, then the application plugins in `hull.build.json`'s order;
+  the action key names the route. Registration refuses a bundled plugin on no route, a route
+  naming no bundled plugin or a language its plugin does not take. No route ships yet: the first
+  is TypeScript erasure (T3). `hull plugins list` prints a plugin's claims from the registry and
+  marks a bundled one.
 - Pipeline generations, the pipeline side (checkpoint G2, docs/dev_pipeline_generations_design.md
   §9.2): an app run from source whose directory holds a `hull.build.json` runs its build
   plugins before it loads - `hull app.*`, `hull test`, `hull agent` and `hull mcp` spawn the

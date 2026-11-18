@@ -778,5 +778,28 @@ do
     ok(not blob:find("_units", 1, true), "projection drops the per-source unit table")
 end
 
+do
+    -- analyze(root, { source_hash }) records what each ANALYZED source's bytes hash to, for the
+    -- pipeline plan's whole-file routes (docs/buildcontext_design.md §13.7); generation-internal.
+    local analyze = require("hull.project.analyze")
+    local FS = {
+        ["hh/app.lua"]    = "local a = 1\nreturn a\n",
+        ["hh/broken.lua"] = "local = = )",
+    }
+    local seen = {}
+    _G.tool = make_tool(FS)
+    local disc = analyze.analyze("hh", { source_hash = function(b) seen[#seen + 1] = b; return "h:" .. #b end })
+    local plain = analyze.analyze("hh")
+    _G.tool = nil
+    eq(analyze.source_hash(disc, "app.lua"), "h:" .. #FS["hh/app.lua"], "an analyzed source's bytes are hashed")
+    eq(analyze.source_hash(disc, "broken.lua"), nil, "a source that failed to analyze has no hash")
+    eq(#seen, 1, "only analyzed sources are hashed")
+    eq(analyze.source_hash(plain, "app.lua"), nil, "no hash function, no hash")
+    eq(analyze.source_hash(nil, "app.lua"), nil, "no discovery, no hash")
+    local blob = require("hull.json").encode(require("hull.project.projection").project(disc))
+    ok(not blob:find("_source_hashes", 1, true) and not blob:find("h:", 1, true),
+       "projection drops the source hashes")
+end
+
 print(string.format("test_project: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail, failures = failures }

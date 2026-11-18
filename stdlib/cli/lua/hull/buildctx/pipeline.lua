@@ -16,87 +16,33 @@
 --   --         "failed" (error = the runner's token), "no_input" (nothing
 --   --         selected), "skipped" (detail says why)
 --
--- A source plugin's selection is every annotated declaration project
--- discovery finds in a language it lists, carrying an annotation it lists (any
--- annotation when it lists none), outside every plugin directory. Each unit is
--- a plain value: { id, language, path, kind, name, range, annotations =
--- { { name, value? } } } - the same shape for every language, so one plugin
--- serves Lua and JavaScript sources alike. The action's grants are exactly
--- the units' files.
+-- The stages, their selections and their keys are the plan's
+-- (hull.buildctx.plan): a Hull route runs its bundled plugin over every
+-- analyzed source file of its language; an application source plugin runs
+-- over every annotated declaration project discovery finds in a language it
+-- lists, carrying an annotation it lists (any annotation when it lists none),
+-- outside every plugin directory. Such a unit is a plain value: { id,
+-- language, path, kind, name, range, annotations = { { name, value? } } } -
+-- the same shape for every language, so one plugin serves Lua and JavaScript
+-- sources alike, and the action's grants are exactly the units' files.
 --
 -- The action key is the SHA-256 of a canonical envelope: the key format and
 -- the channel protocol version, the plugin's identity and descriptor, its
--- configuration, the selection, and hull.build.json's hash. A plugin's code,
--- its configuration and the annotated source it is shown all change it; what
--- it reads besides is covered by the result's dependency manifest (§10).
+-- configuration, the selection (a route's units carry their files' hashes),
+-- the route, and hull.build.json's hash. A plugin's code, its configuration
+-- and the source it is shown all change it; what it reads besides is covered
+-- by the result's dependency manifest (§10).
 
 local action = require("hull.buildctx.action")
 local outputs = require("hull.buildctx.outputs")
 local plugin = require("hull.buildctx.plugin")
+local plan = require("hull.buildctx.plan")
 local registry = require("hull.buildctx.registry")
 
 local M = {}
 
-M.KEY_FORMAT = "hull-build-action-key"
-M.KEY_VERSION = 1
-M.PROTOCOL = 1
 M.STORE_KIND = "build-results"     -- its hull cache kind
 M.CACHE_ENV = "build"              -- HULL_NO_BUILD_CACHE
-
-local function under(path, dirs)
-    for _, d in ipairs(dirs) do
-        if path:sub(1, #d + 1) == d .. "/" then return true end
-    end
-    return false
-end
-
-local function set_of(list)
-    if not list or #list == 0 then return nil end
-    local s = {}
-    for _, v in ipairs(list) do s[v] = true end
-    return s
-end
-
--- The selection of a source plugin: its units and grants.
-function M.select(discovery, desc, plugin_dirs)
-    local langs, anns = set_of(desc.languages), set_of(desc.annotations)
-    local units, grants, seen = {}, {}, {}
-    for _, d in ipairs(discovery.declarations or {}) do
-        if langs[d.language] and not under(d.path, plugin_dirs) then
-            local kept = {}
-            for _, a in ipairs(d.annotations or {}) do
-                if not anns or anns[a.name] then
-                    kept[#kept + 1] = { name = a.name, value = a.value }
-                end
-            end
-            if #kept > 0 then
-                local r = d.range or {}
-                units[#units + 1] = {
-                    id = d.id, language = d.language, path = d.path, kind = d.kind,
-                    name = d.name, annotations = kept,
-                    range = { start = r.start, stop = r.stop, line = r.line, col = r.col },
-                }
-                if not seen[d.path] then
-                    seen[d.path] = true
-                    grants[#grants + 1] = d.path
-                end
-            end
-        end
-    end
-    table.sort(units, function(a, b) return a.id < b.id end)
-    table.sort(grants)
-    return units, grants
-end
-
-function M.action_key(p, units, config_sha256, sha256_hex)
-    local env = outputs.encode({
-        format = M.KEY_FORMAT, version = M.KEY_VERSION, protocol = M.PROTOCOL,
-        plugin = p.identity, descriptor = p.descriptor, config = p.config,
-        units = units, build_config = config_sha256 or "",
-    })
-    if not env then return nil end
-    return sha256_hex(env)
-end
 
 local function default_sha256_hex(s)
     return require("hull.encoding").hex.encode(require("hull.crypto").sha256(s))
@@ -131,29 +77,28 @@ local function describe(res, sha256_hex)
     return outs, res.diagnostics
 end
 
--- opts: analyze(root) -> discovery, store, exe, sha256_hex, no_cache, limits,
--- and the registry's (extract, fs, native, bundled).
+-- opts: analyze(root, opts) -> discovery, store, exe, sha256_hex, no_cache,
+-- limits, source_hash (the plan's), and the registry's (extract, fs, native,
+-- bundled, routes).
 function M.run(root, opts)
     opts = opts or {}
     local sha256_hex = opts.sha256_hex or default_sha256_hex
     local reg, err = registry.load(root, {
         extract = opts.extract, fs = opts.fs, native = opts.native,
-        sha256_hex = sha256_hex, bundled = opts.bundled,
+        sha256_hex = sha256_hex, bundled = opts.bundled, routes = opts.routes,
     })
     if not reg then return nil, err end
     local results = {}
-    if #reg.plugins == 0 then return results end
+    if #reg.plugins == 0 then return results, nil, reg end
 
     local analyze = opts.analyze or require("hull.project.analyze").analyze
-    local disc = analyze(root)
+    local disc = analyze(root, { source_hash = sha256_hex })
     if not disc or not disc.valid then
         local d = disc and disc.diagnostics and disc.diagnostics[1]
         return nil, "project discovery failed" .. (d and (": " .. tostring(d.message)) or "")
     end
-    local plugin_dirs = {}
-    for _, p in ipairs(reg.plugins) do
-        if p.path then plugin_dirs[#plugin_dirs + 1] = p.path end
-    end
+    local stages, perr = plan.build(reg, disc, { sha256_hex = sha256_hex, source_hash = opts.source_hash })
+    if not stages then return nil, perr end
     local store, own_store = opts.store, false
     if not store then
         store, err = default_store()
@@ -164,18 +109,15 @@ function M.run(root, opts)
     if no_cache == nil and tool then no_cache = tool.hull_cache_disabled(M.CACHE_ENV) end
     local exe = opts.exe or default_exe()
 
-    for n, p in ipairs(reg.plugins) do
-        local r = { identity = p.identity }
+    for n, st in ipairs(stages) do
+        local p = st.plugin
+        local r = { identity = st.identity, route = st.route and st.route.id or nil }
         results[#results + 1] = r
-        if not p.entry then
-            r.status, r.detail = "skipped", "bundled plugins run under the planner"
-        elseif p.descriptor.input ~= "source" then
-            r.status, r.detail = "skipped", "artifact stages run under the planner"
+        if st.skip then
+            r.status, r.detail = "skipped", st.skip
         else
-            local units, grants = M.select(disc, p.descriptor, plugin_dirs)
-            r.units = #units
-            local key = M.action_key(p, units, reg.config_sha256, sha256_hex)
-            r.key = key
+            local units, key = st.units, st.key
+            r.units, r.key = #units, key
             if not key then
                 r.status, r.error = "failed", "unencodable_selection"
             elseif #units == 0 then
@@ -186,7 +128,7 @@ function M.run(root, opts)
                     r.status, r.result = "cached", hit
                     r.outputs, r.diagnostics = describe(hit, sha256_hex)
                 else
-                    local a, aerr = action.new({ root = root, grants = grants, key = key, store = store,
+                    local a, aerr = action.new({ root = root, grants = st.grants, key = key, store = store,
                                                  limits = opts.limits })
                     local runner = a and plugin.new({ exe = exe, entry = p.entry, limits = opts.limits },
                                                     { native = opts.native })
@@ -197,7 +139,7 @@ function M.run(root, opts)
                         tok = "invalid_args"
                     else
                         ok, tok, detail = runner:run(a, {
-                            id = n, config = p.config, meta = { input = "source" },
+                            id = n, config = p.config, meta = { input = st.input },
                             source = { units = units },
                         })
                         runner:close()
