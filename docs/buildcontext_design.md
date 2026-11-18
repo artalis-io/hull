@@ -1,6 +1,6 @@
 # BuildContext action and authority design
 
-Status: **checkpoints 1 and 2 implemented (§13.1, §13.2), checkpoint 5's plugin side (§13.3), host side (§13.4), demonstration (§13.5) and plugin tests (§13.6); the rest design-only.** This document refines checkpoint 4
+Status: **checkpoints 1 and 2 implemented (§13.1, §13.2), checkpoint 5's plugin side (§13.3), host side (§13.4), demonstration (§13.5) and plugin tests (§13.6), and checkpoint 6's explicit routes (§13.7); the rest design-only.** This document refines checkpoint 4
 of [hull_fs_design.md](hull_fs_design.md) and supersedes the still-unimplemented
 BuildContext portions of
 [hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md). The shipped
@@ -902,7 +902,8 @@ first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the n
   as an empty array (`_plugin.empty_array`, a marker the Lua walker encodes as `[]`, so a
   JavaScript plugin gets an array). A writer's id is a counter of the runner, kept in a table of
   the action, so an id from an earlier action is `invalid_handle`.
-- **Registration** (`registry.load(root)`): the bundled list (empty until `stdlib:ts-erase@1`), then
+- **Registration** (`registry.load(root)`): the bundled list and its routes (§13.7; both empty until
+  `stdlib:ts-erase@1`), then
   `hull.build.json`, read through an exact grant (a link there is refused): `{ "plugins": [ { path,
   config? } ] }`, unknown keys refused, each `path` canonical, not into `.hull`, named once, and a
   directory holding exactly one of `app.lua` / `app.js` (exact grants: no link on the way). The
@@ -914,8 +915,9 @@ first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the n
   `id`, `version`, `input` (`source` with `languages` and optional `annotations`, or `artifact` with
   `kinds`), `output`, and an optional `config` schema (`{ key = { type, required? } }`, types
   `string` / `integer` / `boolean` / `array` / `map`); unknown keys refused. The configuration is
-  checked against it. A plugin claims `source:<language>:<annotation or *>` or `artifact:<kind>`,
-  and two plugins claiming one kind refuse the load. `reg.config_sha256` is the file's hash, for
+  checked against it. An application plugin claims `source:<language>:<annotation or *>` or
+  `artifact:<kind>`, a bundled one its routes' `module:<language>` (§13.7), and two plugins
+  claiming one kind refuse the load. `reg.config_sha256` is the file's hash, for
   the action key (§10).
 - **Tests**: the `plugin_host` leg of `test_buildctx` runs real plugin processes
   (`tests/fixtures/build_host_{lua,js}`, every host operation) through real actions - a commit, a
@@ -925,7 +927,8 @@ first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the n
   `hull.build.json`, links, the preset, descriptors, configuration and claims; and
   `lua_tool_vm.buildctx_registry_reads_real_plugin_manifests` runs registration in the real tool
   VM with the real extraction.
-- **Not yet**: the bundled plugins' entries come with `stdlib:ts-erase@1`; the rest is §13.5.
+- **Not yet**: the bundled plugins' entries come with `stdlib:ts-erase@1` (§13.7 takes them as
+  given); the rest is §13.5.
 
 ### 13.5 Checkpoint 5: the demonstration as built
 
@@ -944,8 +947,8 @@ first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the n
   the selection, `hull.build.json`'s hash). A committed result that `action.lookup` finds fresh is
   reported `cached`; otherwise the plugin runs (§13.4) and its result is `committed`, or the run
   reports `failed` with the runner's token and any diagnostics. A plugin with nothing selected is
-  `no_input`; artifact plugins and bundled ones are `skipped` until the planner runs them. Exit 1
-  when a plugin failed.
+  `no_input`; artifact plugins are `skipped` until the artifact routes exist, and a bundled plugin
+  runs on its route (§13.7). Exit 1 when a plugin failed.
 - **The result store** is the `build-results` cache kind (`~/.hull/blobs/runtime/build-results`, or
   under `HULL_CACHE_DIR`), sealed under the tool key; `HULL_NO_BUILD_CACHE` (or `HULL_NO_CACHE`)
   turns reuse off, never the commit. A result's key is the pre-run key, which a later run with
@@ -992,6 +995,45 @@ first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the n
   tests/`), which `tests/e2e_plugins.sh` runs with `hull test` in both languages; the e2e also
   checks that the app's `hull test` and `hull agent inspect` leave the plugin out;
   `build_plugin.drop_dirs_leaves_plugins_out` covers the C filter.
+
+### 13.7 Checkpoint 6: explicit routes as built
+
+The part of checkpoint 6 that TypeScript erasure needs (typescript_design.md §4.2): a route that
+hands a bundled plugin whole source files, and a planner that orders a run. Canonical artifact
+schemas, artifact routes, the DAG and its cycle rejection are the rest of the checkpoint.
+
+- **Routes** (`registry.ROUTES`, `{ id, unit = "module", language, plugin }`; empty until T3): a
+  bundled plugin runs only on a Hull-defined route, and every bundled plugin is on one - a bundled
+  plugin on no route, a route naming no bundled plugin, a route over a language its plugin's
+  descriptor does not list, or a route defined twice refuses the load. A route claims
+  `module:<language>` for its plugin, which claims nothing else. An application descriptor can
+  only name `source` or `artifact` input, so no application plugin can claim a module kind: an app
+  cannot replace or shadow a route (an app plugin over annotated TypeScript declarations is
+  `source:typescript:*`, beside it). A bundled entry is `{ id, major, descriptor, entry, language }`:
+  the entry is an absolute `app.lua` / `app.js` the runner spawns as for an application plugin.
+- **The plan** (`hull.buildctx.plan.build(reg, disc)`): the routes first, by route id, then the
+  application plugins in `hull.build.json`'s order. Every stage is a source stage reading only the
+  workspace, so no stage depends on another and the order is fixed rather than scheduled.
+  `pipeline.run` executes the plan; a result names its route.
+- **A route's selection** is every source discovery `analyzed` in the route's language, outside
+  the plugin directories, as `{ id = "module:<language>:<path>", language, path, kind = "module",
+  name = "./<path>", sha256 }`, sorted by id. `sha256` is the hash of the bytes discovery analyzed:
+  `hull.project.analyze(root, { source_hash })` records it as it reads each source
+  (`analyze.source_hash(disc, path)`, generation-internal, not projected), so the plan never reads
+  the file again and a source analyzed without a hash refuses the plan. A route stage has no
+  grants: its plugin is told about the file and asks the host for frontend operations over the
+  analyzed bytes (`source.erased_source`), never the workspace. With no analyzed file of the
+  language the stage is `no_input`.
+- **The key** (§10) adds the route (`{ id, kind }`) to the envelope, beside the plugin, its
+  descriptor and configuration, the selection - for a route, the files' hashes - and
+  `hull.build.json`'s hash: an edited file of the route's language changes it, a file of another
+  language does not.
+- **Tests**: the `pipeline_plan` leg of `test_buildctx` (`buildctx/tests/test_plan.lua`) checks the
+  order, the selections and the keys, then runs a bundled plugin on a test route through
+  `pipeline.run` with a real plugin process (`tests/fixtures/build_route_js`, which finds the
+  workspace closed to it): committed, the generation's entries named for the files they shadow,
+  cached on the same bytes, run again after an edit, `no_input` with no TypeScript. The
+  `registration` leg covers the route checks; `test_project.lua` the source hashes.
 
 ## 14. Non-scope
 

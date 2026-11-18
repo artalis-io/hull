@@ -51,7 +51,7 @@ local function parse()
 end
 
 local function claims(p)
-    return table.concat(require("hull.buildctx.registry").claims(p.descriptor), " ")
+    return table.concat(p.claims, " ")
 end
 
 local function list(root, o)
@@ -62,7 +62,7 @@ local function list(root, o)
         for i, p in ipairs(reg.plugins) do
             out[i] = { identity = p.identity, path = p.path, language = p.language,
                        descriptor = p.descriptor, config = p.config,
-                       claims = require("hull.buildctx.registry").claims(p.descriptor) }
+                       claims = p.claims, bundled = p.bundled ~= nil or nil }
         end
         tool.stdout_raw(json.encode({ plugins = out, config_sha256 = reg.config_sha256 }) .. "\n")
         return 0
@@ -73,7 +73,7 @@ local function list(root, o)
     end
     for _, p in ipairs(reg.plugins) do
         tool.stdout(p.identity .. "\n")
-        tool.stdout("  " .. (p.language or "bundled") .. ", " .. p.descriptor.input .. " -> " ..
+        tool.stdout("  " .. p.language .. (p.bundled and " (bundled)" or "") .. ", " .. p.descriptor.input .. " -> " ..
                     p.descriptor.output .. "\n")
         tool.stdout("  claims: " .. claims(p) .. "\n")
     end

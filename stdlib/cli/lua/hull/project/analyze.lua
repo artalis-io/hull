@@ -171,6 +171,8 @@ local function analyze_unprotected(root_in, opts)
     local ctx = { js_token = nil, js_open_failed = false }
     local handles = { n = 0, map = {} }
     local units = {}                     -- source path -> { frontend, unit } (generation-internal)
+    local hash = opts.source_hash        -- fn(bytes) -> hex, or nil
+    local hashes = {}                    -- source path -> the analyzed bytes' hash (generation-internal)
 
     -- The per-file loop + model.build run under a pcall so the generation's JS session is ALWAYS
     -- closed on a fault (finally-style), then the fault is re-raised for M.analyze's boundary.
@@ -194,7 +196,9 @@ local function analyze_unprotected(root_in, opts)
                             status = "error", declarations = {},
                             diagnostics = { diag("project.unreadable", "cannot read source file", rel) } }
                     else
-                        per_source[#per_source + 1] = analyze_one(fe, row, src, rel, handles, ctx, units)
+                        local entry = analyze_one(fe, row, src, rel, handles, ctx, units)
+                        if hash and entry.status == "analyzed" then hashes[rel] = hash(src) end
+                        per_source[#per_source + 1] = entry
                     end
                 elseif row then
                     -- Known but NON-analyzable (JavaScript with the engine not compiled in, or a
@@ -211,6 +215,7 @@ local function analyze_unprotected(root_in, opts)
         local d = model.build(root, gen, per_source, op_diags, source_kind)
         d._handles = handles.map            -- generation-internal; NOT serialized (D6)
         d._units = units                    -- likewise: per-source units, for unit operations
+        d._source_hashes = hashes           -- likewise: what each analyzed source's bytes hash to
         return d
     end)
 
@@ -254,6 +259,7 @@ local function minimal_invalid(root, gen, source_kind, code, message)
         _by_source     = {},
         _handles       = {},
         _units         = {},
+        _source_hashes = {},
         _frontend_lease = { retained = false, open = false, sessions = {} },  -- not semantically live
     }
 end
@@ -263,6 +269,8 @@ end
 -- project.internal diagnostic (never a raised error, never a clean generation).
 --   opts.generation  : the dev generation counter (default 0 = standalone).
 --   opts.source_kind : "standalone" (default) | "dev" provenance marker.
+--   opts.source_hash : fn(bytes) -> string; when given, each analyzed source's
+--                      bytes are hashed as they are analyzed (M.source_hash).
 function M.analyze(root, opts)
     -- Normalize + validate opts ONCE, up front, so neither the normal nor the recovery
     -- path ever dereferences a non-table / wrong-typed opts.
@@ -272,8 +280,9 @@ function M.analyze(root, opts)
     local root_disp   = tostring(root or ".")
 
     local retain = (opts.retain_frontend == true)      -- strict boolean; threaded to the analysis
+    local hash = type(opts.source_hash) == "function" and opts.source_hash or nil
     local ok, result = pcall(analyze_unprotected, root,
-        { generation = gen, source_kind = source_kind, retain_frontend = retain })
+        { generation = gen, source_kind = source_kind, retain_frontend = retain, source_hash = hash })
     if ok then return result end
     -- Recovery uses the literal constructor -- if model.build was the defect, calling it
     -- again here would re-raise the same error OUTSIDE the pcall.
@@ -351,6 +360,15 @@ function M.type_erasure(disc, path)
     local ok2, res, ferr = pcall(resolved.frontend.type_erasure, resolved.unit)
     if not ok2 then return nil, diag("project.internal", "frontend type_erasure raised: " .. tostring(res)) end
     return res, ferr
+end
+
+-- analyze.source_hash(disc, path) -> the hash of the bytes the analyzed source
+-- `path` was analyzed from (opts.source_hash's), or nil: not analyzed, or not
+-- hashed. Generation-internal, like the units; the planner keys a whole-file
+-- route on it (docs/buildcontext_design.md §13.7).
+function M.source_hash(disc, path)
+    local h = type(disc) == "table" and type(disc._source_hashes) == "table" and disc._source_hashes[path]
+    return type(h) == "string" and h or nil
 end
 
 -- analyze.close(disc): frontend-neutral, idempotent generation teardown. Closes any live

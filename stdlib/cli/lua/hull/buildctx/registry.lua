@@ -11,12 +11,17 @@
 --   local reg, err = registry.load("/abs/app")
 --   for _, p in ipairs(reg.plugins) do
 --       -- p.identity   "stdlib:<id>@<major>" | "app:<path>#<sha256>"
---       -- p.entry      the absolute app.lua / app.js (nil for a bundled one)
+--       -- p.entry      the absolute app.lua / app.js
+--       -- p.claims     the input kinds it claims
 --       -- p.language   "lua" | "javascript"
 --       -- p.descriptor the validated build_plugin descriptor
 --       -- p.config     the configuration hull.build.json gives it
 --   end
 --   local p = reg:route("source:typescript:*")   -- the plugin claiming a kind
+--   for _, r in ipairs(reg.routes) do              -- the active Hull routes
+--       -- r.id, r.unit ("module"), r.language, r.kind ("module:<language>"),
+--       -- r.plugin (the bundled plugin it runs)
+--   end
 --
 -- hull.build.json, at the app root, read without running any app code:
 --   { "plugins": [ { "path": "plugins/sql_codegen", "config": { ... } } ] }
@@ -35,9 +40,18 @@
 --   output      the kind it produces
 --   config      optional: { <key> = { type = "string" | "integer" | "boolean"
 --                                          | "array" | "map", required = bool } }
--- Unknown keys are refused. Each plugin claims the input kinds
+-- Unknown keys are refused. Each application plugin claims the input kinds
 -- "source:<language>:<annotation | *>" or "artifact:<kind>"; two plugins
 -- claiming one kind is an error.
+--
+-- Routes (docs/buildcontext_design.md §13.7, typescript_design.md §4.2): a bundled
+-- plugin runs only on a Hull-defined route, active whenever its input exists.
+-- A route of unit "module" hands the plugin every analyzed source file of its
+-- language, whole, and claims "module:<language>". An application plugin
+-- cannot claim a module kind (its descriptor only names source and artifact
+-- inputs), so it can neither replace nor shadow a route; a bundled plugin
+-- claims its routes' kinds, never a source or artifact kind, and a bundled
+-- plugin on no route, or a route naming no bundled plugin, refuses the load.
 --
 -- Errors are nil, message: the message names the plugin and what is wrong.
 
@@ -54,9 +68,14 @@ M.LIMITS = {
     file_bytes   = 16 * 1024 * 1024,    -- one file
 }
 
--- The plugins compiled into Hull: { id, major, descriptor }. None yet; the
--- first is stdlib:ts-erase@1 (typescript_design.md §4.1).
+-- The plugins compiled into Hull: { id, major, descriptor, entry, language }.
+-- None yet; the first is stdlib:ts-erase@1 (typescript_design.md §4.1).
 M.BUNDLED = {}
+
+-- The Hull-defined routes: { id, unit = "module", language, plugin } (plugin:
+-- a bundled id). None yet; the first is TypeScript erasure (§4.2).
+M.ROUTES = {}
+M.ROUTE_UNITS = { module = true }
 
 local LANGUAGES = { lua = true, javascript = true, typescript = true }
 local CONFIG_TYPES = { string = true, integer = true, boolean = true, array = true, map = true }
@@ -357,6 +376,23 @@ function M.plugin_paths(root, opts)
     return out
 end
 
+-- A validated copy of a route, or nil, reason.
+function M.check_route(r)
+    if type(r) ~= "table" then return nil, "a route must be a table" end
+    local extra = only_keys(r, { id = true, unit = true, language = true, plugin = true })
+    if extra then return nil, "unknown route key '" .. tostring(extra) .. "'" end
+    if type(r.id) ~= "string" or not r.id:match("^[a-z][a-z0-9%-]*$") or #r.id > 64 then
+        return nil, "route id must match [a-z][a-z0-9-]* (at most 64 bytes)"
+    end
+    if not M.ROUTE_UNITS[r.unit] then return nil, "route " .. r.id .. ": unit must be \"module\"" end
+    if not LANGUAGES[r.language] then
+        return nil, "route " .. r.id .. ": language must be lua, javascript or typescript"
+    end
+    if type(r.plugin) ~= "string" then return nil, "route " .. r.id .. ": plugin must name a bundled plugin" end
+    return { id = r.id, unit = r.unit, language = r.language, plugin = r.plugin,
+             kind = r.unit .. ":" .. r.language }
+end
+
 local Registry = {}
 Registry.__index = Registry
 
@@ -375,25 +411,68 @@ function M.load(root, opts)
         extract = opts.extract or default_extract,
         sha256_hex = opts.sha256_hex or default_sha256_hex,
     }
-    local reg = setmetatable({ plugins = {}, by_kind = {}, config_sha256 = nil }, Registry)
-    local function add(p)
-        for _, k in ipairs(M.claims(p.descriptor)) do
+    local reg = setmetatable({ plugins = {}, by_kind = {}, routes = {}, config_sha256 = nil }, Registry)
+    local function add(p, claims)
+        for _, k in ipairs(claims) do
             local other = reg.by_kind[k]
             if other then
                 return p.identity .. " and " .. other.identity .. " both claim " .. k
             end
             reg.by_kind[k] = p
         end
+        p.claims = claims
         reg.plugins[#reg.plugins + 1] = p
         return nil
     end
+    -- Bundled plugins, each on its routes.
+    local bundled, routed = {}, {}
     for _, b in ipairs(opts.bundled or M.BUNDLED) do
+        local name = "stdlib:" .. tostring(b.id)
         local desc, derr = M.check_descriptor(b.descriptor)
-        if not desc then return nil, "stdlib:" .. tostring(b.id) .. ": " .. derr end
-        local e = add({ identity = "stdlib:" .. b.id .. "@" .. b.major, descriptor = desc,
-                        config = {}, bundled = b })
+        if not desc then return nil, name .. ": " .. derr end
+        if desc.id ~= b.id then return nil, name .. ": descriptor id is " .. desc.id end
+        if math.type(b.major) ~= "integer" or b.major < 1 then
+            return nil, name .. ": major must be an integer >= 1"
+        end
+        if bundled[b.id] then return nil, name .. " is bundled twice" end
+        if type(b.entry) ~= "string" or b.entry:sub(1, 1) ~= "/" then
+            return nil, name .. ": no entry"
+        end
+        if b.language ~= "lua" and b.language ~= "javascript" then
+            return nil, name .. ": language must be lua or javascript"
+        end
+        bundled[b.id] = { identity = name .. "@" .. b.major, descriptor = desc, config = {},
+                          entry = b.entry, language = b.language, bundled = b }
+        routed[b.id] = {}
+    end
+    for _, r0 in ipairs(opts.routes or M.ROUTES) do
+        local r, rerr = M.check_route(r0)
+        if not r then return nil, rerr end
+        local p = bundled[r.plugin]
+        if not p then return nil, "route " .. r.id .. " names no bundled plugin (" .. r.plugin .. ")" end
+        local d = p.descriptor
+        local takes = false
+        for _, l in ipairs(d.input == "source" and d.languages or {}) do
+            if l == r.language then takes = true end
+        end
+        if not takes then
+            return nil, "route " .. r.id .. ": " .. p.identity .. " takes no " .. r.language .. " source"
+        end
+        for _, other in ipairs(reg.routes) do
+            if other.id == r.id then return nil, "route " .. r.id .. " is defined twice" end
+        end
+        r.plugin = p
+        reg.routes[#reg.routes + 1] = r
+        local list = routed[p.descriptor.id]
+        list[#list + 1] = r.kind
+    end
+    for _, b in ipairs(opts.bundled or M.BUNDLED) do
+        local p = bundled[b.id]
+        if #routed[b.id] == 0 then return nil, p.identity .. " is on no route" end
+        local e = add(p, routed[b.id])
         if e then return nil, e end
     end
+    table.sort(reg.routes, function(a, b) return a.id < b.id end)
     local bytes, err = read_config(ctx.fs, root)
     if bytes == nil then return nil, err end
     if bytes then
@@ -403,7 +482,7 @@ function M.load(root, opts)
         for _, item in ipairs(list) do
             local p, e = load_app_plugin(ctx, item)
             if not p then return nil, e end
-            e = add(p)
+            e = add(p, M.claims(p.descriptor))
             if e then return nil, e end
         end
     end
