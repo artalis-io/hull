@@ -965,7 +965,6 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
                     kill(pid, SIGTERM);
                     waitpid(pid, NULL, 0);
                     dev_child_pid = 0;
-                    pid = 0;
                 }
                 char fdv[16];
                 if (gen_fd >= 0) {
