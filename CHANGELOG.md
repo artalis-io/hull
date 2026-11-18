@@ -104,6 +104,11 @@ release-artifact layout).
 
 ### Fixed
 
+- A build plugin now runs on the `app.main` runner too (a hull built without the HTTP server,
+  `HL_ENABLE_HTTP=0`): it took no channel from `HULL_BUILD_PLUGIN_FD` and applied no manifest
+  preset, so `app.transform` reported no build host and a refused manifest still started. It now
+  takes the channel before any app code runs and refuses a manifest outside the preset, as the
+  server runner does. Covered by `make e2e-build-plugin` in the pure-compute flavor job.
 - `hull dev` reloads when a `.mjs` or `.cjs` file changes. Project discovery reads both as
   JavaScript, but the watcher looked only at `.js`, so `hull dev --agent` did not publish a new
   generation for an edit to one.
