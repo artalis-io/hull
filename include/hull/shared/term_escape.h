@@ -56,6 +56,19 @@ static inline size_t hl_utf8_seq_len(const unsigned char *s, size_t len)
     return n;
 }
 
+/* Whether all @p len bytes at @p s are well-formed UTF-8. */
+static inline int hl_utf8_valid(const unsigned char *s, size_t len)
+{
+    size_t i = 0;
+    while (i < len) {
+        if (s[i] < 0x80) { i++; continue; }
+        size_t n = hl_utf8_seq_len(s + i, len - i);
+        if (n == 0) return 0;
+        i += n;
+    }
+    return 1;
+}
+
 /* The escapers' rule for a byte >= 0x80 at @p s (audit 42). Returns how many
  * input bytes form one unit, and sets *@p escape when each of them is to be
  * written as \xNN: a C1 control U+0080-U+009F (C2 80-9F, 2 bytes) or a stray

@@ -32,6 +32,7 @@
 #include "hull/cap/gpu.h"
 #include "hull/cap/crypto.h"
 #include "hull/limits/gpu.h"
+#include "hull/shared/child_channel.h"
 #include "hull/shared/host.h"
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_budget.h"
@@ -140,7 +141,6 @@ static uint32_t helper_compile_ms(void)
 /* ── Frames ────────────────────────────────────────────────────────── */
 
 #define HGC_MAGIC   0x32434748u   /* "HGC2" little-endian */
-#define HGC_HDR     16u
 #define HGC_REQ     1u
 #define HGC_CANCEL  2u
 #define HGC_RESP    3u
@@ -149,176 +149,12 @@ static uint32_t helper_compile_ms(void)
 #define HGC_REQ_MAX ((uint32_t)(HGC_REQ_PRE + HL_GPU_WGSL_MAX_BYTES))
 #define HGC_FLAG_SANDBOXED 0x1u
 
-static void put32(uint8_t *p, uint32_t v)
-{
-    p[0] = (uint8_t)v;
-    p[1] = (uint8_t)(v >> 8);
-    p[2] = (uint8_t)(v >> 16);
-    p[3] = (uint8_t)(v >> 24);
-}
-
-static uint32_t get32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
-           (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-
-static uint64_t mono_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
-}
-
-static void set_nonblock(int fd)
-{
-    int fl = fcntl(fd, F_GETFL);
-    if (fl >= 0) (void)fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-}
-
-static void set_nosigpipe(int fd)
-{
-#ifdef SO_NOSIGPIPE
-    int one = 1;
-    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
-#else
-    (void)fd;
-#endif
-}
-
-#ifdef MSG_NOSIGNAL
-#define HGC_SEND_FLAGS MSG_NOSIGNAL
-#else
-#define HGC_SEND_FLAGS 0
-#endif
-
-/* Milliseconds left until @p deadline (0 = no deadline: -1, poll forever). */
-static int ms_left(uint64_t deadline)
-{
-    if (!deadline) return -1;
-    uint64_t now = mono_ms();
-    if (now >= deadline) return 0;
-    uint64_t left = deadline - now;
-    return left > INT_MAX ? INT_MAX : (int)left;
-}
-
-/* Write @p n bytes to a non-blocking socket, waiting for room at most until
- * @p deadline (0 = none). 0, or -1 (error, peer gone, deadline). */
-static int write_all(int fd, const void *buf, size_t n, uint64_t deadline)
-{
-    const uint8_t *p = buf;
-    while (n > 0) {
-        ssize_t w = send(fd, p, n, HGC_SEND_FLAGS);
-        if (w > 0) { p += w; n -= (size_t)w; continue; }
-        if (w < 0 && errno == EINTR) continue;
-        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            struct pollfd pf = { .fd = fd, .events = POLLOUT };
-            int left = ms_left(deadline);
-            if (left == 0) return -1;
-            int pr = poll(&pf, 1, left);
-            if (pr < 0 && errno == EINTR) continue;
-            if (pr <= 0) return -1;
-            if (pf.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
-            continue;
-        }
-        return -1;
-    }
-    return 0;
-}
-
 static int write_frame(int fd, uint32_t type, uint32_t id,
                        const void *a, size_t alen, const void *b, size_t blen,
                        uint64_t deadline)
 {
-    if (alen + blen > UINT32_MAX) return -1;
-    uint8_t hdr[HGC_HDR];
-    put32(hdr, HGC_MAGIC);
-    put32(hdr + 4, type);
-    put32(hdr + 8, id);
-    put32(hdr + 12, (uint32_t)(alen + blen));
-    if (write_all(fd, hdr, sizeof hdr, deadline) != 0) return -1;
-    if (alen && write_all(fd, a, alen, deadline) != 0) return -1;
-    if (blen && write_all(fd, b, blen, deadline) != 0) return -1;
-    return 0;
-}
-
-/* An incremental frame reader over a non-blocking socket. */
-typedef struct {
-    uint8_t  hdr[HGC_HDR];
-    size_t   got;        /* bytes of header + payload read so far */
-    uint32_t type, id, len;
-    uint8_t *buf;        /* the payload (len bytes), malloc'd */
-    uint32_t max;        /* the largest payload taken */
-} FrameRd;
-
-#define FR_MORE      0
-#define FR_DONE      1
-#define FR_EOF      -1
-#define FR_ERROR    -2
-#define FR_OVERSIZE -3
-
-static void frame_reset(FrameRd *r)
-{
-    free(r->buf);
-    uint32_t max = r->max;
-    memset(r, 0, sizeof *r);
-    r->max = max;
-}
-
-/* Read what the socket has. FR_DONE when a whole frame is in @p r (the
- * caller takes it, then frame_reset), FR_MORE when it needs more, else an
- * error (FR_EOF before a whole frame, FR_ERROR, FR_OVERSIZE past r->max). */
-static int frame_read_some(int fd, FrameRd *r)
-{
-    for (;;) {
-        if (r->got < HGC_HDR) {
-            ssize_t n = recv(fd, r->hdr + r->got, HGC_HDR - r->got, 0);
-            if (n == 0) return FR_EOF;
-            if (n < 0) {
-                if (errno == EINTR) continue;
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return FR_MORE;
-                return FR_ERROR;
-            }
-            r->got += (size_t)n;
-            if (r->got < HGC_HDR) continue;
-            if (get32(r->hdr) != HGC_MAGIC) return FR_ERROR;
-            r->type = get32(r->hdr + 4);
-            r->id   = get32(r->hdr + 8);
-            r->len  = get32(r->hdr + 12);
-            if (r->len > r->max) return FR_OVERSIZE;
-            if (r->len > 0) {
-                r->buf = calloc(1, r->len);   /* zeroed: never read uninitialised */
-                if (!r->buf) return FR_ERROR;
-            }
-        }
-        size_t have = r->got - HGC_HDR;
-        if (have == r->len) return FR_DONE;
-        ssize_t n = recv(fd, r->buf + have, r->len - have, 0);
-        if (n == 0) return FR_EOF;
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return FR_MORE;
-            return FR_ERROR;
-        }
-        r->got += (size_t)n;
-    }
-}
-
-/* Read one whole frame, waiting at most until @p deadline (0 = none).
- * FR_DONE, FR_MORE on the deadline, or an error. */
-static int frame_read(int fd, FrameRd *r, uint64_t deadline)
-{
-    for (;;) {
-        int rc = frame_read_some(fd, r);
-        if (rc != FR_MORE) return rc;
-        struct pollfd pf = { .fd = fd, .events = POLLIN };
-        int left = ms_left(deadline);
-        if (left == 0) return FR_MORE;
-        int pr = poll(&pf, 1, left);
-        if (pr < 0 && errno == EINTR) continue;
-        if (pr < 0) return FR_ERROR;
-        if (pr == 0) return FR_MORE;
-    }
+    return hl_chan_write_frame(fd, HGC_MAGIC, type, id, a, alen, b, blen,
+                               deadline);
 }
 
 /* ── Spawning ─────────────────────────────────────────────────────── */
@@ -346,134 +182,18 @@ static int env_allowed(const char *kv)
     return 0;
 }
 
-static char **helper_env(void)
-{
-    size_t n = 0;
-    for (char **e = environ; e && *e; e++) n++;
-    char **out = calloc(n + 1, sizeof *out);
-    if (!out) return NULL;
-    size_t k = 0;
-    for (char **e = environ; e && *e; e++)
-        if (env_allowed(*e)) out[k++] = *e;
-    out[k] = NULL;
-    return out;
-}
-
 /* Spawn @p exe as the helper @p role with @p fd as its fd 3, stdin /
  * stdout / stderr on /dev/null. The pid, or -1. */
 static pid_t spawn_role(const char *exe, const char *role, int fd)
 {
-    posix_spawn_file_actions_t fa;
-    posix_spawnattr_t at;
-    if (posix_spawn_file_actions_init(&fa) != 0) return -1;
-    if (posix_spawnattr_init(&at) != 0) {
-        posix_spawn_file_actions_destroy(&fa);
-        return -1;
-    }
-    int ok = 1;
-    ok = ok && posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0) == 0;
-    ok = ok && posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0) == 0;
-    ok = ok && posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0) == 0;
-    ok = ok && posix_spawn_file_actions_adddup2(&fa, fd, 3) == 0;
-    short flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
-#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
-    /* Apple: every descriptor not named above is closed in the child. */
-    flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
-#endif
-    sigset_t none, all;
-    sigemptyset(&none);
-    sigfillset(&all);
-    ok = ok && posix_spawnattr_setflags(&at, flags) == 0;
-    ok = ok && posix_spawnattr_setsigmask(&at, &none) == 0;
-    ok = ok && posix_spawnattr_setsigdefault(&at, &all) == 0;
-    char **env = ok ? helper_env() : NULL;
-    pid_t pid = -1;
-    if (ok && env) {
-        /* posix_spawn takes char *const argv[]: owned copies. */
-        // cppcheck-suppress variableScope
-        char a0[PATH_MAX], a1[] = HL_GPU_HELPER_ARGV1, a2[16];
-        if (strlen(exe) < sizeof a0 && strlen(role) < sizeof a2) {
-            memcpy(a0, exe, strlen(exe) + 1);
-            memcpy(a2, role, strlen(role) + 1);
-            char *argv[] = { a0, a1, a2, NULL };
-            if (posix_spawn(&pid, exe, &fa, &at, argv, env) != 0)
-                pid = -1;
-        }
-    }
-    free(env);
-    posix_spawnattr_destroy(&at);
-    posix_spawn_file_actions_destroy(&fa);
-    return pid;
-}
-
-/* This process's binary, as a path posix_spawn takes. On Linux
- * /proc/self/exe itself: it runs the image this process runs even if the
- * file was replaced since. */
-static int self_exe(char *out, size_t sz)
-{
-#if defined(__linux__)
-    if (sz < sizeof "/proc/self/exe") return -1;
-    memcpy(out, "/proc/self/exe", sizeof "/proc/self/exe");
-    return 0;
-#elif defined(__APPLE__)
-    char raw[PATH_MAX];
-    uint32_t n = sizeof raw;
-    if (_NSGetExecutablePath(raw, &n) != 0) return -1;
-    char real[PATH_MAX];
-    if (!realpath(raw, real)) return -1;
-    if (strlen(real) >= sz) return -1;
-    memcpy(out, real, strlen(real) + 1);
-    return 0;
-#else
-    (void)out; (void)sz;
-    return -1;
-#endif
-}
-
-/* Close every descriptor above 3 (the helper inherits only 0-3). */
-static void close_extra_fds(void)
-{
-#if defined(__linux__) && defined(__NR_close_range)
-    if (syscall(__NR_close_range, 4u, ~0u, 0u) == 0)
-        return;
-#endif
-    struct rlimit rl;
-    long max = 4096;
-    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
-        rl.rlim_cur < 65536)
-        max = (long)rl.rlim_cur;
-    for (long fd = 4; fd < max; fd++)
-        (void)close((int)fd);
-}
-
-/* Reap @p pid within @p ms (it was killed, or is exiting). 1 = reaped (its
- * status in *status, its peak RSS in bytes in *maxrss when non-NULL),
- * 0 = still there. */
-static int reap_ru(pid_t pid, int *status, uint32_t ms, uint64_t *maxrss)
-{
-    uint64_t deadline = mono_ms() + ms;
-    for (;;) {
-        struct rusage ru;
-        memset(&ru, 0, sizeof ru);
-        pid_t r = wait4(pid, status, WNOHANG, &ru);
-        if (r == pid && maxrss) {
-#if defined(__APPLE__)
-            *maxrss = (uint64_t)ru.ru_maxrss;            /* bytes */
-#else
-            *maxrss = (uint64_t)ru.ru_maxrss * 1024u;    /* KiB */
-#endif
-        }
-        if (r == pid) return 1;
-        if (r < 0 && errno != EINTR) return 1;   /* not ours any more */
-        if (mono_ms() >= deadline) return 0;
-        struct timespec ts = { 0, 5 * 1000000L };
-        nanosleep(&ts, NULL);
-    }
-}
-
-static int reap(pid_t pid, int *status, uint32_t ms)
-{
-    return reap_ru(pid, status, ms, NULL);
+    /* posix_spawn takes char *const argv[]: owned copies. */
+    // cppcheck-suppress variableScope
+    char a0[PATH_MAX], a1[] = HL_GPU_HELPER_ARGV1, a2[16];
+    if (strlen(exe) >= sizeof a0 || strlen(role) >= sizeof a2) return -1;
+    memcpy(a0, exe, strlen(exe) + 1);
+    memcpy(a2, role, strlen(role) + 1);
+    char *argv[] = { a0, a1, a2, NULL };
+    return hl_chan_spawn(exe, argv, fd, env_allowed);
 }
 
 /* ── Client (the server) ──────────────────────────────────────────── */
@@ -489,7 +209,7 @@ int hl_gpu_helper_start(const char *exe)
     char self[PATH_MAX];
     if (!exe) {
         // cppcheck-suppress knownConditionTrueFalse
-        if (self_exe(self, sizeof self) != 0) {
+        if (hl_chan_self_exe(self, sizeof self) != 0) {
             log_warn("[hull:gpu] compile helper: cannot resolve this binary");
             return -1;
         }
@@ -506,8 +226,8 @@ int hl_gpu_helper_start(const char *exe)
                  strerror(errno));
         return -1;
     }
-    set_nonblock(sv[0]);
-    set_nosigpipe(sv[0]);
+    hl_chan_set_nonblock(sv[0]);
+    hl_chan_set_nosigpipe(sv[0]);
     g_fd = sv[0];
     g_pid = pid;
     return 0;
@@ -527,7 +247,7 @@ static void helper_reap_exiting(void)
 {
     if (g_pid_exiting > 0) {
         int st;
-        if (reap(g_pid_exiting, &st, 0)) g_pid_exiting = -1;
+        if (hl_chan_reap(g_pid_exiting, &st, 0, NULL)) g_pid_exiting = -1;
     }
 }
 
@@ -541,7 +261,7 @@ void hl_gpu_helper_stop(void)
         int st;
         /* It exits on the EOF, killing a running worker first; give it a
          * moment, then reap it later (helper_reap_exiting). */
-        if (!reap(g_pid, &st, 200)) {
+        if (!hl_chan_reap(g_pid, &st, 200, NULL)) {
             helper_reap_exiting();         /* an older one, if any */
             if (g_pid_exiting <= 0) g_pid_exiting = g_pid;
         }
@@ -666,36 +386,36 @@ static int round_trip(const char *wgsl, size_t len, int device,
     uint32_t id = g_next_id++;
     if (g_next_id == 0) g_next_id = 1;
     uint32_t compile_ms = helper_compile_ms();
-    uint64_t deadline = mono_ms() + helper_init_ms() + compile_ms +
+    uint64_t deadline = hl_chan_mono_ms() + helper_init_ms() + compile_ms +
                         HL_GPU_HELPER_MARGIN_MS;
     uint8_t pre[HGC_REQ_PRE];
-    put32(pre, compile_ms);
-    put32(pre + 4, (uint32_t)device);
-    put32(pre + 8, stack_mib);
-    put32(pre + 12, mem_mib);
+    hl_chan_put32(pre, compile_ms);
+    hl_chan_put32(pre + 4, (uint32_t)device);
+    hl_chan_put32(pre + 8, stack_mib);
+    hl_chan_put32(pre + 12, mem_mib);
     if (write_frame(g_fd, HGC_REQ, id, pre, sizeof pre, wgsl, len,
                     deadline) != 0) {
         helper_lost("request not sent");
         return HL_GPU_HELPER_UNAVAILABLE;
     }
     g_stats.round_trips++;
-    FrameRd r = { .max = 8u + HL_GPU_HELPER_REPLY_MAX };
+    HlChanFrame r = { .magic = HGC_MAGIC, .max = 8u + HL_GPU_HELPER_REPLY_MAX };
     int cancelled = 0;
     for (;;) {
         /* Wait in poll slices, asking the run between them: its deadline
          * or a tripped budget sends a cancel (the supervisor kills the
          * worker and answers CANCELLED). */
-        uint64_t slice = mono_ms() + HL_GPU_COMPILE_POLL_MS;
+        uint64_t slice = hl_chan_mono_ms() + HL_GPU_COMPILE_POLL_MS;
         if (slice > deadline) slice = deadline;
-        int rc = frame_read(g_fd, &r, slice);
-        if (rc == FR_DONE) {
+        int rc = hl_chan_frame_read(g_fd, &r, slice);
+        if (rc == HL_CHAN_DONE) {
             int keep = r.type == HGC_RESP && r.len >= 8;
             uint32_t rid = r.id;
-            int status = keep ? (int)get32(r.buf) : -1;
-            uint32_t flags = keep ? get32(r.buf + 4) : 0;
+            int status = keep ? (int)hl_chan_get32(r.buf) : -1;
+            uint32_t flags = keep ? hl_chan_get32(r.buf + 4) : 0;
             uint64_t peak = keep && r.len >= 12
-                ? (uint64_t)get32(r.buf + 8) * 1024u : 0;
-            frame_reset(&r);
+                ? (uint64_t)hl_chan_get32(r.buf + 8) * 1024u : 0;
+            hl_chan_frame_reset(&r);
             if (!keep) {
                 helper_lost("malformed reply");
                 return HL_GPU_HELPER_UNAVAILABLE;
@@ -716,13 +436,13 @@ static int round_trip(const char *wgsl, size_t len, int device,
             }
             return cancelled ? HL_GPU_HELPER_CANCELLED : status;
         }
-        if (rc != FR_MORE) {
-            frame_reset(&r);
-            helper_lost(rc == FR_EOF ? "it exited" : "bad frame");
+        if (rc != HL_CHAN_MORE) {
+            hl_chan_frame_reset(&r);
+            helper_lost(rc == HL_CHAN_EOF ? "it exited" : "bad frame");
             return HL_GPU_HELPER_UNAVAILABLE;
         }
-        if (mono_ms() >= deadline) {
-            frame_reset(&r);
+        if (hl_chan_mono_ms() >= deadline) {
+            hl_chan_frame_reset(&r);
             helper_lost("no reply within its deadline");
             return HL_GPU_HELPER_UNAVAILABLE;
         }
@@ -730,8 +450,8 @@ static int round_trip(const char *wgsl, size_t len, int device,
         if (!cancelled && run_stopped()) {
             cancelled = 1;
             if (write_frame(g_fd, HGC_CANCEL, id, NULL, 0, NULL, 0,
-                            mono_ms() + HL_GPU_HELPER_MARGIN_MS) != 0) {
-                frame_reset(&r);
+                            hl_chan_mono_ms() + HL_GPU_HELPER_MARGIN_MS) != 0) {
+                hl_chan_frame_reset(&r);
                 helper_lost("cancel not sent");
                 return HL_GPU_HELPER_CANCELLED;
             }
@@ -864,7 +584,7 @@ static void sup_reap_pending(int block)
             struct timespec ts = { 2, 500 * 1000000L };   /* its slow death */
             nanosleep(&ts, NULL);
         }
-        if (!reap_ru(pid, &st, block ? 2000u : 0u, NULL))
+        if (!hl_chan_reap(pid, &st, block ? 2000u : 0u, NULL))
             g_reap_pending[keep++] = pid;
     }
     g_reap_pending_n = keep;
@@ -878,7 +598,7 @@ static void worker_reap_quick(Worker *w)
     uint64_t rss = 0;
     // cppcheck-suppress knownConditionTrueFalse
     int reaped = !sup_slowdie() &&
-                 reap_ru(w->pid, &st, SUP_REAP_QUICK_MS, &rss);
+                 hl_chan_reap(w->pid, &st, SUP_REAP_QUICK_MS, &rss);
     worker_note_rss(w, rss);
     if (!reaped) {
         if (g_reap_pending_n == SUP_REAP_PENDING_MAX) sup_reap_pending(1);
@@ -920,16 +640,16 @@ static int worker_gone(Worker *w)
  * the worker's memory every HL_GPU_HELPER_MEM_POLL_MS. Returns SUP_FRAME
  * (a frame in *wr), or a status: TIMEOUT, CRASHED, BADREPLY, CANCELLED,
  * MEMORY; *server_gone = 1 on the server's EOF / a protocol error. */
-static int sup_wait_worker(int sfd, Worker *w, FrameRd *wr, uint32_t id,
+static int sup_wait_worker(int sfd, Worker *w, HlChanFrame *wr, uint32_t id,
                            uint64_t deadline, int *server_gone)
 {
-    FrameRd sr = { .max = 0 };   /* only CANCEL (empty) is taken while busy */
+    HlChanFrame sr = { .magic = HGC_MAGIC, .max = 0 };   /* only CANCEL (empty) is taken while busy */
     for (;;) {
         struct pollfd pf[2] = {
             { .fd = w->fd, .events = POLLIN },
             { .fd = sfd,   .events = POLLIN },
         };
-        int left = ms_left(deadline);
+        int left = hl_chan_ms_left(deadline);
         if (left == 0) {
             worker_kill(w);
             return HL_GPU_HELPER_TIMEOUT;
@@ -954,11 +674,11 @@ static int sup_wait_worker(int sfd, Worker *w, FrameRd *wr, uint32_t id,
             return HL_GPU_HELPER_CRASHED;
         }
         if (pf[1].revents) {
-            int rc = frame_read_some(sfd, &sr);
-            if (rc == FR_DONE) {
+            int rc = hl_chan_frame_read_some(sfd, &sr);
+            if (rc == HL_CHAN_DONE) {
                 int is_cancel = sr.type == HGC_CANCEL;
                 int ours = is_cancel && sr.id == id;
-                frame_reset(&sr);
+                hl_chan_frame_reset(&sr);
                 if (ours) {
                     worker_kill(w);
                     return HL_GPU_HELPER_CANCELLED;
@@ -969,23 +689,23 @@ static int sup_wait_worker(int sfd, Worker *w, FrameRd *wr, uint32_t id,
                     worker_kill(w);
                     return HL_GPU_HELPER_CANCELLED;
                 }
-            } else if (rc != FR_MORE) {
-                frame_reset(&sr);
+            } else if (rc != HL_CHAN_MORE) {
+                hl_chan_frame_reset(&sr);
                 *server_gone = 1;
                 worker_kill(w);
                 return HL_GPU_HELPER_CANCELLED;
             }
         }
         if (pf[0].revents) {
-            int rc = frame_read_some(w->fd, wr);
-            if (rc == FR_DONE) return SUP_FRAME;
-            if (rc == FR_OVERSIZE || rc == FR_ERROR) {
-                frame_reset(wr);
+            int rc = hl_chan_frame_read_some(w->fd, wr);
+            if (rc == HL_CHAN_DONE) return SUP_FRAME;
+            if (rc == HL_CHAN_OVERSIZE || rc == HL_CHAN_ERROR) {
+                hl_chan_frame_reset(wr);
                 worker_kill(w);
                 return HL_GPU_HELPER_BADREPLY;
             }
-            if (rc == FR_EOF) {
-                frame_reset(wr);
+            if (rc == HL_CHAN_EOF) {
+                hl_chan_frame_reset(wr);
                 return worker_gone(w);
             }
         }
@@ -1002,18 +722,18 @@ static int sup_compile(int sfd, const char *exe, uint32_t id,
                        uint8_t *req, uint32_t req_len, int *server_gone,
                        uint32_t *flags, uint64_t *peak)
 {
-    uint32_t compile_ms = get32(req);
+    uint32_t compile_ms = hl_chan_get32(req);
     if (compile_ms == 0 || compile_ms > 600000u) compile_ms = HL_GPU_COMPILE_TIMEOUT_MS;
     /* The stack and memory the worker gets: the server's asks, never above
      * the compiled caps; rewritten in the request the worker reads. */
-    uint32_t stack_mib = get32(req + 8);
-    uint32_t mem_mib = get32(req + 12);
+    uint32_t stack_mib = hl_chan_get32(req + 8);
+    uint32_t mem_mib = hl_chan_get32(req + 12);
     if (stack_mib == 0 || stack_mib > (uint32_t)(HL_GPU_HELPER_STACK_BYTES >> 20))
         stack_mib = (uint32_t)(HL_GPU_HELPER_STACK_BYTES >> 20);
     if (mem_mib == 0 || mem_mib > (uint32_t)(HL_GPU_HELPER_MEM_BYTES >> 20))
         mem_mib = (uint32_t)(HL_GPU_HELPER_MEM_BYTES >> 20);
-    put32(req + 8, stack_mib);
-    put32(req + 12, mem_mib);
+    hl_chan_put32(req + 8, stack_mib);
+    hl_chan_put32(req + 12, mem_mib);
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
         return HL_GPU_HELPER_UNAVAILABLE;
@@ -1025,8 +745,8 @@ static int sup_compile(int sfd, const char *exe, uint32_t id,
         close(sv[0]);
         return HL_GPU_HELPER_UNAVAILABLE;
     }
-    set_nonblock(w.fd);
-    set_nosigpipe(w.fd);
+    hl_chan_set_nonblock(w.fd);
+    hl_chan_set_nosigpipe(w.fd);
     sup_reap_pending(0);   /* earlier workers that were slow to die */
     int rc = sup_compile_w(sfd, &w, id, req, req_len, compile_ms,
                            server_gone, flags);
@@ -1038,39 +758,39 @@ static int sup_compile_w(int sfd, Worker *w, uint32_t id, uint8_t *req,
                          uint32_t req_len, uint32_t compile_ms,
                          int *server_gone, uint32_t *flags)
 {
-    FrameRd wr = { .max = HL_GPU_HELPER_REPLY_MAX };
+    HlChanFrame wr = { .magic = HGC_MAGIC, .max = HL_GPU_HELPER_REPLY_MAX };
     /* Start-up: spawn + backend init + sandbox, until READY. The init
      * deadline is the server's (it knows the configured value) less the
      * compile deadline and margin it budgeted; the supervisor uses the
      * default. */
     int rc = sup_wait_worker(sfd, w, &wr, id,
-                             mono_ms() + helper_init_ms(), server_gone);
+                             hl_chan_mono_ms() + helper_init_ms(), server_gone);
     if (rc != SUP_FRAME) return rc;
     int ready = wr.type == HGC_READY && wr.len == 0;
-    frame_reset(&wr);
+    hl_chan_frame_reset(&wr);
     if (!ready) {
         worker_kill(w);
         return HL_GPU_HELPER_BADREPLY;
     }
     /* The source, then the compile deadline. */
-    uint64_t deadline = mono_ms() + compile_ms;
+    uint64_t deadline = hl_chan_mono_ms() + compile_ms;
     if (write_frame(w->fd, HGC_REQ, id, req, req_len, NULL, 0, deadline) != 0) {
         worker_kill(w);
-        return mono_ms() >= deadline ? HL_GPU_HELPER_TIMEOUT
+        return hl_chan_mono_ms() >= deadline ? HL_GPU_HELPER_TIMEOUT
                                      : HL_GPU_HELPER_CRASHED;
     }
     rc = sup_wait_worker(sfd, w, &wr, id, deadline, server_gone);
     if (rc != SUP_FRAME) return rc;
     int status = HL_GPU_HELPER_BADREPLY;
     if (wr.type == HGC_RESP && wr.id == id && wr.len >= 8) {
-        int st = (int)get32(wr.buf);
+        int st = (int)hl_chan_get32(wr.buf);
         if (st == HL_GPU_HELPER_OK || st == HL_GPU_HELPER_SHADER ||
             st == HL_GPU_HELPER_UNAVAILABLE) {
             status = st;
-            *flags = get32(wr.buf + 4) & HGC_FLAG_SANDBOXED;
+            *flags = hl_chan_get32(wr.buf + 4) & HGC_FLAG_SANDBOXED;
         }
     }
-    frame_reset(&wr);
+    hl_chan_frame_reset(&wr);
     worker_kill(w);   /* it exits after replying; reaped (or killed) here */
     /* macOS polls the footprint only while it waits: an allocation burst
      * between the last look and the reply may have passed the cap, which
@@ -1095,28 +815,28 @@ static int supervisor_main(void)
     (void)prctl(PR_SET_PDEATHSIG, SIGKILL);
     (void)prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 #endif
-    close_extra_fds();
+    hl_chan_close_extra_fds();
     struct rlimit core0 = { 0, 0 };
     (void)setrlimit(RLIMIT_CORE, &core0);
     char exe[PATH_MAX];
     // cppcheck-suppress knownConditionTrueFalse
-    if (self_exe(exe, sizeof exe) != 0) return 2;
+    if (hl_chan_self_exe(exe, sizeof exe) != 0) return 2;
     int sfd = 3;
-    set_nonblock(sfd);
-    set_nosigpipe(sfd);
-    FrameRd r = { .max = HGC_REQ_MAX };
+    hl_chan_set_nonblock(sfd);
+    hl_chan_set_nosigpipe(sfd);
+    HlChanFrame r = { .magic = HGC_MAGIC, .max = HGC_REQ_MAX };
     for (;;) {
-        int rc = frame_read(sfd, &r, 0);
-        if (rc != FR_DONE) {
-            frame_reset(&r);
-            return rc == FR_EOF ? 0 : 2;
+        int rc = hl_chan_frame_read(sfd, &r, 0);
+        if (rc != HL_CHAN_DONE) {
+            hl_chan_frame_reset(&r);
+            return rc == HL_CHAN_EOF ? 0 : 2;
         }
         if (r.type == HGC_CANCEL) {      /* nothing running: ignore */
-            frame_reset(&r);
+            hl_chan_frame_reset(&r);
             continue;
         }
         if (r.type != HGC_REQ || r.len < HGC_REQ_PRE) {
-            frame_reset(&r);
+            hl_chan_frame_reset(&r);
             return 2;
         }
         int gone = 0;
@@ -1125,13 +845,13 @@ static int supervisor_main(void)
         int status = sup_compile(sfd, exe, r.id, r.buf, r.len, &gone, &flags,
                                  &peak);
         uint32_t id = r.id;
-        frame_reset(&r);
+        hl_chan_frame_reset(&r);
         if (gone) return 0;
         uint8_t st[12];
-        put32(st, (uint32_t)status);
-        put32(st + 4, flags);
+        hl_chan_put32(st, (uint32_t)status);
+        hl_chan_put32(st + 4, flags);
         uint64_t kib = peak >> 10;
-        put32(st + 8, kib > UINT32_MAX ? UINT32_MAX : (uint32_t)kib);
+        hl_chan_put32(st + 8, kib > UINT32_MAX ? UINT32_MAX : (uint32_t)kib);
         if (write_frame(sfd, HGC_RESP, id, st, sizeof st, NULL, 0, 0) != 0)
             return 0;
         /* The verdict is out: now the workers that were slow to die may
@@ -1384,8 +1104,8 @@ static void worker_reply(uint32_t id, int status, const void *extra,
                          size_t extra_len)
 {
     uint8_t st[8];
-    put32(st, (uint32_t)status);
-    put32(st + 4, g_worker_flags);
+    hl_chan_put32(st, (uint32_t)status);
+    hl_chan_put32(st + 4, g_worker_flags);
     (void)write_frame(3, HGC_RESP, id, st, sizeof st, extra, extra_len, 0);
 }
 
@@ -1395,7 +1115,7 @@ static int worker_main(void)
 #if defined(__linux__)
     (void)prctl(PR_SET_PDEATHSIG, SIGKILL);
 #endif
-    close_extra_fds();
+    hl_chan_close_extra_fds();
     struct rlimit rl = { 0, 0 };
     (void)setrlimit(RLIMIT_CORE, &rl);
     /* CPU: the start-up and compile deadlines, rounded up, plus a second;
@@ -1415,7 +1135,7 @@ static int worker_main(void)
     worker_limit_data((uint64_t)HL_GPU_HELPER_MEM_BYTES +
                       (uint64_t)HL_GPU_HELPER_STACK_BYTES);
     int fd = 3;
-    set_nosigpipe(fd);
+    hl_chan_set_nosigpipe(fd);
 
     /* The GPU backend, before the sandbox (it opens the device). A failure
      * is reported after the request arrives, as UNAVAILABLE. */
@@ -1431,15 +1151,15 @@ static int worker_main(void)
         g_worker_flags |= HGC_FLAG_SANDBOXED;
     if (write_frame(fd, HGC_READY, 0, NULL, 0, NULL, 0, 0) != 0)
         _exit(2);
-    FrameRd r = { .max = HGC_REQ_MAX };
-    if (frame_read(fd, &r, 0) != FR_DONE || r.type != HGC_REQ ||
+    HlChanFrame r = { .magic = HGC_MAGIC, .max = HGC_REQ_MAX };
+    if (hl_chan_frame_read(fd, &r, 0) != HL_CHAN_DONE || r.type != HGC_REQ ||
         r.len < HGC_REQ_PRE)
         _exit(2);
     uint32_t id = r.id;
-    int device = (int)get32(r.buf + 4);
+    int device = (int)hl_chan_get32(r.buf + 4);
     /* The supervisor clamped both to the compiled caps. */
-    size_t stack = (size_t)get32(r.buf + 8) << 20;
-    uint64_t mem = (uint64_t)get32(r.buf + 12) << 20;
+    size_t stack = (size_t)hl_chan_get32(r.buf + 8) << 20;
+    uint64_t mem = (uint64_t)hl_chan_get32(r.buf + 12) << 20;
     if (stack == 0 || stack > HL_GPU_HELPER_STACK_BYTES)
         stack = HL_GPU_HELPER_STACK_BYTES;
     if (mem == 0 || mem > HL_GPU_HELPER_MEM_BYTES)

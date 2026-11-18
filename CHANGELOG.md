@@ -24,6 +24,15 @@ release-artifact layout).
   a canonical dependency manifest and its revalidation (content and type decide freshness, never
   mtime). Nothing in `hull` uses it yet: it is the first step toward running TypeScript
   (docs/typescript_design.md §1).
+- Build pipeline, internal (BuildContext, docs/buildcontext_design.md §9.1): the pieces a build
+  plugin's channel is made of. `shared/child_channel` - a helper process on one inherited socket
+  (spawn with fd 3 and a filtered environment, length-framed messages under deadlines, reap) -
+  is the GPU compile helper's code moved out of `cap/gpu_helper.c`, which now uses it, unchanged.
+  `shared/plain_value` is the value encoding (nil, booleans, int64, text, bytes, arrays and maps
+  with text keys; canonical, bounded, checked whole before it is read), with a Lua and a QuickJS
+  walker that run no app code (raw reads, own data properties; a Proxy, a getter, a metatable or a
+  float is refused) and encode the same value to the same bytes. Fuzzed by `fuzz_plain_value`.
+  Nothing uses the encoding yet.
 - Project discovery reads TypeScript: `.ts` and `.mts` sources go to a `typescript` frontend (the
   JS parser's TypeScript mode, in the same tooling session), so `hull agent inspect` and `hull
   dev --agent` report their declarations and JSDoc annotations, and a construct Hull refuses
