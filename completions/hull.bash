@@ -20,8 +20,9 @@ _hull() {
         cword=$COMP_CWORD
     }
 
-    local commands="keygen build verify verify-self verify-release sign-release sbom inspect manifest test new init types dev eject sign-platform migrate modules agent mcp check compute deploy version doctor update tools help"
+    local commands="keygen build verify verify-self verify-release sign-release sbom inspect manifest test new init types dev eject sign-platform migrate modules agent mcp check compute deploy version doctor update tools plugins help"
     local tools_subs="list install uninstall"
+    local plugins_subs="list run"
     local modules_subs="list available explain analyze"
     local sbom_formats="human json cyclonedx spdx"
     # Keep in sync with src/hull/commands/agent.c hl_cmd_agent() dispatch table.
@@ -222,6 +223,15 @@ _hull() {
 
         update)
             COMPREPLY=($(compgen -W "--check --force --repo= --help" -- "$cur"))
+            ;;
+
+        plugins)
+            # `hull plugins <verb> [app_dir] [--json]`
+            if [ "$cword" -eq 2 ]; then
+                COMPREPLY=($(compgen -W "$plugins_subs --help -h" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -d -W "--json" -- "$cur"))
+            fi
             ;;
 
         tools)

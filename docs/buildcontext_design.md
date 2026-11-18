@@ -1,6 +1,6 @@
 # BuildContext action and authority design
 
-Status: **checkpoints 1 and 2 implemented (§13.1, §13.2), checkpoint 5's plugin side (§13.3) and host side (§13.4); the rest design-only.** This document refines checkpoint 4
+Status: **checkpoints 1 and 2 implemented (§13.1, §13.2), checkpoint 5's plugin side (§13.3), host side (§13.4) and demonstration (§13.5); the rest design-only.** This document refines checkpoint 4
 of [hull_fs_design.md](hull_fs_design.md) and supersedes the still-unimplemented
 BuildContext portions of
 [hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md). The shipped
@@ -878,8 +878,8 @@ The host half of §9.1 and §9.2, in the same split as the action: Lua tool code
 native piece, `hull.buildctx._plugin` (in `mod_buildctx.c`): spawn a plugin with the channel on its
 fd 3, send a frame, receive one under a deadline, kill and reap - the part that holds a socket and
 a pid. The three natives are loaded in the tool VM only, where a spawn is held to the tool
-sandbox's grants like every other tool spawn (the executable for execute, the entry for read). Nothing in `hull` drives a run yet: the
-first caller is the demonstration plugin's command (next) and then the planner (checkpoint 6).
+sandbox's grants like every other tool spawn (the executable for execute, the entry for read). The
+first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the next.
 
 - **The runner** (`plugin.new({ exe, entry })`, `r:run(action, req)`, `r:close()`) spawns the hull
   binary on the plugin's entry with `-d :memory:` (an implicit `data.db` would be written into the
@@ -925,10 +925,48 @@ first caller is the demonstration plugin's command (next) and then the planner (
   `hull.build.json`, links, the preset, descriptors, configuration and claims; and
   `lua_tool_vm.buildctx_registry_reads_real_plugin_manifests` runs registration in the real tool
   VM with the real extraction.
-- **Not yet**: the result store's place in `~/.hull` and its `hull cache` row, keeping a plugin's
-  directory out of the app's build, discovery and `hull test`, and `hull test` of a transform
-  against a stubbed ctx come with the demonstration plugin; the bundled plugins' entries with
-  `stdlib:ts-erase@1`.
+- **Not yet**: the bundled plugins' entries come with `stdlib:ts-erase@1`; the rest is §13.5.
+
+### 13.5 Checkpoint 5: the demonstration as built
+
+`hull plugins list|run [app_dir] [--json]` (`src/hull/commands/plugins.c`, the tool module
+`hull.plugins`) over `hull.buildctx.pipeline`, the part of a pipeline run the planner will reuse.
+
+- **list** loads the registry (§13.4) and prints each plugin's identity, language, input and output
+  kinds, and claims; a registration error is exit 2.
+- **run** (`pipeline.run(root)`): project discovery (`hull.project.analyze`; an invalid discovery
+  stops the run), then for each source plugin its selection - every annotated declaration in a
+  language it lists, carrying an annotation it lists (any, when it lists none), outside every
+  plugin directory. A unit is a plain value, `{ id, language, path, kind, name, range, annotations
+  = { { name, value } } }`, the same shape for every language; the action's grants are exactly the
+  units' files. The action key is the SHA-256 of a canonical envelope (`hull-build-action-key`
+  version 1: the channel protocol version, the plugin's identity, descriptor and configuration,
+  the selection, `hull.build.json`'s hash). A committed result that `action.lookup` finds fresh is
+  reported `cached`; otherwise the plugin runs (§13.4) and its result is `committed`, or the run
+  reports `failed` with the runner's token and any diagnostics. A plugin with nothing selected is
+  `no_input`; artifact plugins and bundled ones are `skipped` until the planner runs them. Exit 1
+  when a plugin failed.
+- **The result store** is the `build-results` cache kind (`~/.hull/blobs/runtime/build-results`, or
+  under `HULL_CACHE_DIR`), sealed under the tool key; `HULL_NO_BUILD_CACHE` (or `HULL_NO_CACHE`)
+  turns reuse off, never the commit. A result's key is the pre-run key, which a later run with
+  other dependencies shares, so `put_result` replaces a stored result (a stale one); payloads stay
+  content-addressed.
+- **Plugin directories are not the app's**: `hull build` leaves every file under a directory
+  `hull.build.json` names out of the binary (`hull.build.json` itself is embedded and signed), and
+  the selection leaves them out of discovery's declarations. Project discovery's own listing
+  (`hull agent inspect`) and `hull test` do not skip them yet.
+- **The demonstration** (`tests/fixtures/plugin_demo`): an inventory plugin - it lists the `@demo`
+  declarations it is shown, by name and annotation value, as one artifact, and reads each unit's
+  file so the source is a dependency - written once in Lua and once in JavaScript, over the same
+  app written in Lua and in JavaScript. `tests/e2e_plugins.sh` (`make e2e-plugins`) runs all four
+  pairings through the hull binary and requires byte-identical artifacts and diagnostics; checks
+  the cached rerun, a re-run after an edit outside the annotations (the dependency manifest, same
+  bytes), a new selection after a new annotation and `HULL_NO_BUILD_CACHE`; reads a JavaScript
+  plugin's manifest through the extraction child (`list`); refuses a missing required
+  configuration and a plugin outside the preset; checks that nothing is written into the app and
+  that `hull build` leaves the plugin's sources out.
+- **Not yet**: `hull test` of a transform against a stubbed ctx, and discovery / `hull test`
+  skipping plugin directories.
 
 ## 14. Non-scope
 

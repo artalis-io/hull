@@ -1926,10 +1926,40 @@ end
 -- ctx table of the discovered state main() threads into the later stages.
 -- Extracted from main() (docs/build_modularization.md). The internal
 -- *_dir path locals stay private; only the 11 fields main uses downstream return.
+-- The build plugin directories hull.build.json names are not part of the app
+-- (docs/buildcontext_design.md §9.2): their sources are left out of the
+-- binary. hull.build.json itself is embedded and signed with the app.
+local function plugin_dir_prefixes(app_dir)
+    local root = tool.realpath(app_dir)
+    if not root then return {} end
+    local paths, err = require("hull.buildctx.registry").plugin_paths(root)
+    if not paths then
+        tool.stderr("hull build: " .. tostring(err) .. "\n")
+        tool.exit(1)
+    end
+    local out = {}
+    for i, p in ipairs(paths) do out[i] = app_dir .. "/" .. p .. "/" end
+    return out
+end
+
+local function without_plugin_dirs(files, prefixes)
+    if #prefixes == 0 then return files end
+    local out = {}
+    for _, f in ipairs(files) do
+        local keep = true
+        for _, pre in ipairs(prefixes) do
+            if f:sub(1, #pre) == pre then keep = false; break end
+        end
+        if keep then out[#out + 1] = f end
+    end
+    return out
+end
+
 local function discover(opts)
-    local lua_files = find_lua_files(opts.app_dir)
-    local js_files = find_js_files(opts.app_dir)
-    local json_files = find_json_files(opts.app_dir)
+    local plugin_dirs = plugin_dir_prefixes(opts.app_dir)
+    local lua_files = without_plugin_dirs(find_lua_files(opts.app_dir), plugin_dirs)
+    local js_files = without_plugin_dirs(find_js_files(opts.app_dir), plugin_dirs)
+    local json_files = without_plugin_dirs(find_json_files(opts.app_dir), plugin_dirs)
 
     if #lua_files == 0 and #js_files == 0 then
         tool.stderr("hull build: no .lua or .js files found in " .. opts.app_dir .. "\n")

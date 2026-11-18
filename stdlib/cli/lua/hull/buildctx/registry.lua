@@ -342,6 +342,21 @@ local function load_app_plugin(ctx, item)
     }
 end
 
+-- The application plugin directories hull.build.json names, without loading
+-- the plugins: what `hull build` leaves out of the app. A list (empty when
+-- there is no file), or nil, message.
+function M.plugin_paths(root, opts)
+    local fs = (opts and opts.fs) or require("hull.buildctx._fs")
+    local bytes, err = read_config(fs, root)
+    if bytes == nil then return nil, err end
+    if not bytes then return {} end
+    local list, perr = parse_config(bytes)
+    if not list then return nil, perr end
+    local out = {}
+    for i, p in ipairs(list) do out[i] = p.path end
+    return out
+end
+
 local Registry = {}
 Registry.__index = Registry
 

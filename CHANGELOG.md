@@ -43,6 +43,14 @@ release-artifact layout).
   commit byte-identical results. Tool code (`hull.buildctx.plugin`, `hull.buildctx.registry`)
   over one more small native binding, `hull.buildctx._plugin`; nothing in `hull build` runs it
   yet.
+- `hull plugins list|run [app_dir] [--json]` (docs/buildcontext_design.md §13.5): list the build
+  plugins `hull.build.json` registers, and run each source plugin over its selection - the
+  annotated declarations project discovery finds in the languages and annotations it claims, in
+  one language-neutral shape - committing the result to the new `build-results` cache kind
+  (sealed under the tool key; reused while its inputs hold, `HULL_NO_BUILD_CACHE` to run again).
+  `hull build` leaves a plugin directory's sources out of the app. A demonstration inventory
+  plugin, written in Lua and in JavaScript, commits byte-identical results over the same app
+  written in Lua and in JavaScript (`make e2e-plugins`).
 - Build pipeline, internal (BuildContext, docs/buildcontext_design.md §9.1): the pieces a build
   plugin's channel is made of. `shared/child_channel` - a helper process on one inherited socket
   (spawn with fd 3 and a filtered environment, length-framed messages under deadlines, reap) -

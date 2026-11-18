@@ -367,6 +367,14 @@ end
 
 function Action:get_state() return self.state end
 
+-- The diagnostics emitted so far, in order (also after an abort: a refused
+-- action's error diagnostics say why).
+function Action:get_diagnostics()
+    local out = {}
+    for i, enc in ipairs(self.out.diagnostics) do out[i] = json.decode(enc) end
+    return out
+end
+
 -- Rebuild a recorded observation from the manifest, or nil when malformed.
 local function parse_obs(j)
     if type(j) ~= "table" or not OP_ORDER[j.op] then return nil end

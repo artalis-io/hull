@@ -68,8 +68,8 @@ local function kill(self)
 end
 
 local function spawn(self)
-    local p, err = self.native.spawn(self.exe, self.entry, M.PLUGIN_ARGS)
-    if not p then return nil, err end
+    local p, err, why = self.native.spawn(self.exe, self.entry, M.PLUGIN_ARGS)
+    if not p then return nil, why and (err .. ": " .. why) or err end
     self.proc = p
     self.spawned = self.spawned + 1
     return p

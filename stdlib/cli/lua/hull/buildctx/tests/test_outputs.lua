@@ -228,6 +228,22 @@ do
     end
     ok(action.lookup(store, k, root) ~= nil, "the shared key resolves")
 
+    -- The same key after an input changed: the stored result is stale, and a
+    -- new commit under the key replaces it.
+    local k2 = key()
+    local s1 = started(store, k2)
+    build(s1)
+    assert(s1:prepare()); assert(s1:commit())
+    put("src/a.ts", "let y: number = 2;\n")
+    local _, why = action.lookup(store, k2, root)
+    eq(why, "stale", "an edited input makes the result stale")
+    local s2 = started(store, k2)
+    build(s2)
+    assert(s2:prepare())
+    ok(s2:commit(), "a commit under the stale result's key")
+    ok(action.lookup(store, k2, root) ~= nil, "replaces it")
+    put("src/a.ts", "let x: number = 1;\n")
+
     local a = started()                   -- an empty payload is a payload
     local w = a:create_blob("e"); w:close()
     a:declare_generated_output({ name = "empty.ts" }, w)
