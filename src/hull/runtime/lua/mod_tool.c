@@ -75,6 +75,7 @@
 #include "lauxlib.h"
 #include "internal.h"          /* get_hl_lua_from_L, HlLua */
 #include "protected.h"         /* hl_lua_pushlstring_safe */
+#include "mod_buildctx.h"
 
 /* Registry key for the unveil context pointer */
 #define TOOL_UNVEIL_KEY "__hull_tool_unveil"
@@ -2435,6 +2436,26 @@ static const luaL_Reg tool_funcs[] = {
     { NULL, NULL }
 };
 
+/* hull.buildctx._plugin.spawn in the tool VM: the plugin's executable and
+ * entry are checked against the tool sandbox's grants first (execute, read),
+ * as every other tool spawn is. */
+static int l_tool_plugin_spawn(lua_State *L)
+{
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+    const char *exe = luaL_checkstring(L, 1);
+    const char *entry = luaL_checkstring(L, 2);
+    if (ctx && (hl_tool_unveil_check(ctx, exe, 'x') != 0 ||
+                hl_tool_unveil_check(ctx, entry, 'r') != 0)) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "permission");
+        return 2;
+    }
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
+    return lua_gettop(L);
+}
+
 void hl_lua_tool_register(lua_State *L, HlToolUnveilCtx *ctx)
 {
     /* Store unveil context in registry */
@@ -2447,6 +2468,16 @@ void hl_lua_tool_register(lua_State *L, HlToolUnveilCtx *ctx)
     /* Register tool table */
     luaL_newlib(L, tool_funcs);
     lua_setglobal(L, "tool");
+
+    /* The BuildContext host's native pieces (hull.buildctx.action / plugin /
+     * registry require them): tool VM only. */
+    luaL_requiref(L, "hull.buildctx._fs", luaopen_hull_buildctx_fs, 0);
+    luaL_requiref(L, "hull.buildctx._store", luaopen_hull_buildctx_store, 0);
+    luaL_requiref(L, "hull.buildctx._plugin", luaopen_hull_buildctx_plugin, 0);
+    lua_getfield(L, -1, "spawn");
+    lua_pushcclosure(L, l_tool_plugin_spawn, 1);
+    lua_setfield(L, -2, "spawn");
+    lua_pop(L, 3);
 }
 
 #endif /* HL_ENABLE_LUA */

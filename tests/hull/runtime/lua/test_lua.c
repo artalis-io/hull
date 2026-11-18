@@ -11903,6 +11903,94 @@ UTEST(lua_tool_vm, no_load_and_bindings_check_the_allowlist)
     rmdir(other);
 }
 
+/* Build plugin registration in the real tool VM (docs/buildcontext_design.md
+ * §9.2): hull.buildctx.registry reads hull.build.json and a plugin's manifest
+ * with the tool's own extraction (a fresh sandboxed runtime), checks it
+ * against the preset and hashes the plugin's directory with the tool VM's
+ * crypto. A JavaScript plugin's extraction re-executes the running binary,
+ * which here is this test: it is covered from the hull binary. */
+UTEST(lua_tool_vm, buildctx_registry_reads_real_plugin_manifests)
+{
+    char tmp[HL_TEST_PATH_MAX], root[PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(tmp, sizeof tmp, "hull_tv_reg") != NULL);
+    ASSERT_TRUE(realpath(tmp, root) != NULL);
+    char p[PATH_MAX + 64];
+    const char *dirs[] = { "plugins", "plugins/a", "plugins/bad" };
+    for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
+        snprintf(p, sizeof p, "%s/%s", root, dirs[i]);
+        ASSERT_EQ(mkdir(p, 0755), 0);
+    }
+    snprintf(p, sizeof p, "%s/plugins/a/app.lua", root);
+    ASSERT_EQ(tool_vm_write(p,
+        "app.manifest({ modules = { 'hull/build-plugin@1' }, build_plugin = {\n"
+        "  id = 'a', version = 1, input = 'source', languages = { 'lua' }, output = 'g' } })\n"
+        "app.transform(function(ctx) end)\n"), 0);
+    snprintf(p, sizeof p, "%s/plugins/bad/app.lua", root);
+    ASSERT_EQ(tool_vm_write(p,
+        "app.manifest({ modules = { 'hull/build-plugin@1' }, env = { 'HOME' }, build_plugin = {\n"
+        "  id = 'bad', version = 1, input = 'source', languages = { 'lua' }, output = 'g' } })\n"), 0);
+    snprintf(p, sizeof p, "%s/hull.build.json", root);
+    ASSERT_EQ(tool_vm_write(p, "{\"plugins\":[{\"path\":\"plugins/a\"}]}"), 0);
+
+    HlToolUnveilCtx uctx;
+    hl_tool_unveil_init(&uctx);
+    ASSERT_EQ(hl_tool_unveil_add(&uctx, root, "r"), 0);
+    hl_tool_unveil_seal(&uctx);
+    HlVfs pvfs;
+    void *pvfs_owned = NULL;
+    hl_platform_vfs_init(&pvfs, &pvfs_owned);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.sandbox = 0;
+    HlLua tv;
+    memset(&tv, 0, sizeof tv);
+    tv.tool_unveil_ctx = &uctx;
+    tv.base.platform_vfs = &pvfs;
+    ASSERT_EQ(hl_lua_init(&tv, &cfg), 0);
+    lua_State *L = tv.L;
+    lua_pushstring(L, root);
+    lua_setglobal(L, "ROOT");
+    const char *chunk =
+        "local registry = require('hull.buildctx.registry')\n"
+        "local reg = assert(registry.load(ROOT))\n"
+        "assert(#reg.plugins == 1, #reg.plugins)\n"
+        "local a = reg.plugins[1]\n"
+        "assert(a.identity:match('^app:plugins/a#' .. ('%x'):rep(64) .. '$'), a.identity)\n"
+        "assert(a.language == 'lua' and a.descriptor.id == 'a')\n"
+        "assert(reg:route('source:lua:*') == a)\n"
+        "assert(#reg.config_sha256 == 64)\n"
+        "assert(not pcall(require, 'hull.buildctx._plugin'), 'the native is the stdlib\\'s')\n"
+        "local action = require('hull.buildctx.action')\n"
+        "local a = assert(action.new({ root = ROOT, grants = {}, key = ('0'):rep(64), store = {} }))\n"
+        "local r = assert(require('hull.buildctx.plugin').new({ exe = '/bin/sh',\n"
+        "                                                       entry = ROOT .. '/plugins/a/app.lua' }))\n"
+        "local done, tok, why = r:run(a, { id = 1 })\n"
+        "assert(not done and tok == 'spawn_failed' and why == 'permission', tostring(why))\n"
+        "return true\n";
+    ASSERT_EQ(luaL_loadstring(L, chunk), LUA_OK);
+    int rc = lua_pcall(L, 0, 1, 0);
+    if (rc != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(L, -1));
+    EXPECT_EQ(rc, LUA_OK);
+    lua_pop(L, 1);
+
+    /* A plugin whose manifest the preset refuses is not registered. */
+    snprintf(p, sizeof p, "%s/hull.build.json", root);
+    ASSERT_EQ(tool_vm_write(p, "{\"plugins\":[{\"path\":\"plugins/bad\"}]}"), 0);
+    const char *refused =
+        "local reg, err = require('hull.buildctx.registry').load(ROOT)\n"
+        "assert(reg == nil and err:find('may not declare `env`', 1, true), tostring(err))\n"
+        "return true\n";
+    ASSERT_EQ(luaL_loadstring(L, refused), LUA_OK);
+    rc = lua_pcall(L, 0, 1, 0);
+    if (rc != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(L, -1));
+    EXPECT_EQ(rc, LUA_OK);
+    lua_pop(L, 1);
+
+    hl_lua_free(&tv);
+    hl_tool_unveil_free(&uctx);
+    hl_platform_vfs_dispose(pvfs_owned);
+    nftw(root, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
 /* The app runtime never carries a tool context, even when the caller's struct
  * held one (the field is only kept in tool mode). */
 UTEST(lua_tool_vm, app_runtime_drops_a_stray_unveil_context)

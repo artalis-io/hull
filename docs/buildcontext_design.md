@@ -1,6 +1,6 @@
 # BuildContext action and authority design
 
-Status: **checkpoints 1 and 2 implemented (§13.1, §13.2), checkpoint 5's plugin side (§13.3); the rest design-only.** This document refines checkpoint 4
+Status: **checkpoints 1 and 2 implemented (§13.1, §13.2), checkpoint 5's plugin side (§13.3) and host side (§13.4); the rest design-only.** This document refines checkpoint 4
 of [hull_fs_design.md](hull_fs_design.md) and supersedes the still-unimplemented
 BuildContext portions of
 [hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md). The shipped
@@ -820,7 +820,7 @@ more small native piece, `hull.buildctx._store` (in `mod_buildctx.c` beside `_fs
 
 The plugin half of §9.1: the channel, the value model, `app.transform` in both runtimes and the
 manifest preset. The host half - the runner, registration (§9.2) and the host operations - is
-the next part; until it lands, nothing spawns a plugin but the tests' fake host.
+§13.4.
 
 - **The channel** is `shared/child_channel` (spawn with the socket as fd 3, stdin / stdout /
   stderr on `/dev/null` and a filtered environment; length-framed messages under deadlines;
@@ -870,6 +870,65 @@ the next part; until it lands, nothing spawns a plugin but the tests' fake host.
   Lua and JavaScript drives a fake host (`tests/e2e_build_plugin_drive.c`) with byte-identical
   calls and results over two actions on one process; a refused preset, an unknown frame, a run
   by hand and a bad descriptor each end as described.
+
+### 13.4 Checkpoint 5: the host side as built
+
+The host half of §9.1 and §9.2, in the same split as the action: Lua tool code
+(`hull.buildctx.plugin` the runner, `hull.buildctx.registry` registration) over one more small
+native piece, `hull.buildctx._plugin` (in `mod_buildctx.c`): spawn a plugin with the channel on its
+fd 3, send a frame, receive one under a deadline, kill and reap - the part that holds a socket and
+a pid. The three natives are loaded in the tool VM only, where a spawn is held to the tool
+sandbox's grants like every other tool spawn (the executable for execute, the entry for read). Nothing in `hull` drives a run yet: the
+first caller is the demonstration plugin's command (next) and then the planner (checkpoint 6).
+
+- **The runner** (`plugin.new({ exe, entry })`, `r:run(action, req)`, `r:close()`) spawns the hull
+  binary on the plugin's entry with `-d :memory:` (an implicit `data.db` would be written into the
+  plugin's directory and change its identity), `HULL_BUILD_PLUGIN_FD=3` and an environment of
+  `HOME`, `TMPDIR`, `HULL_CACHE_DIR` and the `HULL_NO_*` cache switches only. `run` starts the
+  action, sends ACTION, answers each CALL until DONE, then prepares and commits; it answers true or
+  a token: `plugin_failed` (the transform raised; the process is reused), `plugin_crashed` (it
+  exited or closed the channel), `plugin_timeout` (no DONE within `action_ms`, 120 s by default),
+  `plugin_protocol` (a frame out of turn, a value outside the model, a malformed DONE),
+  `spawn_failed`, `cancelled`, or what prepare / commit answer. A crash, a timeout or a protocol
+  error kills the process; the next action spawns a fresh one, and a process that went while idle is replaced
+  before the action starts. `close` sends STOP and waits for the exit.
+- **The host operations** are defined once, in the runner: the op table maps each CALL to the
+  action (`inputs.read` / `stat` / `list`, `outputs.create_blob` / `create_tree`, `blob.write` /
+  `close`, `tree.write` / `close`, `outputs.declare_generated_output` / `declare_artifact`,
+  `diagnostics.emit`) or to the caller's source selection (`source.units`, and
+  `source.erased_source` when the caller's frontend session offers it - `unsupported_op`
+  otherwise). Argument shapes are checked here (`invalid_args`, `invalid_handle`, `unknown_op`);
+  everything else is the action's token. Bytes go back as bytes (`_plugin.bytes`), an empty list
+  as an empty array (`_plugin.empty_array`, a marker the Lua walker encodes as `[]`, so a
+  JavaScript plugin gets an array). A writer's id is a counter of the runner, kept in a table of
+  the action, so an id from an earlier action is `invalid_handle`.
+- **Registration** (`registry.load(root)`): the bundled list (empty until `stdlib:ts-erase@1`), then
+  `hull.build.json`, read through an exact grant (a link there is refused): `{ "plugins": [ { path,
+  config? } ] }`, unknown keys refused, each `path` canonical, not into `.hull`, named once, and a
+  directory holding exactly one of `app.lua` / `app.js` (exact grants: no link on the way). The
+  identity hash is over every file of the directory (`<path>\0<sha256>\n`, sorted, hashed; a link
+  or special file in it is refused, 1024 files and 64 MiB at most); the manifest comes from the
+  extraction child (`tool.extract_manifest_lua` / `_js`), and the preset is the runner's own
+  check (`hl_build_plugin_preset_check`, through `_plugin.preset_check`, which reads the decoded
+  manifest with `hl_manifest_extract_lua`). The descriptor (`build_plugin` / `buildPlugin`):
+  `id`, `version`, `input` (`source` with `languages` and optional `annotations`, or `artifact` with
+  `kinds`), `output`, and an optional `config` schema (`{ key = { type, required? } }`, types
+  `string` / `integer` / `boolean` / `array` / `map`); unknown keys refused. The configuration is
+  checked against it. A plugin claims `source:<language>:<annotation or *>` or `artifact:<kind>`,
+  and two plugins claiming one kind refuse the load. `reg.config_sha256` is the file's hash, for
+  the action key (§10).
+- **Tests**: the `plugin_host` leg of `test_buildctx` runs real plugin processes
+  (`tests/fixtures/build_host_{lua,js}`, every host operation) through real actions - a commit, a
+  failing transform on a reused process, an undeclared payload, a cancelled action, a process
+  that dies and is replaced, the host's deadline - with the Lua and JavaScript results
+  byte-identical, and the protocol paths over a scripted process; the `registration` leg covers
+  `hull.build.json`, links, the preset, descriptors, configuration and claims; and
+  `lua_tool_vm.buildctx_registry_reads_real_plugin_manifests` runs registration in the real tool
+  VM with the real extraction.
+- **Not yet**: the result store's place in `~/.hull` and its `hull cache` row, keeping a plugin's
+  directory out of the app's build, discovery and `hull test`, and `hull test` of a transform
+  against a stubbed ctx come with the demonstration plugin; the bundled plugins' entries with
+  `stdlib:ts-erase@1`.
 
 ## 14. Non-scope
 

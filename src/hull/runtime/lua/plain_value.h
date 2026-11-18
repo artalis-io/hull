@@ -5,8 +5,9 @@
  * A Lua string encodes as text (it must be UTF-8); bytes travel in a box
  * made by hl_lua_pv_push_bytes. Decoding gives both as a plain string.
  * Integers only (a float is refused), tables with no metatable: 1..n keys
- * are an array, string keys a map, an empty table an empty map; a nil
- * value in a map is simply absent.
+ * are an array, string keys a map, an empty table an empty map (an empty
+ * array is the marker hl_lua_pv_push_empty_array pushes); a nil value in a
+ * map is simply absent.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -27,5 +28,8 @@ int hl_lua_pv_decode(lua_State *L, const void *buf, size_t len);
 
 /* Push a bytes box holding the string at @p idx. */
 void hl_lua_pv_push_bytes(lua_State *L, int idx);
+
+/* Push the marker that encodes as an empty array. */
+void hl_lua_pv_push_empty_array(lua_State *L);
 
 #endif /* HL_LUA_PLAIN_VALUE_H */

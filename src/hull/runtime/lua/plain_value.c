@@ -14,6 +14,14 @@
 /* The bytes box's metatable, keyed in the registry by this address. */
 static const char BYTES_KEY = 0;
 
+/* The empty array's marker: a light userdata of this address. */
+static char EMPTY_ARRAY;
+
+void hl_lua_pv_push_empty_array(lua_State *L)
+{
+    lua_pushlightuserdata(L, &EMPTY_ARRAY);
+}
+
 static int is_bytes_box(lua_State *L, int idx)
 {
     if (lua_type(L, idx) != LUA_TUSERDATA || !lua_getmetatable(L, idx))
@@ -140,6 +148,10 @@ static int encode(lua_State *L, int idx, HlPvWriter *w, int depth)
     }
     case LUA_TTABLE:
         return encode_table(L, idx, w, depth);
+    case LUA_TLIGHTUSERDATA:
+        if (lua_touserdata(L, idx) != &EMPTY_ARRAY) return fail(w, HL_PV_E_TYPE);
+        hl_pv_put_array(w, 0);
+        break;
     case LUA_TUSERDATA:
         if (!is_bytes_box(L, idx)) return fail(w, HL_PV_E_TYPE);
         lua_getiuservalue(L, idx, 1);

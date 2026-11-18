@@ -31,8 +31,11 @@
 #include "hull/cap/fs.h"
 #include "hull/cap/fs_policy.h"
 #include "hull/cap/fs_resolve.h"
+#include "hull/manifest.h"
+#include "hull/shared/build_plugin.h"
 #include "hull/utils/alloc.h"
 #include "../../utils/hex.h"
+#include "plain_value.h"
 
 #include "lauxlib.h"
 
@@ -40,6 +43,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#ifdef HL_CHAN_SUPPORTED
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#endif
 
 #define BCFS_MT       "hull.buildctx._fs"
 #define BCFS_PATH_MAX 4096
@@ -435,5 +445,296 @@ int luaopen_hull_buildctx_store(lua_State *L)
     lua_createtable(L, 0, 1);
     lua_pushcfunction(L, st_open);
     lua_setfield(L, -2, "open");
+    return 1;
+}
+
+/* ── hull.buildctx._plugin ─────────────────────────────────────────────
+ *
+ * A build plugin's process and its channel (§9.1, shared/build_plugin.h),
+ * seen from the host. The supervisor - one process per plugin per run, the
+ * action loop, the host operations - is Lua (hull.buildctx.plugin); this is
+ * the part that holds a socket and a pid.
+ *
+ *   local P = require("hull.buildctx._plugin")
+ *   local p, tok = P.spawn(exe, entry, args)  -- `exe [args...] entry`, the
+ *                                             -- channel on its fd 3
+ *   p:send(type, id, value?, timeout_ms?)  -> true        | nil, token
+ *   p:recv(timeout_ms)                     -> type, id, v | nil, token
+ *   p:close(grace_ms)                      -> exit code | "signal" | "killed"
+ *   p:kill()                               -- SIGKILL now, reaped
+ *   P.bytes(s)                             -- a bytes value (a string is text)
+ *   P.now()                                -- the monotonic clock, in ms
+ *   P.empty_array                          -- encodes as []
+ *   P.preset_check(manifest)               -> true | nil, reason
+ *
+ * Tokens: "unsupported" (no channel on this host), "spawn_failed",
+ * "timeout", "eof" (the plugin closed its end or exited), "protocol" (a
+ * frame with another magic or past the payload limit), "malformed" (a value
+ * outside the value model), "too_big", "unsupported_value", "closed".
+ * Every error but "timeout" on recv leaves the process unusable: the caller
+ * kills it.
+ */
+
+#define BCPL_MT "hull.buildctx._plugin"
+
+typedef struct {
+    int   fd;
+    pid_t pid;      /* 0 once reaped */
+} BcProc;
+
+#ifdef HL_CHAN_SUPPORTED
+/* What a plugin inherits: its home (the code caches and their key) and the
+ * cache knobs. Never a secret, a database URL or a path list. */
+static int plugin_env_ok(const char *kv)
+{
+    static const char *const keep[] = { "HOME=", "TMPDIR=", "HULL_CACHE_DIR=",
+                                        "HULL_NO_", NULL };
+    for (int i = 0; keep[i]; i++)
+        if (strncmp(kv, keep[i], strlen(keep[i])) == 0) return 1;
+    return 0;
+}
+
+static void proc_kill(BcProc *p)
+{
+    if (p->fd >= 0) { close(p->fd); p->fd = -1; }
+    if (p->pid > 0) {
+        int st;
+        (void)kill(p->pid, SIGKILL);
+        (void)hl_chan_reap(p->pid, &st, 5000, NULL);
+        p->pid = 0;
+    }
+}
+#else
+static void proc_kill(BcProc *p) { (void)p; }
+#endif
+
+static BcProc *proc_check(lua_State *L)
+{
+    BcProc *p = luaL_checkudata(L, 1, BCPL_MT);
+    if (p->fd < 0) luaL_error(L, "hull.buildctx._plugin: closed");
+    return p;
+}
+
+/* P.spawn(exe, entry, args) */
+static int pl_spawn(lua_State *L)
+{
+    const char *exe = luaL_checkstring(L, 1);
+    const char *entry = luaL_checkstring(L, 2);
+    lua_Integer n = lua_istable(L, 3) ? luaL_len(L, 3) : 0;
+    if (n < 0 || n > 32) return fail(L, "invalid_args");
+#ifdef HL_CHAN_SUPPORTED
+    const char *argv[32 + 3];
+    int k = 0;
+    argv[k++] = exe;
+    for (lua_Integer i = 1; i <= n; i++) {
+        lua_rawgeti(L, 3, i);
+        if (lua_type(L, -1) != LUA_TSTRING) return fail(L, "invalid_args");
+        argv[k++] = lua_tostring(L, -1);   /* kept alive by the args table */
+        lua_pop(L, 1);
+    }
+    argv[k++] = entry;
+    argv[k] = NULL;
+
+    BcProc *p = lua_newuserdatauv(L, sizeof *p, 0);
+    p->fd = -1;
+    p->pid = 0;
+    luaL_setmetatable(L, BCPL_MT);
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return fail(L, "spawn_failed");
+    (void)fcntl(sv[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(sv[1], F_SETFD, FD_CLOEXEC);   /* dup2'd onto the child's 3 */
+    hl_chan_set_nonblock(sv[0]);
+    hl_chan_set_nosigpipe(sv[0]);
+    static const char *const extra[] = { HL_BUILD_PLUGIN_ENV "=3", NULL };
+    pid_t pid = hl_chan_spawn_env(exe, (char *const *)(uintptr_t)argv, sv[1], plugin_env_ok, extra);
+    close(sv[1]);
+    if (pid < 0) {
+        close(sv[0]);
+        return fail(L, "spawn_failed");
+    }
+    p->fd = sv[0];
+    p->pid = pid;
+    return 1;
+#else
+    (void)exe; (void)entry;
+    return fail(L, "unsupported");
+#endif
+}
+
+/* p:send(type, id, value?, timeout_ms?) */
+static int pl_send(lua_State *L)
+{
+    BcProc *p = proc_check(L);
+    lua_Integer type = luaL_checkinteger(L, 2), id = luaL_checkinteger(L, 3);
+    lua_Integer ms = luaL_optinteger(L, 5, HL_BP_REPLY_TIMEOUT_MS);
+    if (type < 0 || type > UINT32_MAX || id < 0 || id > UINT32_MAX || ms <= 0)
+        return fail(L, "invalid_args");
+    HlPvWriter w;
+    hl_pv_writer_init(&w, HL_BP_MAX_PAYLOAD);
+    if (!lua_isnone(L, 4)) {
+        int err = hl_lua_pv_encode(L, 4, &w);
+        if (err != HL_PV_OK) {
+            hl_pv_writer_free(&w);
+            return fail(L, hl_pv_error_name(err));
+        }
+    }
+#ifdef HL_CHAN_SUPPORTED
+    int rc = hl_chan_write_frame(p->fd, HL_BUILD_PLUGIN_MAGIC, (uint32_t)type, (uint32_t)id,
+                                 w.buf, w.len, NULL, 0, hl_chan_mono_ms() + (uint64_t)ms);
+#else
+    int rc = -1;
+    (void)p;
+#endif
+    hl_pv_writer_free(&w);
+    if (rc != 0) return fail(L, "eof");
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+/* p:recv(timeout_ms) */
+static int pl_recv(lua_State *L)
+{
+    BcProc *p = proc_check(L);
+    lua_Integer ms = luaL_checkinteger(L, 2);
+    if (ms <= 0) return fail(L, "invalid_args");
+#ifdef HL_CHAN_SUPPORTED
+    HlChanFrame f = { .magic = HL_BUILD_PLUGIN_MAGIC, .max = HL_BP_MAX_PAYLOAD };
+    int rc = hl_chan_frame_read(p->fd, &f, hl_chan_mono_ms() + (uint64_t)ms);
+    if (rc != HL_CHAN_DONE) {
+        hl_chan_frame_reset(&f);
+        return fail(L, rc == HL_CHAN_MORE ? "timeout" : rc == HL_CHAN_EOF ? "eof" : "protocol");
+    }
+    lua_pushinteger(L, (lua_Integer)f.type);
+    lua_pushinteger(L, (lua_Integer)f.id);
+    int err = f.len ? hl_lua_pv_decode(L, f.buf, f.len) : (lua_pushnil(L), HL_PV_OK);
+    hl_chan_frame_reset(&f);
+    if (err != HL_PV_OK) {
+        lua_pop(L, 2);
+        return fail(L, "malformed");
+    }
+    return 3;
+#else
+    (void)p;
+    return fail(L, "unsupported");
+#endif
+}
+
+/* p:close(grace_ms): the host is done with it. Closing the socket ends its
+ * loop; a process still there after @p grace_ms is killed. */
+static int pl_close(lua_State *L)
+{
+    BcProc *p = luaL_checkudata(L, 1, BCPL_MT);
+    lua_Integer ms = luaL_optinteger(L, 2, 0);
+#ifdef HL_CHAN_SUPPORTED
+    if (p->fd >= 0) { close(p->fd); p->fd = -1; }
+    if (p->pid > 0) {
+        int st = 0;
+        if (hl_chan_reap(p->pid, &st, ms > 0 ? (uint32_t)ms : 0, NULL)) {
+            p->pid = 0;
+            if (WIFEXITED(st)) lua_pushinteger(L, WEXITSTATUS(st));
+            else lua_pushliteral(L, "signal");
+            return 1;
+        }
+        proc_kill(p);
+        lua_pushliteral(L, "killed");
+        return 1;
+    }
+#else
+    (void)ms;
+    proc_kill(p);
+#endif
+    lua_pushnil(L);
+    return 1;
+}
+
+static int pl_kill(lua_State *L)
+{
+    proc_kill(luaL_checkudata(L, 1, BCPL_MT));
+    return 0;
+}
+
+static int pl_gc(lua_State *L)
+{
+    proc_kill(luaL_checkudata(L, 1, BCPL_MT));
+    return 0;
+}
+
+/* P.now(): the monotonic clock the deadlines are on, in milliseconds. */
+static int pl_now(lua_State *L)
+{
+    lua_pushinteger(L, (lua_Integer)hl_chan_mono_ms());
+    return 1;
+}
+
+static int pl_bytes(lua_State *L)
+{
+    hl_lua_pv_push_bytes(L, 1);
+    return 1;
+}
+
+/* P.preset_check(manifest): the manifest (a table, as the extraction child's
+ * JSON decodes) against the plugin preset - the runner's own check
+ * (hl_build_plugin_preset_check), run before the plugin is registered. */
+static int pl_preset_check(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");   /* saved */
+    lua_pushvalue(L, 1);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    HlAllocator a;
+    hl_alloc_init(&a, 0);
+    HlManifest m;
+    int rc = hl_manifest_extract_lua(L, &m, &a);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");   /* restored */
+    char err[256] = "a build plugin must declare a manifest";
+    int ok = rc == 0 && hl_build_plugin_preset_check(&m, err, sizeof err) == 0;
+    if (rc == 0) hl_manifest_free(&m);
+    if (ok) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, err);
+    return 2;
+}
+
+static const luaL_Reg PROC_METHODS[] = {
+    { "send",  pl_send  },
+    { "recv",  pl_recv  },
+    { "close", pl_close },
+    { "kill",  pl_kill  },
+    { NULL, NULL },
+};
+
+int luaopen_hull_buildctx_plugin(lua_State *L)
+{
+    if (luaL_newmetatable(L, BCPL_MT)) {
+        luaL_newlib(L, PROC_METHODS);
+        lua_setfield(L, -2, "__index");
+        lua_pushcfunction(L, pl_gc);
+        lua_setfield(L, -2, "__gc");
+    }
+    lua_pop(L, 1);
+    lua_createtable(L, 0, 10);
+    lua_pushcfunction(L, pl_spawn);
+    lua_setfield(L, -2, "spawn");
+    lua_pushcfunction(L, pl_bytes);
+    lua_setfield(L, -2, "bytes");
+    lua_pushcfunction(L, pl_now);
+    lua_setfield(L, -2, "now");
+    lua_pushcfunction(L, pl_preset_check);
+    lua_setfield(L, -2, "preset_check");
+    hl_lua_pv_push_empty_array(L);
+    lua_setfield(L, -2, "empty_array");
+    static const struct { const char *name; lua_Integer v; } F[] = {
+        { "ACTION", HL_BP_ACTION }, { "CALL", HL_BP_CALL }, { "REPLY", HL_BP_REPLY },
+        { "DONE", HL_BP_DONE }, { "STOP", HL_BP_STOP },
+    };
+    for (size_t i = 0; i < sizeof F / sizeof F[0]; i++) {
+        lua_pushinteger(L, F[i].v);
+        lua_setfield(L, -2, F[i].name);
+    }
+    lua_pushinteger(L, HL_BP_MAX_PAYLOAD);
+    lua_setfield(L, -2, "MAX_PAYLOAD");
     return 1;
 }
