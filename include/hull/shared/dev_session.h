@@ -15,7 +15,9 @@
  *   last_error.json - the served child (serve.c), which gets the nonce
  *                     through HL_DEV_SESSION_ENV, scrubs and unsets it before
  *                     any app code runs and keeps it only in C memory until
- *                     the app has loaded;
+ *                     the app has loaded; and the supervisor, when the build
+ *                     pipeline fails before a (re)spawn
+ *                     (hl_dev_last_error_write, shared/dev_last_error.c);
  *   discovery.json  - the publisher (`hull agent inspect --generation`), which
  *                     takes it the same way before its tool VM starts.
  * `hull agent errors` / `status` / `inspect` read the key from $HOME and
@@ -168,5 +170,13 @@ static inline int hl_dev_sidecar_mac_ok(const char *nonce, const char *kind,
     hl_secure_zero(got, sizeof got);
     return diff == 0;
 }
+
+/* Write <app_dir>/.hull/last_error.json: { error, timestamp, mac }, the MAC
+ * under `nonce` (none when it is empty) for the supervisor `session_pid`.
+ * `msg` must begin "failed to load " (what `hull agent errors` serves). Only
+ * into a real .hull directory this user owns, never through a link; best
+ * effort (shared/dev_last_error.c). */
+void hl_dev_last_error_write(const char *app_dir, const char *nonce,
+                             long session_pid, const char *msg);
 
 #endif /* HL_SHARED_DEV_SESSION_H */

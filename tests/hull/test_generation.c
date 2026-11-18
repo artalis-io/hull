@@ -394,4 +394,72 @@ UTEST(generation, take_env_reads_a_pipe)
     hl_generation_reset();
 }
 
+UTEST(generation, verify_sig_takes_an_empty_generation)
+{
+    static uint8_t b[4096];
+    char err[256];
+    hl_vfs_overlay_reset();
+    size_t n = build(b, sizeof b, NULL, NULL, 0, 0, NULL);
+    /* Pipeline work that produced no app file: nothing to cover. */
+    ASSERT_EQ(0, hl_generation_install_ex(b, n, 1, err, sizeof err));
+    ASSERT_FALSE(hl_vfs_overlay_active());
+    const Ent e[] = { { "app.lua", "return 7\n", NULL, NULL } };
+    n = build(b, sizeof b, NULL, e, 1, 0, NULL);
+    ASSERT_EQ(-1, hl_generation_install_ex(b, n, 1, err, sizeof err));
+    ASSERT_TRUE(strstr(err, "--verify-sig") != NULL);
+    ASSERT_FALSE(hl_vfs_overlay_active());
+}
+
+static void collect(const char *path, void *ud)
+{
+    char *out = ud;
+    strcat(out, path);
+    strcat(out, ";");
+}
+
+UTEST(generation, inputs_are_read_from_the_manifest)
+{
+    static uint8_t b[4096];
+    char got[256] = "";
+    const char *m = "{\"format\":\"hull-pipeline-generation\",\"version\":1,"
+                    "\"entries\":[],\"inputs\":[\".\",\"src/a.lua\"]}";
+    int n = snprintf((char *)b, sizeof b, HL_GENERATION_MAGIC "%zu\n%s",
+                     strlen(m), m);
+    ASSERT_EQ(0, hl_generation_inputs(b, (size_t)n, collect, got));
+    ASSERT_STREQ(".;src/a.lua;", got);
+    ASSERT_EQ(-1, hl_generation_inputs((const uint8_t *)"nope", 4, collect, got));
+}
+
+UTEST(generation, a_pipeline_needs_a_build_config)
+{
+    const char *dir = hl_test_tmpdir();
+    ASSERT_TRUE(dir != NULL);
+    char app[HL_TEST_PATH_MAX], cfg[HL_TEST_PATH_MAX + 32];
+    snprintf(app, sizeof app, "%s/hull-gen-app-XXXXXX", dir);
+    ASSERT_TRUE(mkdtemp(app) != NULL);
+    ASSERT_FALSE(hl_generation_has_pipeline(app));
+    ASSERT_FALSE(hl_generation_has_pipeline(NULL));
+    /* No config: hl_generation_take runs nothing. */
+    hl_generation_reset();
+    unsetenv(HL_GENERATION_ENV);
+    ASSERT_EQ(0, hl_generation_take(0, app));
+    ASSERT_EQ(0, hl_generation_apply(0));
+    snprintf(cfg, sizeof cfg, "%s/hull.build.json", app);
+    /* A link is not a config. */
+    ASSERT_EQ(0, symlink("/dev/null", cfg));
+    ASSERT_FALSE(hl_generation_has_pipeline(app));
+    unlink(cfg);
+    FILE *f = fopen(cfg, "w");
+    ASSERT_TRUE(f != NULL);
+    fputs("{}\n", f);
+    fclose(f);
+    ASSERT_TRUE(hl_generation_has_pipeline(app));
+    /* A built binary runs no pipeline, whatever the tree holds. */
+    hl_generation_reset();
+    ASSERT_EQ(0, hl_generation_take(1, app));
+    unlink(cfg);
+    rmdir(app);
+    hl_generation_reset();
+}
+
 UTEST_MAIN()

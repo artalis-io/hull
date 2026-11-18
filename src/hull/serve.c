@@ -141,17 +141,6 @@
     "default-src 'none'; style-src 'self'; " \
     "img-src 'self'; form-action 'self'; frame-ancestors 'none'"
 
-/* ── JSON writer plumbing ──────────────────────────────────────────── */
-
-/* FILE* writer callback for ShJsonWriter - used by the agent-mode
- * .hull/last_error.json emitter below. Same shape as the helpers in
- * commands/cache.c / sbom.c / commands/doctor.c. */
-static int serve_stdio_write(void *ctx, const char *data, size_t len)
-{
-    FILE *fp = (FILE *)ctx;
-    return fwrite(data, 1, len, fp) == len ? 0 : -1;
-}
-
 /* ── Logging ───────────────────────────────────────────────────────── */
 
 /* The record format itself is hl_log_install_line_callback's (cli_log.c),
@@ -1719,74 +1708,11 @@ static int hl_serve_load_app(HlServerState *s)
     if (hl_app_context_load(s->app, s->entry_point) != 0) {
         log_error("[hull:c] failed to load %s", s->entry_point);
         if (s->cfg.agent_mode) {
-            char err_dir[4096], err_path[4096];
-            int nd = snprintf(err_dir, sizeof(err_dir), "%s/.hull", s->app_dir);
-            int np = snprintf(err_path, sizeof(err_path),
-                              "%s/.hull/last_error.json", s->app_dir);
-            if (nd > 0 && (size_t)nd < sizeof(err_dir) &&
-                np > 0 && (size_t)np < sizeof(err_path)) {
-                mkdir(err_dir, 0755);
-                /* The app tree may be a cloned repo: write only into a real
-                 * .hull directory of ours, and never through a planted
-                 * link (fopen "w" truncated whatever .hull/last_error.json
-                 * pointed at). */
-                struct stat dst;
-                FILE *ef = NULL;
-                if (lstat(err_dir, &dst) == 0 && S_ISDIR(dst.st_mode)
-#ifndef _WIN32
-                    && dst.st_uid == geteuid()
-#endif
-                   ) {
-                    (void)unlink(err_path);
-                    int efd = open(err_path, O_WRONLY | O_CREAT | O_EXCL |
-                                   O_NOFOLLOW | O_CLOEXEC, 0644);
-                    if (efd >= 0) {
-                        ef = fdopen(efd, "w");
-                        if (!ef) close(efd);
-                    }
-                }
-                if (ef) {
-                    /* entry_point is app-config-derived (controlled
-                     * today) but routing through sh_json removes the
-                     * latent escape vector if it ever takes external
-                     * input. */
-                    char msg[512];
-                    snprintf(msg, sizeof(msg),
-                             "failed to load %s", s->entry_point);
-                    ShJsonWriter w;
-                    sh_json_writer_init(&w, serve_stdio_write, ef);
-                    sh_json_write_object_start(&w);
-                    sh_json_write_kv_string(&w, "error", msg);
-                    int64_t ts = (int64_t)time(NULL);
-                    sh_json_write_kv_int   (&w, "timestamp", ts);
-                    /* The session that wrote it: `hull agent errors`
-                     * serves the record only when this MAC verifies under
-                     * the live session's key (audit 36 / 37). The
-                     * supervisor is our parent (dev.c spawns us). */
-                    if (s->cfg.dev_session[0]) {
-                        /* Sized from the message, never a fixed stack
-                         * buffer a longer message would outgrow and leave
-                         * the record without its MAC (C audit L11). */
-                        char mac[HL_DEV_SIDECAR_MAC_LEN + 1];
-                        size_t csz = strlen(msg) + 32;
-                        char *content = malloc(csz);
-                        int cn = content
-                            ? snprintf(content, csz, "%lld\n%s",
-                                       (long long)ts, msg)
-                            : -1;
-                        if (cn > 0 && (size_t)cn < csz &&
-                            hl_dev_sidecar_mac(s->cfg.dev_session,
-                                               HL_DEV_SIDECAR_LAST_ERROR,
-                                               s->app_dir, (long)getppid(),
-                                               content, (size_t)cn, mac) == 0)
-                            sh_json_write_kv_string(&w, "mac", mac);
-                        free(content);
-                    }
-                    sh_json_write_object_end(&w);
-                    fputc('\n', ef);
-                    fclose(ef);
-                }
-            }
+            /* The supervisor is our parent (dev.c spawns us). */
+            char msg[512];
+            snprintf(msg, sizeof(msg), "failed to load %s", s->entry_point);
+            hl_dev_last_error_write(s->app_dir, s->cfg.dev_session,
+                                    (long)getppid(), msg);
         }
         hl_secure_zero(s->cfg.dev_session, sizeof s->cfg.dev_session);
         return -1;
@@ -3554,7 +3480,7 @@ int hull_serve(int argc, char **argv)
     {
         extern const HlEntry hl_app_entries[];
         if (hl_generation_take_env(hl_app_entries[0].name != NULL) < 0) {
-            log_error("[hull:c] " HL_GENERATION_TAKE_ERR);
+            log_error("[hull:c] %s", hl_generation_error());
             return 1;
         }
     }
@@ -3568,6 +3494,17 @@ int hull_serve(int argc, char **argv)
 
     /* Phase 2: resolve entry point + app_dir */
     if (hl_serve_resolve_entry(&s, argv[0]) != 0) return 1;
+
+    /* No generation handed over: an app with build plugins runs its build
+     * pipeline in a child now, before any sandbox forbids spawning
+     * (docs/dev_pipeline_generations_design.md §4.3). */
+    {
+        extern const HlEntry hl_app_entries[];
+        if (hl_generation_take(hl_app_entries[0].name != NULL, s.app_dir) < 0) {
+            log_error("[hull:c] %s", hl_generation_error());
+            return 1;
+        }
+    }
 
     /* Phase 3 (VFS) + Phase 6 (DB) are now handled by hl_app_context_init */
 

@@ -561,13 +561,15 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
 
     /* The pipeline generation a parent handed over becomes the loaders'
      * overlay before the app loads (shared/generation.h). Taken here unless
-     * the runner took it already (serve.c, serve_cli.c); refused under
+     * the runner took it already (serve.c, serve_cli.c) - handed over, or,
+     * for an app with build plugins, made by running its build pipeline in
+     * a child (hull test, hull agent, hull mcp); refused under
      * --verify-sig, whose disk gate the runner armed before this. A refused
      * or invalid generation stops the app: it never runs the sources the
      * generation would have shadowed. */
-    int gen_taken = hl_generation_take_env(hl_vfs_embedded(&probe));
+    int gen_taken = hl_generation_take(hl_vfs_embedded(&probe), ctx->app_dir_copy);
     if (gen_taken < 0)
-        log_error("[hull:c] " HL_GENERATION_TAKE_ERR);
+        log_error("[hull:c] %s", hl_generation_error());
     if (gen_taken < 0 || hl_generation_apply(hl_vfs_disk_gate_armed()) != 0) {
         free(ctx->app_dir_copy);
         free(ctx);

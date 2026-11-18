@@ -104,7 +104,7 @@ printf '%s\n' '{"plugins":[{"path":"plugins/inventory"}]}' > "$d/hull.build.json
 rc=0; "$HULL" plugins run "$d" > "$WORK/noconf.txt" 2>&1 || rc=$?
 [ "$rc" -eq 2 ] && has "$WORK/noconf.txt" "config 'title' is required" && ok "a missing required config stops the run" || { bad "config ($rc)"; cat "$WORK/noconf.txt"; }
 d=$(make_app lua lua)
-sed 's|"hull/build-plugin@1" }|"hull/build-plugin@1", "hull/time@1" }|' "$d/plugins/inventory/app.lua" > "$WORK/p.lua" && cp "$WORK/p.lua" "$d/plugins/inventory/app.lua"
+sed 's|"hull/json@1" }|"hull/json@1", "hull/time@1" }|' "$d/plugins/inventory/app.lua" > "$WORK/p.lua" && cp "$WORK/p.lua" "$d/plugins/inventory/app.lua"
 rc=0; "$HULL" plugins run "$d" > "$WORK/preset.txt" 2>&1 || rc=$?
 [ "$rc" -eq 2 ] && has "$WORK/preset.txt" "hull/time" && ok "a plugin outside the preset is not registered" || { bad "preset ($rc)"; cat "$WORK/preset.txt"; }
 rc=0; "$HULL" plugins frob "$d" > "$WORK/usage.txt" 2>&1 || rc=$?

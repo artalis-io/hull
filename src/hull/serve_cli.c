@@ -28,6 +28,7 @@
  */
 
 #include "hull/shared/generation.h"
+#include "hull/shared/term_escape.h"  /* hl_eprintf_line */
 #include "hull/app_context.h"
 #include "hull/entry.h"        /* HlEntry / hl_app_entries[] (embedded apps) */
 #include "hull/utils/alloc.h"  /* HlAllocator + hl_alloc_kl (Keel-free KlAllocator) */
@@ -425,7 +426,7 @@ int hull_serve(int argc, char **argv)
     {
         extern const HlEntry hl_app_entries[];
         if (hl_generation_take_env(hl_app_entries[0].name != NULL) < 0) {
-            fprintf(stderr, "hull: " HL_GENERATION_TAKE_ERR "\n");
+            hl_eprintf_line("hull: %s", hl_generation_error());
             return 1;
         }
     }
@@ -521,6 +522,17 @@ int hull_serve(int argc, char **argv)
     /* `.hull` is reserved from the disk loaders whether or not the app's
      * manifest compiles an fs policy (audit 42). */
     (void)hl_fs_reserve_root_path(app_dir);
+
+    /* No generation handed over: an app with build plugins runs its build
+     * pipeline in a child now, before the sandbox forbids spawning - as
+     * serve.c does. */
+    {
+        extern const HlEntry hl_app_entries[];
+        if (hl_generation_take(hl_app_entries[0].name != NULL, app_dir) < 0) {
+            hl_eprintf_line("hull: %s", hl_generation_error());
+            return 1;
+        }
+    }
 
     /* Verify the app signature BEFORE any app code is loaded (serve.c's
      * RT-01): a tampered app never runs. The embedded entries are what a

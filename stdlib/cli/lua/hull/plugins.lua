@@ -5,9 +5,14 @@
 --   run    run each source plugin over its selection and commit its result
 --          (a fresh committed result is reused: "cached"); print the outputs
 --
+--   generation  run them, then write the app's pipeline generation (their
+--          generated outputs, include/hull/shared/generation.h) to stdout:
+--          what `hull dev` and an app run from source take. Diagnostics go
+--          to stderr. Internal; its format is not a public interface.
+--
 -- Nothing is written into the app: results live in the build result store
--- (hull cache kind build-results). Exit 0, 1 when a plugin failed, 2 on a
--- usage or registration error.
+-- (hull cache kind build-results). Exit 0, 1 when a plugin failed (or, for
+-- generation, its outputs cannot be one), 2 on a usage or registration error.
 
 local json = require("hull.json")
 
@@ -39,7 +44,7 @@ local function parse()
         tool.exit(0)
     end
     o.verb = positional[1]
-    if o.verb ~= "list" and o.verb ~= "run" then usage(o.verb and ("unknown verb: " .. o.verb) or nil) end
+    if o.verb ~= "list" and o.verb ~= "run" and o.verb ~= "generation" then usage(o.verb and ("unknown verb: " .. o.verb) or nil) end
     if positional[3] then usage("one app directory at most") end
     o.dir = positional[2] or "."
     return o
@@ -115,10 +120,41 @@ local function run(root, o)
     return failed and 1 or 0
 end
 
+local function sha256_hex(s)
+    return require("hull.encoding").hex.encode(require("hull.crypto").sha256(s))
+end
+
+-- stdout carries only the bundle: everything else goes to stderr.
+local function generation(root)
+    local results, err = require("hull.buildctx.pipeline").run(root)
+    if not results then fail(err) end
+    for _, r in ipairs(results) do
+        for _, d in ipairs(r.diagnostics or {}) do
+            local where = d.path and (d.path .. ": ") or ""
+            tool.stderr(("hull plugins: %s: %s %s: %s%s\n"):format(
+                r.identity, d.severity, d.code, where, d.message))
+        end
+    end
+    local gen = require("hull.buildctx.generation")
+    local g, gerr = gen.from_results(results, sha256_hex)
+    if not g then
+        tool.stderr("hull plugins: the pipeline failed: " .. gerr .. "\n")
+        return 1
+    end
+    local bundle, eerr = gen.encode(g, sha256_hex)
+    if not bundle then
+        tool.stderr("hull plugins: " .. eerr .. "\n")
+        return 1
+    end
+    tool.stdout_raw(bundle)
+    return 0
+end
+
 return function()
     local o = parse()
     local root = tool.realpath(o.dir)
     if not root then fail(o.dir .. ": not a directory") end
-    local rc = (o.verb == "list" and list or run)(root, o)
+    local verb = o.verb == "list" and list or o.verb == "run" and run or generation
+    local rc = verb(root, o)
     tool.exit(rc)
 end

@@ -174,6 +174,15 @@ UTEST(buildctx, registration)
     EXPECT_GT(pass, 0LL);
 }
 
+UTEST(buildctx, pipeline_generation)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_with("stdlib/cli/lua/hull/buildctx/tests/test_generation.lua", setup, &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
 int main(int argc, const char *const argv[])
 {
     int rc = utest_main(argc, argv);

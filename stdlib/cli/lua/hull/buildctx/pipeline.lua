@@ -8,7 +8,10 @@
 --   local pipeline = require("hull.buildctx.pipeline")
 --   local results, err = pipeline.run("/abs/app")
 --   -- results[i] = { identity, status, units, key, outputs, diagnostics,
---   --                error?, detail? }
+--   --                error?, detail?, result? }
+--   -- result: the committed result itself (action.lookup's: outputs with
+--   --         their bytes, and the dependency manifest) when status is
+--   --         "cached" or "committed"
 --   -- status: "committed" (ran now), "cached" (a fresh committed result),
 --   --         "failed" (error = the runner's token), "no_input" (nothing
 --   --         selected), "skipped" (detail says why)
@@ -180,7 +183,7 @@ function M.run(root, opts)
             else
                 local hit = not no_cache and action.lookup(store, key, root)
                 if hit then
-                    r.status = "cached"
+                    r.status, r.result = "cached", hit
                     r.outputs, r.diagnostics = describe(hit, sha256_hex)
                 else
                     local a, aerr = action.new({ root = root, grants = grants, key = key, store = store,
@@ -202,7 +205,7 @@ function M.run(root, opts)
                     if ok then
                         local res = action.lookup(store, key, root)
                         if res then
-                            r.status = "committed"
+                            r.status, r.result = "committed", res
                             r.outputs, r.diagnostics = describe(res, sha256_hex)
                         else
                             r.status, r.error = "failed", "store_failed"

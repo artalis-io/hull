@@ -15,6 +15,8 @@
 #include "hull/release_io.h"  /* hl_release_io_self_path */
 #include "hull/shared/host.h" /* hl_host_find_in_path */
 #include "hull/shared/dev_session.h" /* HL_DEV_SESSION_ENV, sidecar MAC (audit 36/37) */
+#include "hull/shared/generation.h"
+#include "hull/shared/term_escape.h"  /* hl_eprintf_line */  /* the pipeline generation handed to the child */
 #include "hull/tool.h"
 
 #include <dirent.h>
@@ -411,6 +413,128 @@ static time_t scan_mtime(const char *dir)
 
     closedir(d);
     return max_mt;
+}
+
+/* ── The pipeline generation ─────────────────────────────────────────
+ *
+ * With build plugins (a hull.build.json), every (re)spawn first runs the
+ * build pipeline (docs/dev_pipeline_generations_design.md §4.1): a good run
+ * becomes the generation the new child is handed, on a descriptor named by
+ * HULL_GENERATION_FD; a failed one replaces nothing - a running child keeps
+ * its last good generation, and with none running nothing starts until the
+ * next change. The paths the plugins observed are watched too (§4.2). */
+
+typedef struct {
+    char  **paths;
+    size_t  n;
+} DevInputs;
+
+static void dev_inputs_clear(DevInputs *in)
+{
+    for (size_t i = 0; i < in->n; i++) free(in->paths[i]);
+    free(in->paths);
+    in->paths = NULL;
+    in->n = 0;
+}
+
+static void dev_inputs_add(const char *path, void *ud)
+{
+    DevInputs *in = ud;
+    char **np = realloc(in->paths, (in->n + 1) * sizeof *np);
+    if (!np) return;
+    in->paths = np;
+    if ((in->paths[in->n] = strdup(path)) != NULL) in->n++;
+}
+
+/* A signature of the observed inputs: changes when one is created, removed
+ * or modified (mtime or size). 0 with none. */
+static uint64_t dev_inputs_sig(const char *app_dir, const DevInputs *in)
+{
+    uint64_t sig = 0;
+    for (size_t i = 0; i < in->n; i++) {
+        char path[PATH_MAX];
+        int n = in->paths[i][0]
+              ? snprintf(path, sizeof path, "%s/%s", app_dir, in->paths[i])
+              : snprintf(path, sizeof path, "%s", app_dir);
+        if (n < 0 || (size_t)n >= sizeof path) continue;
+        struct stat st;
+        uint64_t v = 1;
+        if (lstat(path, &st) == 0)
+            v = ((uint64_t)st.st_mtime << 20) ^ (uint64_t)st.st_size ^
+                ((uint64_t)st.st_mode << 40) ^ 2u;
+        sig = sig * 1099511628211ull + v + i;
+    }
+    return sig;
+}
+
+/* The generation's bytes on a descriptor the child inherits (an unlinked
+ * temporary file, so nothing is left in the tree or in $TMPDIR). -1 on
+ * failure. */
+static int dev_generation_fd(const uint8_t *b, size_t len)
+{
+    const char *t = getenv("TMPDIR");
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof path, "%s/hull-generation-XXXXXX",
+                     t && t[0] == '/' ? t : "/tmp");
+    if (n < 0 || (size_t)n >= sizeof path) return -1;
+    int fd = mkstemp(path);
+    if (fd < 0) return -1;
+    (void)unlink(path);
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, b + off, len - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            return -1;
+        }
+        off += (size_t)w;
+    }
+    if (lseek(fd, 0, SEEK_SET) != 0) { close(fd); return -1; }
+    return fd;
+}
+
+/* Run the pipeline when the app has build plugins. 1 = a generation in
+ * *gen_fd (and *inputs), 0 = no pipeline work, -1 = it failed. */
+static int dev_run_pipeline(const char *app_dir, const char *entry, int agent_mode,
+                            int *gen_fd, DevInputs *inputs)
+{
+    *gen_fd = -1;
+    if (!hl_generation_has_pipeline(app_dir)) {
+        dev_inputs_clear(inputs);
+        return 0;
+    }
+    uint8_t *b = NULL;
+    size_t len = 0;
+    if (hl_generation_produce(app_dir, &b, &len) != 0) {
+        hl_eprintf_line("[hull:dev] %s", hl_generation_error());
+        if (agent_mode) {
+            char msg[512];
+            snprintf(msg, sizeof msg, "failed to load %s: the build pipeline "
+                     "failed", entry);
+            hl_dev_last_error_write(app_dir, g_dev_nonce, (long)getpid(), msg);
+        }
+        return -1;
+    }
+    DevInputs fresh = { 0 };
+    if (hl_generation_inputs(b, len, dev_inputs_add, &fresh) != 0) {
+        fprintf(stderr, "[hull:dev] the build pipeline wrote no generation\n");
+        free(b);
+        dev_inputs_clear(&fresh);
+        return -1;
+    }
+    int fd = dev_generation_fd(b, len);
+    free(b);
+    if (fd < 0) {
+        hl_eprintf_line("[hull:dev] cannot hand over the generation: %s",
+                        strerror(errno));
+        dev_inputs_clear(&fresh);
+        return -1;
+    }
+    dev_inputs_clear(inputs);
+    *inputs = fresh;
+    *gen_fd = fd;
+    return 1;
 }
 
 /*
@@ -815,6 +939,9 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 
     int ret = 0;
     long generation = 0;   /* incremented per (re)spawn; published to .hull/discovery.json */
+    DevInputs inputs = { 0 };
+    pid_t pid = 0;         /* the running child, 0 for none */
+    int need_build = 1;    /* run the pipeline and (re)spawn */
 
     for (;;) {
         if (dev_got_signal) {
@@ -822,92 +949,117 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
             break;
         }
 
-        /* Fork child, with SIGINT/SIGTERM blocked across the fork: a signal
-         * landing in the child before it reset its handlers ran the
-         * parent's (which only records it), so it was swallowed - the child
-         * exec'd anyway and the parent then sat in waitpid. Blocked, it
-         * stays pending: the child resets to SIG_DFL before unblocking (and
-         * dies of it), the parent unblocks once dev_child_pid is set (and
-         * forwards it). */
-        sigset_t blk, prev;
-        sigemptyset(&blk);
-        sigaddset(&blk, SIGINT);
-        sigaddset(&blk, SIGTERM);
-        sigprocmask(SIG_BLOCK, &blk, &prev);
+        if (need_build) {
+            need_build = 0;
+            int gen_fd = -1;
+            int built = dev_run_pipeline(app_dir, entry_point, agent_mode,
+                                         &gen_fd, &inputs);
+            if (built < 0 && pid > 0) {
+                fprintf(stderr, "[hull:dev] the app keeps running its last good "
+                        "build; fix the error to reload\n");
+            } else if (built < 0) {
+                fprintf(stderr, "[hull:dev] nothing is running; waiting for a "
+                        "change\n");
+            } else {
+                if (pid > 0) {
+                    kill(pid, SIGTERM);
+                    waitpid(pid, NULL, 0);
+                    dev_child_pid = 0;
+                }
+                char fdv[16];
+                if (gen_fd >= 0) {
+                    snprintf(fdv, sizeof fdv, "%d", gen_fd);
+                    (void)setenv(HL_GENERATION_ENV, fdv, 1);
+                }
+
+                /* Fork child, with SIGINT/SIGTERM blocked across the fork: a
+                 * signal landing in the child before it reset its handlers ran
+                 * the parent's (which only records it), so it was swallowed -
+                 * the child exec'd anyway and the parent then sat in waitpid.
+                 * Blocked, it stays pending: the child resets to SIG_DFL
+                 * before unblocking (and dies of it), the parent unblocks once
+                 * dev_child_pid is set (and forwards it). */
+                sigset_t blk, prev;
+                sigemptyset(&blk);
+                sigaddset(&blk, SIGINT);
+                sigaddset(&blk, SIGTERM);
+                sigprocmask(SIG_BLOCK, &blk, &prev);
 #ifdef __COSMOPOLITAN__
-        pid_t pid = dev_spawn(hull_exe, (const char *const *)child_argv, &prev,
-                              DEV_IO_INHERIT, DEV_IO_INHERIT, DEV_IO_INHERIT,
-                              -1, -1);
-        if (pid < 0) {
-            sigprocmask(SIG_SETMASK, &prev, NULL);
-            fprintf(stderr, "[hull:dev] spawn failed: %s\n", strerror(errno));
-            ret = 1;
-            break;
-        }
+                pid = dev_spawn(hull_exe, (const char *const *)child_argv, &prev,
+                                DEV_IO_INHERIT, DEV_IO_INHERIT, DEV_IO_INHERIT,
+                                -1, -1);
 #else
-        pid_t pid = fork();
-        if (pid < 0) {
-            sigprocmask(SIG_SETMASK, &prev, NULL);
-            fprintf(stderr, "[hull:dev] fork failed: %s\n", strerror(errno));
-            ret = 1;
-            break;
-        }
-
-        if (pid == 0) {
-            /* Child: restore default signal handlers, unblock, and exec */
-            signal(SIGINT, SIG_DFL);
-            signal(SIGTERM, SIG_DFL);
-            sigprocmask(SIG_SETMASK, &prev, NULL);
-            execv(hull_exe, (char *const *)(uintptr_t)child_argv);  /* POSIX execv does not modify argv */
-            _exit(127);
-        }
+                pid = fork();
+                if (pid == 0) {
+                    /* Child: restore default signal handlers, unblock, and exec */
+                    signal(SIGINT, SIG_DFL);
+                    signal(SIGTERM, SIG_DFL);
+                    sigprocmask(SIG_SETMASK, &prev, NULL);
+                    execv(hull_exe, (char *const *)(uintptr_t)child_argv);  /* POSIX execv does not modify argv */
+                    _exit(127);
+                }
 #endif
+                (void)unsetenv(HL_GENERATION_ENV);
+                if (gen_fd >= 0) close(gen_fd);   /* the child has its copy */
+                if (pid < 0) {
+                    sigprocmask(SIG_SETMASK, &prev, NULL);
+                    fprintf(stderr, "[hull:dev] spawn failed: %s\n", strerror(errno));
+                    pid = 0;
+                    ret = 1;
+                    break;
+                }
 
-        dev_child_pid = pid;
-        sigprocmask(SIG_SETMASK, &prev, NULL);
-        /* A signal between fork() and the line above found no child to
-         * forward to; the loop then broke out and left this one running,
-         * holding the port. Forward it now. */
-        if (dev_got_signal) {
-            kill(pid, dev_got_signal);
-            (void)waitpid(pid, NULL, 0);
-            dev_child_pid = 0;
-            ret = 128 + dev_got_signal;
-            break;
+                dev_child_pid = pid;
+                sigprocmask(SIG_SETMASK, &prev, NULL);
+                /* A signal between fork() and the line above found no child
+                 * to forward to; the loop then broke out and left this one
+                 * running, holding the port. Forward it now. */
+                if (dev_got_signal) {
+                    kill(pid, dev_got_signal);
+                    (void)waitpid(pid, NULL, 0);
+                    dev_child_pid = 0;
+                    pid = 0;
+                    ret = 128 + dev_got_signal;
+                    break;
+                }
+
+                if (agent_mode) {
+                    agent_write_dev_json(app_dir, port, pid);
+                    /* Publish a new discovery generation for this (re)spawn.
+                     * A full deterministic reanalysis each time (no
+                     * incremental in this story). */
+                    generation++;
+                    agent_publish_discovery(hull_exe, app_dir, generation);
+                }
+            }
         }
 
-        if (agent_mode) {
-            agent_write_dev_json(app_dir, port, pid);
-            /* Publish a new discovery generation for this (re)spawn. A full deterministic
-             * reanalysis each time (no incremental in this story). */
-            generation++;
-            agent_publish_discovery(hull_exe, app_dir, generation);
-        }
-
-        /* Record baseline mtime */
+        /* Record baseline: the app's files and what the plugins observed */
         time_t baseline = scan_mtime(app_dir);
+        uint64_t in_baseline = dev_inputs_sig(app_dir, &inputs);
 
         /* Poll for changes or child exit */
-        int child_exited = 0;
-        int change_detected = 0;
-
-        while (!dev_got_signal && !child_exited && !change_detected) {
+        while (!dev_got_signal && !need_build) {
             /* Check child status (non-blocking) */
-            int status;
-            pid_t w = waitpid(pid, &status, WNOHANG);
-            if (w > 0) {
-                child_exited = 1;
-                if (WIFEXITED(status)) {
-                    int code = WEXITSTATUS(status);
-                    if (code != 0) {
+            if (pid > 0) {
+                int status;
+                pid_t w = waitpid(pid, &status, WNOHANG);
+                if (w > 0) {
+                    dev_child_pid = 0;
+                    pid = 0;
+                    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
                         fprintf(stderr, "[hull:dev] server exited with code %d, "
-                                "restarting in 1s...\n", code);
+                                "restarting in 1s...\n", WEXITSTATUS(status));
                     } else {
                         fprintf(stderr, "[hull:dev] server exited, "
                                 "restarting in 1s...\n");
                     }
+                    /* Back-off before restart */
+                    struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
+                    nanosleep(&ts, NULL);
+                    need_build = 1;
+                    break;
                 }
-                break;
             }
 
             /* Sleep 1 second between polls */
@@ -915,28 +1067,24 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
             nanosleep(&ts, NULL);
 
             /* Check for file changes */
-            time_t current = scan_mtime(app_dir);
-            if (current > baseline) {
-                change_detected = 1;
+            if (scan_mtime(app_dir) > baseline ||
+                dev_inputs_sig(app_dir, &inputs) != in_baseline) {
                 fprintf(stderr, "[hull:dev] change detected, reloading...\n");
-                kill(pid, SIGTERM);
-                waitpid(pid, NULL, 0);
+                need_build = 1;
             }
         }
 
-        dev_child_pid = 0;
-
         if (dev_got_signal)
             break;
-
-        if (child_exited) {
-            /* Back-off before restart */
-            struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
-            nanosleep(&ts, NULL);
-        }
-
-        /* Loop back and restart */
+        /* Loop back: run the pipeline, then restart */
     }
+
+    if (pid > 0) {
+        kill(pid, SIGTERM);
+        (void)waitpid(pid, NULL, 0);
+        dev_child_pid = 0;
+    }
+    dev_inputs_clear(&inputs);
 
     if (agent_mode)
         agent_remove_sidecars(app_dir);

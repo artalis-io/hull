@@ -1,7 +1,8 @@
 # Pipeline generations outside `hull build` - design
 
-Status: **G1 IMPLEMENTED** (the app side: the handed generation, the overlay, the loaders,
-INV-14; §9.1). G2 and G3 are design only. This document extends
+Status: **G1 and G2 IMPLEMENTED** (the handed generation, the overlay, the loaders, INV-14,
+§9.1; the pipeline run before an app from source loads and `hull dev`'s hand-off, §9.2). G3
+is design only. This document extends
 [buildcontext_design.md](buildcontext_design.md) (BuildContext). It defines how the
 outputs of the ONE build pipeline reach an app that is not built: `hull dev`,
 `hull test`, `hull agent`, `hull mcp`, and a development `hull app.lua` / `app.js`.
@@ -325,7 +326,7 @@ These interleave with BuildContext's (BuildContext §13); each stops for review.
   payload reads, the loader lookup order and its lint rule, refusal in built binaries
   and under `--verify-sig`. Fed by test fixtures (a hand-built generation over
   committed fixture results); no plugin runs.
-- **G2. Runner wiring** (after BuildContext checkpoint 5, plugin runner). The
+- **G2. Runner wiring** (implemented, §9.2; after BuildContext checkpoint 5, plugin runner). The
   supervisor and the one-shot child plan and run the pipeline, publish, hand off; the
   failure rules of §4; the watcher union of §4.2. Proven with checkpoint 5's
   demonstration plugin.
@@ -366,6 +367,45 @@ These interleave with BuildContext's (BuildContext §13); each stops for review.
   refusals) and `tests/e2e_generation.sh` (`make e2e-generation`: Lua and JS apps, `hull
   test`, the refusals, a planted generation-shaped file ignored; also on the
   pure-compute `app.main` runner in CI).
+
+### 9.2 G2 as built
+
+- **The pipeline child.** `hull plugins generation <app_dir>` (an internal verb of the `hull
+  plugins` tool module) runs the app's pipeline (`hull.buildctx.pipeline`) and writes its
+  generation to stdout - nothing else goes there; diagnostics go to stderr - and exits 1 when
+  a plugin failed or its outputs cannot be one generation. `hull.buildctx.generation` builds
+  it: every `generated` output of a committed or cached result becomes an entry named for the
+  app file it shadows (its descriptor's `name`, `./` dropped; a tree output's files are
+  `<name>/<path>`), with `origin` = the plugin and the action key and the descriptor's
+  `position_map` (`none` by default); artifacts are not entries. Two outputs of one name, or a
+  name an app cannot be handed (the app process's rule), fail the run. `inputs` is every path a
+  result's dependency manifest observed; `pipeline_plan_hash` (also the `generation_id`) hashes
+  the actions' identities and keys.
+- **One-shot entry points.** With no generation handed over, an app from source whose
+  directory holds a regular `hull.build.json` runs that child before it loads
+  (`hl_generation_take`, `shared/generation.c`): `hull app.*` (serve.c and serve_cli.c, right
+  after the entry resolves, before any sandbox) and `hull test`, `hull agent`, `hull mcp` (the
+  app context). A failed pipeline is a load error. Never in a built binary, never in a build
+  plugin's own process (one with a plugin channel). The child is this binary
+  (`hl_chan_self_exe`), so build plugins need a native hull, as `hull plugins run` already
+  does. Results are reused from the build result store, so a repeat run spawns no plugin.
+- **`hull dev`.** Before every (re)spawn the supervisor runs the child
+  (`hl_generation_produce`) while the old app keeps running. A good generation goes to the new
+  child on an unlinked temporary file named by `HULL_GENERATION_FD`; then the old child is
+  stopped and the new one started. A failed one replaces nothing: a running child keeps its
+  last good generation (`[hull:dev] the app keeps running its last good build`), with none
+  running nothing starts until the next change; under `--agent` the failure is written to
+  `.hull/last_error.json` (MAC'd, `hl_dev_last_error_write`, shared with serve.c). The
+  watcher adds the generation's `inputs` (created, removed or changed) to the app's own
+  files. `hull dev --tui` does not hand a generation yet: its child runs the pipeline itself,
+  as a one-shot entry point does, without the keep-the-last-good rule.
+- **`--verify-sig`** refuses a generation with entries; pipeline work that generates no app
+  file is nothing to cover.
+- **Proof.** The inventory demonstration plugin generates `inventory.json` when configured
+  with `module` (`tests/fixtures/plugin_demo/app_gen_*` load it; it is in no tree).
+  `tests/e2e_generation.sh` runs it one-shot (Lua and JS, `hull test`, a failed pipeline) and
+  under `hull dev` (first spawn, a reload, a failed pipeline keeping the app, recovery);
+  `stdlib/cli/lua/hull/buildctx/tests/test_generation.lua` covers the builder.
 
 ## 10. Non-scope
 

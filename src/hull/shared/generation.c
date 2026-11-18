@@ -9,6 +9,8 @@
 
 #include "hull/cap/crypto.h"
 #include "hull/entry.h"
+#include "hull/shared/build_plugin.h"   /* hl_build_plugin_fd */
+#include "hull/shared/child_channel.h"  /* hl_chan_self_exe */
 #include "hull/shared/term_escape.h"   /* hl_utf8_valid */
 #include "../utils/hex.h"
 #include "hull/vfs.h"
@@ -18,6 +20,7 @@
 #include "sh_json.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,10 +29,22 @@
 
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef HL_CHAN_SUPPORTED
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+extern char **environ;
+#endif
 
 static uint8_t *g_pending;
 static size_t   g_pending_len;
 static int      g_taken;
+static char     g_err[256];
+
+const char *hl_generation_error(void)
+{
+    return g_err[0] ? g_err : "no error";
+}
 
 void hl_generation_reset(void)
 {
@@ -37,6 +52,7 @@ void hl_generation_reset(void)
     g_pending = NULL;
     g_pending_len = 0;
     g_taken = 0;
+    g_err[0] = '\0';
 }
 
 __attribute__((format(printf, 3, 4)))
@@ -106,6 +122,12 @@ static int json_str_is(const ShJsonValue *v, const char *want)
 
 int hl_generation_install(const uint8_t *buf, size_t len,
                           char *err, size_t errsz)
+{
+    return hl_generation_install_ex(buf, len, 0, err, errsz);
+}
+
+int hl_generation_install_ex(const uint8_t *buf, size_t len, int verify_sig,
+                             char *err, size_t errsz)
 {
     if (!buf) {
         set_err(err, errsz, "no generation");
@@ -228,6 +250,17 @@ int hl_generation_install(const uint8_t *buf, size_t len,
                 "payload", payload_total - off);
         goto out;
     }
+    if (verify_sig && n > 0) {
+        /* The signature and the disk gate hash SOURCE; a generation is not
+         * covered by them (design §6). */
+        set_err(err, errsz, "--verify-sig refuses a pipeline generation: run "
+                "the built binary to verify a signed app");
+        goto out;
+    }
+    if (verify_sig) {
+        rc = 0;            /* nothing to install, nothing to cover */
+        goto out;
+    }
     if (hl_vfs_overlay_install(entries, n) != 0) {
         set_err(err, errsz, "cannot install the generation (a duplicate "
                 "vfs_name, or out of memory)");
@@ -301,14 +334,19 @@ int hl_generation_take_env(int embedded)
     if (fd < 0 || fstat(fd, &st) != 0 ||
         !(S_ISREG(st.st_mode) || S_ISFIFO(st.st_mode) ||
           S_ISSOCK(st.st_mode))) {
+        snprintf(g_err, sizeof g_err, HL_GENERATION_ENV " names no readable "
+                 "descriptor");
         return -1;
     }
     uint8_t *b = NULL;
     size_t blen = 0;
     int rr = read_all(fd, &b, &blen);
     (void)close(fd);
-    if (rr != 0)
+    if (rr != 0) {
+        snprintf(g_err, sizeof g_err, "cannot read the pipeline generation "
+                 "(a read error, or more than %u bytes)", HL_GENERATION_MAX_BYTES);
         return -1;
+    }
     g_pending = b;
     g_pending_len = blen;
     return 1;
@@ -321,19 +359,152 @@ int hl_generation_apply(int verify_sig)
     size_t blen = g_pending_len;
     g_pending = NULL;
     g_pending_len = 0;
-    int rc = -1;
-    if (verify_sig) {
-        /* The signature and the disk gate hash SOURCE; a generation is not
-         * covered by them (design §6). */
-        log_error("[hull:c] --verify-sig refuses a pipeline generation: run "
-                  "the built binary to verify a signed app");
-    } else {
-        char err[256];
-        err[0] = '\0';
-        rc = hl_generation_install(b, blen, err, sizeof err);
-        if (rc != 0)
-            log_error("[hull:c] the pipeline generation is refused: %s", err);
-    }
+    char err[256];
+    err[0] = '\0';
+    int rc = hl_generation_install_ex(b, blen, verify_sig, err, sizeof err);
+    if (rc != 0)
+        log_error("[hull:c] the pipeline generation is refused: %s", err);
     free(b);
+    return rc;
+}
+
+/* ── Running the pipeline ─────────────────────────────────────────── */
+
+int hl_generation_has_pipeline(const char *app_dir)
+{
+    char path[4096];
+    struct stat st;
+    int n = app_dir ? snprintf(path, sizeof path, "%s/hull.build.json", app_dir) : -1;
+    return n > 0 && (size_t)n < sizeof path && lstat(path, &st) == 0 &&
+           S_ISREG(st.st_mode);
+}
+
+int hl_generation_produce(const char *app_dir, uint8_t **out, size_t *len)
+{
+#ifdef HL_CHAN_SUPPORTED
+    char exe[4096];
+    if (hl_chan_self_exe(exe, sizeof exe) != 0) {
+        snprintf(g_err, sizeof g_err, "cannot find this hull binary to run "
+                 "the build pipeline");
+        return -1;
+    }
+    int p[2];
+    if (pipe(p) != 0) {
+        snprintf(g_err, sizeof g_err, "cannot run the build pipeline: %s",
+                 strerror(errno));
+        return -1;
+    }
+    (void)fcntl(p[0], F_SETFD, FD_CLOEXEC);
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t at;
+    int ok = posix_spawn_file_actions_init(&fa) == 0;
+    int at_ok = ok && posix_spawnattr_init(&at) == 0;
+    ok = at_ok;
+    /* stdin nothing, stdout the bundle, stderr shared: the plugins'
+     * diagnostics are the developer's to read. */
+    ok = ok && posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0) == 0;
+    ok = ok && posix_spawn_file_actions_adddup2(&fa, p[1], 1) == 0;
+    ok = ok && posix_spawn_file_actions_addclose(&fa, p[1]) == 0;
+    sigset_t none, all;
+    sigemptyset(&none);
+    sigfillset(&all);
+    ok = ok && posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK |
+                                             POSIX_SPAWN_SETSIGDEF) == 0;
+    ok = ok && posix_spawnattr_setsigmask(&at, &none) == 0;
+    ok = ok && posix_spawnattr_setsigdefault(&at, &all) == 0;
+    char *argv[] = { exe, (char *)"plugins", (char *)"generation", NULL, NULL };
+    char dir[4096];
+    snprintf(dir, sizeof dir, "%s", app_dir);
+    argv[3] = dir;
+    pid_t pid = -1;
+    int err = ok ? posix_spawn(&pid, exe, &fa, &at, argv, environ) : ENOMEM;
+    if (at_ok) posix_spawnattr_destroy(&at);
+    posix_spawn_file_actions_destroy(&fa);
+    close(p[1]);
+    if (err != 0) {
+        close(p[0]);
+        snprintf(g_err, sizeof g_err, "cannot run the build pipeline: %s",
+                 strerror(err));
+        return -1;
+    }
+    uint8_t *b = NULL;
+    size_t blen = 0;
+    int rr = read_all(p[0], &b, &blen);
+    close(p[0]);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        free(b);
+        snprintf(g_err, sizeof g_err, "the build pipeline failed (its "
+                 "diagnostics are above)");
+        return -1;
+    }
+    if (rr != 0) {
+        snprintf(g_err, sizeof g_err, "the build pipeline's generation is "
+                 "larger than %u bytes", HL_GENERATION_MAX_BYTES);
+        return -1;
+    }
+    *out = b;
+    *len = blen;
+    return 0;
+#else
+    (void)app_dir; (void)out; (void)len;
+    snprintf(g_err, sizeof g_err, "build plugins need a native hull (this "
+             "build cannot spawn them)");
+    return -1;
+#endif
+}
+
+int hl_generation_take(int embedded, const char *app_dir)
+{
+    int rc = hl_generation_take_env(embedded);
+    if (rc != 0 || g_taken)
+        return rc;
+    g_taken = 1;
+    if (embedded || hl_build_plugin_fd() >= 0 ||
+        !hl_generation_has_pipeline(app_dir))
+        return 0;
+    uint8_t *b = NULL;
+    size_t blen = 0;
+    if (hl_generation_produce(app_dir, &b, &blen) != 0)
+        return -1;
+    g_pending = b;
+    g_pending_len = blen;
+    return 1;
+}
+
+int hl_generation_inputs(const uint8_t *buf, size_t len,
+                         void (*fn)(const char *path, void *ud), void *ud)
+{
+    size_t ml = strlen(HL_GENERATION_MAGIC);
+    if (!buf || len < ml || memcmp(buf, HL_GENERATION_MAGIC, ml) != 0)
+        return -1;
+    size_t p = ml, mlen = 0, digits = 0;
+    while (p < len && buf[p] >= '0' && buf[p] <= '9' && digits < 9) {
+        mlen = mlen * 10 + (size_t)(buf[p] - '0');
+        p++;
+        digits++;
+    }
+    if (digits == 0 || p >= len || buf[p] != '\n')
+        return -1;
+    p++;
+    if (mlen == 0 || mlen > HL_GENERATION_MAX_MANIFEST || mlen > len - p)
+        return -1;
+    SHArena *arena = sh_arena_create(16 * mlen + 65536);
+    ShJsonValue *root = NULL;
+    int rc = -1;
+    if (arena && sh_json_parse((const char *)buf + p, mlen, arena, &root) ==
+                     SH_JSON_OK) {
+        const ShJsonValue *in = sh_json_get(root, "inputs");
+        if (sh_json_type(in) == SH_JSON_ARRAY) {
+            size_t n = sh_json_array_len(in);
+            for (size_t i = 0; i < n; i++) {
+                const char *s = sh_json_as_string(sh_json_array_get(in, i), NULL);
+                if (s) fn(s, ud);
+            }
+            rc = 0;
+        }
+    }
+    if (arena) sh_arena_free(arena);
     return rc;
 }
