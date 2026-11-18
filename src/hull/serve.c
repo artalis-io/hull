@@ -20,7 +20,6 @@
  */
 
 #ifdef HL_ENABLE_JS
-#include "hull/shared/generation.h"
 #include "hull/runtime/js.h"
 #endif
 
@@ -34,6 +33,7 @@
  * disappear and the call become an implicit declaration (an error on GCC 14). */
 #include "hull/shared/cli_log.h"
 #include "hull/shared/build_plugin.h"
+#include "hull/shared/generation.h"
 #include "hull/shared/dev_session.h"   /* HL_DEV_SESSION_ENV (audit 36) */
 
 #include "hull/utils/alloc.h"
