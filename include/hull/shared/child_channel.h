@@ -103,6 +103,11 @@ int hl_chan_frame_read(int fd, HlChanFrame *r, uint64_t deadline);
 pid_t hl_chan_spawn(const char *exe, char *const argv[], int fd,
                     int (*env_ok)(const char *kv));
 
+/* hl_chan_spawn, and the "NAME=value" entries of @p extra (NULL-terminated,
+ * may be NULL) added after the filtered ones. */
+pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
+                        int (*env_ok)(const char *kv), const char *const *extra);
+
 /* This process's binary, as a path posix_spawn takes (Linux:
  * /proc/self/exe itself). 0 / -1. */
 int hl_chan_self_exe(char *out, size_t sz);

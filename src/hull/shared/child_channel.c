@@ -173,23 +173,32 @@ int hl_chan_frame_read(int fd, HlChanFrame *r, uint64_t deadline)
     }
 }
 
-/* The environment entries @p env_ok accepts, borrowed from environ. */
-static char **filtered_env(int (*env_ok)(const char *kv))
+/* The environment entries @p env_ok accepts, borrowed from environ, then
+ * @p extra. */
+static char **filtered_env(int (*env_ok)(const char *kv), const char *const *extra)
 {
-    size_t n = 0;
+    size_t n = 0, x = 0;
     for (char **e = environ; e && *e; e++) n++;
-    char **out = calloc(n + 1, sizeof *out);
+    while (extra && extra[x]) x++;
+    char **out = calloc(n + x + 1, sizeof *out);
     if (!out) return NULL;
     size_t k = 0;
     if (env_ok)
         for (char **e = environ; e && *e; e++)
             if (env_ok(*e)) out[k++] = *e;
+    for (size_t i = 0; i < x; i++) out[k++] = (char *)(uintptr_t)extra[i];   /* posix_spawn does not modify it */
     out[k] = NULL;
     return out;
 }
 
 pid_t hl_chan_spawn(const char *exe, char *const argv[], int fd,
                     int (*env_ok)(const char *kv))
+{
+    return hl_chan_spawn_env(exe, argv, fd, env_ok, NULL);
+}
+
+pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
+                        int (*env_ok)(const char *kv), const char *const *extra)
 {
     posix_spawn_file_actions_t fa;
     posix_spawnattr_t at;
@@ -214,7 +223,7 @@ pid_t hl_chan_spawn(const char *exe, char *const argv[], int fd,
     ok = ok && posix_spawnattr_setflags(&at, flags) == 0;
     ok = ok && posix_spawnattr_setsigmask(&at, &none) == 0;
     ok = ok && posix_spawnattr_setsigdefault(&at, &all) == 0;
-    char **env = ok ? filtered_env(env_ok) : NULL;
+    char **env = ok ? filtered_env(env_ok, extra) : NULL;
     pid_t pid = -1;
     if (ok && env && posix_spawn(&pid, exe, &fa, &at, argv, env) != 0)
         pid = -1;

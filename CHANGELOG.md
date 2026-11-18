@@ -31,6 +31,18 @@ release-artifact layout).
   call (`ctx.inputs`, `ctx.outputs`, `ctx.diagnostics`, `ctx.source`) is one request the host
   answers. The manifest preset admits no capability section and only pure modules. The host side
   (the runner, `hull.build.json`) comes next; nothing in `hull build` runs a plugin yet.
+- Build plugins, host side (BuildContext checkpoint 5, docs/buildcontext_design.md §13.4): the
+  build host's runner spawns a plugin (the hull binary, `-d :memory:` so nothing is written to the
+  plugin's directory), serves its ctx calls into a BuildAction, then prepares and commits it; one
+  process serves a run's actions, and one that crashes, misses the action's deadline or breaks the
+  protocol aborts its action and is replaced. Registration reads `hull.build.json` (strict;
+  plugin directories inside the app, through no link, not into `.hull`), each plugin's manifest
+  through the extraction child, the preset (the runner's own check), its `build_plugin`
+  descriptor and its configuration, and gives each an identity (`app:<path>#<sha256>` over every
+  file of its directory, `stdlib:<id>@<major>` for a bundled one). Lua and JavaScript plugins
+  commit byte-identical results. Tool code (`hull.buildctx.plugin`, `hull.buildctx.registry`)
+  over one more small native binding, `hull.buildctx._plugin`; nothing in `hull build` runs it
+  yet.
 - Build pipeline, internal (BuildContext, docs/buildcontext_design.md §9.1): the pieces a build
   plugin's channel is made of. `shared/child_channel` - a helper process on one inherited socket
   (spawn with fd 3 and a filtered environment, length-framed messages under deadlines, reap) -
