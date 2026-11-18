@@ -84,8 +84,29 @@ static int t_sha256(lua_State *L)
 
 static char g_home[HL_TEST_PATH_MAX];
 
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define BUILDCTX_TEST_ASAN 1
+#  endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#  define BUILDCTX_TEST_ASAN 1
+#endif
+
 static void setup(lua_State *L)
 {
+#ifdef BUILDCTX_TEST_ASAN
+    /* The plugin processes are this build's hull, under the app sandbox: the
+     * leak checker's exit-time thread is a syscall the sandbox refuses, which
+     * killed a plugin that STOP had ended cleanly. Their leaks are not what
+     * this suite checks. */
+    {
+        const char *o = getenv("ASAN_OPTIONS");
+        char buf[512];
+        snprintf(buf, sizeof buf, "%s%sdetect_leaks=0", o ? o : "", o && o[0] ? ":" : "");
+        setenv("ASAN_OPTIONS", buf, 1);
+    }
+#endif
     if (!g_home[0]) {
         hl_test_path(g_home, sizeof(g_home), "hull_buildctx_home_%d", (int)getpid());
         mkdir(g_home, 0700);

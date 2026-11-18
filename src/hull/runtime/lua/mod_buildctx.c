@@ -482,13 +482,29 @@ typedef struct {
     pid_t pid;      /* 0 once reaped */
 } BcProc;
 
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer)
+#    define HL_BUILDCTX_SANITIZED 1
+#  endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#  define HL_BUILDCTX_SANITIZED 1
+#endif
+
 #ifdef HL_CHAN_SUPPORTED
 /* What a plugin inherits: its home (the code caches and their key) and the
- * cache knobs. Never a secret, a database URL or a path list. */
+ * cache knobs. Never a secret, a database URL or a path list. A sanitizer
+ * build also passes the sanitizer options, so its tests can keep the leak
+ * checker's exit-time work out of the plugin's kernel sandbox. */
 static int plugin_env_ok(const char *kv)
 {
     static const char *const keep[] = { "HOME=", "TMPDIR=", "HULL_CACHE_DIR=",
-                                        "HULL_NO_", NULL };
+                                        "HULL_NO_",
+#ifdef HL_BUILDCTX_SANITIZED
+                                        "ASAN_OPTIONS=", "LSAN_OPTIONS=", "UBSAN_OPTIONS=",
+                                        "MSAN_OPTIONS=",
+#endif
+                                        NULL };
     for (int i = 0; keep[i]; i++)
         if (strncmp(kv, keep[i], strlen(keep[i])) == 0) return 1;
     return 0;
