@@ -517,33 +517,40 @@ def inv4(tree, ctx):
 INV5_OPEN = re.compile(r"\b(fopen|open|openat|hl_fs_fopen_read|hl_fs_open\w*)\s*\(")
 
 
-@rule("INV-5", "every disk loader checks hl_vfs_embedded")
-def inv5(tree, ctx):
-    findings = []
+def disk_loaders(cf, p):
+    """INV-5's disk loaders in one file (see the comment above)."""
+    loaders = []
+    for fn in cf.funcs:
+        if "hl_vfs_disk_gate_check" in fn.calls:
+            loaders.append(fn.name)
+        elif (p.startswith("src/hull/runtime/")
+              and re.search(r"\bapp_dir\b", fn.body_code)
+              and INV5_OPEN.search(fn.body_code)):
+            loaders.append(fn.name)
+    return loaders
+
+
+def loaders_missing(tree, call):
+    """(path, loader) for every disk loader that neither calls `call` nor
+    is reached from a same-file caller that does."""
+    out = []
     for p in tree.files("src/hull", exts=(".c",)):
         if p == "src/hull/vfs.c":
             continue
         cf = tree.cfile(p)
-        loaders = []
-        for fn in cf.funcs:
-            if "hl_vfs_disk_gate_check" in fn.calls:
-                loaders.append(fn.name)
-            elif (p.startswith("src/hull/runtime/")
-                  and re.search(r"\bapp_dir\b", fn.body_code)
-                  and INV5_OPEN.search(fn.body_code)):
-                loaders.append(fn.name)
-        if not loaders:
-            continue
-        reached, _ = reverse_roots(cf, loaders)
-        for ld in loaders:
+        for ld in disk_loaders(cf, p):
             r2, _ = reverse_roots(cf, [ld])
-            if not any("hl_vfs_embedded" in cf.by_name[n].calls
+            if not any(call in cf.by_name[n].calls
                        for n in r2 if n in cf.by_name):
-                fn = cf.by_name[ld]
-                findings.append((f"{p}:{ld}",
-                                 f"disk loader {ld} (line {fn.line}) never "
-                                 "checks hl_vfs_embedded"))
-    return findings
+                out.append((p, cf.by_name[ld]))
+    return out
+
+
+@rule("INV-5", "every disk loader checks hl_vfs_embedded")
+def inv5(tree, ctx):
+    return [(f"{p}:{fn.name}", f"disk loader {fn.name} (line {fn.line}) "
+             "never checks hl_vfs_embedded")
+            for p, fn in loaders_missing(tree, "hl_vfs_embedded")]
 
 
 # INV-6 -------------------------------------------------------------------
@@ -1036,6 +1043,24 @@ def inv13(tree, ctx):
                                  f"{cf.line_of(m.start())} - use dev_lock "
                                  "(or a cap function that does)"))
     return findings
+
+
+# INV-14 ------------------------------------------------------------------
+# How it decides: INV-5's disk loaders (a function that calls
+# hl_vfs_disk_gate_check, or one under src/hull/runtime/ that names app_dir
+# and opens a file). The loader, or a same-file function that reaches it,
+# must call hl_vfs_overlay_find: a pipeline generation entry shadows the file
+# of the same name, so every development loader asks the overlay before the
+# disk and, on a hit, loads its checked bytes and never the file
+# (docs/dev_pipeline_generations_design.md §2.4). A loader that reads no app
+# content a pipeline stage could produce is allowlisted with its reason.
+
+
+@rule("INV-14", "every disk loader consults the generation overlay first")
+def inv14(tree, ctx):
+    return [(f"{p}:{fn.name}", f"disk loader {fn.name} (line {fn.line}) "
+             "never consults hl_vfs_overlay_find")
+            for p, fn in loaders_missing(tree, "hl_vfs_overlay_find")]
 
 
 # ---------------------------------------------------------------------------

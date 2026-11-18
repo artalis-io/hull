@@ -277,6 +277,28 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
      * was built with, not whatever lies under <cwd>/static when it runs. */
     if (hl_vfs_embedded(ctx->vfs))
         return 0;
+
+    /* A pipeline generation entry shadows the file (shared/generation.h):
+     * its checked bytes are served, the file unread. */
+    const HlEntry *ov = hl_vfs_overlay_find(full_name);
+    if (ov) {
+        char etag[64];
+        int elen = format_etag_embedded(etag, sizeof(etag), ov->data, ov->len);
+        if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
+            kl_http_response_status(res, 304);
+            kl_http_response_header(res, "ETag", etag);
+            kl_http_response_body_borrow(res, NULL, 0);
+            return 1;
+        }
+        kl_http_response_status(res, 200);
+        kl_http_response_header(res, "Content-Type", mime);
+        static_safety_headers(res, mime);
+        kl_http_response_header(res, "Cache-Control", "no-cache");
+        if (elen > 0)
+            kl_http_response_header(res, "ETag", etag);
+        kl_http_response_body_borrow(res, (const char *)ov->data, ov->len);
+        return 1;
+    }
     {
         if (!ctx->vfs || !ctx->vfs->root_dir)
             return 0;

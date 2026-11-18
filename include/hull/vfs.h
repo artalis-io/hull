@@ -181,4 +181,34 @@ int hl_vfs_disk_gate_check(const char *rel, const void *data, size_t len);
 /* Disarm and free (tests, shutdown). */
 void hl_vfs_disk_gate_reset(void);
 
+/* ── Pipeline generation overlay ─────────────────────────────────────
+ *
+ * The outputs of the build pipeline for an app run from source
+ * (docs/dev_pipeline_generations_design.md): a sorted table of app-relative
+ * names ("app.ts", "lib/x.lua", "compute/k.wasm") whose bytes SHADOW the
+ * disk file of the same name. Every development disk loader asks it first
+ * (hl_vfs_overlay_find) and, on a hit, loads those bytes and never reads the
+ * file. Installed once, before any app code runs, from the generation the
+ * parent process handed over (shared/generation.h), whose payload hashes are
+ * checked before the install; read-only afterwards (sealed), so safe from
+ * worker threads. Never installed in a built binary or under --verify-sig.
+ */
+
+/* Install the overlay: copies every name and payload (each payload is
+ * followed by a NUL byte the entry's len does not count). Names are
+ * app-relative with no leading "./"; they must be distinct. Returns 0, or -1
+ * on bad input, a duplicate name, out of memory, or an overlay already
+ * installed. */
+int hl_vfs_overlay_install(const HlEntry *entries, size_t n);
+
+/* 1 when an overlay is installed (it may have no entries). */
+int hl_vfs_overlay_active(void);
+
+/* The overlay entry for the app-relative name `rel` (a leading "./" is
+ * ignored), or NULL when nothing shadows it. */
+const HlEntry *hl_vfs_overlay_find(const char *rel);
+
+/* Remove the overlay (tests, shutdown). */
+void hl_vfs_overlay_reset(void);
+
 #endif /* HL_VFS_H */

@@ -27,6 +27,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/generation.h"
 #include "hull/app_context.h"
 #include "hull/entry.h"        /* HlEntry / hl_app_entries[] (embedded apps) */
 #include "hull/utils/alloc.h"  /* HlAllocator + hl_alloc_kl (Keel-free KlAllocator) */
@@ -418,6 +419,15 @@ int hull_serve(int argc, char **argv)
     if (hl_build_plugin_take_env() < 0) {
         fprintf(stderr, "hull: " HL_BUILD_PLUGIN_ENV " is set but fd 3 is not a socket\n");
         return 1;
+    }
+    /* A pipeline generation the parent handed over: taken here, installed
+     * by the app context - as serve.c does. */
+    {
+        extern const HlEntry hl_app_entries[];
+        if (hl_generation_take_env(hl_app_entries[0].name != NULL) < 0) {
+            fprintf(stderr, "hull: " HL_GENERATION_TAKE_ERR "\n");
+            return 1;
+        }
     }
     int app_argc = 0;
     char **app_argv = NULL;

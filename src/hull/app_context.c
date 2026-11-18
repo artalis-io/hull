@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/generation.h"
 #include "hull/app_context.h"
 #include "hull/cap/run_watchdog.h"   /* hl_run_watchdog_set_app_limits */
 #include "hull/entry.h"
@@ -556,6 +557,21 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     if (!hl_vfs_embedded(&probe)) {
         ctx->app_dir_copy = abs_dir_path(opts->app_dir);
         ctx->app_dir_abs = ctx->app_dir_copy != NULL;
+    }
+
+    /* The pipeline generation a parent handed over becomes the loaders'
+     * overlay before the app loads (shared/generation.h). Taken here unless
+     * the runner took it already (serve.c, serve_cli.c); refused under
+     * --verify-sig, whose disk gate the runner armed before this. A refused
+     * or invalid generation stops the app: it never runs the sources the
+     * generation would have shadowed. */
+    int gen_taken = hl_generation_take_env(hl_vfs_embedded(&probe));
+    if (gen_taken < 0)
+        log_error("[hull:c] " HL_GENERATION_TAKE_ERR);
+    if (gen_taken < 0 || hl_generation_apply(hl_vfs_disk_gate_armed()) != 0) {
+        free(ctx->app_dir_copy);
+        free(ctx);
+        return -1;
     }
     if (!ctx->app_dir_copy)
         ctx->app_dir_copy = strdup(opts->app_dir);

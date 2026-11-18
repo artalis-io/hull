@@ -1,6 +1,7 @@
 # Pipeline generations outside `hull build` - design
 
-Status: **DESIGN-ONLY. NOTHING IMPLEMENTED.** This document extends
+Status: **G1 IMPLEMENTED** (the app side: the handed generation, the overlay, the loaders,
+INV-14; §9.1). G2 and G3 are design only. This document extends
 [buildcontext_design.md](buildcontext_design.md) (BuildContext). It defines how the
 outputs of the ONE build pipeline reach an app that is not built: `hull dev`,
 `hull test`, `hull agent`, `hull mcp`, and a development `hull app.lua` / `app.js`.
@@ -120,6 +121,10 @@ Consequences:
   its parent handed it;
 - no new `.hull/` reader, so the audit 37 reservation is untouched.
 
+As built (G1), the descriptor carries the payloads too, after the manifest: the parent, which
+holds the tool key, reads the committed results from the store and writes their bytes; the app
+process opens no store path at all (§3, §9.1).
+
 ### 1.5 Production loads no generation
 
 A built binary (`hl_vfs_embedded`) has no generation and refuses one: the descriptor
@@ -151,10 +156,12 @@ specifier never normalizes to one.
 
 ### 2.2 Reading a payload
 
-A loader that hits the overlay reads the payload from the store (§3), hashes it, and
-refuses it (a load error naming the entry) unless the hash matches. It never falls
-back to the disk file it shadows: a missing or corrupt payload is an error, not a
-reason to run the untransformed source.
+Every payload is hashed against its manifest entry when the generation is taken, before
+any app code runs, and a mismatch stops the app (it never starts on part of a
+generation). The checked bytes are then kept in sealed, read-only memory, so a loader
+that hits the overlay loads them as they were checked. It never falls back to the disk
+file it shadows: a corrupt payload is an error, not a reason to run the untransformed
+source.
 
 ### 2.3 What app code sees
 
@@ -183,11 +190,11 @@ manifest references them by store identity + content hash.
   tool key (`$HOME/.hull/tool-cache.key`), which app processes never load. The app
   process does not need the key (§1.4): it checks payload hashes against the handed
   manifest.
-- **Kernel sandbox.** The app process opens every payload it may need BEFORE its
-  phase-2 sandbox (the generation is small and known at startup) and keeps the
-  descriptors, so the sandbox grants no store path. This mirrors the CA bundle, read
-  into memory before the sandbox applies. A dev reload is a new process with a new
-  generation.
+- **Kernel sandbox.** The app process reads the whole generation, payloads included,
+  from the handed descriptor BEFORE its phase-2 sandbox (the generation is small and
+  known at startup), so the sandbox grants no store path. This mirrors the CA bundle,
+  read into memory before the sandbox applies. A dev reload is a new process with a
+  new generation.
 - **Cache reuse.** A reload re-plans; actions whose two-level keys validate
   (BuildContext §10, §4.4) reuse their committed results, so editing one module
   re-runs only the stages that observed it.
@@ -313,7 +320,7 @@ inspection; this document adds no second diagnostic channel.
 
 These interleave with BuildContext's (BuildContext §13); each stops for review.
 
-- **G1. Overlay + handed manifest** (after BuildContext checkpoint 2, `ctx.outputs`:
+- **G1. Overlay + handed manifest** (implemented, §9.1; after BuildContext checkpoint 2, `ctx.outputs`:
   committed results exist). The overlay, the descriptor hand-off, hash-verified
   payload reads, the loader lookup order and its lint rule, refusal in built binaries
   and under `--verify-sig`. Fed by test fixtures (a hand-built generation over
@@ -324,6 +331,41 @@ These interleave with BuildContext's (BuildContext §13); each stops for review.
   demonstration plugin.
 - **G3. Positions** (with the first stage that needs a `table` map, the compute-island
   stubs). Identity maps need nothing beyond G1.
+
+### 9.1 G1 as built
+
+- **Hand-off.** `HULL_GENERATION_FD=<n>` (n >= 3) names a descriptor (a file, pipe or
+  socket) the app process reads whole and closes, removing the variable, before any app
+  code runs: the runners take it beside the build plugin channel (`serve.c`,
+  `serve_cli.c`), before any child (the GPU compile helper) is spawned; the app context
+  takes it for `hull test`, `hull agent` and `hull mcp` (`shared/generation.c`,
+  `hl_generation_take_env` / `hl_generation_apply`).
+- **Bundle.** `hull-generation 1 <manifest length>\n`, the manifest JSON
+  (`format` `"hull-pipeline-generation"`, `version` 1, `entries[]` of `vfs_name`,
+  `content_hash` (64 lowercase hex SHA-256), `size`, `origin`, `position_map` `none` |
+  `identity`), then each entry's bytes in entry order and nothing after. At most 256 MiB
+  in all, a 4 MiB manifest and 16384 entries. `origin`, `generation_id`,
+  `pipeline_plan_hash`, `diagnostics_summary` and `inputs` are carried, not read: G2
+  (watching) and G3 (positions) read them. `position_map: "table"` is refused until G3.
+- **Names.** App-relative, `/`-separated, no leading `./`, no empty / `.` / `..`
+  component, valid UTF-8 with no control byte, backslash or `:`, not under the reserved
+  `.hull` in any case, not starting `hull.` / `hull:` (§7.7).
+- **Overlay.** One sorted table in a sealed arena (`hl_vfs_overlay_install` /
+  `hl_vfs_overlay_find`, `vfs.c`); each payload is followed by a NUL its length does not
+  count. Installed once per process, never in a built binary (the descriptor is not
+  consulted) and never under `--verify-sig` (refused: the app does not start).
+- **Loaders.** The entry (Lua and JS), Lua `require` and JS `import` of app modules,
+  templates, static files, migrations (a file the listing finds), shaders (`gpu.load`)
+  and compute modules (`compute/<name>.wasm`, bytecode only) ask the overlay first.
+  A name only the generation holds loads too (a module, a template, a static file, a
+  compute module); migrations come from the `migrations/` listing, so a migration only a
+  generation holds is a G2 question.
+- **Lint.** INV-14 (`scripts/check_invariants.py`): every INV-5 disk loader, or a
+  same-file caller, calls `hl_vfs_overlay_find`.
+- **Tests.** `tests/hull/test_generation.c` (the bundle checks, names, the hand-off, the
+  refusals) and `tests/e2e_generation.sh` (`make e2e-generation`: Lua and JS apps, `hull
+  test`, the refusals, a planted generation-shaped file ignored; also on the
+  pure-compute `app.main` runner in CI).
 
 ## 10. Non-scope
 

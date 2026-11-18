@@ -1826,6 +1826,12 @@ $(BUILDDIR)/e2e_build_plugin_drive: $(TESTDIR)/e2e_build_plugin_drive.c $(CHILD_
 e2e-build-plugin: $(BUILDDIR)/hull $(BUILDDIR)/e2e_build_plugin_drive
 	HULL=$(BUILDDIR)/hull DRIVE=$(BUILDDIR)/e2e_build_plugin_drive sh tests/e2e_build_plugin.sh
 
+.PHONY: e2e-generation
+# A pipeline generation handed to an app run from source: the loaders'
+# overlay in Lua and JavaScript, hull test, the refusals.
+e2e-generation: $(BUILDDIR)/hull
+	HULL=$(BUILDDIR)/hull sh tests/e2e_generation.sh
+
 .PHONY: e2e-plugins
 # `hull plugins list|run`: registration, the inventory demonstration plugin in
 # Lua and JavaScript over a Lua and a JavaScript app, the build result store.
@@ -2236,3 +2242,8 @@ hull-test-examples: $(BUILDDIR)/hull
 
 e2e-types: $(BUILDDIR)/hull
 	sh tests/e2e_types.sh
+
+# A pipeline generation handed to an app run from source (shared/
+# generation.c) and the loaders' overlay it installs (vfs.c).
+$(BUILDDIR)/test_generation: $(TESTDIR)/hull/test_generation.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS) $(LDFLAGS)

@@ -10,6 +10,17 @@ release-artifact layout).
 
 ### Added
 
+- Pipeline generations, the app side (checkpoint G1, docs/dev_pipeline_generations_design.md):
+  an app run from source (`hull app.*`, `hull dev`'s child, `hull test`, `hull agent`, `hull mcp`)
+  takes a pipeline generation its parent hands it on the descriptor `HULL_GENERATION_FD` names -
+  read whole and closed before any app code runs - checks every payload against its manifest's
+  SHA-256, and installs the result as a sealed, read-only overlay. Every development loader (the
+  entry, Lua `require` / JS `import`, templates, static files, migrations, shaders, compute
+  modules) asks the overlay first and, on a hit, loads its bytes and never the file it shadows. A
+  payload that fails its hash, a bad entry name or a descriptor that is not one stops the app (the
+  shadowed sources never run); a built binary ignores the descriptor and `--verify-sig` refuses a
+  generation. Nothing produces a generation yet (G2 wires the pipeline). New invariant lint
+  INV-14: every development disk loader consults the overlay before the disk.
 - Build pipeline, internal (BuildContext checkpoint 2, docs/buildcontext_design.md §13.2): a
   BuildAction's outputs and committed result - bounded in-memory staging of blobs and file trees,
   declared generated outputs and artifacts, diagnostics (an error refuses the action), a

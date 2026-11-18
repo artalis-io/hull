@@ -154,6 +154,15 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
         if (n > 0 && (size_t)n < sizeof(path)) {
             char rel[HL_MODULE_PATH_MAX];
             snprintf(rel, sizeof(rel), "templates/%s", name);
+            /* A pipeline generation entry shadows the file (shared/
+             * generation.h): its checked bytes, the file unread. */
+            const HlEntry *ov = hl_vfs_overlay_find(rel);
+            if (ov) {
+                JSValue result = JS_NewStringLen(ctx, (const char *)ov->data,
+                                                 ov->len);
+                JS_FreeCString(ctx, name);
+                return result;
+            }
             /* Opened under the app root, as modules are: a symlink below
              * templates/ is re-rooted there and cannot reach a file outside
              * it. (This was a realpath check, then a separate fopen - which

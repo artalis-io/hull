@@ -1086,9 +1086,13 @@ static int require_impl(lua_State *L, int trusted)
                 relpath = path + adl;
                 while (*relpath == '/') relpath++;
             }
+            /* A pipeline generation entry shadows the file: its checked
+             * bytes load under the file's name, and the file is not read
+             * (shared/generation.h). */
+            const HlEntry *ov = hl_vfs_overlay_find(relpath);
             FILE *f = NULL;
             const char *fserr = NULL;
-            int root_fd = hl_fs_open_base(root_dir, &fserr);
+            int root_fd = ov ? -1 : hl_fs_open_base(root_dir, &fserr);
             if (root_fd >= 0) {
                 int mfd = hl_fs_open_at(root_fd, relpath, HL_FS_OPEN_READ,
                                         0, &fserr);
@@ -1098,48 +1102,55 @@ static int require_impl(lua_State *L, int trusted)
                     if (!f) close(mfd);
                 }
             }
-            if (f) {
-                if (fseek(f, 0, SEEK_END) != 0) {
-                    fclose(f);
-                    return luaL_error(L, "seek failed: %s", path);
-                }
-                long size = ftell(f);
-                if (size < 0 || size > HL_MODULE_MAX_SIZE) {
-                    fclose(f);
-                    return luaL_error(L, "module too large: %s", path);
-                }
-                if (fseek(f, 0, SEEK_SET) != 0) {
-                    fclose(f);
-                    return luaL_error(L, "seek failed: %s", path);
-                }
-
+            if (ov || f) {
                 /* Save arena position - buffer is only needed until
                  * luaL_loadbuffer copies it into Lua bytecode. */
                 size_t arena_saved = lua->scratch->used;
+                const char *buf;
+                size_t nread;
+                if (ov) {
+                    buf = (const char *)ov->data;
+                    nread = ov->len;
+                } else {
+                    if (fseek(f, 0, SEEK_END) != 0) {
+                        fclose(f);
+                        return luaL_error(L, "seek failed: %s", path);
+                    }
+                    long size = ftell(f);
+                    if (size < 0 || size > HL_MODULE_MAX_SIZE) {
+                        fclose(f);
+                        return luaL_error(L, "module too large: %s", path);
+                    }
+                    if (fseek(f, 0, SEEK_SET) != 0) {
+                        fclose(f);
+                        return luaL_error(L, "seek failed: %s", path);
+                    }
 
-                char *buf = sh_arena_alloc(lua->scratch, (size_t)size);
-                if (!buf) {
+                    char *dbuf = sh_arena_alloc(lua->scratch, (size_t)size);
+                    if (!dbuf) {
+                        fclose(f);
+                        return luaL_error(L, "out of memory loading: %s", path);
+                    }
+
+                    nread = fread(dbuf, 1, (size_t)size, f);
+                    int read_err = ferror(f);
                     fclose(f);
-                    return luaL_error(L, "out of memory loading: %s", path);
-                }
 
-                size_t nread = fread(buf, 1, (size_t)size, f);
-                int read_err = ferror(f);
-                fclose(f);
+                    if (read_err || nread != (size_t)size) {
+                        lua->scratch->used = arena_saved;
+                        return luaL_error(L, "read error: %s", path);
+                    }
 
-                if (read_err || nread != (size_t)size) {
-                    lua->scratch->used = arena_saved;
-                    return luaL_error(L, "read error: %s", path);
-                }
-
-                /* Under --verify-sig only a signed module, with the bytes
-                 * that were signed, may load (a planted ./plugin.lua that
-                 * signed code requires under pcall, or one swapped after
-                 * the startup check). */
-                if (hl_vfs_disk_gate_check(relpath, buf, nread) != 0) {
-                    lua->scratch->used = arena_saved;
-                    return luaL_error(L, "module %s is not a signed file "
-                                      "(--verify-sig)", relpath);
+                    /* Under --verify-sig only a signed module, with the bytes
+                     * that were signed, may load (a planted ./plugin.lua that
+                     * signed code requires under pcall, or one swapped after
+                     * the startup check). */
+                    if (hl_vfs_disk_gate_check(relpath, dbuf, nread) != 0) {
+                        lua->scratch->used = arena_saved;
+                        return luaL_error(L, "module %s is not a signed file "
+                                          "(--verify-sig)", relpath);
+                    }
+                    buf = dbuf;
                 }
 
                 /* JSON file → decode with the runtime's cached

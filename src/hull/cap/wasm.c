@@ -926,8 +926,29 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
          * leaf that is not a regular file, opened O_NONBLOCK. */
         char relpath[600];
         int n = snprintf(relpath, sizeof(relpath), "compute/%s.wasm", name);
-        FILE *f = (n > 0 && (size_t)n < sizeof(relpath))
-                ? hl_fs_fopen_read(app_dir, relpath) : NULL;
+        int rel_ok = n > 0 && (size_t)n < sizeof(relpath);
+        /* A pipeline generation entry shadows the file (shared/
+         * generation.h): its checked bytes are the module, and the file is
+         * not read. Bytecode only, as from disk. */
+        const HlEntry *ov = rel_ok ? hl_vfs_overlay_find(relpath) : NULL;
+        if (ov) {
+            if (ov->len >= 4 && hl_aot_le32(ov->data) == HL_AOT_FILE_MAGIC) {
+                log_error("[wasm] refusing module '%s': the pipeline "
+                          "generation's compute/%s.wasm holds AOT code", name,
+                          name);
+                return HL_WASM_ERR_LOAD;
+            }
+            if (ov->len > 0 && (uint64_t)ov->len < HL_WASM_MAX_IO_SIZE) {
+                buf = malloc(ov->len);
+                if (buf) {
+                    memcpy(buf, ov->data, ov->len);
+                    buf_len = ov->len;
+                    log_debug("[wasm] loaded module '%s' from the pipeline "
+                              "generation (%u bytes)", name, buf_len);
+                }
+            }
+        }
+        FILE *f = (rel_ok && !ov) ? hl_fs_fopen_read(app_dir, relpath) : NULL;
         if (f) {
             long fsize = -1;
             if (fseek(f, 0, SEEK_END) == 0) {

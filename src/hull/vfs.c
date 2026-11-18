@@ -329,3 +329,102 @@ int hl_vfs_disk_gate_check(const char *rel, const void *data, size_t len)
     }
     return -1;
 }
+
+/* ── Pipeline generation overlay ──────────────────────────────────── */
+
+static ShSealArena *g_overlay_arena;
+static HlVfs        g_overlay;
+static int          g_overlay_active;
+
+void hl_vfs_overlay_reset(void)
+{
+    if (g_overlay_arena) {
+        sh_seal_arena_destroy(g_overlay_arena);
+        free(g_overlay_arena);
+    }
+    g_overlay_arena = NULL;
+    memset(&g_overlay, 0, sizeof g_overlay);
+    g_overlay_active = 0;
+}
+
+int hl_vfs_overlay_install(const HlEntry *entries, size_t n)
+{
+    if (g_overlay_active || (n > 0 && !entries))
+        return -1;
+    if (n > SIZE_MAX / sizeof(HlEntry) - 1)
+        return -1;
+
+    /* One arena for the table, the names and the payloads (each + NUL). */
+    size_t bytes = (n + 1) * sizeof(HlEntry) + _Alignof(HlEntry);
+    for (size_t i = 0; i < n; i++) {
+        const char *nm = entries[i].name;
+        if (!nm || (!entries[i].data && entries[i].len > 0))
+            return -1;
+        while (nm[0] == '.' && nm[1] == '/') nm += 2;
+        size_t add = strlen(nm) + 1;
+        if (entries[i].len > SIZE_MAX - bytes - add - 1)
+            return -1;
+        bytes += add + entries[i].len + 1;
+    }
+
+    ShSealArena *arena = malloc(sizeof(*arena));
+    if (!arena)
+        return -1;
+    HlEntry *t = NULL;
+    if (sh_seal_arena_init(arena, bytes, "generation_overlay") == 0)
+        t = sh_seal_arena_alloc(arena, (n + 1) * sizeof(HlEntry),
+                                _Alignof(HlEntry));
+    if (!t) {
+        sh_seal_arena_destroy(arena);
+        free(arena);
+        return -1;
+    }
+    for (size_t i = 0; i < n; i++) {
+        const char *nm = entries[i].name;
+        while (nm[0] == '.' && nm[1] == '/') nm += 2;
+        t[i].name = sh_seal_arena_strdup(arena, nm);
+        t[i].data = sh_seal_arena_memdup_nt(arena, entries[i].len
+                                            ? (const void *)entries[i].data
+                                            : (const void *)"",
+                                            entries[i].len);
+        t[i].len = entries[i].len;
+        if (!t[i].name || !t[i].data) {
+            sh_seal_arena_destroy(arena);
+            free(arena);
+            return -1;
+        }
+    }
+    t[n].name = NULL;
+    t[n].data = NULL;
+    t[n].len = 0;
+    qsort(t, n, sizeof(*t), hl_entry_name_cmp);
+    for (size_t i = 1; i < n; i++) {
+        if (strcmp(t[i - 1].name, t[i].name) == 0) {
+            sh_seal_arena_destroy(arena);
+            free(arena);
+            return -1;
+        }
+    }
+    /* Read-only from here on: the table decides which code the loaders
+     * run. A failed seal leaves it valid but writable, said once. */
+    if (sh_seal_arena_seal(arena) != 0)
+        fprintf(stderr, "hull: could not seal the generation overlay "
+                        "read-only; it stays writable for this run\n");
+    g_overlay_arena = arena;
+    hl_vfs_init(&g_overlay, t, NULL);
+    g_overlay_active = 1;
+    return 0;
+}
+
+int hl_vfs_overlay_active(void)
+{
+    return g_overlay_active;
+}
+
+const HlEntry *hl_vfs_overlay_find(const char *rel)
+{
+    if (!g_overlay_active || !rel)
+        return NULL;
+    while (rel[0] == '.' && rel[1] == '/') rel += 2;
+    return hl_vfs_find(&g_overlay, rel);
+}

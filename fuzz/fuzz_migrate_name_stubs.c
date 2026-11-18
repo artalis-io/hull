@@ -24,6 +24,8 @@ void hl_vfs_disk_gate_check(void);
 void hl_vfs_disk_gate_check(void) { abort(); }
 void hl_vfs_prefix(void);
 void hl_vfs_prefix(void) { abort(); }
+void hl_vfs_overlay_find(void);
+void hl_vfs_overlay_find(void) { abort(); }
 void hl_db_txn_note(void);
 void hl_db_txn_note(void) { abort(); }
 void hl_cap_db_ns_trust(void);

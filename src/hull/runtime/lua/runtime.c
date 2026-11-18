@@ -618,7 +618,18 @@ static int lua_load_app_impl(HlLua *lua, const char *filename)
         load_name = entry_path;
     }
     int load_rc;
-    if (hl_vfs_disk_gate_armed()) {
+    const char *ebase = strrchr(filename, '/');
+    ebase = ebase ? ebase + 1 : filename;
+    const HlEntry *ov = hl_vfs_overlay_find(ebase);
+    if (ov) {
+        /* The pipeline generation's entry shadows the file (shared/
+         * generation.h): its checked bytes run under the file's name, and
+         * the file is never read. */
+        char chunk[4096 + 2];
+        snprintf(chunk, sizeof chunk, "@%s", load_name);
+        load_rc = luaL_loadbufferx(lua->L, (const char *)ov->data, ov->len,
+                                   chunk, "t");
+    } else if (hl_vfs_disk_gate_armed()) {
         /* --verify-sig: run the bytes that were signed - read once, checked,
          * loaded from memory (the startup check hashed the file; a reload by
          * name could see another one). */
