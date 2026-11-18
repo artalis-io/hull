@@ -92,8 +92,11 @@ static int encode_map(JSContext *ctx, JSValueConst v, HlPvWriter *w,
     size_t header = w->len;
     hl_pv_put_map(w, n);
     size_t start = w->len;
-    size_t *ends = n ? malloc((size_t)n * sizeof *ends) : NULL;
-    if (n && !ends) fail(w, HL_PV_E_NOMEM);
+    size_t *ends = malloc((n ? (size_t)n : 1) * sizeof *ends);
+    if (!ends) {
+        JS_FreePropertyEnum(ctx, tab, n);
+        return fail(w, HL_PV_E_NOMEM);
+    }
     uint32_t kept = 0;
     for (uint32_t i = 0; i < n && !w->err; i++) {
         JSValue e;

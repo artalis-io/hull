@@ -100,8 +100,8 @@ static int encode_table(lua_State *L, int idx, HlPvWriter *w, int depth)
     }
     hl_pv_put_map(w, (uint32_t)n);
     size_t start = w->len;
-    size_t *ends = n ? malloc((size_t)n * sizeof *ends) : NULL;
-    if (n && !ends) return fail(w, HL_PV_E_NOMEM);
+    size_t *ends = malloc((n ? (size_t)n : 1) * sizeof *ends);
+    if (!ends) return fail(w, HL_PV_E_NOMEM);
     lua_Integer i = 0;
     lua_pushnil(L);
     while (lua_next(L, idx)) {
