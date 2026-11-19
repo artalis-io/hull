@@ -60,6 +60,28 @@ declare module "hull:app" {
      * one request to the build host; a refused call throws an Error whose
      * `code` is the host's token. Values are plain (no functions, no class
      * instances); bytes arrive as an ArrayBuffer. */
+    /** A diagnostic a transform emits (`ctx.diagnostics.emit`). */
+    export interface BuildPluginDiagnostic {
+        severity: "error" | "warning" | "info";
+        code: string;
+        message: string;
+        path?: string;
+        range?: { start: number; stop: number; line?: number; col?: number };
+    }
+
+    /** One unit of the action's source selection: an annotated declaration, or a whole
+     *  file on a Hull route (`kind: "module"`, with the analyzed bytes' `sha256`). */
+    export interface BuildPluginUnit {
+        id: string;
+        language: string;
+        path: string;
+        kind: string;
+        name: string;
+        sha256?: string;
+        range?: { start: number; stop: number; line: number; col: number };
+        annotations?: { name: string; value?: unknown }[];
+    }
+
     export interface BuildPluginContext {
         /** The action's metadata. */
         meta: Record<string, unknown>;
@@ -79,12 +101,16 @@ declare module "hull:app" {
                             tree: BuildPluginTree | BuildPluginBlob): true;
         };
         diagnostics: {
-            emit(d: { severity: "error" | "warning" | "info"; code: string; message: string;
-                      path?: string; range?: { start: number; stop: number } }): true;
+            emit(d: BuildPluginDiagnostic): true;
         };
         source: {
-            units(): unknown[];
-            erasedSource(unit: unknown): unknown;
+            units(): BuildPluginUnit[];
+            /** The erased JavaScript of a TypeScript unit (or its id): `bytes` is absent
+             *  when there is a refusal. Throws `unsupported_op` for another language. */
+            erasedSource(unit: BuildPluginUnit | string): {
+                bytes?: ArrayBuffer;
+                refusals: BuildPluginDiagnostic[];
+            };
         };
     }
 

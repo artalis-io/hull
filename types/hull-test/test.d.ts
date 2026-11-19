@@ -59,8 +59,9 @@ declare namespace Hull {
         units?: unknown[];
         /** The workspace `ctx.inputs` reads: path -> contents. */
         inputs?: Record<string, string | Bytes>;
-        /** What `ctx.source.erasedSource(unit)` returns, by unit. */
-        erased?: Record<string, string | Bytes>;
+        /** What `ctx.source.erasedSource(unit)` answers, by unit id: the erased bytes, or
+         *  `{ refusals }`. */
+        erased?: Record<string, string | Bytes | { refusals: Record<string, unknown>[] }>;
     }
 
     /** One output the transform declared. */

@@ -18,7 +18,7 @@
 import { parse } from "hull:source:parser";
 import { resolve as scopeResolve } from "hull:source:scope";
 import { position } from "hull:source:range";
-import { typeErasure as tsTypeErasure } from "hull:source:ts_erase";
+import { typeErasure as tsTypeErasure, erase as tsErase } from "hull:source:ts_erase";
 
 export const capabilities = ["declarations", "annotations", "source_ranges", "scope", "semantics"];
 
@@ -277,5 +277,47 @@ export function typeErasure(unitId) {
     } catch (e) {
         const msg = (e && e.message !== undefined) ? String(e.message) : String(e);
         return teErr("js.internal", "internal fault: " + msg);
+    }
+}
+
+// ---- erased_source (TypeScript units only; docs/typescript_design.md 4.1) ----
+// The unit's type erasure applied to the bytes this session analyzed: { ok, refusals, bytes? },
+// bytes base64 (the session answers JSON). Any refusal - a ts.* one, or any other error the parse
+// reported (the erased file would not run) - leaves the bytes out.
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function base64(b) {
+    const parts = [];
+    let chunk = "";
+    for (let i = 0; i < b.length; i += 3) {
+        const n = (b[i] << 16) | ((i + 1 < b.length ? b[i + 1] : 0) << 8) | (i + 2 < b.length ? b[i + 2] : 0);
+        chunk += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] +
+                 (i + 1 < b.length ? B64[(n >> 6) & 63] : "=") + (i + 2 < b.length ? B64[n & 63] : "=");
+        if (chunk.length >= 8192) { parts.push(chunk); chunk = ""; }
+    }
+    parts.push(chunk);
+    return parts.join("");
+}
+function esErr(code, msg) { return { ok: false, error: { severity: "error", code: code, message: "erased_source: " + msg, range: null } }; }
+export function erasedSource(unitId) {
+    try {
+        const u = units.get(unitId);
+        if (!u) return esErr("js.internal", "unknown unit handle");
+        if (u.lang !== "ts" || !u.unit) return esErr("project.operation_unsupported", "not a TypeScript unit");
+        const r = tsTypeErasure(u.unit, u.bytes, u.path);
+        if (!r.ok) return esErr("js.internal", r.error);
+        const found = r.refusals.slice();
+        for (const d of u.unit.diagnostics || [])
+            if (d.severity === "error" && !(typeof d.code === "string" && d.code.substring(0, 3) === "ts.")) found.push(d);
+        const refusals = [];
+        for (const d of found)
+            refusals.push({ severity: "error", code: d.code, message: d.message,
+                            range: d.range ? nrange(u.linemap, d.range.start, d.range.stop) : null });
+        if (refusals.length) return { ok: true, refusals: refusals };
+        const e = tsErase(u.bytes, r.spans);
+        if (!e.ok) return esErr("js.internal", e.error);
+        return { ok: true, refusals: [], bytes: base64(e.bytes) };
+    } catch (e) {
+        const msg = (e && e.message !== undefined) ? String(e.message) : String(e);
+        return esErr("js.internal", "internal fault: " + msg);
     }
 }

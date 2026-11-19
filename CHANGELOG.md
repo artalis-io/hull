@@ -10,6 +10,17 @@ release-artifact layout).
 
 ### Added
 
+- TypeScript erasure through the build pipeline (docs/typescript_design.md §4.1, §4.2;
+  docs/buildcontext_design.md §13.8): the bundled build plugin `stdlib:ts-erase@1` runs on the
+  Hull route `typescript-erasure` over every analyzed `.ts` / `.mts` file of an app and writes
+  each file's erased JavaScript as a generated output named for it, every type byte a space, so
+  offsets, lines and columns are unchanged. The erasure is the host's: the plugin asks for
+  `ctx.source.erasedSource(unit)` (Lua `erased_source`), which the frontend session project
+  discovery analyzed the file in answers from the bytes it analyzed, as `{ bytes, refusals }`. A
+  refused construct names its file and position and stops the pipeline. The plugin is embedded
+  in the hull binary (`stdlib/plugins/ts_erase/`) and its implementation - the hull version and
+  its files - is part of every action key. `hull plugins run` / `generation` on a TypeScript app
+  now erase it; running the erased modules (`.ts` entry points) comes next.
 - BuildContext checkpoint 6, the explicit routes (docs/buildcontext_design.md §13.7): a bundled
   build plugin runs only on a Hull-defined route, active whenever its input exists. A route of
   unit `module` hands its plugin every analyzed source file of its language, whole (`kind =
@@ -18,8 +29,8 @@ release-artifact layout).
   an app plugin cannot replace or shadow a route. A new planner (`hull.buildctx.plan`) orders a
   pipeline run: the routes, by id, then the application plugins in `hull.build.json`'s order;
   the action key names the route. Registration refuses a bundled plugin on no route, a route
-  naming no bundled plugin or a language its plugin does not take. No route ships yet: the first
-  is TypeScript erasure (T3). `hull plugins list` prints a plugin's claims from the registry and
+  naming no bundled plugin or a language its plugin does not take. The first route is TypeScript
+  erasure (below). `hull plugins list` prints a plugin's claims from the registry and
   marks a bundled one.
 - Pipeline generations, the pipeline side (checkpoint G2, docs/dev_pipeline_generations_design.md
   §9.2): an app run from source whose directory holds a `hull.build.json` runs its build

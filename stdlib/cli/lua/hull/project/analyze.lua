@@ -362,6 +362,25 @@ function M.type_erasure(disc, path)
     return res, ferr
 end
 
+-- analyze.erased_source(disc, path) -> ({ bytes?, refusals }, nil) | (nil, Diagnostic). The
+-- erased JavaScript of the analyzed TypeScript source `path` (docs/typescript_design.md 4.1),
+-- made in the frontend session from the bytes it analyzed: no second read of the file. Same
+-- lifecycle gate; a frontend without the operation reports it unsupported. Never raises.
+function M.erased_source(disc, path)
+    local ok, err = lease_check(disc)
+    if not ok then return nil, err end
+    local resolved = type(path) == "string" and type(disc._units) == "table" and disc._units[path] or nil
+    if type(resolved) ~= "table" or type(resolved.frontend) ~= "table" or resolved.unit == nil then
+        return nil, diag("project.handle_invalid", "no analyzed source unit for this path in this discovery")
+    end
+    if type(resolved.frontend.erased_source) ~= "function" then
+        return nil, diag("project.operation_unsupported", "erased_source is not supported by this source's frontend", path)
+    end
+    local ok2, res, ferr = pcall(resolved.frontend.erased_source, resolved.unit)
+    if not ok2 then return nil, diag("project.internal", "frontend erased_source raised: " .. tostring(res)) end
+    return res, ferr
+end
+
 -- analyze.source_hash(disc, path) -> the hash of the bytes the analyzed source
 -- `path` was analyzed from (opts.source_hash's), or nil: not analyzed, or not
 -- hashed. Generation-internal, like the units; the planner keys a whole-file

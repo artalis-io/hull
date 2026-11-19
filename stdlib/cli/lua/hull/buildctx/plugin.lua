@@ -183,15 +183,19 @@ OPS["source.units"] = function(s)
     return units
 end
 
--- A frontend operation on one unit of the selection; answered by the
--- caller's frontend session when it offers one.
+-- A frontend operation on one unit of the selection (a.unit: its id);
+-- answered by the caller's frontend session when it offers one, as
+-- { bytes?, refusals = { diagnostic... } } - bytes absent with any refusal.
 OPS["source.erased_source"] = function(s, a)
     if not str(a.unit) then return nil, "invalid_args" end
     local fn = s.source.erased_source
     if type(fn) ~= "function" then return nil, "unsupported_op" end
-    local b, e = fn(a.unit)
-    if not b then return nil, e or "io_error" end
-    return s.native.bytes(b)
+    local r, e = fn(a.unit)
+    if type(r) ~= "table" then return nil, e or "io_error" end
+    local refusals = type(r.refusals) == "table" and r.refusals or {}
+    if #refusals > 0 then return { refusals = refusals } end
+    if type(r.bytes) ~= "string" then return nil, "io_error" end
+    return { bytes = s.native.bytes(r.bytes), refusals = s.native.empty_array }
 end
 
 -- The reply to one CALL value: { ok = v } or { error = token }. An action
@@ -255,7 +259,8 @@ local function serve(self, s)
 end
 
 -- req: { id = integer, config = table?, meta = table?,
---        source = { units = {...}, erased_source = fn(unit) -> bytes }? }
+--        source = { units = {...},
+--                   erased_source = fn(unit_id) -> { bytes?, refusals } | nil, token }? }
 function Runner:run(action, req)
     if type(req) ~= "table" or math.type(req.id) ~= "integer" then return nil, "invalid_args" end
     local ok, e = action:start()

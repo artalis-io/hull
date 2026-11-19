@@ -2,8 +2,8 @@
 -- hull.project.frontend_typescript - the Lua PROXY for the TypeScript frontend.
 --
 -- TypeScript is the JavaScript parser in its TypeScript mode (docs/typescript_design.md 3.1), so
--- this is hull.project.frontend_javascript with the mode set to "ts", plus the one operation only
--- TypeScript has: type_erasure(unit) (3.2). The same C bridge and the same QuickJS tooling session
+-- this is hull.project.frontend_javascript with the mode set to "ts", plus the operations only
+-- TypeScript has: type_erasure(unit) (3.2) and erased_source(unit) (4.1). The same C bridge and the same QuickJS tooling session
 -- run it; this module never parses TypeScript or touches QuickJS.
 --
 -- Never raises: every entry returns data or a Diagnostic-shaped error.
@@ -52,6 +52,31 @@ function M.type_erasure(unit)
     end
     if data.ok ~= true then return nil, data.error or diag("typescript.internal", "type_erasure failed") end
     return { spans = data.spans or {}, refusals = data.refusals or {} }, nil
+end
+
+-- erased_source(unit) -> ({ bytes?, refusals }, nil) | (nil, Diagnostic) (4.1): the erasure
+-- applied, in the frontend session, to the bytes it analyzed - each span byte a space, CR and
+-- LF kept - so positions are unchanged. With any refusal (a ts.unsupported construct, or any
+-- other error the parse reported) `bytes` is absent.
+function M.erased_source(unit)
+    if type(unit) ~= "table" or type(unit._session) ~= "number" or type(unit._unit_id) ~= "number"
+        or unit._lang ~= "ts" then
+        return nil, diag("typescript.internal", "erased_source: invalid TypeScript unit handle")
+    end
+    local raw = tool.frontend_erased_source("javascript", unit._session, unit._unit_id)
+    if type(raw) ~= "string" then return nil, diag("typescript.internal", "erased_source: no bridge result") end
+    local ok, data = pcall(json.decode, raw)
+    if not ok or type(data) ~= "table" then
+        return nil, diag("typescript.internal", "erased_source: malformed bridge JSON")
+    end
+    if data.ok ~= true then return nil, data.error or diag("typescript.internal", "erased_source failed") end
+    local refusals = type(data.refusals) == "table" and data.refusals or {}
+    if #refusals > 0 then return { refusals = refusals }, nil end
+    local bytes = type(data.bytes) == "string" and require("hull.encoding").base64.decode(data.bytes)
+    if type(bytes) ~= "string" then
+        return nil, diag("typescript.internal", "erased_source: malformed bytes")
+    end
+    return { bytes = bytes, refusals = {} }, nil
 end
 
 return M

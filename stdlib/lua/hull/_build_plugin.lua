@@ -87,13 +87,17 @@ local function make_ctx(action, call, bytes_of)
         },
         source = {
             units = function() return rpc("source.units") end,
-            erased_source = function(unit) return rpc("source.erased_source", { unit = unit }) end,
+            -- A unit of units(), or its id: { bytes?, refusals }.
+            erased_source = function(unit)
+                if type(unit) == "table" then unit = rawget(unit, "id") end
+                return rpc("source.erased_source", { unit = unit })
+            end,
         },
     }
 end
 
 -- The stub host: spec.inputs (path -> bytes), spec.units, spec.erased
--- (unit -> bytes). It records what the transform writes, declares and emits.
+-- (unit id -> bytes, or { refusals = {...} }). It records what the transform writes, declares and emits.
 local function stub_host(spec)
     local inputs = type(spec.inputs) == "table" and spec.inputs or {}
     local handles, next_id = {}, 0
@@ -194,9 +198,11 @@ local function stub_host(spec)
     end
     ops["source.units"] = function() return type(spec.units) == "table" and spec.units or {} end
     ops["source.erased_source"] = function(a)
+        if type(a.unit) ~= "string" then return nil, "invalid_args" end
         local b = type(spec.erased) == "table" and spec.erased[a.unit]
-        if b == nil then return nil, "unsupported_op" end
-        return b
+        if b == nil or b == false then return nil, "unsupported_op" end
+        if type(b) == "table" and type(b.refusals) == "table" then return { refusals = b.refusals } end
+        return { bytes = b, refusals = {} }
     end
 
     local function call(op, args)

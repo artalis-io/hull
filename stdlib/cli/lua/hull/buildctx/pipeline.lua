@@ -18,7 +18,8 @@
 --
 -- The stages, their selections and their keys are the plan's
 -- (hull.buildctx.plan): a Hull route runs its bundled plugin over every
--- analyzed source file of its language; an application source plugin runs
+-- analyzed source file of its language (TypeScript erasure: §13.8), the
+-- discovery's frontend sessions answering its erased_source; an application source plugin runs
 -- over every annotated declaration project discovery finds in a language it
 -- lists, carrying an annotation it lists (any annotation when it lists none),
 -- outside every plugin directory. Such a unit is a plain value: { id,
@@ -77,7 +78,50 @@ local function describe(res, sha256_hex)
     return outs, res.diagnostics
 end
 
--- opts: analyze(root, opts) -> discovery, store, exe, sha256_hex, no_cache,
+-- ": <path>:<line>:<col>: <code>: <message>" for an invalid discovery's
+-- first error (a refused TypeScript construct, a syntax error), and how many
+-- more there are.
+local function discovery_error(disc)
+    local first, more = nil, 0
+    for _, d in ipairs(disc and disc.diagnostics or {}) do
+        if d.severity == "error" then
+            if first then more = more + 1 else first = d end
+        end
+    end
+    if not first then return "" end
+    local r = type(first.range) == "table" and first.range or {}
+    local where = first.path and (tostring(first.path) .. (r.line and (":" .. r.line .. ":" .. (r.col or 1)) or "") .. ": ") or ""
+    return ": " .. where .. tostring(first.code) .. ": " .. tostring(first.message) ..
+           (more > 0 and (" (and " .. more .. " more)") or "")
+end
+
+-- A route stage's erased_source(unit id): the frontend operation over the unit's
+-- analyzed bytes, its refusals naming the unit's file. Only the stage's own
+-- units resolve.
+local function route_erased(st, disc, erased_source)
+    local by_id = {}
+    for _, u in ipairs(st.units) do by_id[u.id] = u end
+    return function(id)
+        local u = by_id[id]
+        if not u then return nil, "unknown_unit" end
+        local r, d = erased_source(disc, u.path)
+        if not r then
+            if d and d.code == "project.operation_unsupported" then return nil, "unsupported_op" end
+            return nil, "frontend_failed"
+        end
+        local refusals = {}
+        for i, f in ipairs(r.refusals or {}) do
+            local rg = type(f.range) == "table" and f.range or nil
+            refusals[i] = { severity = "error", code = tostring(f.code), message = tostring(f.message),
+                            path = u.path,
+                            range = rg and { start = rg.start, stop = rg.stop, line = rg.line, col = rg.col } or nil }
+        end
+        return { bytes = r.bytes, refusals = refusals }
+    end
+end
+
+-- opts: analyze(root, opts) -> discovery, close(discovery), erased_source(disc,
+-- path) (hull.project.analyze's by default), store, exe, sha256_hex, no_cache,
 -- limits, source_hash (the plan's), and the registry's (extract, fs, native,
 -- bundled, routes).
 function M.run(root, opts)
@@ -91,23 +135,35 @@ function M.run(root, opts)
     local results = {}
     if #reg.plugins == 0 then return results, nil, reg end
 
-    local analyze = opts.analyze or require("hull.project.analyze").analyze
-    local disc = analyze(root, { source_hash = sha256_hex })
+    local A = require("hull.project.analyze")
+    local analyze = opts.analyze or A.analyze
+    -- A route's plugin asks for frontend operations over the analyzed bytes,
+    -- so the discovery keeps its frontend sessions while the run lasts.
+    local retain = #(reg.routes or {}) > 0
+    local disc = analyze(root, { source_hash = sha256_hex, retain_frontend = retain or nil })
+    local function close() if retain and disc then pcall(opts.close or A.close, disc) end end
     if not disc or not disc.valid then
-        local d = disc and disc.diagnostics and disc.diagnostics[1]
-        return nil, "project discovery failed" .. (d and (": " .. tostring(d.message)) or "")
+        close()
+        return nil, "project discovery failed" .. discovery_error(disc)
     end
     local stages, perr = plan.build(reg, disc, { sha256_hex = sha256_hex, source_hash = opts.source_hash })
-    if not stages then return nil, perr end
+    if not stages then close(); return nil, perr end
     local store, own_store = opts.store, false
     if not store then
         store, err = default_store()
-        if not store then return nil, err end
+        if not store then close(); return nil, err end
         own_store = true
     end
+    local erased_source = opts.erased_source or A.erased_source
     local no_cache = opts.no_cache
     if no_cache == nil and tool then no_cache = tool.hull_cache_disabled(M.CACHE_ENV) end
     local exe = opts.exe or default_exe()
+    -- A bundled plugin's files go into a private directory for this run.
+    local dirs = {}
+    local function cleanup()
+        for _, d in ipairs(dirs) do tool.rmdir(d) end
+        close()
+    end
 
     for n, st in ipairs(stages) do
         local p = st.plugin
@@ -128,8 +184,16 @@ function M.run(root, opts)
                     r.status, r.result = "cached", hit
                     r.outputs, r.diagnostics = describe(hit, sha256_hex)
                 else
-                    local a, aerr = action.new({ root = root, grants = st.grants, key = key, store = store,
-                                                 limits = opts.limits })
+                    local a, aerr
+                    local dir, merr = registry.materialize(p)
+                    if dir then dirs[#dirs + 1] = dir end
+                    if merr then
+                        aerr = "spawn_failed"
+                        r.detail = merr
+                    else
+                        a, aerr = action.new({ root = root, grants = st.grants, key = key, store = store,
+                                               limits = opts.limits })
+                    end
                     local runner = a and plugin.new({ exe = exe, entry = p.entry, limits = opts.limits },
                                                     { native = opts.native })
                     local ok, tok, detail
@@ -140,7 +204,8 @@ function M.run(root, opts)
                     else
                         ok, tok, detail = runner:run(a, {
                             id = n, config = p.config, meta = { input = st.input },
-                            source = { units = units },
+                            source = { units = units,
+                                       erased_source = st.route and route_erased(st, disc, erased_source) },
                         })
                         runner:close()
                     end
@@ -153,7 +218,7 @@ function M.run(root, opts)
                             r.status, r.error = "failed", "store_failed"
                         end
                     else
-                        r.status, r.error, r.detail = "failed", tok, detail
+                        r.status, r.error, r.detail = "failed", tok, detail or r.detail
                         if a then r.diagnostics = a:get_diagnostics() end
                     end
                 end
@@ -161,6 +226,7 @@ function M.run(root, opts)
         end
     end
     if own_store then store:close() end
+    cleanup()
     return results, nil, reg
 end
 

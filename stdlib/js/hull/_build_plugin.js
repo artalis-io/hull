@@ -81,7 +81,9 @@
       },
       source: {
         units: () => rpc("source.units"),
-        erasedSource: (unit) => rpc("source.erased_source", { unit }),
+        // A unit of units(), or its id: { bytes?, refusals }.
+        erasedSource: (unit) => rpc("source.erased_source",
+          { unit: unit !== null && typeof unit === "object" ? unit.id : unit }),
       },
     };
   }
@@ -163,8 +165,11 @@
       "source.units": () => [Array.isArray(spec.units) ? spec.units : []],
       "source.erased_source": (a) => {
         const e = spec.erased && typeof spec.erased === "object" ? spec.erased : {};
+        if (typeof a.unit !== "string") return [undefined, "invalid_args"];
         if (!Object.prototype.hasOwnProperty.call(e, a.unit)) return [undefined, "unsupported_op"];
-        return [asBytes(e[a.unit])];
+        const v = e[a.unit];
+        if (v !== null && typeof v === "object" && Array.isArray(v.refusals)) return [{ refusals: v.refusals }];
+        return [{ bytes: asBytes(v), refusals: [] }];
       },
     };
     for (const kind of ["blob", "tree"]) {

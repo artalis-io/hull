@@ -68,14 +68,82 @@ M.LIMITS = {
     file_bytes   = 16 * 1024 * 1024,    -- one file
 }
 
--- The plugins compiled into Hull: { id, major, descriptor, entry, language }.
--- None yet; the first is stdlib:ts-erase@1 (typescript_design.md §4.1).
-M.BUNDLED = {}
+-- The plugins compiled into Hull: { id, major, descriptor, language, source }
+-- - source names its embedded directory (stdlib/plugins/<source>/), whose
+-- files the pipeline writes into a private directory before it runs the
+-- plugin there (M.materialize). The descriptor is the one its manifest
+-- declares.
+M.BUNDLED = {
+    {
+        id = "ts-erase", major = 1, language = "javascript", source = "ts_erase",
+        descriptor = { id = "ts-erase", version = 1, input = "source", languages = { "typescript" },
+                       output = "generated" },
+    },
+}
 
 -- The Hull-defined routes: { id, unit = "module", language, plugin } (plugin:
--- a bundled id). None yet; the first is TypeScript erasure (§4.2).
-M.ROUTES = {}
+-- a bundled id). TypeScript erasure (typescript_design.md §4.2): every
+-- analyzed TypeScript file, erased to the JavaScript an app runs.
+M.ROUTES = {
+    { id = "typescript-erasure", unit = "module", language = "typescript", plugin = "ts-erase" },
+}
 M.ROUTE_UNITS = { module = true }
+
+-- The bundled plugins this binary embeds, each with its files and its
+-- implementation hash (the hull version and every file, so a new hull or a
+-- changed plugin changes every key), and the routes over them. A plugin this
+-- binary does not embed is left out with its routes (a test VM embeds none).
+function M.defaults(sha256_hex)
+    local list, routes, have = {}, {}, {}
+    local files_of = type(tool) == "table" and tool.bundled_plugin_files
+    for _, b in ipairs(M.BUNDLED) do
+        local files, version
+        if files_of then files, version = files_of(b.source) end
+        if type(files) == "table" and #files > 0 then
+            local lines = { "hull-bundled-plugin 1", tostring(version) }
+            for _, f in ipairs(files) do lines[#lines + 1] = f.name .. "\0" .. sha256_hex(f.body) end
+            local e = {}
+            for k, v in pairs(b) do e[k] = v end
+            e.files, e.implementation = files, sha256_hex(table.concat(lines, "\n"))
+            list[#list + 1] = e
+            have[b.id] = true
+        end
+    end
+    for _, r in ipairs(M.ROUTES) do
+        if have[r.plugin] then routes[#routes + 1] = r end
+    end
+    return list, routes
+end
+
+-- Write a bundled plugin's embedded files into a fresh private directory
+-- (tool.tmpdir) and set its entry there. Answers the directory, which the
+-- caller removes, or nil, err. A plugin with an entry already needs nothing.
+function M.materialize(p)
+    if p.entry then return nil end
+    local b = p.bundled
+    local files = b and b.files
+    if type(files) ~= "table" then return nil, p.identity .. ": no entry" end
+    local dir = tool.tmpdir()
+    if not dir then return nil, p.identity .. ": cannot make a directory for it" end
+    local entry
+    for _, f in ipairs(files) do
+        if type(f.name) ~= "string" or not f.name:match("^[%w_%-%.]+$") or f.name:sub(1, 1) == "." then
+            tool.rmdir(dir)
+            return nil, p.identity .. ": bad embedded file name"
+        end
+        if not tool.write_file(dir .. "/" .. f.name, f.body) then
+            tool.rmdir(dir)
+            return nil, p.identity .. ": cannot write " .. f.name
+        end
+        if f.name == "app." .. (p.language == "lua" and "lua" or "js") then entry = dir .. "/" .. f.name end
+    end
+    if not entry then
+        tool.rmdir(dir)
+        return nil, p.identity .. ": no entry"
+    end
+    p.entry = entry
+    return dir
+end
 
 local LANGUAGES = { lua = true, javascript = true, typescript = true }
 local CONFIG_TYPES = { string = true, integer = true, boolean = true, array = true, map = true }
@@ -425,8 +493,14 @@ function M.load(root, opts)
         return nil
     end
     -- Bundled plugins, each on its routes.
+    local bundled_list, route_list = opts.bundled, opts.routes
+    if not bundled_list then
+        local dl, dr = M.defaults(ctx.sha256_hex)
+        bundled_list, route_list = dl, route_list or dr
+    end
+    route_list = route_list or {}
     local bundled, routed = {}, {}
-    for _, b in ipairs(opts.bundled or M.BUNDLED) do
+    for _, b in ipairs(bundled_list) do
         local name = "stdlib:" .. tostring(b.id)
         local desc, derr = M.check_descriptor(b.descriptor)
         if not desc then return nil, name .. ": " .. derr end
@@ -435,17 +509,18 @@ function M.load(root, opts)
             return nil, name .. ": major must be an integer >= 1"
         end
         if bundled[b.id] then return nil, name .. " is bundled twice" end
-        if type(b.entry) ~= "string" or b.entry:sub(1, 1) ~= "/" then
+        if not (type(b.entry) == "string" and b.entry:sub(1, 1) == "/") and type(b.files) ~= "table" then
             return nil, name .. ": no entry"
         end
         if b.language ~= "lua" and b.language ~= "javascript" then
             return nil, name .. ": language must be lua or javascript"
         end
         bundled[b.id] = { identity = name .. "@" .. b.major, descriptor = desc, config = {},
-                          entry = b.entry, language = b.language, bundled = b }
+                          entry = b.entry, language = b.language, bundled = b,
+                          implementation = b.implementation }
         routed[b.id] = {}
     end
-    for _, r0 in ipairs(opts.routes or M.ROUTES) do
+    for _, r0 in ipairs(route_list) do
         local r, rerr = M.check_route(r0)
         if not r then return nil, rerr end
         local p = bundled[r.plugin]
@@ -466,7 +541,7 @@ function M.load(root, opts)
         local list = routed[p.descriptor.id]
         list[#list + 1] = r.kind
     end
-    for _, b in ipairs(opts.bundled or M.BUNDLED) do
+    for _, b in ipairs(bundled_list) do
         local p = bundled[b.id]
         if #routed[b.id] == 0 then return nil, p.identity .. " is on no route" end
         local e = add(p, routed[b.id])

@@ -185,6 +185,49 @@ else
         no_cache = true, analyze = function() return disc_of({}, {}, {}) end,
     }))
     eq(none[1].status, "no_input", "no TypeScript: the route has no input")
+
+    -- The shipped erasure plugin (stdlib/plugins/ts_erase) on the shipped
+    -- route, its erased bytes answered by a stand-in for the frontend session.
+    local ts = {}
+    for k, v in pairs(registry.BUNDLED[1]) do ts[k] = v end
+    ts.entry = T.cwd .. "/stdlib/plugins/ts_erase/app.js"
+    local erased = { ["app.ts"] = { bytes = "const x        = 1;\n", refusals = {} },
+                     ["lib/b.ts"] = { bytes = "export const y = 2;\n", refusals = {} } }
+    local asked = {}
+    local function erase_run(no_cache)
+        return pipeline.run(ws, {
+            bundled = { ts }, routes = registry.ROUTES, sha256_hex = T.sha256, store = store,
+            exe = T.hull, no_cache = no_cache or false,
+            analyze = function(_, opts)
+                ok(opts and opts.retain_frontend == true, "a route run retains the frontend sessions")
+                return disc_of(srcs, {}, hashes)
+            end,
+            close = function() asked.closed = true end,
+            erased_source = function(_, path) asked[#asked + 1] = path; return erased[path] end,
+        })
+    end
+    local er, eerr = erase_run(true)
+    ok(er, "a run of stdlib:ts-erase@1 (" .. tostring(eerr) .. ")")
+    local e1 = er and er[1] or {}
+    eq(e1.identity, "stdlib:ts-erase@1", "the shipped plugin")
+    eq(e1.route, "typescript-erasure", "on the shipped route")
+    eq(e1.status, "committed", "it committed (" .. tostring(e1.error) .. " " .. tostring(e1.detail) .. ")")
+    eq(#asked, 2, "it asked the host to erase each unit")
+    ok(asked.closed, "the discovery is closed once the run ends")
+    local eg = er and gen.from_results(er, T.sha256)
+    eq(eg and eg.entries[1].name, "app.ts", "its output shadows app.ts")
+    eq(eg and eg.entries[1].bytes, erased["app.ts"].bytes, "with the host's erased bytes")
+    eq(eg and eg.entries[1].position_map, "identity", "which keep every position")
+
+    erased["lib/b.ts"] = { refusals = { { severity = "error", code = "ts.unsupported", message = "an enum",
+                                          range = { start = 1, stop = 5, line = 1, col = 1 } } } }
+    local rr = assert(erase_run(true))
+    eq(rr[1].status, "failed", "a refusal fails the action")
+    eq(rr[1].error, "diagnostic_error", "through its error diagnostic")
+    local d = rr[1].diagnostics and rr[1].diagnostics[1] or {}
+    eq(d.code, "ts.unsupported", "the refusal is the diagnostic")
+    eq(d.path, "lib/b.ts", "naming the unit's file")
+    ok(not (gen.from_results(rr, T.sha256)), "and no generation is made from it")
     store:close()
 end
 

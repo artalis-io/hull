@@ -235,9 +235,26 @@ do
                                                 kinds = { "x" }, output = "y" }) }, { ROUTE },
                   "takes no typescript source", "an artifact plugin on a module route")
 
-    -- The default lists: no route, no bundled plugin, until stdlib:ts-erase@1.
-    eq(#registry.ROUTES, 0, "no Hull route ships yet")
-    eq(#registry.BUNDLED, 0, "no bundled plugin ships yet")
+    -- The default lists: stdlib:ts-erase@1 on the typescript route, checked
+    -- like any other, and left out where the binary embeds no files for it.
+    eq(#registry.ROUTES, 1, "one Hull route ships")
+    eq(#registry.BUNDLED, 1, "one bundled plugin ships")
+    local dreg = registry.load(root, { extract = extract, sha256_hex = T.sha256, bundled = {}, routes = {} })
+    ok(dreg, "an empty bundled list loads")
+    local fake = {}
+    for _, b in ipairs(registry.BUNDLED) do
+        local e = {}
+        for k, v in pairs(b) do e[k] = v end
+        e.files = { { name = "app.js", body = "x" } }
+        fake[#fake + 1] = e
+    end
+    local sreg, serr = registry.load(root, { extract = extract, sha256_hex = T.sha256, bundled = fake,
+                                             routes = registry.ROUTES })
+    ok(sreg, "the shipped route and plugin pass the checks (" .. tostring(serr) .. ")")
+    local p = sreg and sreg:route("module:typescript")
+    eq(p and p.identity, "stdlib:ts-erase@1", "the typescript route runs stdlib:ts-erase@1")
+    local listed, routes = registry.defaults(T.sha256)
+    eq(#listed + #routes, 0, "a VM that embeds no plugin files gets none")
 end
 
 for _, r in ipairs(roots) do T.rmtree(r) end

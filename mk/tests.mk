@@ -1832,6 +1832,12 @@ e2e-build-plugin: $(BUILDDIR)/hull $(BUILDDIR)/e2e_build_plugin_drive
 e2e-generation: $(BUILDDIR)/hull
 	HULL=$(BUILDDIR)/hull sh tests/e2e_generation.sh
 
+.PHONY: e2e-typescript
+# TypeScript erasure through the build pipeline: stdlib:ts-erase@1 on the
+# typescript route, the result store, the refusals, the plugin's own tests.
+e2e-typescript: $(BUILDDIR)/hull
+	HULL=$(BUILDDIR)/hull sh tests/e2e_typescript.sh
+
 .PHONY: e2e-plugins
 # `hull plugins list|run`: registration, the inventory demonstration plugin in
 # Lua and JavaScript over a Lua and a JavaScript app, the build result store.

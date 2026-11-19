@@ -99,7 +99,8 @@ end
 function M.action_key(p, units, config_sha256, sha256_hex, route)
     local env = outputs.encode({
         format = M.KEY_FORMAT, version = M.KEY_VERSION, protocol = M.PROTOCOL,
-        plugin = p.identity, descriptor = p.descriptor, config = p.config,
+        plugin = p.identity, implementation = p.implementation, descriptor = p.descriptor,
+        config = p.config,
         units = units, build_config = config_sha256 or "",
         route = route and { id = route.id, kind = route.kind } or nil,
     })
