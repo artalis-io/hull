@@ -132,6 +132,7 @@ _hull() {
             ;;
 
         new|init)
+            runtimes="lua js ts"
             case "$prev" in
                 --runtime) COMPREPLY=($(compgen -W "$runtimes" -- "$cur")); return ;;
             esac

@@ -3964,7 +3964,8 @@ DEPS_ALL := $(shell find $(BUILDDIR) -name '*.d' 2>/dev/null)
 # ── TypeScript declarations (types/hull) ────────────────────────────
 # Verifies types/hull with the pinned TypeScript (tests/types/package-lock.json):
 # the declarations compile under strict, match the running hull's exports
-# (drift check), fixtures type-check, and every example app type-checks as JS.
+# (drift check), fixtures type-check, every example app type-checks as JS, and
+# every `hull new --runtime ts` scaffold type-checks.
 # Needs node / npm. See types/hull/README.md.
 TYPES_TSC := tests/types/node_modules/.bin/tsc
 
@@ -3978,6 +3979,7 @@ check-types: $(TYPES_TSC) $(BUILDDIR)/hull
 	node tests/types/drift.mjs $(BUILDDIR)/types/inventory.jsonl $(BUILDDIR)/types/drift.ts
 	$(TYPES_TSC) -p tests/types/tsconfig.json
 	$(TYPES_TSC) -p tests/types/tsconfig.examples.json
+	sh tests/types/scaffolds.sh $(BUILDDIR)/hull $(TYPES_TSC) $(BUILDDIR)/types/scaffolds
 	@echo "check-types: OK"
 
 .PHONY: check-types

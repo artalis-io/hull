@@ -10,6 +10,14 @@ release-artifact layout).
 
 ### Added
 
+- `hull new --runtime ts` and `hull init --runtime ts` scaffold a TypeScript app
+  (docs/typescript_design.md §4.5): `app.ts` and `tests/test_*.ts` for `hull new`'s flat layout,
+  `--cli`, `--type rest` and `--type cli` (`--type tui` stays Lua-only) and for `hull init`'s
+  server, `--cli` and `--profile htmx` scaffolds, with the declarations for Hull's API,
+  `tsconfig.json` and `tests/tsconfig.json` installed as `hull types` installs them. `hull init`
+  detects an existing `app.ts` / `app.mts`, and refuses to add an entry beside one in another
+  language. `make check-types` type-checks every scaffold with the pinned TypeScript. An import of a `.ts` file that does not exist is now
+  "module not found", as for JavaScript, instead of "was not erased".
 - TypeScript apps run from source (docs/typescript_design.md §4.3, §4.4): an app's entry may be
   `app.ts` or `app.mts`, which runs on the JavaScript runtime. Such an app runs its build
   pipeline whether or not it has a `hull.build.json`, so `hull app.ts`, `hull dev`, `hull test`,

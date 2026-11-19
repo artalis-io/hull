@@ -106,8 +106,7 @@ A tool-mode command (`stdlib/cli/lua/hull/types.lua` + a thin C dispatcher, like
   JavaScript without annotations - which a TypeScript app can tighten;
 - refuses a symbolic link as the destination, and escapes what it prints.
 
-Offering it from `hull new` / `hull init` is left for T3, when a scaffold can be
-TypeScript.
+`hull new --runtime ts` and `hull init --runtime ts` run it for the app (§4.5).
 
 ### 2.3 Keeping them true (`make check-types`, CI job `types`)
 
@@ -465,6 +464,37 @@ otherwise: its bytes on disk are not JavaScript. `hull test` runs `tests/test_*.
 covers them, since project discovery analyzes every `.ts` file in the app. Until `hull build`
 embeds erased modules, it refuses a TypeScript app with that message.
 
+### 4.5 Scaffolding (`hull new` / `hull init --runtime ts`)
+
+As built: `hull new <name> --runtime ts` writes the app in TypeScript for the flat layout,
+`--cli`, `--type rest` and `--type cli` (`--type tui` is Lua-only and refused), then
+installs the declarations as `hull types <name>` does, with its `tsconfig.json` and
+`tests/tsconfig.json`. `hull init [dir] --runtime ts` does the same for the server and
+`--cli` scaffolds and `--profile htmx`; the TypeScript templates, the `.js`-to-`.ts`
+conversion and the declarations install are one module both share
+(`stdlib/cli/lua/hull/templates_ts.lua`, which calls the `hull types` tool module with
+`quiet`).
+
+- `hull init` detects an existing `app.ts` or `app.mts` as a TypeScript app (an `app.mts`
+  stays the entry), and refuses to add an entry that would sit beside one in another
+  language: the runners refuse that app as ambiguous (§4.4). Lua and JavaScript entries may
+  still sit together. It installs the declarations only when `types/hull` is absent, so a
+  re-run changes nothing (`hull types` updates them).
+
+- The flat layouts have TypeScript templates of their own (`app.ts` with an annotated
+  type, `tests/test_app.ts`).
+- A modular layout's files are its JavaScript templates under `.ts` names: every `.js` in a
+  path or in the text becomes `.ts`, so relative imports name the files as written
+  (`./routes/users.ts`, and the CLI's `import("./commands/" + cmd + ".ts")`). The
+  `tsconfig.json` leaves implicit `any` off, so they type-check as they are; an app
+  tightens it when it adds types.
+- An import of a `.ts` name with no file is `module not found`, as for JavaScript, so the
+  CLI's dynamic import tells an unknown command from a broken one; a `.ts` file that
+  exists and was not erased is still refused (§4.4).
+- `make check-types` scaffolds each layout, `hull new` and `hull init` alike, and
+  type-checks it, app and tests, with the pinned compiler (`tests/types/scaffolds.sh`);
+  `tests/e2e_typescript.sh` runs `hull test` on each.
+
 ## 5. Testing
 
 - **Frontend (implemented for slices 1 and 2):** the JS frontend's conformance approach (JS
@@ -522,7 +552,7 @@ embeds erased modules, it refuses a TypeScript app with that message.
 1. Test files: `tests/test_*.ts` - discovered by `hull test` beside `.js`. **Answered: yes,
    same rules (§4.4 as built).**
 2. `hull new --runtime ts`: a scaffold variant once T3 ships (recommended), with
-   `hull types` run by default.
+   `hull types` run by default. **Answered: yes, as built (§4.5).**
 3. Whether Hull should run a type checker. **Answered: yes - tsgo, preferred, or an
    installed `tsc`, run by Hull outside the build pipeline; reported in the dev loop,
    an opt-in gate for `build` and `test` while tsgo is a preview.** The "no" this

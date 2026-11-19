@@ -951,14 +951,6 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         memcpy(buf, ov->data, ov->len);
         nread = ov->len;
         buf[nread] = '\0';
-    } else if (hl_app_name_is_ts(relpath)) {
-        /* TypeScript runs only as the pipeline's erased output: its bytes
-         * on disk are not JavaScript (docs/typescript_design.md §4.4). */
-        JS_ThrowReferenceError(ctx, "module %s is TypeScript and was not "
-                               "erased by the build pipeline (only an app "
-                               "with an app.ts / app.mts entry or a "
-                               "hull.build.json runs it)", module_name);
-        return NULL;
     } else {
         FILE *f = NULL;
         const char *fserr = NULL;
@@ -973,6 +965,19 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         }
         if (!f) {
             JS_ThrowReferenceError(ctx, "module not found: %s", module_name);
+            return NULL;
+        }
+        if (hl_app_name_is_ts(relpath)) {
+            /* TypeScript runs only as the pipeline's erased output: its
+             * bytes on disk are not JavaScript (docs/typescript_design.md
+             * §4.4). A name with no file is "module not found", as for
+             * JavaScript (a dynamic import probing for one tells them
+             * apart). */
+            fclose(f);
+            JS_ThrowReferenceError(ctx, "module %s is TypeScript and was not "
+                                   "erased by the build pipeline (only an app "
+                                   "with an app.ts / app.mts entry or a "
+                                   "hull.build.json runs it)", module_name);
             return NULL;
         }
 

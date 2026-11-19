@@ -1,7 +1,11 @@
 --
 -- hull.new - Scaffold a new Hull project
 --
--- Usage: hull new <name> [--runtime lua|js] [--cli] [--type TYPE]
+-- Usage: hull new <name> [--runtime lua|js|ts] [--cli] [--type TYPE]
+--
+-- --runtime ts scaffolds TypeScript (app.ts, tests/test_*.ts; the JS runtime
+-- runs it through the erasure pipeline) and installs the declarations for
+-- Hull's API with a tsconfig.json, as `hull types` does.
 --
 -- Layout types (--type):
 --   flat (default)  - single app.lua + tests/ + migrations/. Best for
@@ -21,6 +25,8 @@
 --
 
 -- ── Templates ────────────────────────────────────────────────────────
+
+local ts = require("hull.templates_ts")
 
 local templates = {}
 
@@ -237,7 +243,7 @@ local function main()
     local opts = parse_args()
 
     if not opts.name then
-        tool.stderr("Usage: hull new <name> [--runtime lua|js] [--cli]\n")
+        tool.stderr("Usage: hull new <name> [--runtime lua|js|ts] [--cli] [--type TYPE]\n")
         tool.exit(1)
     end
     -- Note: the name IS the target directory and may be relative OR absolute
@@ -246,8 +252,8 @@ local function main()
     -- no path restriction is imposed here.
 
     local runtime = opts.runtime
-    if runtime ~= "lua" and runtime ~= "js" then
-        tool.stderr("hull new: invalid runtime '" .. runtime .. "' (use lua or js)\n")
+    if runtime ~= "lua" and runtime ~= "js" and runtime ~= "ts" then
+        tool.stderr("hull new: invalid runtime '" .. tostring(runtime) .. "' (use lua, js or ts)\n")
         tool.exit(1)
     end
 
@@ -269,7 +275,12 @@ local function main()
     end
 
     local dir = opts.name
-    local ext = runtime == "js" and ".js" or ".lua"
+    local ext = (runtime == "js" and ".js") or (runtime == "ts" and ".ts") or ".lua"
+    local types_lines = {}
+    if runtime == "ts" then
+        types_lines = { dir .. "/types/ (hull types)", dir .. "/tsconfig.json",
+                        dir .. "/tests/tsconfig.json" }
+    end
 
     -- Modular layouts delegate to a per-type templates module. Each
     -- module's M.files(runtime) returns either:
@@ -301,7 +312,11 @@ local function main()
     local mt = MODULAR_TYPES[opts.layout]
     if mt then
         local templates_mod = require(mt.module)
-        local files, err    = templates_mod.files(runtime)
+        local files, err    = templates_mod.files(runtime == "ts" and "js" or runtime)
+        if runtime == "ts" and opts.layout == "tui" then
+            files, err = nil, "the TUI layout is Lua-only (use --runtime lua)"
+        end
+        if files and runtime == "ts" then files = ts.from_js(files) end
         if err then
             tool.stderr("hull new: " .. err .. "\n")
             tool.exit(1)
@@ -320,6 +335,10 @@ local function main()
             created[#created + 1] = full
         end
         table.sort(created)
+        if runtime == "ts" then
+            ts.install_types(dir)
+            for _, l in ipairs(types_lines) do created[#created + 1] = l end
+        end
 
         print("hull new: created " .. dir .. "/ (" .. mt.label .. ")")
         for _, p in ipairs(created) do print("  " .. p) end
@@ -327,6 +346,9 @@ local function main()
         print("Next steps:")
         print("  cd " .. dir)
         print("  " .. mt.next_step(ext))
+        if runtime == "ts" then
+            print("  tsc --noEmit -p .          (type-check; tests: -p tests)")
+        end
         return
     end
 
@@ -338,7 +360,10 @@ local function main()
     end
 
     local app_template, test_template
-    if opts.layout == "flat-cli" then
+    if runtime == "ts" then
+        app_template  = opts.layout == "flat-cli" and ts.cli_app  or ts.app
+        test_template = opts.layout == "flat-cli" and ts.cli_test or ts.test
+    elseif opts.layout == "flat-cli" then
         app_template  = runtime == "js" and templates.js_cli_app  or templates.lua_cli_app
         test_template = runtime == "js" and templates.js_cli_test or templates.lua_cli_test
     else
@@ -352,6 +377,7 @@ local function main()
         tool.write_file(dir .. "/migrations/001_init.sql", templates.migration_init)
     end
     tool.write_file(dir .. "/.gitignore", templates.gitignore)
+    if runtime == "ts" then ts.install_types(dir) end
 
     print("hull new: created " .. dir .. "/")
     print("  " .. dir .. "/app" .. ext)
@@ -360,6 +386,7 @@ local function main()
         print("  " .. dir .. "/migrations/001_init.sql")
     end
     print("  " .. dir .. "/.gitignore")
+    for _, l in ipairs(types_lines) do print("  " .. l) end
     print("")
     print("Next steps:")
     print("  cd " .. dir)
@@ -367,6 +394,9 @@ local function main()
         print("  hull run app" .. ext .. " -- world")
     else
         print("  hull app" .. ext)
+    end
+    if runtime == "ts" then
+        print("  tsc --noEmit -p .          (type-check; tests: -p tests)")
     end
 end
 
