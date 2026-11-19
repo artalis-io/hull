@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/app_entry.h"
 #include "internal.h"
 #include "hull/app_context.h"
 #include "hull/cap/tool.h"
@@ -59,9 +60,23 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
     const char *runtime = NULL;
     const char *entry_point = NULL;
 
+#ifdef HL_ENABLE_JS
+    /* A TypeScript entry, refused beside another (shared/app_entry.h). */
+    char ts_err[512];
+    int ts = hl_app_entry_ts(app_dir, entry_buf, sizeof entry_buf, ts_err,
+                             sizeof ts_err);
+    if (ts < 0)
+        return hl_agent_write_error(out, ts_err);
+    if (ts > 0) {
+        entry_point = entry_buf;
+        runtime = "js";
+    }
+#endif
 #ifdef HL_ENABLE_LUA
-    entry_point = hl_agent_detect_entry(app_dir, "lua", entry_buf, sizeof(entry_buf));
-    if (entry_point) runtime = "lua";
+    if (!entry_point) {
+        entry_point = hl_agent_detect_entry(app_dir, "lua", entry_buf, sizeof(entry_buf));
+        if (entry_point) runtime = "lua";
+    }
 #endif
 #ifdef HL_ENABLE_JS
     if (!entry_point) {
@@ -71,7 +86,7 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
 #endif
 
     if (!entry_point)
-        return hl_agent_write_error(out, "no entry point found (app.lua or app.js)");
+        return hl_agent_write_error(out, "no entry point found (app.lua, app.js or app.ts)");
 
     /* Initialize app context to extract manifest. Register the hull.db module
      * (backed by an in-memory DB) rather than running in no_db mode: apps

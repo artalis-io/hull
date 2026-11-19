@@ -12,6 +12,7 @@
 
 #include "hull/cap/crypto.h"
 #include "hull/shared/generation.h"
+#include "hull/shared/app_entry.h"
 #include "hull/vfs.h"
 #include "../../src/hull/utils/hex.h"
 #include "test_tmpdir.h"
@@ -460,6 +461,73 @@ UTEST(generation, a_pipeline_needs_a_build_config)
     unlink(cfg);
     rmdir(app);
     hl_generation_reset();
+}
+
+/* Write an empty file <app>/<name>. */
+static int touch_in(const char *app, const char *name)
+{
+    char p[HL_TEST_PATH_MAX + 32];
+    snprintf(p, sizeof p, "%s/%s", app, name);
+    FILE *f = fopen(p, "w");
+    if (!f) return -1;
+    fclose(f);
+    return 0;
+}
+
+static void unlink_in(const char *app, const char *name)
+{
+    char p[HL_TEST_PATH_MAX + 32];
+    snprintf(p, sizeof p, "%s/%s", app, name);
+    unlink(p);
+}
+
+UTEST(generation, a_typescript_entry_runs_the_pipeline)
+{
+    const char *dir = hl_test_tmpdir();
+    ASSERT_TRUE(dir != NULL);
+    char app[HL_TEST_PATH_MAX], buf[HL_TEST_PATH_MAX + 32], want[HL_TEST_PATH_MAX + 32];
+    char err[256];
+    snprintf(app, sizeof app, "%s/hull-gen-ts-XXXXXX", dir);
+    ASSERT_TRUE(mkdtemp(app) != NULL);
+
+    ASSERT_EQ(0, hl_app_entry_ts(app, buf, sizeof buf, err, sizeof err));
+    ASSERT_FALSE(hl_generation_has_pipeline(app));
+
+    ASSERT_EQ(0, touch_in(app, "app.ts"));
+    ASSERT_EQ(1, hl_app_entry_ts(app, buf, sizeof buf, err, sizeof err));
+    snprintf(want, sizeof want, "%s/app.ts", app);
+    ASSERT_STREQ(want, buf);
+    ASSERT_TRUE(hl_generation_has_pipeline(app));
+
+    /* Beside another entry it is ambiguous, and the message names both. */
+    ASSERT_EQ(0, touch_in(app, "app.js"));
+    ASSERT_EQ(-1, hl_app_entry_ts(app, buf, sizeof buf, err, sizeof err));
+    ASSERT_TRUE(strstr(err, "app.ts") && strstr(err, "app.js"));
+    unlink_in(app, "app.js");
+    ASSERT_EQ(0, touch_in(app, "app.lua"));
+    ASSERT_EQ(-1, hl_app_entry_ts(app, buf, sizeof buf, err, sizeof err));
+    unlink_in(app, "app.lua");
+    ASSERT_EQ(0, touch_in(app, "app.mts"));
+    ASSERT_EQ(-1, hl_app_entry_ts(app, buf, sizeof buf, err, sizeof err));
+    ASSERT_TRUE(strstr(err, "app.mts") != NULL);
+    unlink_in(app, "app.ts");
+
+    ASSERT_EQ(1, hl_app_entry_ts(app, buf, sizeof buf, NULL, 0));
+    snprintf(want, sizeof want, "%s/app.mts", app);
+    ASSERT_STREQ(want, buf);
+    ASSERT_TRUE(hl_generation_has_pipeline(app));
+    unlink_in(app, "app.mts");
+    rmdir(app);
+
+    ASSERT_TRUE(hl_app_entry_is_ts("lib/a.ts"));
+    ASSERT_TRUE(hl_app_entry_is_ts("app.mts"));
+    ASSERT_FALSE(hl_app_entry_is_ts("a.cts"));
+    ASSERT_FALSE(hl_app_entry_is_ts(".ts"));
+    ASSERT_FALSE(hl_app_entry_is_ts("a.js"));
+    ASSERT_TRUE(hl_app_name_is_ts("a.cts"));
+    ASSERT_TRUE(hl_app_name_is_ts("a.tsx"));
+    ASSERT_FALSE(hl_app_name_is_ts("a.mjs"));
+    ASSERT_FALSE(hl_app_name_is_ts(NULL));
 }
 
 UTEST_MAIN()

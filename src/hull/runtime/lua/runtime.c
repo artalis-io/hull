@@ -2204,6 +2204,8 @@ static struct HlRunWatch *vt_lua_run_watch(HlRuntime *rt)
     return &((HlLua *)rt)->run_watch;
 }
 
+static const char *const hl_lua_test_file_patterns[] = { "test_*.lua", NULL };
+
 const HlRuntimeVtable hl_lua_vtable = {
     .init                = vt_lua_init,
     .load_app            = vt_lua_load_app,
@@ -2217,7 +2219,7 @@ const HlRuntimeVtable hl_lua_vtable = {
     .destroy             = vt_lua_destroy,
     .name                = "Lua",
     .kind                = HL_RT_LUA,
-    .test_file_pattern   = "test_*.lua",
+    .test_file_patterns  = hl_lua_test_file_patterns,
     .has_main            = vt_lua_has_main,
     .has_server_handlers = vt_lua_has_server_handlers,
     .run_main            = vt_lua_run_main,

@@ -10,6 +10,17 @@ release-artifact layout).
 
 ### Added
 
+- TypeScript apps run from source (docs/typescript_design.md §4.3, §4.4): an app's entry may be
+  `app.ts` or `app.mts`, which runs on the JavaScript runtime. Such an app runs its build
+  pipeline whether or not it has a `hull.build.json`, so `hull app.ts`, `hull dev`, `hull test`,
+  `hull agent` and `hull mcp` load the erased modules from the pipeline generation under their
+  source names: imports name the file as written (`./lib/a.ts`), and a stack trace names the
+  `.ts` file with its line and column. `hull test` also runs `tests/test_*.ts` / `test_*.mts`.
+  A TypeScript module the pipeline did not erase is refused rather than run as JavaScript (a
+  `.js` entry importing one needs a `hull.build.json`), and an `app.ts` beside `app.js`,
+  `app.lua` or `app.mts` is refused as ambiguous wherever Hull looks for an app's entry. `hull
+  dev` keeps serving its last good build while an edit is refused. `hull build` refuses a
+  TypeScript app for now: embedding its erased modules comes next.
 - TypeScript erasure through the build pipeline (docs/typescript_design.md §4.1, §4.2;
   docs/buildcontext_design.md §13.8): the bundled build plugin `stdlib:ts-erase@1` runs on the
   Hull route `typescript-erasure` over every analyzed `.ts` / `.mts` file of an app and writes
@@ -20,7 +31,7 @@ release-artifact layout).
   refused construct names its file and position and stops the pipeline. The plugin is embedded
   in the hull binary (`stdlib/plugins/ts_erase/`) and its implementation - the hull version and
   its files - is part of every action key. `hull plugins run` / `generation` on a TypeScript app
-  now erase it; running the erased modules (`.ts` entry points) comes next.
+  now erase it.
 - BuildContext checkpoint 6, the explicit routes (docs/buildcontext_design.md §13.7): a bundled
   build plugin runs only on a Hull-defined route, active whenever its input exists. A route of
   unit `module` hands its plugin every analyzed source file of its language, whole (`kind =

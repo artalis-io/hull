@@ -127,10 +127,11 @@ typedef struct HlRuntimeVtable {
      * runtime symbol (the precondition for a runtime-slim link). */
     HlRuntimeKind kind;
 
-    /* Glob pattern for test files in this runtime (e.g. "test_*.lua").
-     * Used by the shared test runner - avoids switching on rt->vt->name
-     * to pick the file pattern. */
-    const char *test_file_pattern;
+    /* Glob patterns for test files in this runtime, NULL-terminated
+     * ({ "test_*.lua", NULL }; JS adds the TypeScript names). Used by the
+     * shared test runner - avoids switching on rt->vt->name to pick the
+     * file pattern. */
+    const char *const *test_file_patterns;
 
     /* Returns 1 if the loaded app registered app.main(fn), 0 otherwise.
      * Returns 0 if the runtime hasn't been told to look (no app loaded).

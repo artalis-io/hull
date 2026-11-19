@@ -40,7 +40,7 @@ int hl_cmd_help(int argc, char **argv, const HlCommandEnv *env)
         "hull %s - capability-secure local-first runtime\n"
         "\n"
         "Usage: hull [global flags] <command> [command flags]\n"
-        "       hull <app.lua|app.js>          run an app (implicit `dev`)\n"
+        "       hull <app.lua|app.js|app.ts>   run an app (implicit `dev`)\n"
         "\n"
         "Global flags:\n"
         "  --version, -v          print version and exit\n"

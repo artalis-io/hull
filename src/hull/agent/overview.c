@@ -14,6 +14,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/app_entry.h"
 #include "internal.h"
 #include "limits.h"
 #include "hull/app_context.h"
@@ -93,9 +94,10 @@ static int is_wgsl(const char *n)     { return has_ext(n, ".wgsl"); }
 static int is_sql(const char *n)      { return has_ext(n, ".sql"); }
 static int is_test_file(const char *n)
 {
-    /* tests/test_*.{c,lua,js} or *_test.{lua,js} */
+    /* tests/test_*.{c,lua,js,ts,mts} or *_test.{lua,js} */
     if (strncmp(n, "test_", 5) == 0 &&
-        (has_ext(n, ".lua") || has_ext(n, ".js") || has_ext(n, ".c")))
+        (has_ext(n, ".lua") || has_ext(n, ".js") || has_ext(n, ".c") ||
+         hl_app_entry_is_ts(n)))
         return 1;
     if (has_ext(n, "_test.lua") || has_ext(n, "_test.js")) return 1;
     return 0;
@@ -188,7 +190,8 @@ int hl_agent_overview_ctx(HlAppContext *ctx, ShJsonBuf *out)
     snprintf(app_js,  sizeof(app_js),  "%s/app.js",  app_dir);
     struct stat st;
     int has_lua = (stat(app_lua, &st) == 0);
-    int has_js  = (stat(app_js,  &st) == 0);
+    int has_js  = (stat(app_js,  &st) == 0) ||
+                  hl_app_entry_ts(app_dir, app_js, sizeof app_js, NULL, 0) > 0;
     sh_json_write_kv_string(&w, "runtime",
         hl_app_context_is_lua(ctx) ? "lua" :
         has_js ? "js" :

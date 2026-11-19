@@ -17,6 +17,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/app_entry.h"
+#include "hull/shared/term_escape.h"
 #include "hull/commands/jobs.h"
 #include "hull/serve.h"
 
@@ -56,7 +58,15 @@ static int resolve_entry(const char *cand, char *out, size_t outsz)
         if ((size_t)snprintf(out, outsz, "%s", cand) >= outsz) return -1;
         return 0;
     }
-    /* Treat as a directory (existing dir, or a bare name we probe under). */
+    /* Treat as a directory (existing dir, or a bare name we probe under).
+     * A TypeScript entry first: it is refused beside another entry. */
+    char err[512];
+    int ts = hl_app_entry_ts(cand, out, outsz, err, sizeof err);
+    if (ts < 0) {
+        hl_eprintf_line("hull jobs worker: %s", err);
+        return -1;
+    }
+    if (ts > 0) return 0;
     const char *names[] = { "app.lua", "app.js" };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         if ((size_t)snprintf(out, outsz, "%s/%s", cand, names[i]) >= outsz)
@@ -96,7 +106,7 @@ int hl_cmd_jobs(int argc, char **argv, const HlCommandEnv *env)
     if (resolve_entry(cand, entry, sizeof(entry)) != 0) {
         fprintf(stderr,
             "hull jobs worker: no runnable app found at '%s' "
-            "(expected a file, or app.lua|app.js in a directory)\n", cand);
+            "(expected a file, or app.lua|app.js|app.ts in a directory)\n", cand);
         return 1;
     }
 

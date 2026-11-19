@@ -50,6 +50,18 @@ const HlRuntimeFactory *const *hl_runtime_factories(size_t *count)
  * docs/runtime_feature_phase1.md.
  */
 
+/* 1 when factory `f` runs entries with extension `ext` (".js"). */
+static int factory_takes(const HlRuntimeFactory *f, const char *ext)
+{
+    if (!f) return 0;
+    if (f->entry_extension && strcmp(f->entry_extension, ext) == 0)
+        return 1;
+    for (const char *const *a = f->also_extensions; a && *a; a++)
+        if (strcmp(*a, ext) == 0)
+            return 1;
+    return 0;
+}
+
 const HlRuntimeFactory *hl_runtime_factory_for_extension(const char *ext)
 {
     if (!ext) return NULL;
@@ -68,7 +80,7 @@ const HlRuntimeFactory *hl_runtime_factory_for_extension(const char *ext)
     /* Compile-time base factories first. */
     for (size_t i = 0; i < g_factory_count; i++) {
         const HlRuntimeFactory *f = g_factories[i];
-        if (f && f->entry_extension && strcmp(f->entry_extension, ext) == 0)
+        if (factory_takes(f, ext))
             return f;
     }
     /* Then any runtime composed as a feature (empty in a base build; a
@@ -78,7 +90,7 @@ const HlRuntimeFactory *hl_runtime_factory_for_extension(const char *ext)
     const HlRuntimeFactory *const *feats = hl_runtime_feature_factories(&fcount);
     for (size_t i = 0; i < fcount; i++) {
         const HlRuntimeFactory *f = feats ? feats[i] : NULL;
-        if (f && f->entry_extension && strcmp(f->entry_extension, ext) == 0)
+        if (factory_takes(f, ext))
             return f;
     }
     return NULL;

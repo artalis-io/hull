@@ -1137,6 +1137,11 @@ CAP_OBJS += $(GENERATION_OBJ)
 # supervisor. sh_json + the cap HMAC; rides CAP_OBJS like host.
 DEV_LAST_ERROR_OBJ := $(BUILDDIR)/dev_last_error.o
 CAP_OBJS += $(DEV_LAST_ERROR_OBJ)
+# app_entry finds a TypeScript app entry (app.ts / app.mts) and refuses one
+# beside another entry, for every place that looks for an app's entry
+# (shared/app_entry.h). libc-only; rides CAP_OBJS like host.
+APP_ENTRY_OBJ := $(BUILDDIR)/app_entry.o
+CAP_OBJS += $(APP_ENTRY_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -3422,6 +3427,9 @@ $(BUILD_PLUGIN_OBJ): $(SRCDIR)/hull/shared/build_plugin.c $(INCDIR)/hull/shared/
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(DEV_LAST_ERROR_OBJ): $(SRCDIR)/hull/shared/dev_last_error.c $(INCDIR)/hull/shared/dev_session.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(APP_ENTRY_OBJ): $(SRCDIR)/hull/shared/app_entry.c $(INCDIR)/hull/shared/app_entry.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(GENERATION_OBJ): $(SRCDIR)/hull/shared/generation.c $(INCDIR)/hull/shared/generation.h $(INCDIR)/hull/vfs.h | $(BUILDDIR)

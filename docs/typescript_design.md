@@ -2,7 +2,8 @@
 
 Status: **T1 (types + `hull types`) and T2 (the TypeScript frontend, §3.5) implemented;
 T3's erasure plugin and route (§4.1, §4.2) implemented (buildcontext_design.md §13.8); running
-`.ts` modules (§4.3, §4.4) design-only.** Builds on
+`.ts` modules from source (§4.3, §4.4) implemented; `hull build` of a TypeScript app
+design-only.** Builds on
 [buildcontext_design.md](buildcontext_design.md) (BuildContext),
 [dev_pipeline_generations_design.md](dev_pipeline_generations_design.md) (pipeline
 generations), [javascript_source_frontend_design.md](javascript_source_frontend_design.md)
@@ -41,7 +42,7 @@ module resolution modes), CommonJS interop.
 | T2 | TypeScript frontend, analysis only (§3) - implemented (§3.5) | the shipped JS frontend |
 | BuildContext 1, 2, 5 | action core (1, implemented), outputs (2), plugin runner (5) | - |
 | G1, G2 | pipeline generations: overlay, runner wiring | BuildContext 2, 5 |
-| T3 | type-erasure plugin + `.ts` entry points (§4) - the plugin and its route implemented | T2, BuildContext 1, 2, 5, G1, G2, and the explicit-route part of BuildContext 6 (all implemented) |
+| T3 | type-erasure plugin + `.ts` entry points (§4) - the plugin, its route and running from source implemented | T2, BuildContext 1, 2, 5, G1, G2, and the explicit-route part of BuildContext 6 (all implemented) |
 
 BuildContext checkpoints 3 (artifact inputs) and 4 (the tool seam) are not on T3's path:
 erasure takes a source selection, not artifacts, and runs no tool. They follow when Compute
@@ -451,6 +452,19 @@ All through the pipeline, none through a loader transform:
   generated entries with their provenance (generations design §6).
 - A built binary runs the embedded JavaScript; it contains no TypeScript machinery.
 
+As built: `shared/app_entry.c` finds a TypeScript entry for every place that looks for an
+app's entry (the runner, `hull dev`, `hull test`, `hull agent`, `hull jobs`, `hull migrate`) and
+refuses one beside `app.js`, `app.lua` or the other TypeScript name; an entry named explicitly
+(`hull app.ts`) is taken as given. The JavaScript runtime factory takes `.ts` / `.mts` entries
+(`HlRuntimeFactory.also_extensions`). `hl_generation_has_pipeline` is true for an app with a
+TypeScript entry, so its pipeline runs with or without a `hull.build.json`; a `.js` entry that
+imports a `.ts` module needs one. The JavaScript module, entry and test-file loaders read a
+TypeScript name (`.ts`, `.mts`, `.cts`, `.tsx`) only from the generation overlay and refuse it
+otherwise: its bytes on disk are not JavaScript. `hull test` runs `tests/test_*.ts` /
+`test_*.mts` on the JavaScript runtime (`hl_js_test_file_patterns`), and the erasure route
+covers them, since project discovery analyzes every `.ts` file in the app. Until `hull build`
+embeds erased modules, it refuses a TypeScript app with that message.
+
 ## 5. Testing
 
 - **Frontend (implemented for slices 1 and 2):** the JS frontend's conformance approach (JS
@@ -505,8 +519,8 @@ All through the pipeline, none through a loader transform:
 
 ## 6. Open questions
 
-1. Test files: `tests/test_*.ts` - discovered by `hull test` beside `.js` (recommended:
-   yes, same rules, with T3).
+1. Test files: `tests/test_*.ts` - discovered by `hull test` beside `.js`. **Answered: yes,
+   same rules (§4.4 as built).**
 2. `hull new --runtime ts`: a scaffold variant once T3 ships (recommended), with
    `hull types` run by default.
 3. Whether Hull should run a type checker. **Answered: yes - tsgo, preferred, or an

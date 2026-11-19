@@ -62,6 +62,14 @@ typedef struct HlTestRunnerWriter {
 int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer);
 
 /*
+ * The test files under `app_dir` matching any of `patterns` (NULL-terminated
+ * globs, as HlRuntimeVtable.test_file_patterns), sorted, a build plugin
+ * directory's left out: a malloc'd NULL-terminated array of malloc'd paths
+ * (free each, then the array), or NULL when there are none.
+ */
+char **hl_test_runner_find_files(const char *app_dir, const char *const *patterns);
+
+/*
  * The test run's event loop and worker pool, so the code a test drives -
  * app.main under test.run_main / runMain, a JS async test body - can wait
  * on hull.sleep, http.fetch, db.async, compute.async. An entry point that

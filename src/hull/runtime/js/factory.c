@@ -82,9 +82,13 @@ static void js_destroy(HlRuntime *rt)
     hl_policy_page_free(js, sizeof(HlJS));
 }
 
+/* A TypeScript entry runs from the pipeline generation's erased bytes. */
+static const char *const js_also_extensions[] = { ".ts", ".mts", NULL };
+
 const HlRuntimeFactory hl_js_factory = {
     .name            = "js",
     .entry_extension = ".js",
+    .also_extensions = js_also_extensions,
     .create          = js_create,
     .destroy         = js_destroy,
     .vtable          = &hl_js_vtable,
