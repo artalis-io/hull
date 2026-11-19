@@ -483,4 +483,16 @@ int hl_manifest_extract_js_from_file(const char *path,
                                              out_json_len, out_err);
 }
 
+int hl_manifest_extract_js_with_generation(const char *path,
+                                           const char *hull_exe,
+                                           int gen_fd,
+                                           char **out_json,
+                                           size_t *out_json_len,
+                                           char **out_err)
+{
+    (void)hull_exe; (void)gen_fd;
+    return hl_manifest_extract_js_in_process(path, NULL, out_json,
+                                             out_json_len, out_err);
+}
+
 #endif /* HL_ENABLE_JS */
