@@ -314,6 +314,14 @@ rc=0; (cd "$n" && "$HULL" init its --runtime js) > "$WORK/init_amb2.txt" 2>&1 ||
 rc=0; (cd "$n" && "$HULL" new bad --runtime py) > "$WORK/newbad.txt" 2>&1 || rc=$?
 [ "$rc" -ne 0 ] && has "$WORK/newbad.txt" "use lua, js or ts" &&
     ok "an unknown runtime names the three" || { bad "bad runtime (rc $rc)"; cat "$WORK/newbad.txt"; }
+echo "== typescript: an app below a build/ directory"
+u="$WORK/build/vendor/app"
+mkdir -p "$u"
+printf 'import { app } from "hull:app";\nimport { d } from "./lib.ts";\napp.manifest({ modules: [] });\napp.main((ctx) => { ctx.stdout.write("v" + d(2) + "\\n"); return 0; });\n' > "$u/app.ts"
+printf 'export function d(n: number): number { return n * 2; }\n' > "$u/lib.ts"
+(cd "$u" && "$HULL" app.ts) > "$WORK/under.txt" 2>&1 && has "$WORK/under.txt" "v4" &&
+    ok "a TypeScript app whose path has a build/ directory is erased and runs" ||
+    { bad "app below build/"; cat "$WORK/under.txt"; }
 
 echo "== typescript: entries refused"
 : > "$s/app.js"

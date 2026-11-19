@@ -238,6 +238,36 @@ HHOUT=$(cd "$FAKEHOME" && HOME="$FAKEHOME" "$HULL" init 2>&1 || true)
 assert_contains "hull init IN ~ is refused" "$HHOUT" "refusing to make"
 assert "and writes nothing into ~" [ ! -f "$FAKEHOME/app.lua" ]
 
+# The option spellings: --runtime=js was skipped as an unknown option, so it
+# scaffolded a Lua app without a word (the agent quickstarts teach `hull init
+# myapp --runtime=js`). An unknown option is now an error, and a refused run
+# removes the directory it made for its target.
+echo ""
+echo "── hull new / init option spellings ──"
+OPTD="$WORKDIR/opts"
+mkdir -p "$OPTD"
+(cd "$OPTD" && "$HULL" new eqjs --runtime=js >/dev/null 2>&1 || true)
+assert "hull new --runtime=js scaffolds JavaScript" [ -f "$OPTD/eqjs/app.js" ]
+(cd "$OPTD" && "$HULL" new eqcli --type=cli --runtime=js >/dev/null 2>&1 || true)
+assert "hull new --type=cli takes the = form" [ -f "$OPTD/eqcli/commands/greet.js" ]
+(cd "$OPTD" && "$HULL" init ieq --runtime=js >/dev/null 2>&1 || true)
+assert "hull init --runtime=js scaffolds JavaScript" [ -f "$OPTD/ieq/app.js" ]
+UOUT=$(cd "$OPTD" && "$HULL" new typo --runtiem js 2>&1 || true)
+assert_contains "hull new refuses an unknown option" "$UOUT" "unknown option '--runtiem'"
+assert "and leaves no directory for the argument it took as the name" [ ! -e "$OPTD/js" ]
+assert "nor for the name" [ ! -e "$OPTD/typo" ]
+VOUT=$(cd "$OPTD" && "$HULL" new noval --runtime 2>&1 || true)
+assert_contains "hull new --runtime with no value is refused" "$VOUT" "--runtime needs a value"
+assert "and leaves no directory" [ ! -e "$OPTD/noval" ]
+IOUT=$(cd "$OPTD" && "$HULL" init ityp --bogus 2>&1 || true)
+assert_contains "hull init refuses an unknown option" "$IOUT" "unknown option '--bogus'"
+assert "and leaves no directory" [ ! -e "$OPTD/ityp" ]
+mkdir -p "$OPTD/existing"
+(cd "$OPTD" && "$HULL" init existing --bogus >/dev/null 2>&1 || true)
+assert "a refused hull init keeps a directory it did not make" [ -d "$OPTD/existing" ]
+HOUT=$(cd "$OPTD" && "$HULL" new --help 2>&1 || true)
+assert_contains "hull new --help prints usage" "$HOUT" "Usage: hull new"
+
 MANOUT=$("$HULL" manifest "$WORKDIR/app" 2>&1 || true)
 assert_not_contains "hull manifest prints no C source path" "$MANOUT" "src/hull/"
 assert_not_contains "hull manifest prints no .c line refs" "$MANOUT" ".c:"

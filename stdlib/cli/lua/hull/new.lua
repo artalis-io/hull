@@ -203,6 +203,18 @@ templates.migration_init = [[-- Migration: 001_init
 
 -- ── Argument parsing ─────────────────────────────────────────────────
 
+-- Refuse the invocation before anything is written. hull_tool made the
+-- scaffold target before the sandbox applied (tool.scaffold_created); a
+-- refused run removes it again rather than leave an empty directory named
+-- after whatever argument it took for the target.
+local function refuse(msg)
+    tool.stderr("hull new: " .. msg .. "\n")
+    if tool.scaffold_created == true and tool.scaffold_dir then
+        tool.rmdir(tool.scaffold_dir)
+    end
+    tool.exit(1)
+end
+
 local function parse_args()
     local opts = {
         name = nil,
@@ -211,18 +223,39 @@ local function parse_args()
         layout = nil,  -- nil → derived from --cli/default; set by --type
     }
 
+    local function value_of(flag, i)
+        local v = arg[i + 1]
+        if not v or v == "" then
+            refuse(flag .. " needs a value")
+        end
+        return v
+    end
+
     local i = 1
     while i <= #arg do
         local a = arg[i]
         if a == "--runtime" then
+            opts.runtime = value_of(a, i)
             i = i + 1
-            opts.runtime = arg[i]
+        elseif a:sub(1, 10) == "--runtime=" then
+            opts.runtime = a:sub(11)
         elseif a == "--cli" then
             opts.cli = true
         elseif a == "--type" then
+            opts.layout = value_of(a, i)
             i = i + 1
-            opts.layout = arg[i]
-        elseif a:sub(1, 1) ~= "-" then
+        elseif a:sub(1, 7) == "--type=" then
+            opts.layout = a:sub(8)
+        elseif a == "-h" or a == "--help" then
+            tool.stdout("Usage: hull new <name> [--runtime lua|js] [--cli] [--type flat|rest|cli|tui]\n")
+            tool.exit(0)
+        elseif a == "--verbose" or a == "--json" then
+            -- Global flags the dispatcher reads; they stay in argv.
+        elseif a:sub(1, 1) == "-" then
+            -- An option this command does not take is an error: ignored, a
+            -- misspelt one scaffolded something else without a word.
+            refuse("unknown option '" .. tool.escape(a) .. "'")
+        else
             opts.name = a
         end
         i = i + 1
@@ -253,16 +286,14 @@ local function main()
 
     local runtime = opts.runtime
     if runtime ~= "lua" and runtime ~= "js" and runtime ~= "ts" then
-        tool.stderr("hull new: invalid runtime '" .. tostring(runtime) .. "' (use lua, js or ts)\n")
-        tool.exit(1)
+        refuse("invalid runtime '" .. tool.escape(runtime) .. "' (use lua, js or ts)")
     end
 
     local known_layouts = { ["flat"] = true, ["flat-cli"] = true,
                             ["rest"] = true, ["cli"] = true, ["tui"] = true }
     if not known_layouts[opts.layout] then
-        tool.stderr("hull new: invalid --type '" .. opts.layout ..
-                    "' (use flat, rest, cli, or tui)\n")
-        tool.exit(1)
+        refuse("invalid --type '" .. tool.escape(opts.layout) ..
+               "' (use flat, rest, cli, or tui)")
     end
 
     -- Check if directory already exists. hull_tool creates the target before
@@ -318,8 +349,7 @@ local function main()
         end
         if files and runtime == "ts" then files = ts.from_js(files) end
         if err then
-            tool.stderr("hull new: " .. err .. "\n")
-            tool.exit(1)
+            refuse(err)
         end
 
         tool.mkdir(dir)
