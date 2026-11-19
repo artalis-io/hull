@@ -1142,6 +1142,11 @@ CAP_OBJS += $(DEV_LAST_ERROR_OBJ)
 # (shared/app_entry.h). libc-only; rides CAP_OBJS like host.
 APP_ENTRY_OBJ := $(BUILDDIR)/app_entry.o
 CAP_OBJS += $(APP_ENTRY_OBJ)
+# type_check finds the TypeScript compiler the app or the user installed and
+# reads its diagnostic line (`hull check --types`, `hull dev`;
+# shared/type_check.h). libc + host; rides CAP_OBJS like app_entry.
+TYPE_CHECK_OBJ := $(BUILDDIR)/type_check.o
+CAP_OBJS += $(TYPE_CHECK_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -3430,6 +3435,9 @@ $(DEV_LAST_ERROR_OBJ): $(SRCDIR)/hull/shared/dev_last_error.c $(INCDIR)/hull/sha
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(APP_ENTRY_OBJ): $(SRCDIR)/hull/shared/app_entry.c $(INCDIR)/hull/shared/app_entry.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(TYPE_CHECK_OBJ): $(SRCDIR)/hull/shared/type_check.c $(INCDIR)/hull/shared/type_check.h $(INCDIR)/hull/shared/host.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(GENERATION_OBJ): $(SRCDIR)/hull/shared/generation.c $(INCDIR)/hull/shared/generation.h $(INCDIR)/hull/vfs.h | $(BUILDDIR)

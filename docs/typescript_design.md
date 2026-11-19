@@ -591,8 +591,21 @@ conversion and the declarations install are one module both share
      vouch for a third party's preview binaries, a pinned preview goes stale between
      releases, and an app author writing TypeScript has a compiler already (the editor's, or
      `npm`'s; TypeScript 7's `tsc` is the native compiler). Revisit if that stops holding.
-   - **Not yet:** a report in the dev loop (`hull dev`, `hull agent errors`) and an opt-in
-     gate for `hull build` / `hull test` (`--type-check`, `"typeCheck": true` in
-     `hull.build.json`). Both would run the same compiler lookup. The checker stays outside
-     the build pipeline: inside it its version would enter action keys and its behaviour
-     every cached result.
+   - **In the dev loop (as built):** `hull dev` runs the same compiler lookup, once at start
+     and after each successful (re)spawn, as `--noEmit --pretty false -p <app>` in the
+     background (`shared/type_check.h`, dev.c): an edit stops a check still running, and
+     none holds up or decides a reload. It prints a summary of the diagnostics; under
+     `--agent` it writes `.hull/types.json` (MAC'd under the session key, as the other
+     sidecars), which `hull agent errors` / MCP `hull_errors` serve as `types`. With no
+     `tsconfig.json` nothing runs; with no compiler it says so once; `--no-types` turns it
+     off. It depends on as little of the compiler as `hull check --types` does: its path,
+     those arguments, its exit status and the diagnostic line `FILE(LINE,COL): SEVERITY
+     CODE: MESSAGE` (the same in tsc and tsgo); a line of another shape is kept as text.
+     No watch mode: its output and protocol differ between versions. The compiler does not
+     inherit the dev-session key. Not in `hull dev --tui`, nor on a cosmo build (no fork to
+     run it in the background), which point at `hull check --types`.
+   - **Not a `hull build` / `hull test` gate.** Considered and dropped: `hull check --types`
+     is the gate, `hull check --types && hull build` composes it, and a build that needs a
+     compiler would have to decide what a missing one means and whether its version enters a
+     reproducible build. The checker stays outside the build pipeline: inside it its version
+     would enter action keys and its behaviour every cached result.

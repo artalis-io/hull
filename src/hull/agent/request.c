@@ -167,17 +167,91 @@ int hl_agent_status(const char *app_dir, int port, ShJsonBuf *out)
  * (HL_DEV_SIDECAR_LAST_ERROR). Keep the two in step. */
 #define HL_AGENT_ERR_PREFIX "failed to load "
 
-static void errors_write_empty(ShJsonBuf *out, const char *ignored)
+/* An integer field of a verified record, or -1. */
+static int64_t types_int(const ShJsonValue *o, const char *key)
 {
-    ShJsonWriter w;
-    sh_json_writer_init(&w, sh_json_buf_write, out);
-    sh_json_write_object_start(&w);
-    sh_json_write_key(&w, "errors");
-    sh_json_write_array_start(&w);
-    sh_json_write_array_end(&w);
-    if (ignored)
-        sh_json_write_kv_string(&w, "ignored", ignored);
-    sh_json_write_object_end(&w);
+    double d = sh_json_as_double(sh_json_get(o, key), -1);
+    return (d >= 0 && d < 1e13 && d == (double)(int64_t)d) ? (int64_t)d : -1;
+}
+
+/* A short string field of a verified record, or NULL. */
+static const char *types_str(const ShJsonValue *o, const char *key, size_t max)
+{
+    const char *v = sh_json_as_string(sh_json_get(o, key), NULL);
+    return v && strlen(v) <= max ? v : NULL;
+}
+
+/* The type check `hull dev --agent`'s supervisor writes after each reload
+ * (dev.c, hl_dev_types_write): <app>/.hull/types.json, the document with its
+ * MAC as the last member. Written into @p w as a "types" member only when the
+ * MAC verifies under the live session's key and the record names that
+ * session; then only its known fields, re-encoded. 1 when a file was there
+ * but not served. */
+static int errors_write_types(ShJsonWriter *w, const char *app_dir,
+                              const char *nonce, long sp)
+{
+    char path[PATH_MAX];
+    int pn = snprintf(path, sizeof(path), "%s/.hull/types.json", app_dir);
+    if (pn < 0 || (size_t)pn >= sizeof(path)) return 0;
+    size_t n = 0;
+    char *buf = hl_agent_read_sidecar(path, 1024 * 1024, &n);
+    if (!buf) return 0;
+
+    size_t doc_len = 0;
+    const char *mac = NULL;
+    int ok = nonce && hl_agent_text_is_terminal_safe(buf, n) &&
+             hl_dev_sidecar_doc_split(buf, n, &doc_len, &mac) &&
+             hl_dev_sidecar_mac_ok(nonce, HL_DEV_SIDECAR_TYPES, app_dir, sp,
+                                   buf, doc_len, mac);
+    SHArena *arena = NULL;
+    ShJsonValue *v = NULL;
+    if (ok) {
+        buf[doc_len] = '\0';
+        arena = sh_arena_create(4096 + 8 * doc_len);
+        ok = arena && sh_json_parse(buf, doc_len, arena, &v) == SH_JSON_OK && v &&
+             sh_json_type(v) == SH_JSON_OBJECT && types_int(v, "session_pid") == sp;
+    }
+    const char *status = ok ? types_str(v, "status", 16) : NULL;
+    ok = ok && status && (strcmp(status, "ok") == 0 || strcmp(status, "errors") == 0 ||
+                          strcmp(status, "failed") == 0);
+    const ShJsonValue *diags = ok ? sh_json_get(v, "diagnostics") : NULL;
+    ok = ok && diags && sh_json_type(diags) == SH_JSON_ARRAY;
+    if (ok) {
+        sh_json_write_key(w, "types");
+        sh_json_write_object_start(w);
+        sh_json_write_kv_string(w, "status", status);
+        sh_json_write_kv_int(w, "count", types_int(v, "count"));
+        sh_json_write_kv_int(w, "errors", types_int(v, "errors"));
+        sh_json_write_kv_bool(w, "truncated",
+                              sh_json_as_bool(sh_json_get(v, "truncated"), false));
+        sh_json_write_kv_int(w, "timestamp", types_int(v, "timestamp"));
+        sh_json_write_key(w, "diagnostics");
+        sh_json_write_array_start(w);
+        size_t nd = sh_json_array_len(diags);
+        for (size_t i = 0; i < nd && i < 100; i++) {
+            const ShJsonValue *d = sh_json_array_get(diags, i);
+            const char *msg = d ? types_str(d, "message", 2048) : NULL;
+            if (!msg) continue;
+            sh_json_write_object_start(w);
+            const char *file = types_str(d, "file", 1024);
+            const char *sev = types_str(d, "severity", 32);
+            const char *code = types_str(d, "code", 32);
+            if (file && sev && code) {
+                sh_json_write_kv_string(w, "file", file);
+                sh_json_write_kv_int(w, "line", types_int(d, "line"));
+                sh_json_write_kv_int(w, "col", types_int(d, "col"));
+                sh_json_write_kv_string(w, "severity", sev);
+                sh_json_write_kv_string(w, "code", code);
+            }
+            sh_json_write_kv_string(w, "message", msg);
+            sh_json_write_object_end(w);
+        }
+        sh_json_write_array_end(w);
+        sh_json_write_object_end(w);
+    }
+    if (arena) sh_arena_free(arena);
+    free(buf);
+    return !ok;
 }
 
 int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
@@ -188,16 +262,9 @@ int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
     if (pn < 0 || (size_t)pn >= sizeof(err_path))
         return hl_agent_write_error(out, "app_dir too long");
 
-    size_t n = 0;
-    char *buf = hl_agent_read_sidecar(err_path, 64 * 1024, &n);
-    if (!buf) {
-        errors_write_empty(out, NULL);
-        return 0;
-    }
-
     /* The app tree may be a cloned repo, and an agent reads this output as
      * Hull's own diagnostics: a committed last_error.json was served as is,
-     * whatever it told the agent to do (audit 36). The record is served only
+     * whatever it told the agent to do (audit 36). A record is served only
      * when its MAC verifies under the live `hull dev --agent` session's key
      * (kept under $HOME, in no file the app can read - audit 37: the key sat
      * in dev.json, and an app granted .hull/ forged records with it), and
@@ -205,20 +272,21 @@ int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
     static const char unverified[] =
         ".hull/last_error.json was ignored: not written by a live "
         "`hull dev --agent` session (repo or app content, not Hull output)";
+    static const char types_unverified[] =
+        ".hull/types.json was ignored: not written by a live "
+        "`hull dev --agent` session (repo or app content, not Hull output)";
     char nonce[HL_DEV_SESSION_NONCE_LEN + 1];
     long sp = 0;
-    if (hl_agent_dev_session(app_dir, nonce, &sp, NULL) != 0) {
-        free(buf);
-        errors_write_empty(out, unverified);
-        return 0;
-    }
+    int have_session = hl_agent_dev_session(app_dir, nonce, &sp, NULL) == 0;
 
-    SHArena *arena = hl_agent_text_is_terminal_safe(buf, n)
+    size_t n = 0;
+    char *buf = hl_agent_read_sidecar(err_path, 64 * 1024, &n);
+    SHArena *arena = buf && hl_agent_text_is_terminal_safe(buf, n)
                          ? sh_arena_create(4096 + 8 * n) : NULL;
     ShJsonValue *v = NULL;
     const char *msg = NULL, *mac = NULL;
     double ts = -1;
-    if (arena && sh_json_parse(buf, n, arena, &v) == SH_JSON_OK && v &&
+    if (have_session && arena && sh_json_parse(buf, n, arena, &v) == SH_JSON_OK && v &&
         sh_json_type(v) == SH_JSON_OBJECT) {
         msg = sh_json_as_string(sh_json_get(v, "error"), NULL);
         mac = sh_json_as_string(sh_json_get(v, "mac"), NULL);
@@ -237,18 +305,26 @@ int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
              hl_dev_sidecar_mac_ok(nonce, HL_DEV_SIDECAR_LAST_ERROR, app_dir,
                                    sp, content, (size_t)cn, mac);
     }
-    hl_secure_zero(nonce, sizeof nonce);
+
+    ShJsonWriter w;
+    sh_json_writer_init(&w, sh_json_buf_write, out);
+    sh_json_write_object_start(&w);
     if (ok) {
-        ShJsonWriter w;
-        sh_json_writer_init(&w, sh_json_buf_write, out);
-        sh_json_write_object_start(&w);
         sh_json_write_kv_string(&w, "error", msg);
         sh_json_write_kv_int(&w, "timestamp", (int64_t)ts);
-        sh_json_write_object_end(&w);
+    } else {
+        sh_json_write_key(&w, "errors");
+        sh_json_write_array_start(&w);
+        sh_json_write_array_end(&w);
+        if (buf)
+            sh_json_write_kv_string(&w, "ignored", unverified);
     }
+    if (errors_write_types(&w, app_dir, have_session ? nonce : NULL, sp))
+        sh_json_write_kv_string(&w, "types_ignored", types_unverified);
+    sh_json_write_object_end(&w);
+
+    hl_secure_zero(nonce, sizeof nonce);
     if (arena) sh_arena_free(arena);
     free(buf);
-    if (!ok)
-        errors_write_empty(out, unverified);
     return 0;
 }

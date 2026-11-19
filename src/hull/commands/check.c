@@ -15,7 +15,7 @@
 #include "hull/commands/verify.h"
 #include "hull/commands/modules.h"
 #include "hull/cap/tool.h"
-#include "hull/shared/host.h"
+#include "hull/shared/type_check.h"
 #include "hull/shared/term_escape.h"
 
 #include <limits.h>
@@ -24,22 +24,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* The TypeScript compiler `hull check --types` runs: the app's own
- * (node_modules/.bin, tsgo before tsc), else one on PATH (tsgo, then tsc).
- * Hull ships none; it runs the one the project or the user installed.
- * 0 with its path in `out`, -1 when there is none. */
-static int find_type_checker(const char *app_dir, char *out, size_t outsz)
-{
-    static const char *const names[] = { "tsgo", "tsc" };
-    for (size_t i = 0; i < sizeof names / sizeof *names; i++) {
-        int n = snprintf(out, outsz, "%s/node_modules/.bin/%s", app_dir, names[i]);
-        if (n > 0 && (size_t)n < outsz && access(out, X_OK) == 0) return 0;
-    }
-    for (size_t i = 0; i < sizeof names / sizeof *names; i++)
-        if (hl_host_find_in_path(names[i], out, outsz) == 1) return 0;
-    return -1;
-}
-
 /* `--types`: the compiler over the app's tsconfig.json (`hull types`
  * writes it), then tests/tsconfig.json when there is one, with nothing
  * emitted. Run before every other step: the ones that load the app go
@@ -47,15 +31,13 @@ static int find_type_checker(const char *app_dir, char *out, size_t outsz)
  * compiler under ~/.nvm or the app's node_modules could not run there. */
 static int check_types(const char *app_dir)
 {
-    char path[PATH_MAX];
-    int n = snprintf(path, sizeof path, "%s/tsconfig.json", app_dir);
-    if (n < 0 || (size_t)n >= sizeof path || access(path, F_OK) != 0) {
+    if (!hl_type_check_configured(app_dir)) {
         hl_eprintf_line("[hull:check] --types: no tsconfig.json in %s; "
                         "install the declarations with `hull types %s`", app_dir, app_dir);
         return 1;
     }
     char checker[PATH_MAX];
-    if (find_type_checker(app_dir, checker, sizeof checker) != 0) {
+    if (hl_type_check_find(app_dir, checker, sizeof checker) != 0) {
         fprintf(stderr, "[hull:check] --types: no TypeScript compiler found - install one "
                 "in the app (npm install --save-dev typescript) or on PATH (tsgo or tsc)\n");
         return 1;
@@ -66,10 +48,9 @@ static int check_types(const char *app_dir)
     if (rc != 0) return rc < 0 ? 1 : rc;
 
     char tests[PATH_MAX];
-    n = snprintf(tests, sizeof tests, "%s/tests", app_dir);
+    int n = snprintf(tests, sizeof tests, "%s/tests", app_dir);
     if (n < 0 || (size_t)n >= sizeof tests) return 1;
-    n = snprintf(path, sizeof path, "%s/tsconfig.json", tests);
-    if (n > 0 && (size_t)n < sizeof path && access(path, F_OK) == 0) {
+    if (hl_type_check_configured(tests)) {
         const char *targv[] = { checker, "--noEmit", "-p", tests, NULL };
         rc = hl_tool_spawn(targv);
         if (rc != 0) return rc < 0 ? 1 : rc;

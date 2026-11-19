@@ -144,6 +144,7 @@ _hull() {
                         '(-p --port)'{-p,--port}'[Listen port]:port:' \
                         '(-d --database)'{-d,--database}'[Database file]:file:_files' \
                         '--agent[Enable agent sidecar files]' \
+                        '--no-types[Do not type-check after each reload]' \
                         '--no-migrate[Skip auto-run migrations on startup]' \
                         '--no-sandbox[Disable kernel sandbox]' \
                         '--audit[Enable capability audit logging]' \

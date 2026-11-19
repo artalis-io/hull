@@ -54,11 +54,35 @@
 #define HL_DEV_SIDECAR_DEV_JSON   "dev.json"
 #define HL_DEV_SIDECAR_LAST_ERROR "last_error.json"
 #define HL_DEV_SIDECAR_DISCOVERY  "discovery.json"
+#define HL_DEV_SIDECAR_TYPES      "types.json"
 
-/* The JSON member that carries a discovery generation's MAC: always the LAST
- * member of the object, so the MAC'd document is the file with
- * `,"session_mac":"<64 hex>"` removed before the closing brace. */
+/* The JSON member that carries a document sidecar's MAC (discovery.json,
+ * types.json): always the LAST member of the object, so the MAC'd document is
+ * the file with `,"session_mac":"<64 hex>"` removed before the closing brace. */
 #define HL_DEV_DISCOVERY_MAC_KEY ",\"session_mac\":\""
+
+/* Split a document sidecar read into @p buf (@p len bytes, a trailing newline
+ * allowed) into the MAC'd document and its MAC: 1 with the document's closing
+ * brace written over the member's comma ("...}", length in *doc_len, not
+ * NUL-terminated: the byte after it is still the member's) and *mac pointing
+ * at its 64 hex digits; 0 when the file does not end in the MAC member. The
+ * caller ends the document (buf[*doc_len] = '\0') once the MAC verified. */
+static inline int hl_dev_sidecar_doc_split(char *buf, size_t len, size_t *doc_len,
+                                           const char **mac)
+{
+    size_t end = len;
+    if (end > 0 && buf[end - 1] == '\n') end--;
+    const size_t klen = sizeof(HL_DEV_DISCOVERY_MAC_KEY) - 1;
+    const size_t tail = klen + HL_DEV_SIDECAR_MAC_LEN + 2;   /* key + mac + "\"}" */
+    if (!(end > tail + 1 && buf[end - 1] == '}' && buf[end - 2] == '"' &&
+          memcmp(buf + end - tail, HL_DEV_DISCOVERY_MAC_KEY, klen) == 0))
+        return 0;
+    *mac = buf + end - tail + klen;
+    *doc_len = end - tail;            /* bytes before the member */
+    buf[*doc_len] = '}';              /* the MAC'd document: "...}" */
+    (*doc_len)++;
+    return 1;
+}
 
 /* 1 iff @p s is exactly 64 lowercase hex digits followed by NUL. */
 static inline int hl_dev_session_nonce_valid(const char *s)
@@ -178,5 +202,15 @@ static inline int hl_dev_sidecar_mac_ok(const char *nonce, const char *kind,
  * effort (shared/dev_last_error.c). */
 void hl_dev_last_error_write(const char *app_dir, const char *nonce,
                              long session_pid, const char *msg);
+
+/* Write <app_dir>/.hull/types.json: the JSON object @p doc (@p len bytes, a
+ * complete "{...}") with its MAC under `nonce` appended as the last member
+ * (HL_DEV_DISCOVERY_MAC_KEY, kind HL_DEV_SIDECAR_TYPES). Same rules as
+ * hl_dev_last_error_write; with no nonce nothing is written. */
+void hl_dev_types_write(const char *app_dir, const char *nonce, long session_pid,
+                        const char *doc, size_t len);
+
+/* Remove <app_dir>/.hull/types.json when it is a regular file of ours. */
+void hl_dev_types_remove(const char *app_dir);
 
 #endif /* HL_SHARED_DEV_SESSION_H */

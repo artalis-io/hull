@@ -10,6 +10,20 @@ release-artifact layout).
 
 ### Added
 
+- `hull dev` type-checks the app after each reload, when it has a `tsconfig.json` and a
+  TypeScript compiler is installed (the lookup `hull check --types` uses): one `--noEmit
+  --pretty false -p <app>` in the background, stopped by the next edit, never holding up or
+  deciding a reload. The diagnostics are summarised on stderr; under `--agent` they go to
+  `.hull/types.json`, MAC'd under the session key like the other sidecars, and `hull agent
+  errors` / MCP `hull_errors` serve them as `types` (`status`, `diagnostics` of `{file, line,
+  col, severity, code, message}`), a tampered file named under `types_ignored`. With no
+  `tsconfig.json` nothing runs, with no compiler one line says so, and `--no-types` turns it
+  off. Hull reads only the compiler's exit status and its diagnostic line (`FILE(LINE,COL):
+  SEVERITY CODE: MESSAGE`, the same in tsc and tsgo), keeping a line of another shape as
+  text; the compiler does not inherit the dev-session key. The compiler lookup and the line
+  parser are `shared/type_check.c`, shared with `hull check --types` (unit test
+  `test_type_check`), and `tests/e2e_dev_types.sh` (`make e2e-dev-types`, in CI) runs `hull
+  dev --agent` with a stand-in compiler.
 - `hull check --types [app_dir]` type-checks a TypeScript (or typed JavaScript) app before its
   other steps: the compiler runs over the app's `tsconfig.json` and then `tests/tsconfig.json`
   (both written by `hull types`) with `--noEmit`, and a type error fails the check with the

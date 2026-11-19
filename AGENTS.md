@@ -457,6 +457,7 @@ hull dev --agent --audit app.lua -p 3000
 The `--agent` flag enables:
 - `.hull/dev.json`. Written on start (port, PID, timestamp, and a MAC under the session key kept in `$HOME`; no secret), removed on stop
 - `.hull/last_error.json`. Written on app load failure (MAC'd under the session key), cleared on success and when the session starts / ends. `hull agent errors` serves it only while that session is live and its MAC verifies
+- `.hull/types.json`. The type check `hull dev` runs after each reload when the app has a `tsconfig.json` and a TypeScript compiler is installed (the app's `node_modules/.bin` or PATH, `tsgo` before `tsc`; `--no-types` turns it off): its status and diagnostics, its last member `session_mac`. `hull agent errors` serves it as `types` (`status` `ok` / `errors` / `failed`, `diagnostics` of `{file, line, col, severity, code, message}`, a line of another shape as `{message}`) only while that session is live and its MAC verifies, else names it under `types_ignored`. A type error never blocks a reload
 - `.hull/discovery.json`. The analyzed project model per (re)spawn, its last member `session_mac`; `hull agent inspect` streams it only when that verifies, else it runs a standalone analysis
 - `<app>/.hull` is Hull's own: app code cannot read, write, list or stat it (`reserved_path`), and an fs grant naming it fails the manifest
 
