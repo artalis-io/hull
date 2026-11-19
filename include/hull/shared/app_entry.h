@@ -14,6 +14,8 @@
 
 #include <stddef.h>
 
+#include "hull/entry.h"
+
 /* The TypeScript entry of the app at `app_dir` ("." when NULL or empty):
  * 1 with "<app_dir>/app.ts" (or app.mts) in `buf`; 0 when it has none; -1
  * with a message in `err` when one sits beside app.js, app.lua or the other
@@ -29,6 +31,13 @@ int hl_app_entry_is_ts(const char *name);
  * ".tsx"): a module the JavaScript runtime may run only as the pipeline's
  * erased output, never as the bytes on disk. */
 int hl_app_name_is_ts(const char *name);
+
+/* The entry a built binary embeds, by its entry-point name ("app.js",
+ * "app.ts", "app.mts", "app.lua"), or NULL when `entries` (a
+ * NULL-name-terminated array, hl_app_entries) holds none: hull build embeds
+ * a JS / TypeScript entry as "./app.js" / "./app.ts" / "./app.mts" and a Lua
+ * one as "./app". */
+const char *hl_app_entry_embedded(const HlEntry *entries);
 
 /* The JavaScript runtime's test file globs, NULL-terminated: its own and
  * the TypeScript names (HlRuntimeVtable.test_file_patterns, hull test). */

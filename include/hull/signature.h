@@ -114,6 +114,12 @@ typedef struct {
 typedef struct {
     const char *name;       /* relative path (e.g. "app.lua") */
     const char *hash_hex;   /* 64-char hex SHA-256 */
+    /* A file the build pipeline generated (package.sig `generated`): its
+     * hash is of the bytes embedded, and the source file of the same name
+     * hashes to `source_hex` (NULL: no such source; the entry is only ever
+     * embedded). docs/dev_pipeline_generations_design.md §6. */
+    int generated;
+    const char *source_hex;
 } HlSigFileEntry;
 
 typedef struct {
@@ -130,6 +136,7 @@ typedef struct {
     ShJsonValue *files_value;            /* "files" object (required) */
     ShJsonValue *manifest_value;         /* "manifest" value (may be null/absent) */
     ShJsonValue *modules_resolved_value; /* "modules_resolved" array (may be null) */
+    ShJsonValue *generated_value;        /* "generated" object (or NULL) */
 
     /* Platform layer (nested) */
     HlPlatformSig platform;

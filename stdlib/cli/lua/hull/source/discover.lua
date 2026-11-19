@@ -61,8 +61,17 @@ local function exclude_set(extra)
     return set
 end
 
--- A path is excluded if ANY of its segments is an excluded dir name (belt over the
--- returned paths, complementing exclude_dirs pruning during traversal).
+-- A path is excluded if ANY of its segments BELOW the root is an excluded dir name
+-- (belt over the returned paths, complementing exclude_dirs pruning during
+-- traversal). The root's own segments never count: an app at /home/u/build/app
+-- or /srv/vendor/app is the app, and was scanned as empty.
+local function below_root(path, root)
+    if root == "" then return path end
+    local prefix = (root == "/") and "/" or (root .. "/")
+    if path:sub(1, #prefix) == prefix then return path:sub(#prefix + 1) end
+    return path
+end
+
 local function excluded(path, set)
     for seg in path:gmatch("[^/]+") do
         if set[seg] then return true end
@@ -86,6 +95,7 @@ function M.discover(root, opts)
     for _, s in ipairs(M.DEFAULT_EXCLUDE) do exclude_list[#exclude_list + 1] = s end
     for _, s in ipairs(opts.extra_exclude or {}) do exclude_list[#exclude_list + 1] = s end
     local set = exclude_set(opts.extra_exclude)
+    local nroot = M.normalize(root)
 
     local out, seen = {}, {}
     for _, ext in ipairs(exts) do
@@ -93,7 +103,7 @@ function M.discover(root, opts)
         if err then return nil, err end                      -- fail closed; caller decides
         for _, p in ipairs(files) do
             local n = M.normalize(p)
-            if not excluded(n, set) and not seen[n] then
+            if not excluded(below_root(n, nroot), set) and not seen[n] then
                 seen[n] = true; out[#out + 1] = n
             end
         end

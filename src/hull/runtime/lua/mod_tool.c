@@ -46,7 +46,8 @@
 #include "hull/cap/gpu.h"        /* tool.gpu_shaders_check */
 #include "hull/release.h"        /* hl_release_verify_manifest_sig */
 #include "hull/signature.h"  /* HL_PLATFORM_PUBKEY_HEX */
-#include "hull/manifest_extract_file.h"  /* extract_manifest_js helper */
+#include "hull/manifest_extract_file.h"
+#include "hull/shared/generation.h"   /* hl_generation_fd */  /* extract_manifest_js helper */
 #ifdef HL_FRONTEND_JS
 #include "hull/frontend/js_generation.h"  /* JS source-frontend generation/session manager */
 #endif
@@ -857,6 +858,11 @@ static int l_tool_stdout_raw(lua_State *L)
 static int l_tool_extract_manifest_js(lua_State *L)
 {
     const char *path = luaL_checkstring(L, 1);
+    /* An optional pipeline generation (a bundle string): the child loads
+     * the entry with its overlay installed (hull build of an app with
+     * pipeline work - a TypeScript entry runs only from it). */
+    size_t gen_len = 0;
+    const char *gen = luaL_optlstring(L, 2, NULL, &gen_len);
     HlToolUnveilCtx *uctx = get_unveil_ctx(L);
     if (uctx && hl_tool_unveil_check(uctx, path, 'r') != 0)
         return luaL_error(L, "tool.extract_manifest_js: %s: not readable in "
@@ -873,8 +879,16 @@ static int l_tool_extract_manifest_js(lua_State *L)
     lua_getglobal(L, "__hull_exe");
     if (lua_isstring(L, -1)) hull_exe = lua_tostring(L, -1);
 
-    int rc = hl_manifest_extract_js_from_file(path, hull_exe,
-                                              &json, &json_len, &err);
+    int gen_fd = -1;
+    if (gen) {
+        gen_fd = hl_generation_fd((const uint8_t *)gen, gen_len);
+        if (gen_fd < 0)
+            return luaL_error(L, "tool.extract_manifest_js: cannot hand over "
+                              "the pipeline generation: %s", strerror(errno));
+    }
+    int rc = hl_manifest_extract_js_with_generation(path, hull_exe, gen_fd,
+                                                    &json, &json_len, &err);
+    if (gen_fd >= 0) close(gen_fd);
     lua_pop(L, 1);   /* __hull_exe - popped only after the call, which borrows it */
     if (rc != 0) {
         /* The message carries the app's own error text: escaped, as the

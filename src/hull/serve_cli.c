@@ -28,6 +28,7 @@
  */
 
 #include "hull/shared/generation.h"
+#include "hull/shared/app_entry.h"
 #include "hull/shared/term_escape.h"  /* hl_eprintf_line */
 #include "hull/app_context.h"
 #include "hull/entry.h"        /* HlEntry / hl_app_entries[] (embedded apps) */
@@ -102,11 +103,7 @@ static const char **build_env_allowlist(const HlManifest *m)
 static int embedded_app_present(void)
 {
     extern const HlEntry hl_app_entries[];
-    for (int i = 0; hl_app_entries[i].name; i++)
-        if (strcmp(hl_app_entries[i].name, "./app.js") == 0 ||
-            strcmp(hl_app_entries[i].name, "./app") == 0)
-            return 1;
-    return 0;
+    return hl_app_entry_embedded(hl_app_entries) != NULL;
 }
 
 /* Extract entry point (first positional arg) and the `--` separator.
@@ -496,11 +493,7 @@ int hull_serve(int argc, char **argv)
         }
     } else {
         extern const HlEntry hl_app_entries[];
-        const char *embedded = NULL;
-        for (int i = 0; hl_app_entries[i].name; i++) {
-            if (strcmp(hl_app_entries[i].name, "./app.js") == 0) { embedded = "app.js"; break; }
-            if (strcmp(hl_app_entries[i].name, "./app") == 0)    { embedded = "app.lua"; break; }
-        }
+        const char *embedded = hl_app_entry_embedded(hl_app_entries);
         if (!embedded) {
             fprintf(stderr,
                 "hull: no entry point given. Usage: hull run <app.lua|app.js> "

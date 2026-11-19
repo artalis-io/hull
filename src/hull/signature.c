@@ -153,6 +153,7 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
     sig->files_value = sh_json_get(root, "files");
     sig->manifest_value = sh_json_get(root, "manifest");
     sig->modules_resolved_value = sh_json_get(root, "modules_resolved");
+    sig->generated_value = sh_json_get(root, "generated");
 
     /* Required fields */
     if (!sig->signature_hex || !sig->public_key_hex || !sig->files_value) {
@@ -168,7 +169,7 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
      * this one. Refused. */
     if (!sig->binary_hash_hex &&
         (sh_json_get(root, "platform") || sh_json_get(root, "modules_resolved") ||
-         sig->trampoline_hash_hex || sig->build_value)) {
+         sig->trampoline_hash_hex || sig->build_value || sig->generated_value)) {
         hl_sig_free(sig);
         return -1;
     }
@@ -262,6 +263,30 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
         }
     }
 
+    /* Generated files: each names a signed file, with its provenance (an
+     * object); a source hash, when present, is a string. */
+    if (sig->generated_value) {
+        if (sig->generated_value->type != SH_JSON_OBJECT) {
+            hl_sig_free(sig);
+            return -1;
+        }
+        for (size_t g = 0; g < sig->generated_value->u.object_val.count; g++) {
+            const ShJsonMember *m = &sig->generated_value->u.object_val.members[g];
+            size_t i = 0;
+            while (i < sig->entry_count && strcmp(sig->entries[i].name, m->key) != 0)
+                i++;
+            const ShJsonValue *src = m->value && m->value->type == SH_JSON_OBJECT
+                                     ? sh_json_get(m->value, "source") : NULL;
+            if (i == sig->entry_count || !m->value || m->value->type != SH_JSON_OBJECT ||
+                (src && !sh_json_as_string(src, NULL))) {
+                hl_sig_free(sig);
+                return -1;
+            }
+            sig->entries[i].generated = 1;
+            sig->entries[i].source_hex = src ? sh_json_as_string(src, NULL) : NULL;
+        }
+    }
+
     return 0;
 }
 
@@ -305,6 +330,13 @@ int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32])
 
         sh_json_write_key(&w, "files");
         sig_write_value(&w, sig->files_value);
+
+        /* generated: the pipeline-generated files' provenance. Optional -
+         * absent when the build embedded none. */
+        if (sig->generated_value) {
+            sh_json_write_key(&w, "generated");
+            sig_write_value(&w, sig->generated_value);
+        }
 
         sh_json_write_key(&w, "manifest");
         sig_write_value(&w, sig->manifest_value);
@@ -611,6 +643,14 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
          * AOT from disk, so a disk copy is neither checked nor run. */
         if (strncmp(name, "compute/", 8) == 0 && strstr(name, ".aot."))
             continue;
+        /* A generated file's signed hash is of the bytes embedded; the
+         * source file of that name is checked against its recorded source
+         * hash instead, and one with none is only ever embedded. */
+        if (sig->entries[i].generated) {
+            if (!sig->entries[i].source_hex)
+                continue;
+            expected_hash = sig->entries[i].source_hex;
+        }
 
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", app_dir, name);
