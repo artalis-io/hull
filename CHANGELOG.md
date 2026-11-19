@@ -171,6 +171,12 @@ release-artifact layout).
 
 ### Fixed
 
+- `hull test` / `hull agent test` of a JavaScript app named by an absolute path through a
+  symbolic link (`/var/...` on macOS, which is `/private/var/...`) no longer fails a test file's
+  relative import with "module not found". The test runner finds test files under the canonical
+  app directory, but the entry's directory was left as named, so the import resolved outside the
+  app. An absolute entry's directory is now made canonical as a relative one's is. Covered by
+  `make e2e-test-harness`.
 - A build plugin now runs on the `app.main` runner too (a hull built without the HTTP server,
   `HL_ENABLE_HTTP=0`): it took no channel from `HULL_BUILD_PLUGIN_FD` and applied no manifest
   preset, so `app.transform` reported no build host and a refused manifest still started. It now
