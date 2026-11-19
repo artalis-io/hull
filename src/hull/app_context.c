@@ -296,8 +296,12 @@ static int resolve_entry_and_runtime(HlAppContext *ctx,
         /* Caller provided entry point - match factory by file extension. */
         ctx->factory = hl_runtime_factory_for_filename(entry);
         /* A disk entry is named absolutely, as the directory is (see
-         * abs_normalized); an embedded one is a VFS key and left alone. */
-        if (ctx->app_dir_abs && entry[0] != '/') {
+         * abs_normalized); an embedded one is a VFS key and left alone. An
+         * absolute entry's directory is made canonical too: named through a
+         * symbolic link (/var -> /private/var) it did not match the app
+         * directory, under which the test runner finds test files, so a JS
+         * test file's relative import resolved outside the app. */
+        if (ctx->app_dir_abs) {
             /* Kept as given when it cannot be made absolute (as the
              * directory is, below). */
             char *abs = abs_entry_path(entry);
