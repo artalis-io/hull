@@ -17,6 +17,7 @@
 
 local json = require("hull.json")
 local hex = require("hull.encoding").hex
+local crypto = require("hull.crypto")
 local fcompose = require("hull.feature_compose")
 
 -- App-derived text (a file name from the app's tree) is printed through
@@ -572,6 +573,10 @@ local function collect_app_entries(app_dir, files)
         end
         entries[#entries + 1] = { name = item.entry_name, data = data }
     end
+    -- The pipeline's generated files, in place of the ones they shadow.
+    for _, g in ipairs(files.generated or {}) do
+        entries[#entries + 1] = { name = g.entry_name, data = g.bytes }
+    end
     -- Two files must not embed under one name, as in generate_app_registry:
     -- this (the default, compiler-free) path had no such check, and the
     -- built binary aborted at startup on hl_vfs_init's sorted-order assert
@@ -649,14 +654,8 @@ local function generate_app_registry(app_dir, files)
     parts[#parts + 1] = "/* Auto-generated unified app registry by hull build - do not edit */"
     parts[#parts + 1] = ""
 
-    -- Helper to embed a file and add an entry
-    local function add_file(path, entry_name, var_prefix)
-        local data = read_file(path)
-        if not data then
-            tool.stderr("hull build: cannot read " .. esc(path) .. "\n")
-            tool.exit(1)
-        end
-
+    -- Helper to embed bytes and add an entry
+    local function add_data(data, entry_name, var_prefix)
         local varname = next_var(var_prefix)
 
         parts[#parts + 1] = xxd_data(varname, data)
@@ -664,6 +663,21 @@ local function generate_app_registry(app_dir, files)
 
         entries[#entries + 1] = { name = entry_name, line = string.format(
             '    { "%s", %s, sizeof(%s) },', c_string_escape(entry_name), varname, varname) }
+    end
+
+    -- Helper to embed a file and add an entry
+    local function add_file(path, entry_name, var_prefix)
+        local data = read_file(path)
+        if not data then
+            tool.stderr("hull build: cannot read " .. esc(path) .. "\n")
+            tool.exit(1)
+        end
+        add_data(data, entry_name, var_prefix)
+    end
+
+    -- The pipeline's generated files, in place of the ones they shadow.
+    for _, g in ipairs(files.generated or {}) do
+        add_data(g.bytes, g.entry_name, "gen_")
     end
 
     -- Lua modules: "./path" (no .lua extension)
@@ -853,6 +867,17 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
         end
         file_hashes[item.entry_name] = hex.encode(crypto.sha256(data))
     end
+    -- The pipeline's generated files are signed as embedded (their own
+    -- bytes, under the name of the file they shadow), with their provenance:
+    -- the plugin and action key that made each, and the hash of the source
+    -- file of that name, which a check of the source tree compares instead
+    -- (docs/dev_pipeline_generations_design.md §6).
+    local generated = nil
+    for _, g in ipairs(files.generated or {}) do
+        file_hashes[g.name] = hex.encode(crypto.sha256(g.bytes))
+        generated = generated or {}
+        generated[g.name] = { key = g.origin.key, plugin = g.origin.plugin, source = g.source }
+    end
 
     -- Capture the app's manifest (shared with main's --flavor validation).
     local manifest = extract_app_manifest(app_dir)
@@ -972,6 +997,7 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
             flags = "-std=c11 -O2",
         },
         files = file_hashes,
+        generated = generated,
         manifest = manifest,
         modules_resolved = modules_resolved,
         platform = platform,
@@ -985,6 +1011,7 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
         binary_hash = sign_ctx.binary_hash,
         build = payload_table.build,
         files = file_hashes,
+        generated = generated,
         manifest = manifest,
         modules_resolved = modules_resolved,
         platform = platform,
@@ -1955,22 +1982,94 @@ local function without_plugin_dirs(files, prefixes)
     return out
 end
 
-local function discover(opts)
-    -- A TypeScript app runs from source (hull dev / hull test / hull app.ts);
-    -- embedding its erased modules is not built yet (docs/typescript_design.md §4.4).
-    for _, name in ipairs({ "app.ts", "app.mts" }) do
-        if tool.file_exists(opts.app_dir .. "/" .. name) then
-            tool.stderr("hull build: " .. tool.escape(name) .. " is a TypeScript entry; hull build "
-                .. "does not build TypeScript apps yet (run it with hull dev or hull " .. name .. ")\n")
+-- The name a generated entry embeds under: the name the runtime looks the
+-- file it shadows up by (a Lua module without .lua, a JS / TypeScript / JSON
+-- module "./"-prefixed, an asset bare), or nil for a name hull build does
+-- not embed.
+local GENERATED_ASSET_DIRS = { templates = true, static = true, migrations = true,
+                               compute = true, shaders = true }
+local function generated_entry_name(name)
+    if name:match("%.lua$") then return "./" .. name:gsub("%.lua$", "") end
+    for _, ext in ipairs({ ".js", ".mjs", ".cjs", ".ts", ".mts", ".json" }) do
+        if name:sub(-#ext) == ext then return "./" .. name end
+    end
+    local top = name:match("^([^/]+)/")
+    if top and GENERATED_ASSET_DIRS[top] then return name end
+    return nil
+end
+
+-- An app with pipeline work (build plugins, or a TypeScript entry, whose
+-- modules the erasure route makes) is built from its pipeline generation:
+-- the generated entries are embedded under the names of the files they
+-- shadow, and the manifest is extracted from them
+-- (docs/dev_pipeline_generations_design.md §1.1, §6;
+-- docs/typescript_design.md §4.4). nil when the app has no pipeline work.
+local function pipeline_generation(app_dir)
+    if not (file_exists(app_dir .. "/hull.build.json") or file_exists(app_dir .. "/app.ts")
+            or file_exists(app_dir .. "/app.mts")) then
+        return nil
+    end
+    local root = tool.realpath(app_dir)
+    if not root then
+        tool.stderr("hull build: " .. esc(app_dir) .. ": not a directory\n")
+        tool.exit(1)
+    end
+    local g, bundle, err = require("hull.buildctx.generation").produce(root, {
+        sha256_hex = function(d) return hex.encode(crypto.sha256(d)) end,
+        report = function(r, d)
+            local where = d.path and (d.path .. ": ") or ""
+            tool.stderr(("hull build: %s: %s %s: %s%s\n"):format(r.identity, d.severity,
+                d.code, where, d.message))
+        end,
+    })
+    if not g then
+        tool.stderr("hull build: " .. err .. "\n")
+        tool.exit(1)
+    end
+    for _, e in ipairs(g.entries) do
+        e.entry_name = generated_entry_name(e.name)
+        if not e.entry_name then
+            tool.stderr("hull build: the pipeline generated " .. esc(e.name) .. ", which hull "
+                .. "build does not embed (a module - .lua, .js, .mjs, .cjs, .ts, .mts, "
+                .. ".json - or a file under templates/, static/, migrations/, compute/ "
+                .. "or shaders/)\n")
             tool.exit(1)
         end
+        local src = read_file(app_dir .. "/" .. e.name)
+        e.source = src and hex.encode(crypto.sha256(src)) or nil
     end
-    local plugin_dirs = plugin_dir_prefixes(opts.app_dir)
-    local lua_files = without_plugin_dirs(find_lua_files(opts.app_dir), plugin_dirs)
-    local js_files = without_plugin_dirs(find_js_files(opts.app_dir), plugin_dirs)
-    local json_files = without_plugin_dirs(find_json_files(opts.app_dir), plugin_dirs)
+    fcompose.set_generation(app_dir, bundle)
+    if #g.entries > 0 then
+        print("hull build: " .. #g.entries .. " generated file(s) from the build pipeline")
+    end
+    return g
+end
 
-    if #lua_files == 0 and #js_files == 0 then
+-- `files` without the paths a generated entry shadows (its name, under
+-- app_dir): the generated bytes are embedded in their place.
+local function without_shadowed(files, app_dir, generated)
+    if not generated or #generated == 0 then return files end
+    local shadowed = {}
+    for _, e in ipairs(generated) do shadowed[app_dir .. "/" .. e.name] = true end
+    local out = {}
+    for _, f in ipairs(files) do
+        if not shadowed[f] then out[#out + 1] = f end
+    end
+    return out
+end
+
+local function discover(opts)
+    local gen = pipeline_generation(opts.app_dir)
+    local generated = gen and gen.entries or {}
+    local plugin_dirs = plugin_dir_prefixes(opts.app_dir)
+    local lua_files = without_shadowed(without_plugin_dirs(find_lua_files(opts.app_dir), plugin_dirs),
+                                       opts.app_dir, generated)
+    local js_files = without_shadowed(without_plugin_dirs(find_js_files(opts.app_dir), plugin_dirs),
+                                      opts.app_dir, generated)
+    local json_files = without_shadowed(without_plugin_dirs(find_json_files(opts.app_dir), plugin_dirs),
+                                        opts.app_dir, generated)
+
+    if #lua_files == 0 and #js_files == 0 and #generated == 0 then
         tool.stderr("hull build: no .lua or .js files found in " .. opts.app_dir .. "\n")
         tool.exit(1)
     end
@@ -2287,12 +2386,14 @@ typedef struct {
         opts.flavor = picked
     end
 
+    local function unshadowed(files) return without_shadowed(files, opts.app_dir, generated) end
     return {
         lua_files = lua_files, js_files = js_files, json_files = json_files,
-        tmpdir = tmpdir, html_files = html_files, static_files = static_files,
-        migration_files = migration_files, compute_files = compute_files,
-        shader_files = shader_files, cc = cc, is_cosmo = is_cosmo,
-        prebuilt_aot = prebuilt_aot,
+        tmpdir = tmpdir, html_files = unshadowed(html_files),
+        static_files = unshadowed(static_files),
+        migration_files = unshadowed(migration_files), compute_files = unshadowed(compute_files),
+        shader_files = unshadowed(shader_files), cc = cc, is_cosmo = is_cosmo,
+        prebuilt_aot = prebuilt_aot, generated = generated,
     }
 end
 
@@ -2636,6 +2737,7 @@ local function main()
         compute     = compute_files,
         compute_aot = compute_aot,
         shaders     = shader_files,
+        generated   = ctx.generated,
     }
 
     -- The invariant app_main trampoline source. On the default path it's
@@ -2964,6 +3066,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             compute = compute_files,
             shaders = shader_files,
             compute_aot = compute_aot,
+            generated = ctx.generated,
         }, tmpdir, opts.output)
         if not sok then
             sign_fail("hull build --sign: " .. tostring(serr), tmpdir, opts.output)

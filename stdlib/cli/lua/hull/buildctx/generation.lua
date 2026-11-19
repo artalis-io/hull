@@ -12,6 +12,10 @@
 --   --       of one name, a name an app cannot be handed)
 --   local bundle = gen.encode(g, sha256_hex)
 --
+--   -- or both, from a pipeline run over the app at `root`:
+--   local g, bundle, err = gen.produce(root, { sha256_hex = ..., report = fn })
+--   -- report(r, d) is called for each result's diagnostic d
+--
 -- Only generated outputs become entries (an artifact is not an app file). A
 -- tree output's files are named <output>/<path>. The inputs are every
 -- workspace path a result's dependency manifest observed: what `hull dev`
@@ -134,6 +138,28 @@ function M.encode(g, sha256_hex)
     local parts = { M.MAGIC, tostring(#man), "\n", man }
     for _, e in ipairs(g.entries) do parts[#parts + 1] = e.bytes end
     return table.concat(parts)
+end
+
+-- Run the pipeline over the app at `root` and make its generation:
+-- g, bundle, or nil, nil, err, stage ("run": the pipeline could not run -
+-- a registry or discovery error; "generation": a plugin failed or its
+-- outputs make no generation). `hull plugins generation` and `hull build`
+-- (which embeds the entries) call it. opts: sha256_hex (required), report
+-- (r, d) for each diagnostic, and pipeline.run's own options.
+function M.produce(root, opts)
+    local sha256_hex = opts.sha256_hex
+    local results, err = require("hull.buildctx.pipeline").run(root, opts)
+    if not results then return nil, nil, err, "run" end
+    if opts.report then
+        for _, r in ipairs(results) do
+            for _, d in ipairs(r.diagnostics or {}) do opts.report(r, d) end
+        end
+    end
+    local g, gerr = M.from_results(results, sha256_hex)
+    if not g then return nil, nil, "the pipeline failed: " .. gerr, "generation" end
+    local bundle, eerr = M.encode(g, sha256_hex)
+    if not bundle then return nil, nil, eerr, "generation" end
+    return g, bundle
 end
 
 return M

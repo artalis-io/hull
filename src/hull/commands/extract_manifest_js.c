@@ -24,9 +24,11 @@
 #include "hull/commands/extract_manifest_js.h"
 #include "hull/manifest_extract_file.h"
 #include "hull/runtime/cache_common.h"   /* hl_runtime_cache_code_off */
+#include "hull/shared/generation.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 int hl_cmd_extract_manifest_js(int argc, char **argv, const HlCommandEnv *env)
 {
@@ -37,7 +39,7 @@ int hl_cmd_extract_manifest_js(int argc, char **argv, const HlCommandEnv *env)
      * other handler, which all start their scan at i = 1. */
     if (argc < 3) {
         fprintf(stderr,
-                "usage: hull __extract-manifest-js <entry.js> <result-file>\n"
+                "usage: hull __extract-manifest-js <entry.js> <result-file> [<generation fd>]\n"
                 "  (internal - used by hull build to isolate JS manifest "
                 "extraction)\n");
         return 2;
@@ -45,6 +47,20 @@ int hl_cmd_extract_manifest_js(int argc, char **argv, const HlCommandEnv *env)
 
     const char *path        = argv[1];
     const char *result_path = argv[2];
+    /* `hull build` of an app with pipeline work hands the generation it
+     * embeds on the descriptor named by the third operand
+     * (hl_manifest_extract_js_with_generation). */
+    int gen_fd = -1;
+    if (argc >= 4) {
+        char *end = NULL;
+        long l = strtol(argv[3], &end, 10);
+        if (!end || *end != '\0' || end == argv[3] || l < 3 || l > 65535) {
+            fprintf(stderr, "hull __extract-manifest-js: bad descriptor %s\n",
+                    argv[3]);
+            return 2;
+        }
+        gen_fd = (int)l;
+    }
 
     /* Its manifest is what hull build signs: no stdlib bytecode from the
      * runtime-key caches an app process can write (audit 22). */
@@ -68,6 +84,16 @@ int hl_cmd_extract_manifest_js(int argc, char **argv, const HlCommandEnv *env)
     char  *json = NULL;
     char  *err  = NULL;
     size_t len  = 0;
+
+    /* The overlay is installed before the entry runs: a TypeScript entry and
+     * its .ts imports load from the generation, never from disk. */
+    if (gen_fd >= 0 &&
+        (hl_generation_take_fd(gen_fd) < 0 || hl_generation_apply(0) != 0)) {
+        const char *why = hl_generation_error();
+        (void)hl_manifest_extract_write_result(result_path, "err", why,
+                                               strlen(why));
+        return 1;
+    }
 
     /* Writes the result itself, before teardown. Its return value only tells
      * us the exit code to use; the parent reads the file either way. */
