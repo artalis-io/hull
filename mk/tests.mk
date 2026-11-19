@@ -2238,7 +2238,7 @@ e2e-tui: $(E2E_TUI_DEPS)
 hull-test-examples: $(BUILDDIR)/hull
 	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \
 	            examples/jwt_api examples/crud_with_auth examples/middleware examples/webhooks \
-	            examples/entry examples/timers examples/cli_modular; do \
+	            examples/entry examples/timers examples/cli_modular examples/tui_modular; do \
 		echo "=== hull test $$dir ===" && \
 		output=$$($(BUILDDIR)/hull test "$$dir" 2>&1; true) && \
 		echo "$$output" && \

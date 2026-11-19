@@ -171,6 +171,10 @@ release-artifact layout).
 
 ### Fixed
 
+- The test `hull new --type tui` scaffolds (and `examples/tui_modular`'s) loads its view again:
+  it required `./../../views/menu`, a path relative to the test file, but a Lua test file's
+  `require` resolves from the app root, so the test failed with "module not found". It now
+  requires `./views/menu`, and `make hull-test-examples` (CI) runs `examples/tui_modular`.
 - `hull test` / `hull agent test` of a JavaScript app named by an absolute path through a
   symbolic link (`/var/...` on macOS, which is `/private/var/...`) no longer fails a test file's
   relative import with "module not found". The test runner finds test files under the canonical
