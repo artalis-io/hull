@@ -86,6 +86,8 @@ cd myapp
 #   --type rest   modular REST API (routes/ models/ middleware/ lib/)
 #   --type cli    modular CLI tool (commands/ + lib/)
 #   --type tui    modular TUI app  (views/ + lib/, Lua-only)
+# and pick the language with --runtime lua (default), js or ts
+# (TypeScript, with the API's declarations and a tsconfig.json; hull init too):
 hull new --type rest myapp
 
 # Run in development mode (hot reload)

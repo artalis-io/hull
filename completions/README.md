@@ -53,7 +53,7 @@ Completions take effect immediately on a new shell.
 
 * All 19 subcommands with descriptions
 * `hull build --compiler=` → `tcc`, `system`, `cc`, `gcc`, `clang`, `cosmocc`
-* `hull new` / `hull init --runtime=` → `lua`, `js`
+* `hull new` / `hull init --runtime=` → `lua`, `js`, `ts`
 * `hull agent <sub>` → `routes`, `db`, `request`, `status`, `errors`, `test`, `context`, `migrate`, `deploy`
 * `hull agent db <sub>` → `schema`, `query`
 * `hull agent request <method>` → `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`

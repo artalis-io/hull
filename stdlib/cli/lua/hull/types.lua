@@ -166,9 +166,12 @@ local TSCONFIG_TESTS = [[{
 }
 ]]
 
-local function main()
-    local opts = parse_args()
+-- opts: from the command line, or from `hull new --runtime ts`, which passes
+-- { dir = <new app>, quiet = true } and prints its own summary.
+local function main(opts)
+    opts = opts or parse_args()
     if opts.help then usage() return end
+    local print = opts.quiet and function() end or print
 
     local kind = tool.path_kind(opts.dir)
     if kind ~= "dir" then fail("'" .. opts.dir .. "' is not a directory") end

@@ -193,15 +193,15 @@ _hull() {
 
                 new)
                     _arguments \
-                        '--runtime[Runtime]:runtime:('"${runtimes[@]}"')' \
-                        '--runtime=[Runtime]:runtime:('"${runtimes[@]}"')' \
+                        '--runtime[Runtime]:runtime:(lua js ts)' \
+                        '--runtime=[Runtime]:runtime:(lua js ts)' \
                         '*:dir:_files -/'
                     ;;
 
                 init)
                     _arguments \
-                        '--runtime[Runtime]:runtime:('"${runtimes[@]}"')' \
-                        '--runtime=[Runtime]:runtime:('"${runtimes[@]}"')' \
+                        '--runtime[Runtime]:runtime:(lua js ts)' \
+                        '--runtime=[Runtime]:runtime:(lua js ts)' \
                         '*:dir:_files -/'
                     ;;
 

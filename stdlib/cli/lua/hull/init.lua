@@ -1,7 +1,7 @@
 --
 -- hull.init - Initialize a Hull project in the current (or specified) directory
 --
--- Usage: hull init [dir] [--runtime lua|js] [--cli] [--profile <name>]
+-- Usage: hull init [dir] [--runtime lua|js|ts] [--cli] [--profile <name>]
 --
 -- Unlike `hull new`, init is idempotent: it creates missing files but never
 -- overwrites existing ones. Works in-place like `git init`.
@@ -18,6 +18,8 @@
 --
 
 -- ── File templates (same content as hull.new) ────────────────────────
+
+local ts = require("hull.templates_ts")
 
 local templates = {}
 
@@ -1499,10 +1501,27 @@ local function ensure_file(path, content)
     return false
 end
 
+-- The entries an app directory may hold, and the runtime each scaffolds
+-- with. A TypeScript entry beside any other is ambiguous to every runner
+-- (docs/typescript_design.md §4.4); Lua and JavaScript may coexist.
+local ENTRIES = {
+    { file = "app.lua", runtime = "lua" },
+    { file = "app.js",  runtime = "js"  },
+    { file = "app.ts",  runtime = "ts"  },
+    { file = "app.mts", runtime = "ts"  },
+}
+
+local function existing_entries(dir)
+    local found = {}
+    for _, e in ipairs(ENTRIES) do
+        if file_exists(dir .. "/" .. e.file) then found[#found + 1] = e end
+    end
+    return found
+end
+
 local function detect_existing_runtime(dir)
-    if file_exists(dir .. "/app.lua") then return "lua" end
-    if file_exists(dir .. "/app.js")  then return "js"  end
-    return nil
+    local found = existing_entries(dir)
+    return found[1] and found[1].runtime or nil
 end
 
 -- Detect mode from an existing app file: returns "cli" if app.main is
@@ -1510,9 +1529,11 @@ end
 -- unreadable.
 local function detect_existing_mode(dir, runtime)
     if not runtime then return nil end
-    local ext = (runtime == "js") and ".js" or ".lua"
-    local path = dir .. "/app" .. ext
-    if not file_exists(path) then return nil end
+    local path
+    for _, e in ipairs(existing_entries(dir)) do
+        if e.runtime == runtime then path = dir .. "/" .. e.file break end
+    end
+    if not path then return nil end
     local content = tool.read_file(path)
     if not content then return nil end
     if content:find("app%.main%s*%(", 1, false) then return "cli" end
@@ -1529,7 +1550,7 @@ Idempotent. Creates missing files without overwriting existing ones
 (like `git init`).
 
 Options:
-  --runtime lua|js     Pick the runtime. Default: auto-detect from
+  --runtime lua|js|ts  Pick the runtime. Default: auto-detect from
                        existing files; else lua.
   --cli                Scaffold a CLI app (app.main) instead of a
                        server. Mutually exclusive with --profile.
@@ -1634,10 +1655,18 @@ end
 -- AFTER the default scaffold has run, so it only adds files that
 -- don't conflict with the base set. Uses the same track_file/track_dir
 -- helpers (passed in) so created/skipped output stays consistent.
-local function scaffold_htmx(dir, runtime, track_file, track_dir)
-    local ext  = (runtime == "js") and ".js" or ".lua"
-    local app_template  = (runtime == "js") and templates.htmx_js_app  or templates.htmx_lua_app
-    local test_template = (runtime == "js") and templates.htmx_test_js or templates.htmx_test_lua
+local function scaffold_htmx(dir, runtime, track_file, track_dir, entry_file)
+    local ext  = (runtime == "js" and ".js") or (runtime == "ts" and ".ts") or ".lua"
+    local js   = runtime == "js" or runtime == "ts"
+    local app_template  = js and templates.htmx_js_app  or templates.htmx_lua_app
+    local test_template = js and templates.htmx_test_js or templates.htmx_test_lua
+    if runtime == "ts" then
+        app_template  = ts.from_js_text(app_template)
+        test_template = ts.from_js_text(test_template)
+        -- A string, not the literal type of the secret baked in below:
+        -- the placeholder check compares it with another literal.
+        app_template  = app_template:gsub("const CSRF_SECRET = ", "const CSRF_SECRET: string = ", 1)
+    end
 
     -- Bake a fresh CSRF secret into this scaffold's app file.
     app_template = inject_csrf_secret(app_template, fresh_csrf_secret())
@@ -1647,7 +1676,7 @@ local function scaffold_htmx(dir, runtime, track_file, track_dir)
     -- only writes when the default scaffold didn't have to (first run
     -- in an empty dir). For idempotency in subsequent runs the user's
     -- modified copy is preserved.
-    track_file(dir .. "/app" .. ext,            app_template)
+    track_file(dir .. "/" .. entry_file,         app_template)
     track_file(dir .. "/tests/test_app" .. ext, test_template)
 
     -- Template hierarchy.
@@ -1703,8 +1732,9 @@ local function main()
     local dir = opts.dir
 
     -- Validate runtime flag if given
-    if opts.runtime and opts.runtime ~= "lua" and opts.runtime ~= "js" then
-        refuse("invalid runtime '" .. tool.escape(opts.runtime) .. "' (use lua or js)")
+    if opts.runtime and opts.runtime ~= "lua" and opts.runtime ~= "js"
+       and opts.runtime ~= "ts" then
+        refuse("invalid runtime '" .. tool.escape(opts.runtime) .. "' (use lua, js or ts)")
     end
 
     -- Create target directory if needed
@@ -1720,6 +1750,23 @@ local function main()
     local existing_runtime = detect_existing_runtime(dir)
     local runtime = opts.runtime or existing_runtime or "lua"
 
+    -- A TypeScript entry may not sit beside another entry: refuse to add one
+    -- that would make the app ambiguous, before anything is written.
+    for _, e in ipairs(existing_entries(dir)) do
+        if e.runtime ~= runtime and (e.runtime == "ts" or runtime == "ts") then
+            refuse(tool.escape(dir) .. " already has " .. e.file ..
+                   "; a TypeScript entry beside another entry is ambiguous " ..
+                   "(use --runtime " .. e.runtime .. ", or remove it)")
+        end
+    end
+    -- An app.mts counts as the TypeScript entry already there.
+    local entry_file = "app" .. ((runtime == "js" and ".js") or
+                                 (runtime == "ts" and ".ts") or ".lua")
+    if runtime == "ts" and not file_exists(dir .. "/app.ts")
+       and file_exists(dir .. "/app.mts") then
+        entry_file = "app.mts"
+    end
+
     -- Detect or choose mode (CLI vs server). Priority:
     --   1. --cli flag (explicit opt-in)
     --   2. existing app file content (app.main → cli, else server)
@@ -1727,9 +1774,12 @@ local function main()
     local existing_mode = detect_existing_mode(dir, existing_runtime)
     local cli_mode = opts.cli or (existing_mode == "cli")
 
-    local ext = runtime == "js" and ".js" or ".lua"
+    local ext = (runtime == "js" and ".js") or (runtime == "ts" and ".ts") or ".lua"
     local app_template, test_template
-    if cli_mode then
+    if runtime == "ts" then
+        app_template  = cli_mode and ts.cli_app  or ts.app
+        test_template = cli_mode and ts.cli_test or ts.test
+    elseif cli_mode then
         app_template  = runtime == "js" and templates.js_cli_app  or templates.lua_cli_app
         test_template = runtime == "js" and templates.js_cli_test or templates.lua_cli_test
     else
@@ -1770,7 +1820,7 @@ local function main()
                 tool.stderr("hull init: --profile htmx requires server mode (omit --cli)\n")
                 tool.exit(1)
             end
-            scaffold_htmx(dir, runtime, track_file, track_dir)
+            scaffold_htmx(dir, runtime, track_file, track_dir, entry_file)
         else
             tool.stderr("hull init: unknown profile '" .. opts.profile ..
                         "' (supported: htmx)\n")
@@ -1780,12 +1830,34 @@ local function main()
 
     -- Generic / fallback files. ensure_file (track_file) won't
     -- overwrite a profile's version that was just written above.
-    track_file(dir .. "/app" .. ext,            app_template)
+    track_file(dir .. "/" .. entry_file,         app_template)
     track_file(dir .. "/tests/test_app" .. ext, test_template)
     if not cli_mode then
         track_file(dir .. "/migrations/001_init.sql", templates.migration_init)
     end
     track_file(dir .. "/.gitignore", templates.gitignore)
+
+    -- TypeScript: the declarations and tsconfig.json, as `hull types` writes
+    -- them - once. A re-run leaves an installed types/ alone (`hull types`
+    -- updates it), so init stays idempotent.
+    if runtime == "ts" then
+        local types_dir = dir .. "/types/hull"
+        if file_exists(types_dir) then
+            skipped[#skipped + 1] = dir .. "/types/"
+        else
+            local had = {}
+            for _, f in ipairs({ "tsconfig.json", "tests/tsconfig.json" }) do
+                had[f] = file_exists(dir .. "/" .. f)
+            end
+            ts.install_types(dir)
+            created[#created + 1] = dir .. "/types/ (hull types)"
+            for _, f in ipairs({ "tsconfig.json", "tests/tsconfig.json" }) do
+                if not had[f] and file_exists(dir .. "/" .. f) then
+                    created[#created + 1] = dir .. "/" .. f
+                end
+            end
+        end
+    end
 
     -- Output
     local display_dir = (dir == ".") and "./" or dir .. "/"
@@ -1817,7 +1889,7 @@ local function main()
 
     print("")
 
-    local app_path = (dir == "." and "" or dir .. "/") .. "app" .. ext
+    local app_path = (dir == "." and "" or dir .. "/") .. entry_file
     print("Next steps:")
     if opts.profile == "htmx" then
         local cd_prefix = (dir == ".") and "" or ("cd " .. dir .. " && ")
@@ -1828,6 +1900,9 @@ local function main()
         print("  hull run " .. app_path .. " -- world")
     else
         print("  hull " .. app_path)
+    end
+    if runtime == "ts" then
+        print("  tsc --noEmit -p " .. dir .. "   (type-check)")
     end
 end
 

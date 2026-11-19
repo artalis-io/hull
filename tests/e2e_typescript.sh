@@ -20,6 +20,10 @@
 #   - `hull build` embeds the erased modules: the binary runs with no .ts on
 #     disk, --sign records each one's provenance, hull verify checks the
 #     source against it, and the signed binary starts under --verify-sig.
+#   - `hull new --runtime ts` scaffolds (flat, --cli, rest, cli) write .ts
+#     sources, the declarations and a tsconfig.json, and pass hull test.
+#   - `hull init --runtime ts` (server, --cli, --profile htmx) likewise, and
+#     it refuses a TypeScript entry beside another one.
 set -eu
 
 HULL=${HULL:-build/hull}
@@ -244,6 +248,72 @@ has "$WORK/d1.json" '{"n":42}' && has "$WORK/dev.log" "lib/a.ts:6:1: ts.unsuppor
     ok "hull dev keeps its last good build across a refused edit, and a fix reloads" ||
     { bad "hull dev"; cat "$WORK/dev.log"; cat "$WORK/d1.json" "$WORK/d2.json" "$WORK/d3.json"; }
 
+echo "== typescript: hull new --runtime ts"
+n="$WORK/new"
+mkdir -p "$n"
+for spec in "flat:" "cliflat:--cli" "rest:--type rest" "cli:--type cli"; do
+    name=${spec%%:*}; args=${spec#*:}
+    # shellcheck disable=SC2086
+    (cd "$n" && "$HULL" new "$name" --runtime ts $args) > "$WORK/new_$name.txt" 2>&1 ||
+        { bad "hull new $name"; cat "$WORK/new_$name.txt"; continue; }
+    if [ -f "$n/$name/app.ts" ] && [ ! -e "$n/$name/app.js" ] &&
+       [ -f "$n/$name/types/hull/.hull-types" ] && [ -f "$n/$name/tsconfig.json" ] &&
+       ! find "$n/$name" -name '*.js' -not -path '*/types/*' | grep -q .; then
+        ok "hull new $name --runtime ts writes .ts sources, types/ and tsconfig.json"
+    else
+        bad "hull new $name layout"; find "$n/$name" -type f | sort
+    fi
+    (cd "$n/$name" && "$HULL" test) > "$WORK/newt_$name.txt" 2>&1 &&
+        has "$WORK/newt_$name.txt" "tests passed" && ! has "$WORK/newt_$name.txt" "FAIL" &&
+        ok "the $name TypeScript scaffold passes hull test" ||
+        { bad "hull test $name"; cat "$WORK/newt_$name.txt"; }
+    "$HULL" types "$n/$name" --check > "$WORK/newc_$name.txt" 2>&1 &&
+        ok "the $name scaffold's declarations are this hull's" ||
+        { bad "hull types --check $name"; cat "$WORK/newc_$name.txt"; }
+done
+rc=0; (cd "$n/cli" && "$HULL" app.ts -- nope) > "$WORK/newu.txt" 2>&1 || rc=$?
+[ "$rc" -eq 1 ] && has "$WORK/newu.txt" "unknown command 'nope'" &&
+    ok "an import of a .ts file that does not exist is 'module not found'" ||
+    { bad "unknown command (rc $rc)"; cat "$WORK/newu.txt"; }
+(cd "$n/cliflat" && "$HULL" app.ts -- ada) > "$WORK/newr.txt" 2>&1 && has "$WORK/newr.txt" "hello ada" &&
+    ok "the flat CLI TypeScript scaffold runs" || { bad "cliflat run"; cat "$WORK/newr.txt"; }
+rc=0; (cd "$n" && "$HULL" new tui --runtime ts --type tui) > "$WORK/newtui.txt" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && has "$WORK/newtui.txt" "the TUI layout is Lua-only" &&
+    ok "hull new --type tui --runtime ts is refused" || { bad "tui (rc $rc)"; cat "$WORK/newtui.txt"; }
+echo "== typescript: hull init --runtime ts"
+for spec in "isrv:" "icli:--cli" "ihx:--profile htmx"; do
+    name=${spec%%:*}; args=${spec#*:}
+    # shellcheck disable=SC2086
+    (cd "$n" && "$HULL" init "$name" --runtime ts $args) > "$WORK/init_$name.txt" 2>&1 ||
+        { bad "hull init $name"; cat "$WORK/init_$name.txt"; continue; }
+    [ -f "$n/$name/app.ts" ] && [ -f "$n/$name/tests/test_app.ts" ] &&
+        [ -f "$n/$name/types/hull/.hull-types" ] && [ -f "$n/$name/tsconfig.json" ] &&
+        ok "hull init $name --runtime ts writes app.ts, types/ and tsconfig.json" ||
+        { bad "hull init $name layout"; find "$n/$name" -type f | sort; }
+    (cd "$n/$name" && "$HULL" test) > "$WORK/initt_$name.txt" 2>&1 &&
+        has "$WORK/initt_$name.txt" "tests passed" && ! has "$WORK/initt_$name.txt" "FAIL" &&
+        ok "the $name TypeScript init scaffold passes hull test" ||
+        { bad "hull test $name"; cat "$WORK/initt_$name.txt"; }
+done
+(cd "$n" && "$HULL" init isrv) > "$WORK/init_re.txt" 2>&1 &&
+    has "$WORK/init_re.txt" "runtime   ts" && has "$WORK/init_re.txt" "isrv/types/" &&
+    ! has "$WORK/init_re.txt" "created:" &&
+    ok "hull init again detects app.ts and changes nothing" || { bad "init rerun"; cat "$WORK/init_re.txt"; }
+mkdir -p "$n/imts" && printf 'import { app } from "hull:app";\napp.manifest({ modules: [] });\napp.main(() => 0);\n' > "$n/imts/app.mts"
+(cd "$n" && "$HULL" init imts) > "$WORK/init_mts.txt" 2>&1 && [ ! -e "$n/imts/app.ts" ] &&
+    has "$WORK/init_mts.txt" "runtime   ts" &&
+    ok "hull init takes an app.mts as the TypeScript entry" || { bad "init app.mts"; cat "$WORK/init_mts.txt"; }
+mkdir -p "$n/ilua" && : > "$n/ilua/app.lua"
+rc=0; (cd "$n" && "$HULL" init ilua --runtime ts) > "$WORK/init_amb.txt" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && [ ! -e "$n/ilua/app.ts" ] && has "$WORK/init_amb.txt" "already has app.lua" &&
+    ok "hull init refuses a TypeScript entry beside app.lua" || { bad "init ambiguity (rc $rc)"; cat "$WORK/init_amb.txt"; }
+mkdir -p "$n/its" && : > "$n/its/app.ts"
+rc=0; (cd "$n" && "$HULL" init its --runtime js) > "$WORK/init_amb2.txt" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && [ ! -e "$n/its/app.js" ] && has "$WORK/init_amb2.txt" "already has app.ts" &&
+    ok "hull init refuses a JavaScript entry beside app.ts" || { bad "init ambiguity 2 (rc $rc)"; cat "$WORK/init_amb2.txt"; }
+rc=0; (cd "$n" && "$HULL" new bad --runtime py) > "$WORK/newbad.txt" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && has "$WORK/newbad.txt" "use lua, js or ts" &&
+    ok "an unknown runtime names the three" || { bad "bad runtime (rc $rc)"; cat "$WORK/newbad.txt"; }
 echo "== typescript: an app below a build/ directory"
 u="$WORK/build/vendor/app"
 mkdir -p "$u"

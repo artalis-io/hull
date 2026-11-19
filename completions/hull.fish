@@ -193,7 +193,7 @@ end
 # ── new / init ───────────────────────────────────────────────────────
 
 for cmd in new init
-    complete -c hull -n "__hull_subcommand $cmd" -l runtime -r -d 'Runtime' -xa 'lua js'
+    complete -c hull -n "__hull_subcommand $cmd" -l runtime -r -d 'Runtime' -xa 'lua js ts'
 end
 
 # ── types ────────────────────────────────────────────────────────────

@@ -140,8 +140,10 @@ non-zero is fine.
 | Command | Use |
 |---|---|
 | `hull new <dir>` | New project from template (full scaffold) |
+| `hull new <dir> --runtime ts` | TypeScript scaffold, with `types/` and `tsconfig.json` |
 | `hull init [dir]` | In-place init (like `git init`; doesn't overwrite) |
 | `hull init --runtime js` | Force JS runtime |
+| `hull init --runtime ts` | TypeScript, with `types/` and `tsconfig.json` |
 
 `hull init` is idempotent: it creates `app.lua`/`app.js`, `tests/`, `migrations/`,
 `.gitignore` if missing, and leaves existing files alone. Runtime is
