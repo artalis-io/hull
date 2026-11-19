@@ -165,7 +165,7 @@ lua_files["tests/views/test_menu.lua"] = [[-- TUI views are pure functions of st
 -- without a terminal. Just construct a state, feed an event, assert
 -- the new state.
 
-local menu = require("./../../views/menu")
+local menu = require("./views/menu")
 
 test("menu: down arrow moves cursor", function()
     local s = { view = "menu", cursor = 1 }
