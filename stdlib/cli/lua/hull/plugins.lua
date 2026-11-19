@@ -131,24 +131,17 @@ end
 
 -- stdout carries only the bundle: everything else goes to stderr.
 local function generation(root)
-    local results, err = require("hull.buildctx.pipeline").run(root)
-    if not results then fail(err) end
-    for _, r in ipairs(results) do
-        for _, d in ipairs(r.diagnostics or {}) do
+    local _, bundle, err, stage = require("hull.buildctx.generation").produce(root, {
+        sha256_hex = sha256_hex,
+        report = function(r, d)
             local where = d.path and (d.path .. ": ") or ""
             tool.stderr(("hull plugins: %s: %s %s: %s%s\n"):format(
                 r.identity, d.severity, d.code, where, d.message))
-        end
-    end
-    local gen = require("hull.buildctx.generation")
-    local g, gerr = gen.from_results(results, sha256_hex)
-    if not g then
-        tool.stderr("hull plugins: the pipeline failed: " .. gerr .. "\n")
-        return 1
-    end
-    local bundle, eerr = gen.encode(g, sha256_hex)
+        end,
+    })
     if not bundle then
-        tool.stderr("hull plugins: " .. eerr .. "\n")
+        if stage == "run" then fail(err) end
+        tool.stderr("hull plugins: " .. err .. "\n")
         return 1
     end
     tool.stdout_raw(bundle)

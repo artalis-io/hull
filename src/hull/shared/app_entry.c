@@ -81,3 +81,16 @@ int hl_app_entry_ts(const char *app_dir, char *buf, size_t bufsz,
     }
     return 1;
 }
+
+const char *hl_app_entry_embedded(const HlEntry *entries)
+{
+    static const struct { const char *key, *name; } map[] = {
+        { "./app.js", "app.js" }, { "./app.ts", "app.ts" },
+        { "./app.mts", "app.mts" }, { "./app", "app.lua" },
+    };
+    for (int i = 0; entries && entries[i].name; i++)
+        for (size_t k = 0; k < sizeof map / sizeof *map; k++)
+            if (strcmp(entries[i].name, map[k].key) == 0)
+                return map[k].name;
+    return NULL;
+}

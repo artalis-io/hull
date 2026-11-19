@@ -274,10 +274,17 @@ inspection; this document adds no second diagnostic channel.
 - `--verify-sig` in development (filesystem mode) refuses to start when the plan has
   pipeline work: the signature and the disk gate hash SOURCE, and a generation is not
   covered by them. Run the built binary to verify a signed app.
-- `hull verify` against a source tree whose signature has generated entries re-derives
-  them through the pipeline (cache-reused) and compares hashes; it does not compare a
-  generated entry with the source file of the same name. The detailed rule lands with
-  the first generated entry `hull build` embeds.
+- `hull verify` against a source tree whose signature has generated entries does not
+  compare a generated entry with the source file of the same name.
+- As built: `package.sig` carries a signed `generated` map, file name to `{ key, plugin,
+  source }` (the action key and plugin that made it, and the SHA-256 of the source file of
+  that name when there is one). `files` holds each generated entry's hash of the bytes
+  embedded, so a built binary's `--verify-sig` checks them as any embedded file, and
+  `hull verify` checks them through `binary_hash` (they need the binary, as AOT entries
+  do). A check of the source tree - `hull verify`, `hl_sig_verify_files_fs` - compares the
+  source file with `source` instead, and skips an entry with none: an edited source fails
+  even before the binary is rebuilt. Re-deriving the entries through the pipeline is not
+  done; the source hash and the action key say what they were made from.
 
 ## 7. Security invariants (in addition to BuildContext §11)
 

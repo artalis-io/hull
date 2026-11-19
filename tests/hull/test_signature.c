@@ -1037,4 +1037,103 @@ UTEST(hl_sig, non_string_file_hash_is_refused)
     EXPECT_EQ(-1, a3_read_raw("{\"files\":{\"app.lua\":null}," A3_SIG "," A3_PK "}"));
 }
 
+/* A generated entry must name a signed file, with an object of provenance
+ * whose source (when present) is a string; a legacy signature cannot carry
+ * one (it would be unsigned). */
+UTEST(hl_sig, generated_entries_are_checked_when_read)
+{
+#define A3_NEW "\"binary_hash\":\"00\","
+    EXPECT_EQ(0, a3_read_raw("{" A3_NEW "\"files\":{\"app.ts\":\"aa\"},"
+                             "\"generated\":{\"app.ts\":{\"plugin\":\"p\",\"source\":\"bb\"}},"
+                             A3_SIG "," A3_PK "}"));
+    EXPECT_EQ(0, a3_read_raw("{" A3_NEW "\"files\":{\"app.ts\":\"aa\"},"
+                             "\"generated\":{\"app.ts\":{\"plugin\":\"p\"}}," A3_SIG "," A3_PK "}"));
+    EXPECT_EQ(-1, a3_read_raw("{" A3_NEW "\"files\":{\"app.ts\":\"aa\"},"
+                              "\"generated\":{\"b.ts\":{\"plugin\":\"p\"}}," A3_SIG "," A3_PK "}"));
+    EXPECT_EQ(-1, a3_read_raw("{" A3_NEW "\"files\":{\"app.ts\":\"aa\"},"
+                              "\"generated\":{\"app.ts\":\"bb\"}," A3_SIG "," A3_PK "}"));
+    EXPECT_EQ(-1, a3_read_raw("{" A3_NEW "\"files\":{\"app.ts\":\"aa\"},"
+                              "\"generated\":{\"app.ts\":{\"source\":7}}," A3_SIG "," A3_PK "}"));
+    EXPECT_EQ(-1, a3_read_raw("{" A3_NEW "\"files\":{\"app.ts\":\"aa\"},"
+                              "\"generated\":[]," A3_SIG "," A3_PK "}"));
+    EXPECT_EQ(-1, a3_read_raw("{\"files\":{\"app.ts\":\"aa\"},"
+                              "\"generated\":{\"app.ts\":{}}," A3_SIG "," A3_PK "}"));
+#undef A3_NEW
+}
+
+/* A generated file is signed as embedded (its own bytes) and covered by the
+ * signature, generated block included; the source file of its name is
+ * checked against the recorded source hash. */
+UTEST(hl_sig, generated_entry_signed_and_its_source_checked)
+{
+    static const char SRC[] = "const x: number = 1;\n";
+    static const char OUT[] = "const x         = 1;\n";
+    char dir[512], path[600], src_hex[65], out_hex[65];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "hull_gensig") != NULL);
+    snprintf(path, sizeof path, "%s/app.ts", dir);
+    FILE *f = fopen(path, "w");
+    ASSERT_TRUE(f != NULL);
+    fputs(SRC, f);
+    fclose(f);
+    sha_hex(SRC, sizeof SRC - 1, src_hex);
+    sha_hex(OUT, sizeof OUT - 1, out_hex);
+
+    char gen[512], payload[2048], app_sig[129];
+    snprintf(gen, sizeof gen, "{\"app.ts\":{\"key\":\"k\",\"plugin\":\"stdlib:ts-erase@1\","
+             "\"source\":\"%s\"}}", src_hex);
+    snprintf(payload, sizeof payload, "{\"binary_hash\":\"00\",\"build\":null,"
+             "\"files\":{\"app.ts\":\"%s\"},\"generated\":%s,\"manifest\":null,"
+             "\"platform\":null,\"trampoline_hash\":\"00\"}", out_hex, gen);
+    sign_payload(payload, test_sk, app_sig);
+    char sigp[600];
+    snprintf(sigp, sizeof sigp, "%s/package.sig", dir);
+    f = fopen(sigp, "w");
+    ASSERT_TRUE(f != NULL);
+    fprintf(f, "{\"binary_hash\":\"00\",\"build\":null,\"files\":{\"app.ts\":\"%s\"},"
+            "\"generated\":%s,\"manifest\":null,\"platform\":null,\"public_key\":\"%s\","
+            "\"signature\":\"%s\",\"trampoline_hash\":\"00\"}\n", out_hex, gen,
+            test_pk_hex, app_sig);
+    fclose(f);
+
+    HlSignature sig;
+    ASSERT_EQ(0, hl_sig_read(sigp, &sig));
+    EXPECT_EQ(0, hl_sig_verify(&sig, test_pk));
+    EXPECT_EQ(0, hl_sig_verify_files_fs(&sig, dir));
+    /* The embedded bytes are the generated ones, not the source. */
+    const HlEntry emb_ok[] = { { "./app.ts", (const unsigned char *)OUT, sizeof OUT - 1 },
+                               { NULL, NULL, 0 } };
+    const HlEntry emb_src[] = { { "./app.ts", (const unsigned char *)SRC, sizeof SRC - 1 },
+                                { NULL, NULL, 0 } };
+    HlVfs v;
+    hl_vfs_init(&v, emb_ok, NULL);
+    EXPECT_EQ(0, hl_sig_verify_files_embedded(&sig, &v));
+    hl_vfs_init(&v, emb_src, NULL);
+    EXPECT_EQ(-1, hl_sig_verify_files_embedded(&sig, &v));
+    hl_sig_free(&sig);
+
+    /* An edited source fails the check of the source tree. */
+    f = fopen(path, "a");
+    ASSERT_TRUE(f != NULL);
+    fputs("// edited\n", f);
+    fclose(f);
+    ASSERT_EQ(0, hl_sig_read(sigp, &sig));
+    EXPECT_EQ(-1, hl_sig_verify_files_fs(&sig, dir));
+    hl_sig_free(&sig);
+
+    /* Dropping the generated block breaks the signature. */
+    f = fopen(sigp, "w");
+    ASSERT_TRUE(f != NULL);
+    fprintf(f, "{\"binary_hash\":\"00\",\"build\":null,\"files\":{\"app.ts\":\"%s\"},"
+            "\"manifest\":null,\"platform\":null,\"public_key\":\"%s\","
+            "\"signature\":\"%s\",\"trampoline_hash\":\"00\"}\n", out_hex,
+            test_pk_hex, app_sig);
+    fclose(f);
+    ASSERT_EQ(0, hl_sig_read(sigp, &sig));
+    EXPECT_EQ(-1, hl_sig_verify(&sig, test_pk));
+    hl_sig_free(&sig);
+    unlink(sigp);
+    unlink(path);
+    rmdir(dir);
+}
+
 UTEST_MAIN()

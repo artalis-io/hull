@@ -89,12 +89,30 @@ local _manifest_cache = {}
 -- extraction CONTROL COMPOSITION must treat a non-nil err as fatal (see
 -- extract_manifest_or_fatal); read-only callers may ignore it. Does not print;
 -- the caller owns the (command-correct) diagnostic.
+-- The JavaScript entry of the app: app.js, else app.ts / app.mts (a
+-- TypeScript entry, which runs from the pipeline's erased modules).
+function M.js_entry(app_dir)
+    for _, name in ipairs({ "app.js", "app.ts", "app.mts" }) do
+        local p = app_dir .. "/" .. name
+        if file_exists(p) then return p end
+    end
+    return nil
+end
+
+-- The pipeline generation hull build embeds (a bundle string), handed to
+-- the manifest-extraction child so the entry runs as it will be built.
+local _generation = {}
+function M.set_generation(app_dir, bundle)
+    _generation[app_dir] = bundle
+    _manifest_cache[app_dir] = nil
+end
+
 function M.extract_manifest(app_dir)
     local cached = _manifest_cache[app_dir]
     if cached ~= nil then return cached.manifest, cached.err end
     local manifest, err = nil, nil
     local lua_entry = app_dir .. "/app.lua"
-    local js_entry  = app_dir .. "/app.js"
+    local js_entry  = M.js_entry(app_dir)
     if file_exists(lua_entry) then
         -- Does the app INTEND a manifest? A failure to capture one is only a
         -- real (fatal) extraction failure when the app declares app.manifest -
@@ -127,7 +145,7 @@ function M.extract_manifest(app_dir)
         elseif run_err and intends_manifest then
             err = tostring(run_err)
         end
-    elseif file_exists(js_entry) then
+    elseif js_entry then
         local intends_manifest =
             (tool.read_file(js_entry) or ""):find("app%.manifest%s*%(") ~= nil
         -- Same build-time app-evaluation window as the Lua branch above:
@@ -135,7 +153,8 @@ function M.extract_manifest(app_dir)
         -- app.manifest(). Mark it so the app's own logging is attributed to
         -- extraction rather than surfacing as build output.
         if tool.log_app_phase then tool.log_app_phase(true) end
-        local ok, js_json_or_err = pcall(tool.extract_manifest_js, js_entry)
+        local ok, js_json_or_err = pcall(tool.extract_manifest_js, js_entry,
+                                         _generation[app_dir])
         if tool.log_app_phase then tool.log_app_phase(false) end
         if not ok then
             -- Same rule as the Lua branch: a load/import failure is fatal only
@@ -185,7 +204,7 @@ end
 -- @return "lua" | "js" | nil
 function M.detect_app_rt(app_dir)
     if file_exists(app_dir .. "/app.lua") then return "lua" end
-    if file_exists(app_dir .. "/app.js") then return "js" end
+    if M.js_entry(app_dir) then return "js" end
     return nil
 end
 
