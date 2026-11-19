@@ -182,6 +182,12 @@ release-artifact layout).
 
 ### Fixed
 
+- `hull new --type rest` scaffolds a working model again: `models/user.lua` / `models/user.js`
+  called `db.query` / `db.exec` on the `hull/db` module, which since the handles-only API has no
+  query methods, so every route that touched the database answered 500 and two of the four
+  scaffolded tests failed in both runtimes. The models now use `db.default()`, as
+  `examples/rest_api_modular` does. `tests/e2e_test_cli.sh` runs `hull test` on the REST and flat
+  server scaffolds too, and `make hull-test-examples` (CI) runs `examples/rest_api_modular`.
 - The test `hull new --type tui` scaffolds (and `examples/tui_modular`'s) loads its view again:
   it required `./../../views/menu`, a path relative to the test file, but a Lua test file's
   `require` resolves from the app root, so the test failed with "module not found". It now

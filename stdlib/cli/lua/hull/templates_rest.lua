@@ -163,7 +163,7 @@ lua_files["models/user.lua"] = [[-- models/user.lua - Persistence layer for the 
 -- stay focused on HTTP concerns. The returned table is the resource's
 -- public surface; route handlers shouldn't touch `db` directly.
 
-local db     = require("hull.db")
+local db     = require("hull.db").default()
 local crypto = require("hull.crypto")
 local time   = require("hull.time")
 
@@ -421,9 +421,11 @@ export function register(app) {
 
 js_files["models/user.js"] = [[// models/user.js - Persistence layer for the User resource.
 
-import { db }     from "hull:db";
+import { db as dbModule } from "hull:db";
 import { crypto } from "hull:crypto";
 import { time }   from "hull:time";
+
+const db = dbModule.default();
 
 export function create(input) {
     // 32 random bytes as hex (64 chars): a cryptographically-strong

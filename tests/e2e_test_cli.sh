@@ -4,7 +4,8 @@
 # ctx.args / stdin / env given by the test and ctx.stdout / stderr captured.
 #
 #   1. `hull new --type cli` and `hull new --cli` scaffolds pass `hull test`
-#      as generated (both runtimes).
+#      as generated (both runtimes), and so do the server ones (`hull new`,
+#      `hull new --type rest`).
 #   2. A failing case is reported FAIL and `hull test` exits non-zero;
 #      `hull agent test` reports it as "status":"fail" in its JSON.
 #   3. main's waits (hull.sleep), stdin, env (manifest-gated), a raised
@@ -41,7 +42,11 @@ cd "$TMP"
 "$HULL" new --type cli --runtime js mjs >/dev/null 2>&1
 "$HULL" new --cli flua >/dev/null 2>&1
 "$HULL" new --cli --runtime js fjs >/dev/null 2>&1
-for d in mlua mjs flua fjs; do
+"$HULL" new --type rest rlua >/dev/null 2>&1
+"$HULL" new --type rest --runtime js rjs >/dev/null 2>&1
+"$HULL" new slua >/dev/null 2>&1
+"$HULL" new --runtime js sjs >/dev/null 2>&1
+for d in mlua mjs flua fjs rlua rjs slua sjs; do
     if out=$(run_test "$TMP/$d"); then
         if echo "$out" | grep -q "tests passed" && ! echo "$out" | grep -q "FAIL"; then
             pass "$d scaffold: hull test passes"
