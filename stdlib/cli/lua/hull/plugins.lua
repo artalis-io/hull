@@ -91,11 +91,16 @@ local function run(root, o)
         tool.stdout_raw(json.encode({ results = results }) .. "\n")
         return failed and 1 or 0
     end
-    if #results == 0 then
+    -- A Hull route with nothing to do (no TypeScript in the app) is not news.
+    local shown = {}
+    for _, r in ipairs(results) do
+        if not (r.route and r.status == "no_input") then shown[#shown + 1] = r end
+    end
+    if #shown == 0 then
         tool.stdout("no build plugins (no hull.build.json, or it names none)\n")
         return 0
     end
-    for _, r in ipairs(results) do
+    for _, r in ipairs(shown) do
         local head = r.identity .. "  " .. r.status
         if r.units then head = head .. "  " .. r.units .. (r.units == 1 and " unit" or " units") end
         if r.error then head = head .. "  " .. r.error end

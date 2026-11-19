@@ -1,7 +1,8 @@
 # TypeScript - design
 
 Status: **T1 (types + `hull types`) and T2 (the TypeScript frontend, §3.5) implemented;
-T3 design-only, its prerequisites in progress (§1).** Builds on
+T3's erasure plugin and route (§4.1, §4.2) implemented (buildcontext_design.md §13.8); running
+`.ts` modules (§4.3, §4.4) design-only.** Builds on
 [buildcontext_design.md](buildcontext_design.md) (BuildContext),
 [dev_pipeline_generations_design.md](dev_pipeline_generations_design.md) (pipeline
 generations), [javascript_source_frontend_design.md](javascript_source_frontend_design.md)
@@ -40,7 +41,7 @@ module resolution modes), CommonJS interop.
 | T2 | TypeScript frontend, analysis only (§3) - implemented (§3.5) | the shipped JS frontend |
 | BuildContext 1, 2, 5 | action core (1, implemented), outputs (2), plugin runner (5) | - |
 | G1, G2 | pipeline generations: overlay, runner wiring | BuildContext 2, 5 |
-| T3 | type-erasure plugin + `.ts` entry points (§4) | T2, BuildContext 1, 2, 5, G1, G2, and the explicit-route part of BuildContext 6 |
+| T3 | type-erasure plugin + `.ts` entry points (§4) - the plugin and its route implemented | T2, BuildContext 1, 2, 5, G1, G2, and the explicit-route part of BuildContext 6 (all implemented) |
 
 BuildContext checkpoints 3 (artifact inputs) and 4 (the tool seam) are not on T3's path:
 erasure takes a source selection, not artifacts, and runs no tool. They follow when Compute
@@ -387,13 +388,25 @@ answer into the action's result.
 
 ```js
 app.transform(async (ctx) => {
+  let refused = false;
   for (const unit of ctx.source.units()) {
-    const r = await ctx.source.erasedSource(unit);
-    if (r.refusals.length) { r.refusals.forEach((d) => ctx.diagnostics.emit(d)); return; }
-    ctx.outputs.declareGeneratedOutput({ name: unit.name }, r.bytes);
+    const r = ctx.source.erasedSource(unit);
+    if (r.refusals.length) { r.refusals.forEach((d) => ctx.diagnostics.emit(d)); refused = true; }
+    else if (!refused) {
+      const w = ctx.outputs.createBlob(unit.id);
+      w.write(r.bytes);
+      w.close();
+      ctx.outputs.declareGeneratedOutput({ name: unit.name, position_map: "identity" }, w);
+    }
   }
 });
 ```
+
+As built (buildcontext_design.md §13.8): `stdlib/plugins/ts_erase/app.js`, embedded in the hull
+binary and run from a private directory the pipeline writes it into. Every unit's refusals are
+reported. A construct the frontend refuses while analyzing already makes the discovery invalid,
+so the run stops before the plugin, naming the file and position; the plugin's refusals are the
+ones only the erasure finds.
 
 The bytes erased are the bytes the frontend analyzed: the host erases them in the same
 session, so there is no second read of the workspace and no time-of-check gap between

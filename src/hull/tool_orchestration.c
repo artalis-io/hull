@@ -415,6 +415,40 @@ static int l_tool_types_files(lua_State *L)
     return 2;
 }
 
+/* ── tool.bundled_plugin_files(name) ──────────────────────────────── */
+
+/* The bundled build plugins (stdlib/plugins/<name>/**), generated into
+ * build/plugin_registry.c and linked into the hull binary only. Weak empty
+ * default, as for the declarations. */
+__attribute__((weak)) const HlEntry *hl_plugin_entries(void)
+{
+    return NULL;
+}
+
+/* tool.bundled_plugin_files(name) -> { { name = "app.js", body = "..." }, ... },
+ * hull_version: the files of the bundled plugin `name` ("ts_erase"), named
+ * within its directory, in name order; an empty table when this binary
+ * embeds none of that name. */
+static int l_tool_bundled_plugin_files(lua_State *L)
+{
+    size_t nlen = 0;
+    const char *want = luaL_checklstring(L, 1, &nlen);
+    const HlEntry *e = hl_plugin_entries();
+    lua_newtable(L);
+    lua_Integer i = 1;
+    for (; e && e->name; e++) {
+        if (strncmp(e->name, want, nlen) != 0 || e->name[nlen] != '/') continue;
+        lua_createtable(L, 0, 2);
+        lua_pushstring(L, e->name + nlen + 1);
+        lua_setfield(L, -2, "name");
+        lua_pushlstring(L, (const char *)e->data, e->len);
+        lua_setfield(L, -2, "body");
+        lua_rawseti(L, -2, i++);
+    }
+    lua_pushstring(L, HL_VERSION);
+    return 2;
+}
+
 static int l_tool_agent_context(lua_State *L)
 {
     const char *task  = luaL_checkstring(L, 1);
@@ -730,6 +764,7 @@ void hl_lua_tool_register_orchestration(lua_State *L)
 #endif
         { "agent_context",          l_tool_agent_context },
         { "types_files",            l_tool_types_files },
+        { "bundled_plugin_files",   l_tool_bundled_plugin_files },
         { "modules_available",      l_tool_modules_available },
 #if defined(HL_ENABLE_HTTP_SERVER) && defined(HL_TUI_LINKED)
         { "dev_status",             l_tool_dev_status },

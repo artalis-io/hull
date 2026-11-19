@@ -728,6 +728,14 @@ do
                 refusals = { { severity = "error", code = "ts.unsupported", message = "m",
                                range = { start = 1, stop = 5, line = 1, col = 1 } } } })
         end
+        t.frontend_erased_source = function(lang, token, unit_id)
+            track.erased_src = track.units[unit_id]
+            if track.units[unit_id] == "lib/a.mts" then
+                return json.encode({ ok = true, refusals = { { severity = "error", code = "ts.unsupported",
+                                     message = "m", range = { start = 1, stop = 5, line = 1, col = 1 } } } })
+            end
+            return json.encode({ ok = true, refusals = {}, bytes = "Y29uc3QgeCAgICAgICAgID0gMTsK" })
+        end
         return t
     end
     local FS = {
@@ -766,7 +774,16 @@ do
     eq(e_none and e_none.code, "project.handle_invalid", "an unanalyzed source has no unit")
     local _, e_bad = analyze.type_erasure(disc, 1)
     eq(e_bad and e_bad.code, "project.handle_invalid", "a non-path key does not resolve")
+    local es = analyze.erased_source(disc, "app.ts")
+    eq(es and es.bytes, "const x         = 1;\n", "erased_source answers the session's erased bytes")
+    eq(trk.erased_src, "app.ts", "from app.ts's own unit")
+    local esr = analyze.erased_source(disc, "lib/a.mts")
+    ok(esr and esr.bytes == nil and esr.refusals[1].code == "ts.unsupported", "a refused unit: no bytes")
+    local _, es_js = analyze.erased_source(disc, "old.js")
+    eq(es_js and es_js.code, "project.operation_unsupported", "a .js source reports erased_source unsupported")
     analyze.close(disc)
+    local _, es_closed = analyze.erased_source(disc, "app.ts")
+    eq(es_closed and es_closed.code, "project.frontend_closed", "erased_source is refused after close")
     local _, e_closed = analyze.type_erasure(disc, "app.ts")
     eq(e_closed and e_closed.code, "project.frontend_closed", "type_erasure is refused after close")
 

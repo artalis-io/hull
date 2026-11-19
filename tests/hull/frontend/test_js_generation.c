@@ -19,6 +19,7 @@ static char *scp(int64_t t, int64_t u) { char *o = NULL; size_t l = 0; hl_js_gen
 
 static char *an_lang(int64_t t, const char *src, const char *lang) { char *o = NULL; size_t l = 0; hl_js_gen_analyze(t, (const uint8_t *)src, strlen(src), "a.ts", lang, &o, &l); return o; }
 static char *te(int64_t t, int64_t u) { char *o = NULL; size_t l = 0; hl_js_gen_type_erasure(t, u, &o, &l); return o; }
+static char *es(int64_t t, int64_t u) { char *o = NULL; size_t l = 0; hl_js_gen_erased_source(t, u, &o, &l); return o; }
 
 UTEST(js_generation, available) { EXPECT_TRUE(hl_js_gen_available()); }
 
@@ -57,6 +58,41 @@ UTEST(js_generation, typescript_unit_type_erasure)
     free(js);
     hl_js_gen_close(t);
     char *st = te(t, 1);                                             /* stale token */
+    EXPECT_TRUE(has(st, "\"ok\":false") && has(st, "stale frontend session"));
+    free(st);
+}
+
+/* erasedSource applies the unit's erasure to the bytes the session analyzed (base64 in the
+ * answer): every span byte a space, so offsets stay. A refused unit answers its refusals and no
+ * bytes; a JavaScript unit, an unknown one and a stale token are refused as for type_erasure. */
+UTEST(js_generation, typescript_unit_erased_source)
+{
+    int64_t t = hl_js_gen_open();
+    ASSERT_TRUE(t > 0);
+    free(an_lang(t, "const x: number = 1;", "ts"));                 /* unit 1 */
+    char *e = es(t, 1);
+    EXPECT_TRUE(has(e, "\"ok\":true") && has(e, "\"refusals\":[]"));
+    EXPECT_TRUE(has(e, "\"bytes\":\"Y29uc3QgeCAgICAgICAgID0gMTs=\""));   /* "const x         = 1;" */
+    free(e);
+    free(an_lang(t, "enum E { A }", "ts"));                          /* unit 2 */
+    char *re = es(t, 2);
+    EXPECT_TRUE(has(re, "\"ok\":true") && has(re, "\"code\":\"ts.unsupported\""));
+    EXPECT_FALSE(has(re, "\"bytes\""));
+    free(re);
+    free(an_lang(t, "let y: number = ;", "ts"));                     /* unit 3: a syntax error */
+    char *se = es(t, 3);
+    EXPECT_TRUE(has(se, "\"ok\":true") && has(se, "\"severity\":\"error\""));
+    EXPECT_FALSE(has(se, "\"bytes\""));
+    free(se);
+    free(an(t, "const y = 1;"));                                     /* unit 4, JavaScript */
+    char *je = es(t, 4);
+    EXPECT_TRUE(has(je, "\"ok\":false") && has(je, "project.operation_unsupported"));
+    free(je);
+    char *ue = es(t, 999);
+    EXPECT_TRUE(has(ue, "\"ok\":false") && has(ue, "unknown unit handle"));
+    free(ue);
+    hl_js_gen_close(t);
+    char *st = es(t, 1);
     EXPECT_TRUE(has(st, "\"ok\":false") && has(st, "stale frontend session"));
     free(st);
 }

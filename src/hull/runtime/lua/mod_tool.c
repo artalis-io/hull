@@ -2283,6 +2283,19 @@ static int l_tool_frontend_type_erasure(lua_State *L)
     return luaL_error(L, "javascript frontend engine not available");
 #endif
 }
+static int l_tool_frontend_erased_source(lua_State *L)
+{
+#ifdef HL_FRONTEND_JS
+    if (!frontend_lang_is_js(L, 1)) return luaL_error(L, "unknown frontend language");
+    int64_t token = (int64_t)luaL_checkinteger(L, 2);
+    int64_t unit_id = (int64_t)luaL_checkinteger(L, 3);
+    char *out = NULL; size_t olen = 0;
+    hl_js_gen_erased_source(token, unit_id, &out, &olen);
+    return frontend_push_json(L, out, olen);
+#else
+    return luaL_error(L, "javascript frontend engine not available");
+#endif
+}
 static int l_tool_frontend_close(lua_State *L)
 {
 #ifdef HL_FRONTEND_JS
@@ -2380,6 +2393,7 @@ static const luaL_Reg tool_funcs[] = {
     { "frontend_declaration_semantics", l_tool_frontend_declaration_semantics },
     { "frontend_scope",              l_tool_frontend_scope },
     { "frontend_type_erasure",       l_tool_frontend_type_erasure },
+    { "frontend_erased_source",      l_tool_frontend_erased_source },
     { "frontend_close",              l_tool_frontend_close },
     { "spawn",                       l_tool_spawn },
     { "sha256_file",                 l_tool_sha256_file },

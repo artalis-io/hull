@@ -249,19 +249,30 @@ do
     local fake, sent = scripted({
         { CALL, 1, { op = "source.erased_source", args = { unit = "a.ts" } } },
         { CALL, 2, { op = "source.erased_source", args = { unit = "b.ts" } } },
+        { CALL, 3, { op = "source.erased_source", args = { unit = "c.ts" } } },
+        { CALL, 4, { op = "source.erased_source", args = { unit = "d.ts" } } },
+        { CALL, 5, { op = "source.erased_source", args = { unit = 7 } } },
         { DONE, 0, {} },
     })
     local r = assert(plugin.new({ exe = "/x", entry = "/x/app.lua" }, { native = fake }))
     local rq = req(1)
+    local refusal = { severity = "error", code = "ts.unsupported", message = "no", path = "c.ts" }
     rq.source.erased_source = function(u)
-        if u == "a.ts" then return "let x = 1;" end
+        if u == "a.ts" then return { bytes = "let x = 1;", refusals = {} } end
+        if u == "c.ts" then return { refusals = { refusal } } end
+        if u == "d.ts" then return { refusals = {} } end
         return nil, "not_a_unit"
     end
     ok(r:run(new_action(store), rq), "erased_source action")
     local got = {}
     for _, s in ipairs(sent) do if s[1] == REPLY then got[s[2]] = s[3] end end
-    ok(type(got[1].ok) == "userdata", "the erased source is bytes")
+    ok(type(got[1].ok) == "table" and type(got[1].ok.bytes) == "userdata", "the erased source is bytes")
+    ok(got[1].ok and got[1].ok.refusals == fake.empty_array, "with no refusals, as an empty array")
     eq(got[2].error, "not_a_unit", "the session's token")
+    ok(got[3].ok and got[3].ok.bytes == nil, "a refused unit has no bytes")
+    eq(got[3].ok and got[3].ok.refusals[1].code, "ts.unsupported", "and its refusals")
+    eq(got[4].error, "io_error", "neither bytes nor refusals is a host fault")
+    eq(got[5].error, "invalid_args", "a unit id is a string")
 end
 
 store:close()

@@ -1,6 +1,6 @@
 # BuildContext action and authority design
 
-Status: **checkpoints 1 and 2 implemented (§13.1, §13.2), checkpoint 5's plugin side (§13.3), host side (§13.4), demonstration (§13.5) and plugin tests (§13.6), and checkpoint 6's explicit routes (§13.7); the rest design-only.** This document refines checkpoint 4
+Status: **checkpoints 1 and 2 implemented (§13.1, §13.2), checkpoint 5's plugin side (§13.3), host side (§13.4), demonstration (§13.5) and plugin tests (§13.6), checkpoint 6's explicit routes (§13.7) and the first route, TypeScript erasure (§13.8); the rest design-only.** This document refines checkpoint 4
 of [hull_fs_design.md](hull_fs_design.md) and supersedes the still-unimplemented
 BuildContext portions of
 [hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md). The shipped
@@ -897,13 +897,14 @@ first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the n
   `close`, `tree.write` / `close`, `outputs.declare_generated_output` / `declare_artifact`,
   `diagnostics.emit`) or to the caller's source selection (`source.units`, and
   `source.erased_source` when the caller's frontend session offers it - `unsupported_op`
-  otherwise). Argument shapes are checked here (`invalid_args`, `invalid_handle`, `unknown_op`);
+  otherwise; it takes a unit's id and answers `{ bytes, refusals }`, `bytes` absent with any
+  refusal). Argument shapes are checked here (`invalid_args`, `invalid_handle`, `unknown_op`);
   everything else is the action's token. Bytes go back as bytes (`_plugin.bytes`), an empty list
   as an empty array (`_plugin.empty_array`, a marker the Lua walker encodes as `[]`, so a
   JavaScript plugin gets an array). A writer's id is a counter of the runner, kept in a table of
   the action, so an id from an earlier action is `invalid_handle`.
-- **Registration** (`registry.load(root)`): the bundled list and its routes (§13.7; both empty until
-  `stdlib:ts-erase@1`), then
+- **Registration** (`registry.load(root)`): the bundled list and its routes (§13.7:
+  `stdlib:ts-erase@1` on the typescript route), then
   `hull.build.json`, read through an exact grant (a link there is refused): `{ "plugins": [ { path,
   config? } ] }`, unknown keys refused, each `path` canonical, not into `.hull`, named once, and a
   directory holding exactly one of `app.lua` / `app.js` (exact grants: no link on the way). The
@@ -927,8 +928,7 @@ first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the n
   `hull.build.json`, links, the preset, descriptors, configuration and claims; and
   `lua_tool_vm.buildctx_registry_reads_real_plugin_manifests` runs registration in the real tool
   VM with the real extraction.
-- **Not yet**: the bundled plugins' entries come with `stdlib:ts-erase@1` (§13.7 takes them as
-  given); the rest is §13.5.
+- **Not yet**: the rest is §13.5; a bundled plugin's entry is §13.8.
 
 ### 13.5 Checkpoint 5: the demonstration as built
 
@@ -979,7 +979,7 @@ first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the n
   and answers `{ outputs, diagnostics, error? }` (JavaScript: a Promise). `spec`: `config`, `meta`,
   `units` (what `ctx.source.units()` returns), `inputs` (path -> contents: `read`, `stat` and
   `list` answer from it, `not_found` / `not_a_regular_file` / `not_a_directory` like the host),
-  `erased` (unit -> contents, for `erased_source`). Each output carries `declared`, `descriptor`,
+  `erased` (unit id -> contents, or `{ refusals }`, for `erased_source`). Each output carries `declared`, `descriptor`,
   `name` and the bytes (Lua: a string; JavaScript: an ArrayBuffer, and `text` when every write was a
   string), or a tree's entries. The stub is a test double, written once per stdlib language: the
   host's own checks (limits, names, grants, descriptors) are the real host's, which
@@ -1002,7 +1002,8 @@ The part of checkpoint 6 that TypeScript erasure needs (typescript_design.md §4
 hands a bundled plugin whole source files, and a planner that orders a run. Canonical artifact
 schemas, artifact routes, the DAG and its cycle rejection are the rest of the checkpoint.
 
-- **Routes** (`registry.ROUTES`, `{ id, unit = "module", language, plugin }`; empty until T3): a
+- **Routes** (`registry.ROUTES`, `{ id, unit = "module", language, plugin }`; one ships,
+  `typescript-erasure`, §13.8): a
   bundled plugin runs only on a Hull-defined route, and every bundled plugin is on one - a bundled
   plugin on no route, a route naming no bundled plugin, a route over a language its plugin's
   descriptor does not list, or a route defined twice refuses the load. A route claims
@@ -1010,7 +1011,8 @@ schemas, artifact routes, the DAG and its cycle rejection are the rest of the ch
   only name `source` or `artifact` input, so no application plugin can claim a module kind: an app
   cannot replace or shadow a route (an app plugin over annotated TypeScript declarations is
   `source:typescript:*`, beside it). A bundled entry is `{ id, major, descriptor, entry, language }`:
-  the entry is an absolute `app.lua` / `app.js` the runner spawns as for an application plugin.
+  the entry is an absolute `app.lua` / `app.js` the runner spawns as for an application plugin
+  (or, for a shipped one, its embedded `files`, written out before it runs: §13.8).
 - **The plan** (`hull.buildctx.plan.build(reg, disc)`): the routes first, by route id, then the
   application plugins in `hull.build.json`'s order. Every stage is a source stage reading only the
   workspace, so no stage depends on another and the order is fixed rather than scheduled.
@@ -1034,6 +1036,48 @@ schemas, artifact routes, the DAG and its cycle rejection are the rest of the ch
   workspace closed to it): committed, the generation's entries named for the files they shadow,
   cached on the same bytes, run again after an edit, `no_input` with no TypeScript. The
   `registration` leg covers the route checks; `test_project.lua` the source hashes.
+
+### 13.8 The first route as built: TypeScript erasure
+
+typescript_design.md §4.1 and §4.2: `stdlib:ts-erase@1` on the route `typescript-erasure`
+(`module:typescript`). Running the erased modules (`.ts` entry points) is typescript_design.md
+§4.3 and §4.4.
+
+- **The host operation.** `source.erased_source` is answered by the discovery the run analyzed
+  with: `pipeline.run` keeps its frontend sessions (`retain_frontend`) while a route exists and
+  closes them when the run ends, and each route stage's `erased_source(unit id)` resolves only
+  its own units. `hull.project.analyze.erased_source(disc, path)` calls the TypeScript frontend's
+  `erased_source`, which asks the session's `erasedSource(unitId)`: the unit's type erasure applied
+  by `hull:source:ts_erase`'s `erase()` to the bytes it analyzed, so there is no second read of the
+  file. Any refusal - a `ts.*` one, or any other error the parse reported - leaves the bytes out;
+  the host gives each refusal the unit's path. The bytes cross the session's JSON boundary as
+  base64.
+- **The plugin** (`stdlib/plugins/ts_erase/app.js`) asks for each unit's erased source and declares
+  it as a generated output named for the unit (`./app.ts`), `position_map: "identity"`; refusals
+  become its error diagnostics, so the action commits nothing. Its tests
+  (`stdlib/plugins/ts_erase/tests/`) run the transform against the stub host.
+- **A bundled plugin's entry.** `stdlib/plugins/<name>/` (tests left out) is embedded in the hull
+  binary alone (`hl_plugin_entries`, read through `tool.bundled_plugin_files(name)`). Registration
+  takes the bundled plugins this binary embeds (`registry.defaults`; one it does not embed is left
+  out with its routes), and the pipeline writes a plugin's files into a fresh private directory
+  (`tool.tmpdir`) before its first stage and removes the directory when the run ends - never the
+  shared cache, which any app process can write. The descriptor is registry data, equal to the one
+  the plugin's manifest declares.
+- **The key** names the plugin's implementation: `implementation`, the SHA-256 of the hull version
+  and each embedded file's hash, so a new hull (a changed frontend) or a changed plugin is a new
+  key.
+- **Discovery comes first.** A construct the TypeScript frontend refuses while it analyzes (an
+  enum, a namespace) makes the discovery invalid, and the run stops before any plugin, naming the
+  file, line and column (`project discovery failed: lib/a.ts:3:1: ts.unsupported: ...`). The
+  plugin's own refusals are those only the erasure finds (U+2028 / U+2029 inside type syntax).
+- **Output.** `hull plugins run` leaves a route with no input out of its text output (JSON keeps
+  it).
+- **Tests**: `js_generation.typescript_unit_erased_source` (the real session), the
+  `erased_source` cases of `test_project.lua` (the analyzer over a mocked bridge), the runner's op
+  in `test_plugin.lua`, the shipped plugin on the shipped route in `test_plan.lua`, and
+  `tests/e2e_typescript.sh` (`make e2e-typescript`) through the hull binary: one output per file,
+  the erased bytes, the result store, both kinds of refusal, a JavaScript-only app, `list`, and
+  the plugin's own tests.
 
 ## 14. Non-scope
 

@@ -45,6 +45,9 @@ int hl_js_gen_scope(int64_t token, int64_t unit_id, char **out_json, size_t *out
  * Success -> { "ok":true, "spans":[...], "refusals":[...] }; a JavaScript unit or a stale token ->
  * { "ok":false, "error": Diagnostic }. */
 int hl_js_gen_type_erasure(int64_t token, int64_t unit_id, char **out_json, size_t *out_len);
+/* erasedSource over a retained TypeScript unit: { ok, refusals, bytes? } (bytes base64, the
+ * erasure applied to the bytes analyzed; absent with any refusal). Same stale handling. */
+int hl_js_gen_erased_source(int64_t token, int64_t unit_id, char **out_json, size_t *out_len);
 
 /* Close (destroy) the generation session for `token`. Idempotent; an unknown/closed/<=0 token is a
  * safe no-op. The token integer is permanently dead (never reissued). */

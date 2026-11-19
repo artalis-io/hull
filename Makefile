@@ -1772,6 +1772,41 @@ $(TYPES_REGISTRY_C): $(TYPES_HDRS) Makefile | $(BUILDDIR)
 $(TYPES_REGISTRY_O): $(TYPES_REGISTRY_C) | $(BUILDDIR)
 	$(CC) -std=c11 $(HL_OPT) -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 
+# ── Bundled build plugins embedding (xxd) ────────────────────────────
+# stdlib/plugins/<name>/** (tests left out) become hl_plugin_entries[], named by
+# their path under stdlib/plugins/ ("ts_erase/app.js"). Tooling-only, like the
+# declarations above: the pipeline writes a bundled plugin into a private
+# directory and runs it there (hull.buildctx.registry, docs/buildcontext_design.md
+# §13.7), through tool.bundled_plugin_files() (tool_orchestration.c, weak empty
+# default).
+PLUGIN_FILES := $(shell find stdlib/plugins -type f -not -path '*/tests/*' 2>/dev/null | LC_ALL=C sort)
+plugin_hdr = $(BUILDDIR)/plugin_$(subst /,_,$(subst -,_,$(subst .,_,$(patsubst stdlib/plugins/%,%,$(1))))).h
+PLUGIN_HDRS := $(foreach f,$(PLUGIN_FILES),$(call plugin_hdr,$(f)))
+define PLUGIN_RULE
+$(call plugin_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
+endef
+$(foreach f,$(PLUGIN_FILES),$(eval $(call PLUGIN_RULE,$(f))))
+
+PLUGIN_REGISTRY_C := $(BUILDDIR)/plugin_registry.c
+PLUGIN_REGISTRY_O := $(BUILDDIR)/plugin_registry.o
+$(PLUGIN_REGISTRY_C): $(PLUGIN_HDRS) Makefile | $(BUILDDIR)
+	@echo "/* Auto-generated bundled build plugins registry - do not edit */" > $@
+	@( for hdr in $(PLUGIN_HDRS); do echo "#include \"$$(basename $$hdr)\""; done ) | LC_ALL=C sort >> $@
+	@echo "" >> $@
+	@echo "#include \"hull/entry.h\"" >> $@
+	@echo "static const HlEntry PLUGINS[] = {" >> $@
+	@( for f in $(PLUGIN_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.\-]/_/g'); \
+		name=$$(echo "$$f" | sed 's|^stdlib/plugins/||'); \
+		echo "$$name	    { \"$$name\", $${varname}, sizeof($${varname}) },"; \
+	done ) | LC_ALL=C sort | cut -f2- >> $@
+	@echo "    { 0, 0, 0 }" >> $@
+	@echo "};" >> $@
+	@echo "const HlEntry *hl_plugin_entries(void) { return PLUGINS; }" >> $@
+$(PLUGIN_REGISTRY_O): $(PLUGIN_REGISTRY_C) | $(BUILDDIR)
+	$(CC) -std=c11 $(HL_OPT) -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
+
 # The restricted QuickJS tooling runtime (needs QuickJS; lives in the hull binary only).
 FRONTEND_JS_SESSION_OBJ := $(BUILDDIR)/frontend_js_session.o
 $(FRONTEND_JS_SESSION_OBJ): $(SRCDIR)/hull/frontend/js_session.c | $(BUILDDIR)
@@ -3011,6 +3046,7 @@ endif
 
 # The embedded TypeScript declarations (hull types) ride in the hull binary only.
 HULL_LINK_OBJS += $(TYPES_REGISTRY_O)
+HULL_LINK_OBJS += $(PLUGIN_REGISTRY_O)
 
 $(BUILDDIR)/hull: $(HULL_LINK_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_ARCHIVE) | $(RUNTIME_FEATURE_LIBS)
 	$(CC) $(LDFLAGS) -o $@ $(HULL_LINK_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_LDFLAGS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread

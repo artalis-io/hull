@@ -91,7 +91,7 @@ int hl_js_gen_analyze(int64_t token, const uint8_t *src, size_t src_len, const c
     return rc;
 }
 
-/* declarationSemantics / scope / typeErasure pass the id via a small options JSON. */
+/* declarationSemantics / scope / typeErasure / erasedSource pass the id via a small options JSON. */
 static int invoke_id(int64_t token, const char *method, const char *opt_key, int64_t id,
                      const char *stale_json, char **out_json, size_t *out_len)
 {
@@ -116,6 +116,10 @@ int hl_js_gen_scope(int64_t token, int64_t unit_id, char **out_json, size_t *out
 int hl_js_gen_type_erasure(int64_t token, int64_t unit_id, char **out_json, size_t *out_len)
 {
     return invoke_id(token, "typeErasure", "unitId", unit_id, STALE_SCOPE, out_json, out_len);
+}
+int hl_js_gen_erased_source(int64_t token, int64_t unit_id, char **out_json, size_t *out_len)
+{
+    return invoke_id(token, "erasedSource", "unitId", unit_id, STALE_SCOPE, out_json, out_len);
 }
 
 void hl_js_gen_close(int64_t token)
