@@ -177,7 +177,7 @@ local cookie      = require("hull.web.cookie")
 local template    = require("hull.template")
 local form        = require("hull.web.form")
 local log         = require("hull.log")
-local db          = require("hull.db")
+local db          = require("hull.db").default()
 
 -- Small default so pagination is visible in the demo with only a
 -- handful of todos. Real apps would set this to 20-50.
@@ -479,7 +479,9 @@ import { cookie }      from "hull:web:cookie";
 import { template }    from "hull:template";
 import { form }        from "hull:web:form";
 import { log }         from "hull:log";
-import { db }          from "hull:db";
+import { db as dbModule } from "hull:db";
+
+const db = dbModule.default();
 
 // Small default so pagination is visible in the demo with only a
 // handful of todos. Real apps would set this to 20-50.
@@ -1075,7 +1077,7 @@ end)
 
 test("GET / paginates with ?page=N", function()
     -- Distinctive titles so substring matches don't false-positive.
-    local db = require("hull.db")
+    local db = require("hull.db").default()
     db.exec("DELETE FROM todos")
     for i = 1, 7 do
         db.exec("INSERT INTO todos (title, done) VALUES (?, 0)",
@@ -1095,7 +1097,7 @@ test("GET / paginates with ?page=N", function()
 end)
 
 test("GET /search filters by title (HTMX fragment)", function()
-    local db = require("hull.db")
+    local db = require("hull.db").default()
     db.exec("DELETE FROM todos")
     db.exec("INSERT INTO todos (title, done) VALUES ('buy milk', 0)")
     db.exec("INSERT INTO todos (title, done) VALUES ('write report', 0)")
@@ -1112,7 +1114,7 @@ test("GET /search filters by title (HTMX fragment)", function()
 end)
 
 test("inline edit: GET /todos/:id/edit -> form, PATCH -> saved row", function()
-    local db = require("hull.db")
+    local db = require("hull.db").default()
     db.exec("DELETE FROM todos")
     db.exec("INSERT INTO todos (title, done) VALUES ('original', 0)")
     local id = db.query("SELECT id FROM todos LIMIT 1")[1].id
@@ -1240,7 +1242,7 @@ test("plain POST /todos sets session flash; next GET renders it", async () => {
 });
 
 test("GET / paginates with ?page=N", async () => {
-    const { db } = await import("hull:db");
+    const db = (await import("hull:db")).db.default();
     db.exec("DELETE FROM todos");
     for (let i = 1; i <= 7; i++) {
         db.exec("INSERT INTO todos (title, done) VALUES (?, 0)",
@@ -1260,7 +1262,7 @@ test("GET / paginates with ?page=N", async () => {
 });
 
 test("GET /search filters by title (HTMX fragment)", async () => {
-    const { db } = await import("hull:db");
+    const db = (await import("hull:db")).db.default();
     db.exec("DELETE FROM todos");
     db.exec("INSERT INTO todos (title, done) VALUES ('buy milk', 0)");
     db.exec("INSERT INTO todos (title, done) VALUES ('write report', 0)");
@@ -1277,7 +1279,7 @@ test("GET /search filters by title (HTMX fragment)", async () => {
 });
 
 test("inline edit: GET /todos/:id/edit -> form, PATCH -> saved row", async () => {
-    const { db } = await import("hull:db");
+    const db = (await import("hull:db")).db.default();
     db.exec("DELETE FROM todos");
     db.exec("INSERT INTO todos (title, done) VALUES ('original', 0)");
     const id = db.query("SELECT id FROM todos LIMIT 1")[0].id;
