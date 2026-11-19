@@ -311,7 +311,6 @@ int hl_generation_take_env(int embedded)
     if (g_taken) return 0;
     const char *v = getenv(HL_GENERATION_ENV);
     if (!v) return 0;
-    g_taken = 1;
     char val[16];
     size_t vl = strlen(v);
     int fd = -1;
@@ -326,10 +325,18 @@ int hl_generation_take_env(int embedded)
     if (embedded) {
         /* A built binary runs its embedded files and consults no
          * descriptor (design §1.5). */
+        g_taken = 1;
         log_debug("[hull:c] " HL_GENERATION_ENV " ignored: a built binary "
                   "loads no generation");
         return 0;
     }
+    return hl_generation_take_fd(fd);
+}
+
+int hl_generation_take_fd(int fd)
+{
+    if (g_taken) return 0;
+    g_taken = 1;
     struct stat st;
     if (fd < 0 || fstat(fd, &st) != 0 ||
         !(S_ISREG(st.st_mode) || S_ISFIFO(st.st_mode) ||
@@ -366,6 +373,30 @@ int hl_generation_apply(int verify_sig)
         log_error("[hull:c] the pipeline generation is refused: %s", err);
     free(b);
     return rc;
+}
+
+int hl_generation_fd(const uint8_t *b, size_t len)
+{
+    const char *t = getenv("TMPDIR");
+    char path[4096];
+    int n = snprintf(path, sizeof path, "%s/hull-generation-XXXXXX",
+                     t && t[0] == '/' ? t : "/tmp");
+    if (n < 0 || (size_t)n >= sizeof path) return -1;
+    int fd = mkstemp(path);
+    if (fd < 0) return -1;
+    (void)unlink(path);
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, b + off, len - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            return -1;
+        }
+        off += (size_t)w;
+    }
+    if (lseek(fd, 0, SEEK_SET) != 0) { close(fd); return -1; }
+    return fd;
 }
 
 /* ── Running the pipeline ─────────────────────────────────────────── */

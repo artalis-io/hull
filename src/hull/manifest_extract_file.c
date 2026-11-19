@@ -297,6 +297,17 @@ int hl_manifest_extract_js_from_file(const char *path,
                                        size_t *out_json_len,
                                        char **out_err)
 {
+    return hl_manifest_extract_js_with_generation(path, hull_exe, -1, out_json,
+                                                  out_json_len, out_err);
+}
+
+int hl_manifest_extract_js_with_generation(const char *path,
+                                           const char *hull_exe,
+                                           int gen_fd,
+                                           char **out_json,
+                                           size_t *out_json_len,
+                                           char **out_err)
+{
     if (out_json)     *out_json = NULL;
     if (out_json_len) *out_json_len = 0;
     if (out_err)      *out_err = NULL;
@@ -313,7 +324,17 @@ int hl_manifest_extract_js_from_file(const char *path,
     else if (hull_exe && *hull_exe)                       exe = hull_exe;
 
     char result_path[600];
-    if (!exe || make_result_path(result_path, sizeof(result_path)) != 0) {
+    /* With a generation the entry runs only in a child that took it: in
+     * this process the loaders have no overlay, and a TypeScript entry is
+     * refused rather than read from disk - so no in-process fallback. */
+    if (gen_fd >= 0 && (!exe || make_result_path(result_path,
+                                                 sizeof(result_path)) != 0)) {
+        if (out_err) *out_err = strdup_safe(
+            "manifest extraction needs a child process to hand the "
+            "pipeline generation to, and none could be set up");
+        return -1;
+    }
+    if (gen_fd < 0 && (!exe || make_result_path(result_path, sizeof(result_path)) != 0)) {
         /* Could not set isolation up at all. Degrade to the historical
          * in-process behaviour rather than inventing a new way to fail. */
         log_debug("manifest extraction: no isolation available "
@@ -322,8 +343,10 @@ int hl_manifest_extract_js_from_file(const char *path,
                                                  out_json_len, out_err);
     }
 
+    char fdarg[16];
+    snprintf(fdarg, sizeof fdarg, "%d", gen_fd);
     const char *argv[] = { exe, "__extract-manifest-js", path, result_path,
-                           NULL };
+                           gen_fd >= 0 ? fdarg : NULL, NULL };
     /* Visible under --verbose. Whether extraction is isolated or fell back is
      * otherwise unobservable from outside the process, which makes a silent
      * regression to the in-process path (and its crash) easy to miss. */
@@ -363,7 +386,7 @@ int hl_manifest_extract_js_from_file(const char *path,
          *   -1          started and died on a signal. Do NOT fall back: that
          *               re-runs the abort this child exists to contain. */
         free(raw);
-        if (spawn_rc >= 0 || spawn_rc == HL_TOOL_SPAWN_NOSTART) {
+        if (gen_fd < 0 && (spawn_rc >= 0 || spawn_rc == HL_TOOL_SPAWN_NOSTART)) {
             log_debug("manifest extraction: child produced no result "
                       "(status %d), running in-process", spawn_rc);
             return hl_manifest_extract_js_in_process(path, NULL, out_json,

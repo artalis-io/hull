@@ -71,6 +71,23 @@ int hl_manifest_extract_js_from_file(const char *path,
                                        char **out_err);
 
 /**
+ * @brief hl_manifest_extract_js_from_file(), the child handed a pipeline
+ * generation (shared/generation.h) on descriptor @p gen_fd (-1: none).
+ *
+ * `hull build` of an app with pipeline work (a TypeScript entry, build
+ * plugins) extracts the manifest from the modules it embeds: the child takes
+ * the descriptor and installs the overlay before the entry runs. It is
+ * inherited by the child and not closed here. With a descriptor there is no
+ * in-process fallback (this process has no overlay).
+ */
+int hl_manifest_extract_js_with_generation(const char *path,
+                                           const char *hull_exe,
+                                           int gen_fd,
+                                           char **out_json,
+                                           size_t *out_json_len,
+                                           char **out_err);
+
+/**
  * @brief The extraction itself, run IN THIS PROCESS.
  *
  * Same contract as hl_manifest_extract_js_from_file() minus @p hull_exe.
