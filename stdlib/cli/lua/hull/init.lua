@@ -1552,6 +1552,18 @@ See also:
   docs/htmx.md                          Full pattern reference]])
 end
 
+-- Refuse the invocation before anything is written. hull_tool made the
+-- scaffold target before the sandbox applied (tool.scaffold_created); a
+-- refused run removes it again rather than leave an empty directory named
+-- after whatever argument it took for the target.
+local function refuse(msg)
+    tool.stderr("hull init: " .. msg .. "\n")
+    if tool.scaffold_created == true and tool.scaffold_dir then
+        tool.rmdir(tool.scaffold_dir)
+    end
+    tool.exit(1)
+end
+
 local function parse_args()
     local opts = {
         dir     = ".",
@@ -1566,17 +1578,26 @@ local function parse_args()
         local a = arg[i]
         if a == "-h" or a == "--help" then
             opts.help = true
-        elseif a == "--runtime" then
+        elseif a == "--runtime" or a == "--profile" then
+            local v = arg[i + 1]
+            if not v or v == "" then
+                refuse(a .. " needs a value")
+            end
+            opts[a:sub(3)] = v
             i = i + 1
-            opts.runtime = arg[i]
+        elseif a:sub(1, 10) == "--runtime=" then
+            opts.runtime = a:sub(11)
         elseif a == "--cli" then
             opts.cli = true
-        elseif a == "--profile" then
-            i = i + 1
-            opts.profile = arg[i]
         elseif a:sub(1, 10) == "--profile=" then
             opts.profile = a:sub(11)
-        elseif a:sub(1, 1) ~= "-" then
+        elseif a == "--verbose" or a == "--json" then
+            -- Global flags the dispatcher reads; they stay in argv.
+        elseif a:sub(1, 1) == "-" then
+            -- An option this command does not take is an error: ignored, a
+            -- misspelt one scaffolded something else without a word.
+            refuse("unknown option '" .. tool.escape(a) .. "'")
+        else
             opts.dir = a
         end
         i = i + 1
@@ -1683,8 +1704,7 @@ local function main()
 
     -- Validate runtime flag if given
     if opts.runtime and opts.runtime ~= "lua" and opts.runtime ~= "js" then
-        tool.stderr("hull init: invalid runtime '" .. opts.runtime .. "' (use lua or js)\n")
-        tool.exit(1)
+        refuse("invalid runtime '" .. tool.escape(opts.runtime) .. "' (use lua or js)")
     end
 
     -- Create target directory if needed
