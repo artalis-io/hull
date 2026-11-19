@@ -10,23 +10,21 @@
 --
 
 local json = require("hull.json")
-
--- Resolve which entry file holds the manifest. Apps are single-runtime;
--- only one of app.lua / app.js is meaningful in a given directory.
-local function find_entry(dir)
-    local lua_path = dir .. "/app.lua"
-    if tool.file_exists(lua_path) then return lua_path, "lua" end
-    local js_path = dir .. "/app.js"
-    if tool.file_exists(js_path) then return js_path, "js" end
-    return nil, nil
-end
+local fcompose = require("hull.feature_compose")
 
 local function main()
     local app_dir = arg[1] or "."
 
-    local entry, kind = find_entry(app_dir)
+    -- The app's entry: app.lua, app.js, or a TypeScript entry, which runs
+    -- from the pipeline's erased modules, so the pipeline runs first.
+    local entry, kind = fcompose.app_entry(app_dir)
     if not entry then
-        tool.stderr("hull manifest: no app.lua or app.js found in " .. app_dir .. "\n")
+        tool.stderr("hull manifest: " .. kind .. "\n")
+        tool.exit(1)
+    end
+    local _, gen_err = fcompose.prepare_generation(app_dir, "hull manifest")
+    if gen_err then
+        tool.stderr("hull manifest: " .. gen_err .. "\n")
         tool.exit(1)
     end
 
@@ -50,7 +48,8 @@ local function main()
     else
         -- JS entry: spin up a transient JS runtime via the C-side
         -- helper, get back the JSON-stringified manifest, decode.
-        local ok, json_or_err = pcall(tool.extract_manifest_js, entry)
+        local ok, json_or_err = pcall(tool.extract_manifest_js, entry,
+                                      fcompose.generation(app_dir))
         if not ok then
             tool.stderr("hull manifest: " .. tostring(json_or_err) .. "\n")
             tool.exit(1)

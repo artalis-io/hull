@@ -122,7 +122,8 @@ compiler pinned in `tests/types/package-lock.json` (7.0.2):
 - **Fixtures:** `tests/types/fixtures/*.ts` use every module as an app would, with
   `// @ts-expect-error` on calls that must be rejected (an unused one fails).
 - **Examples:** every `examples/**/*.js` type-checks as JavaScript (`checkJs`, the
-  `hull types` defaults). This found example apps that failed at load (a missing
+  `hull types` defaults), and every `examples/**/*.ts` (`examples/rest_api_ts`,
+  `examples/cli_modular_ts`) as TypeScript. This found example apps that failed at load (a missing
   `hull:app` import, getters called as methods) and manifest keys the runtime ignores.
 - **`make e2e-types`:** installs into an app, the conflict / `--force` / `--check` /
   removal rules, and a type-check of an app with the installed files (a wrong call fails).
@@ -452,7 +453,8 @@ All through the pipeline, none through a loader transform:
 
 As built: `shared/app_entry.c` finds a TypeScript entry for every place that looks for an
 app's entry (the runner, `hull dev`, `hull test`, `hull agent`, `hull jobs`, `hull migrate`) and
-refuses one beside `app.js`, `app.lua` or the other TypeScript name; an entry named explicitly
+refuses one beside `app.js`, `app.lua` or the other TypeScript name (the tool commands -
+`hull manifest`, `hull deploy` - through `tool.app_entry_ts`); an entry named explicitly
 (`hull app.ts`) is taken as given. The JavaScript runtime factory takes `.ts` / `.mts` entries
 (`HlRuntimeFactory.also_extensions`). `hl_generation_has_pipeline` is true for an app with a
 TypeScript entry, so its pipeline runs with or without a `hull.build.json`; a `.js` entry that
@@ -460,7 +462,9 @@ imports a `.ts` module needs one. The JavaScript module, entry and test-file loa
 TypeScript name (`.ts`, `.mts`, `.cts`, `.tsx`) only from the generation overlay and refuse it
 otherwise: its bytes on disk are not JavaScript. `hull test` runs `tests/test_*.ts` /
 `test_*.mts` on the JavaScript runtime (`hl_js_test_file_patterns`), and the erasure route
-covers them, since project discovery analyzes every `.ts` file in the app.
+covers them, since project discovery analyzes every `.ts` file in the app. A declaration
+file (`.d.ts`, `.d.mts`, `.d.cts`) is not a source (`registry.source_ext`): it holds only types,
+so the declarations `hull types` installs under `types/` are never erased or embedded.
 
 `hull build` of an app with pipeline work (a TypeScript entry or a `hull.build.json`) runs
 the pipeline in its tool process (`hull.buildctx.generation.produce`, the step `hull plugins
@@ -471,7 +475,13 @@ entry is embedded in place of the file of its name, under the name the runtime l
 file up by: `./app.ts`, `./lib/a.ts`, a Lua module without `.lua`, an asset under
 `templates/` and the like bare. A built binary finds its entry by that name
 (`hl_app_entry_embedded`), and its JavaScript loader takes an embedded `.ts` / `.mts` as
-JavaScript. Signing is dev_pipeline_generations_design.md §6 as built.
+JavaScript. Signing is dev_pipeline_generations_design.md §6 as built; `hull build`,
+`hull verify` and `hull inspect` take the signed payload from one function
+(`hull.app_sig`), so each covers the `generated` map.
+
+`tests/e2e_typescript_examples.sh` takes the two TypeScript examples through every command an
+app author runs: `hull types`, `hull test`, running from source, `hull manifest`, `hull
+deploy`, `hull build --sign`, `hull inspect` and `hull verify`.
 
 ### 4.5 Scaffolding (`hull new` / `hull init --runtime ts`)
 

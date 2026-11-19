@@ -1838,6 +1838,12 @@ e2e-generation: $(BUILDDIR)/hull
 e2e-typescript: $(BUILDDIR)/hull
 	HULL=$(BUILDDIR)/hull sh tests/e2e_typescript.sh
 
+# The TypeScript examples through hull types / test / run / manifest / deploy /
+# build / inspect / verify (tests/e2e_typescript_examples.sh).
+.PHONY: e2e-typescript-examples
+e2e-typescript-examples: $(BUILDDIR)/hull
+	HULL=$(BUILDDIR)/hull sh tests/e2e_typescript_examples.sh
+
 .PHONY: e2e-plugins
 # `hull plugins list|run`: registration, the inventory demonstration plugin in
 # Lua and JavaScript over a Lua and a JavaScript app, the build result store.
@@ -2239,7 +2245,7 @@ hull-test-examples: $(BUILDDIR)/hull
 	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \
 	            examples/jwt_api examples/crud_with_auth examples/middleware examples/webhooks \
 	            examples/entry examples/timers examples/cli_modular examples/tui_modular \
-	            examples/rest_api_modular; do \
+	            examples/rest_api_modular examples/rest_api_ts examples/cli_modular_ts; do \
 		echo "=== hull test $$dir ===" && \
 		output=$$($(BUILDDIR)/hull test "$$dir" 2>&1; true) && \
 		echo "$$output" && \

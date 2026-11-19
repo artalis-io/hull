@@ -150,6 +150,11 @@ do
     ok(registry.for_ext("lua").analyzable, "lua is analyzable")
     ok(not registry.for_ext("js").analyzable, "js is known but NOT analyzable")
     ok(registry.for_ext("py") == nil, "unknown extension is not registered")
+    eq(registry.source_ext("lib/a.ts"), "ts", "source_ext: a .ts file")
+    eq(registry.source_ext("app.lua"), "lua", "source_ext: a .lua file")
+    for _, d in ipairs({ "types/hull/app.d.ts", "x.d.mts", "x.d.cts" }) do
+        ok(registry.source_ext(d) == nil, "source_ext: a declaration file is not a source: " .. d)
+    end
     local fr = registry.frontends()
     local lua_e, js_e
     for _, e in ipairs(fr) do
@@ -744,6 +749,9 @@ do
         ["t/old.js"]    = "export const z = 1;\n",
         ["t/q.lua"]     = "local q = 1\nreturn q\n",
         ["t/v.tsx"]     = "export const v = <div/>;\n",
+        -- Declaration files (hull types writes them under types/): not app source.
+        ["t/types/hull/app.d.ts"] = "declare module \"hull:app\" {}\n",
+        ["t/lib/b.d.mts"]         = "export declare const b: number;\n",
     }
 
     local trk = {}
@@ -756,6 +764,9 @@ do
     for _, s in ipairs(disc.sources) do status[s.path] = s.language .. ":" .. s.status end
     eq(status["app.ts"], "typescript:analyzed", "app.ts is an analyzed typescript source")
     eq(status["v.tsx"], "typescript:unsupported", ".tsx is an unsupported typescript source")
+    ok(status["types/hull/app.d.ts"] == nil and trk.modes["types/hull/app.d.ts"] == nil,
+       "a .d.ts declaration file is not a source (never analyzed, so never erased or embedded)")
+    ok(status["lib/b.d.mts"] == nil and trk.modes["lib/b.d.mts"] == nil, "nor is a .d.mts")
     ok(not disc.complete, "a .tsx source makes the generation complete=false")
     local tsx_msg
     for _, d in ipairs(disc.diagnostics) do if d.path == "v.tsx" then tsx_msg = d.message end end

@@ -1003,7 +1003,7 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
         platform = platform,
         trampoline_hash = sign_ctx.trampoline_hash,
     }
-    local payload = json.encode(payload_table)
+    local payload = require("hull.app_sig").payload(payload_table)
     local sig_hex = hex.encode(crypto.ed25519_sign(payload, hex.decode(sk_hex)))
 
     -- Write package.sig
@@ -2005,26 +2005,13 @@ end
 -- (docs/dev_pipeline_generations_design.md §1.1, §6;
 -- docs/typescript_design.md §4.4). nil when the app has no pipeline work.
 local function pipeline_generation(app_dir)
-    if not (file_exists(app_dir .. "/hull.build.json") or file_exists(app_dir .. "/app.ts")
-            or file_exists(app_dir .. "/app.mts")) then
-        return nil
-    end
-    local root = tool.realpath(app_dir)
-    if not root then
-        tool.stderr("hull build: " .. esc(app_dir) .. ": not a directory\n")
-        tool.exit(1)
-    end
-    local g, bundle, err = require("hull.buildctx.generation").produce(root, {
-        sha256_hex = function(d) return hex.encode(crypto.sha256(d)) end,
-        report = function(r, d)
-            local where = d.path and (d.path .. ": ") or ""
-            tool.stderr(("hull build: %s: %s %s: %s%s\n"):format(r.identity, d.severity,
-                d.code, where, d.message))
-        end,
-    })
+    local g, err = fcompose.prepare_generation(app_dir, "hull build")
     if not g then
-        tool.stderr("hull build: " .. err .. "\n")
-        tool.exit(1)
+        if err then
+            tool.stderr("hull build: " .. err .. "\n")
+            tool.exit(1)
+        end
+        return nil
     end
     for _, e in ipairs(g.entries) do
         e.entry_name = generated_entry_name(e.name)
@@ -2038,7 +2025,6 @@ local function pipeline_generation(app_dir)
         local src = read_file(app_dir .. "/" .. e.name)
         e.source = src and hex.encode(crypto.sha256(src)) or nil
     end
-    fcompose.set_generation(app_dir, bundle)
     if #g.entries > 0 then
         print("hull build: " .. #g.entries .. " generated file(s) from the build pipeline")
     end

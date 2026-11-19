@@ -409,33 +409,8 @@ local function main()
     end
 
     -- Verify app signature
-    local payload
-    if sig.binary_hash then
-        -- New package.sig format. Include modules_resolved if present
-        -- (added in the package & module system roadmap), omit otherwise
-        -- so signatures written by older builds still verify.
-        local reconstructed = {
-            binary_hash = sig.binary_hash,
-            build = sig.build,
-            files = sig.files,
-            manifest = sig.manifest,
-            platform = sig.platform,
-            trampoline_hash = sig.trampoline_hash,
-        }
-        if sig.modules_resolved then
-            reconstructed.modules_resolved = sig.modules_resolved
-        end
-        if sig.generated then
-            reconstructed.generated = sig.generated
-        end
-        payload = json.encode(reconstructed)
-    else
-        -- Legacy hull.sig format
-        payload = json.encode({
-            files = sig.files,
-            manifest = sig.manifest,
-        })
-    end
+    -- The exact payload build.lua signed (hull.app_sig, shared with it).
+    local payload = require("hull.app_sig").payload(sig)
 
     local ok = ed25519_verify_hex(payload, sig.signature, sig.public_key)
     if not ok then
