@@ -206,6 +206,28 @@ release-artifact layout).
 
 ### Fixed
 
+- The commands that read an app's manifest without serving it now take every runtime's app.
+  `hull modules list` looked for `app.lua` alone, so a JavaScript or TypeScript app failed
+  with "no app.lua found" - and so did `hull check`, which starts there. `hull modules analyze`
+  ran `app.js` through the Lua extractor (so it "skipped" every JavaScript app) and scanned no
+  `.ts` / `.mts` file. `hull deploy` read only a Lua app's manifest, leaving a JavaScript app's
+  `env` and `hosts` out of the generated configs. All of them, and `hull manifest`, now read the
+  manifest through one function (`feature_compose.app_manifest`). `tests/e2e_manifest_readers.sh`
+  (`make e2e-manifest-readers`) covers them on a Lua, a JavaScript and a TypeScript app, and
+  `tests/e2e_deploy.sh`, which no make target or CI job ran, is now `make e2e-deploy` in CI.
+- `hull modules analyze` now reports what the runtime would do. It compares the modules a source
+  uses with the module resolver's set (the declarations, their dependencies, `hull/app`) rather
+  than the declarations plus a stale intrinsic list: an undeclared `hull/log` or `hull/json`
+  import passed it and then failed the app's load, and a `hull/db` admitted as a declared
+  module's dependency was reported undeclared. The `app` methods a module adds count as using it
+  (`app.get` / `post` / `use` / `router` / ... `hull/http-server`, `app.every` / `daily`
+  `hull/timers`, `app.sse`, `app.ws`), so a declared `hull/http-server` is no longer "never
+  imported" and an `app.get` without it is reported. Names with a hyphen (`hull.http-client`,
+  `hull:web:ws-server`) and a paren-less `require "hull.x"` are read, a TypeScript `import type`
+  is not a use, a sub-module import counts for its registered module, and `gpu` / `tui` apps
+  resolve on a hull without those subsystems (`hull build` composes them). The read-only
+  manifest commands keep a manifest declared before the app's top level raises, as `hull build`
+  does: `hull manifest examples/todo` failed on its top-level `session.init()`.
 - TypeScript apps through the tooling, found by the TypeScript examples:
   - `hull build` embedded every `.d.ts` file under the app as an erased module - the 80-odd
     declarations `hull types` installs under `types/`, signed and embedded in every built

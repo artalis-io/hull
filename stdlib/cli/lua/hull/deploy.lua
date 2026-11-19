@@ -194,9 +194,11 @@ local function introspect_app(app_dir)
         hosts          = {},
     }
 
-    -- Detect runtime: app.lua, app.js, or a TypeScript entry (the JavaScript
-    -- runtime runs it).
-    local entry_path, runtime = require("hull.feature_compose").app_entry(app_dir)
+    -- app.lua, app.js or a TypeScript entry, its manifest read by its own
+    -- runtime (only a Lua app's was read: a JavaScript app's env and hosts
+    -- were left out of the generated configs).
+    local fcompose = require("hull.feature_compose")
+    local entry_path, runtime = fcompose.app_entry(app_dir)
     if not entry_path then
         tool.stderr("hull deploy: " .. runtime .. "\n")
         tool.exit(1)
@@ -204,47 +206,37 @@ local function introspect_app(app_dir)
     info.runtime = runtime
     info.entry = entry_path:match("[^/]+$")
 
-    -- Try to extract manifest (Lua only - JS needs C runtime)
-    if info.runtime == "lua" then
-        -- The app's top level runs in a Lua runtime of its own, never this
-        -- tool VM (see hl_lua_extract_manifest_json).
-        local json_s, run_err = tool.extract_manifest_lua(entry_path)
-        if run_err then
-            tool.stderr("hull deploy: warning: manifest extraction failed: " .. tostring(run_err) .. "\n")
+    local m, run_err = fcompose.app_manifest(app_dir, "hull deploy")
+    if run_err then
+        tool.stderr("hull deploy: warning: manifest extraction failed: " .. run_err .. "\n")
+    end
+    if m then
+        info.manifest = m
+        -- The manifest is UNTRUSTED third-party input that gets
+        -- interpolated into the generated Dockerfile / fly.toml /
+        -- systemd unit. Validate each entry so a value containing a
+        -- newline (or shell/TOML metachars) can't inject directives;
+        -- skip + warn on anything malformed rather than emitting it.
+        if m.env then
+            for _, v in ipairs(m.env) do
+                if type(v) == "string" and v:find("^[A-Za-z_][A-Za-z0-9_]*$") then
+                    info.env_vars[#info.env_vars + 1] = v
+                else
+                    tool.stderr("hull deploy: skipping invalid env name in manifest: "
+                                .. tostring(v) .. "\n")
+                end
+            end
         end
-        do
-            if json_s then
-                local m = require("hull.json").decode(json_s)
-                if m then
-                    info.manifest = m
-                    -- The manifest is UNTRUSTED third-party input that gets
-                    -- interpolated into the generated Dockerfile / fly.toml /
-                    -- systemd unit. Validate each entry so a value containing a
-                    -- newline (or shell/TOML metachars) can't inject directives;
-                    -- skip + warn on anything malformed rather than emitting it.
-                    if m.env then
-                        for _, v in ipairs(m.env) do
-                            if type(v) == "string" and v:find("^[A-Za-z_][A-Za-z0-9_]*$") then
-                                info.env_vars[#info.env_vars + 1] = v
-                            else
-                                tool.stderr("hull deploy: skipping invalid env name in manifest: "
-                                            .. tostring(v) .. "\n")
-                            end
-                        end
-                    end
-                    if m.hosts then
-                        for _, h in ipairs(m.hosts) do
-                            -- hostname / '*.suffix' glob / IPv4 / CIDR; no
-                            -- whitespace, quotes, or shell/TOML metacharacters.
-                            if type(h) == "string" and h ~= ""
-                               and h:find("^[%w%.%*%-/:]+$") then
-                                info.hosts[#info.hosts + 1] = h
-                            else
-                                tool.stderr("hull deploy: skipping invalid host in manifest: "
-                                            .. tostring(h) .. "\n")
-                            end
-                        end
-                    end
+        if m.hosts then
+            for _, h in ipairs(m.hosts) do
+                -- hostname / '*.suffix' glob / IPv4 / CIDR; no
+                -- whitespace, quotes, or shell/TOML metacharacters.
+                if type(h) == "string" and h ~= ""
+                   and h:find("^[%w%.%*%-/:]+$") then
+                    info.hosts[#info.hosts + 1] = h
+                else
+                    tool.stderr("hull deploy: skipping invalid host in manifest: "
+                                .. tostring(h) .. "\n")
                 end
             end
         end

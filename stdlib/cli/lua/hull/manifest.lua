@@ -15,57 +15,15 @@ local fcompose = require("hull.feature_compose")
 local function main()
     local app_dir = arg[1] or "."
 
-    -- The app's entry: app.lua, app.js, or a TypeScript entry, which runs
-    -- from the pipeline's erased modules, so the pipeline runs first.
-    local entry, kind = fcompose.app_entry(app_dir)
-    if not entry then
-        tool.stderr("hull manifest: " .. kind .. "\n")
+    -- app.lua, app.js or a TypeScript entry (run from the pipeline's erased
+    -- modules); the app's top level runs in a runtime of its own.
+    local m, err, entry = fcompose.app_manifest(app_dir, "hull manifest")
+    if err then
+        tool.stderr("hull manifest: " .. err .. "\n")
         tool.exit(1)
     end
-    local _, gen_err = fcompose.prepare_generation(app_dir, "hull manifest")
-    if gen_err then
-        tool.stderr("hull manifest: " .. gen_err .. "\n")
-        tool.exit(1)
-    end
-
-    local m = nil
-    if kind == "lua" then
-        -- The app's top level runs in a Lua runtime of its own, never this
-        -- tool VM (see hl_lua_extract_manifest_json).
-        local json_s, run_err = tool.extract_manifest_lua(entry)
-        if run_err then
-            tool.stderr("hull manifest: " .. tostring(run_err) .. "\n")
-            tool.exit(1)
-        end
-        if json_s then
-            local decoded, decode_err = json.decode(json_s)
-            if not decoded then
-                tool.stderr("hull manifest: JSON decode failed: " .. tostring(decode_err) .. "\n")
-                tool.exit(1)
-            end
-            m = decoded
-        end
-    else
-        -- JS entry: spin up a transient JS runtime via the C-side
-        -- helper, get back the JSON-stringified manifest, decode.
-        local ok, json_or_err = pcall(tool.extract_manifest_js, entry,
-                                      fcompose.generation(app_dir))
-        if not ok then
-            tool.stderr("hull manifest: " .. tostring(json_or_err) .. "\n")
-            tool.exit(1)
-        end
-        if json_or_err then
-            local decoded, decode_err = json.decode(json_or_err)
-            if not decoded then
-                tool.stderr("hull manifest: JSON decode failed: " .. tostring(decode_err) .. "\n")
-                tool.exit(1)
-            end
-            m = decoded
-        end
-    end
-
     if not m then
-        tool.stderr("hull manifest: no app.manifest() declared in " .. entry .. "\n")
+        tool.stderr("hull manifest: no app.manifest() declared in " .. tool.escape(entry) .. "\n")
         tool.exit(1)
     end
 

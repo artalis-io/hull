@@ -246,6 +246,19 @@ else
     pass "js: skipped (no JS hello example)"
 fi
 
+# A JavaScript app's manifest is read (only a Lua app's was): its env and
+# hosts reach the generated configs.
+OUTDIR10="$WORKDIR/env_js"
+mkdir -p "$OUTDIR10"
+cat > "$OUTDIR10/app.js" <<'JS'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/http-server@1"], env: ["API_TOKEN"], hosts: ["api.example.com"] });
+app.get("/", (_req, res) => res.text("ok"));
+JS
+"$HULL" deploy systemd "$OUTDIR10" 2>/dev/null
+INSTALL10=$(cat "$OUTDIR10/deploy/install.sh" 2>/dev/null)
+check_contains "js: the manifest's env reaches install.sh" "$INSTALL10" "API_TOKEN="
+
 echo ""
 
 # ── Summary ───────────────────────────────────────────────────────

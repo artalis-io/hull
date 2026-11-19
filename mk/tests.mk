@@ -1689,6 +1689,16 @@ e2e-js-runs: $(BUILDDIR)/hull
 e2e-manifest-isolation: $(BUILDDIR)/hull
 	sh tests/e2e_manifest_isolation.sh
 
+# hull manifest / modules list / modules analyze / check on a Lua, a JS and a
+# TypeScript app (tests/e2e_manifest_readers.sh).
+.PHONY: e2e-manifest-readers e2e-deploy
+e2e-manifest-readers: $(BUILDDIR)/hull
+	HULL=$(BUILDDIR)/hull sh tests/e2e_manifest_readers.sh
+
+# hull deploy's three targets and hull agent deploy (tests/e2e_deploy.sh).
+e2e-deploy: $(BUILDDIR)/hull
+	sh tests/e2e_deploy.sh
+
 e2e-dynamic-connections: $(BUILDDIR)/hull
 	sh tests/e2e_dynamic_connections.sh
 

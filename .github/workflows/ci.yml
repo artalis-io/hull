@@ -553,6 +553,12 @@ jobs:
       - name: Manifest extraction isolation E2E tests
         timeout-minutes: 2
         run: make e2e-manifest-isolation
+      - name: Manifest reader E2E tests (manifest, modules list / analyze, check; Lua, JS, TS)
+        timeout-minutes: 3
+        run: make e2e-manifest-readers
+      - name: Deploy config E2E tests (dockerfile, systemd, fly, agent deploy)
+        timeout-minutes: 3
+        run: make e2e-deploy
 
       - name: Build-flavor E2E tests
         timeout-minutes: 6

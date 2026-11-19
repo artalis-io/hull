@@ -4,13 +4,20 @@
 -- Usage: hull modules analyze [app_dir]
 --        hull modules analyze --json [app_dir]
 --
--- Scans every .lua and .js file under app_dir for require("hull.X") and
--- import "hull:X" patterns (skipping comments and string-literal text),
--- collects the set of canonical module names actually used, then compares
--- against the manifest's `modules` declaration. Reports:
+-- Scans the app's sources in its entry's language (.lua; or .js / .ts /
+-- .mts) for require("hull.X") and import "hull:X" (skipping comments and
+-- string-literal text), and for the `app` methods a module adds
+-- (app.get / app.use / app.router: hull/http-server, app.every / app.daily:
+-- hull/timers, app.sse: hull/web/sse, app.ws: hull/web/ws-server). Each
+-- name is taken to its registered module (hull.crypto.sealbox to
+-- hull/crypto, as the loader gates it), then compared with the manifest.
+-- Reports:
 --
---   - undeclared:  modules an app source imports but the manifest doesn't list
---   - unused:      modules the manifest declares but no source imports
+--   - undeclared:  modules a source uses that the resolved manifest does
+--                  not admit (the module resolver's set: the declared
+--                  modules, their dependencies and the intrinsic hull/app),
+--                  so the app fails to load or the call raises
+--   - unused:      modules the manifest declares that no source uses
 --
 -- Caveats:
 --   - Indirect calls like `require("hull." .. var)` are not detected.
@@ -43,8 +50,52 @@ end
 
 local function find_source_files(app_dir)
     local lua_files = tool.find_files(app_dir, "*.lua") or {}
-    local js_files  = tool.find_files(app_dir, "*.js")  or {}
+    -- JavaScript, and TypeScript: its imports are JavaScript's. A declaration
+    -- file (.d.ts) is not a source; `hull types` installs dozens of them.
+    local source_ext = require("hull.project.registry").source_ext
+    local js_files = {}
+    for _, pat in ipairs({ "*.js", "*.ts", "*.mts" }) do
+        for _, p in ipairs(tool.find_files(app_dir, pat) or {}) do
+            if source_ext(p) then js_files[#js_files + 1] = p end
+        end
+    end
+    table.sort(js_files)
     return lua_files, js_files
+end
+
+-- ── app decorations ────────────────────────────────────────────────
+--
+-- The `app` methods a declared module adds (mod_app.c in each runtime): an
+-- app that calls one uses that module, and without it the call raises
+-- ("attempt to call a nil value" / "not a function").
+local DECORATIONS = {
+    get = "hull/http-server", post = "hull/http-server", put = "hull/http-server",
+    delete = "hull/http-server", del = "hull/http-server", patch = "hull/http-server",
+    options = "hull/http-server", use = "hull/http-server", use_post = "hull/http-server",
+    usePost = "hull/http-server", router = "hull/http-server",
+    every = "hull/timers", daily = "hull/timers",
+    sse = "hull/web/sse",
+    ws = "hull/web/ws-server",
+    transform = "hull/build-plugin",
+}
+
+-- Whether the byte before position i continues an identifier (so a match
+-- at i is inside a longer name: `myapp.get`, `x.require`).
+local function ident_before(text, i)
+    return i > 1 and text:sub(i - 1, i - 1):find("[%w_$.:]") ~= nil
+end
+
+-- At position i (code, not a string or comment): an `app.NAME(` call of a
+-- decoration records its module in `out`. Returns the next position.
+local function scan_decoration(text, i, out)
+    if not ident_before(text, i) then
+        local s, e, name = text:find("^app%s*[%.:]%s*([%a_][%w_]*)%s*%(", i)
+        if s and DECORATIONS[name] then
+            out[DECORATIONS[name]] = true
+            return e + 1
+        end
+    end
+    return i + 1
 end
 
 -- ── Lua scanner: strip comments + strings, find require() calls ─────
@@ -105,16 +156,21 @@ local function scan_lua(text)
             end
 
         else
-            -- Look for `require ( "..." )` starting here.
-            local s, e, quote, modname = text:find(
-                "^require%s*%(%s*([\"'])hull%.([%w%._]+)%1%s*%)", i)
-            if s then
+            -- `require ( "hull.X" )` or `require "hull.X"`, at a word start.
+            local s, e, q, modname
+            if not ident_before(text, i) then
+                s, e, q, modname = text:find(
+                    "^require%s*%(%s*([\"'])hull%.([%w%._%-]+)%1%s*%)", i)
+                if not s then
+                    s, e, q, modname = text:find("^require%s*([\"'])hull%.([%w%._%-]+)%1", i)
+                end
+            end
+            if s and q then
                 -- Normalize dots → slashes for canonical form.
-                local canonical = "hull/" .. modname:gsub("%.", "/")
-                out[canonical] = true
+                out[(("hull/" .. modname):gsub("%.", "/"))] = true
                 i = e + 1
             else
-                i = i + 1
+                i = scan_decoration(text, i, out)
             end
         end
     end
@@ -133,6 +189,7 @@ end
 
 local function scan_js(text)
     local out = {}
+    local out_skip = false
     local i = 1
     local n = #text
     while i <= n do
@@ -162,19 +219,29 @@ local function scan_js(text)
         else
             -- `import ... from "hull:X"` - capture only the module string.
             -- Handles `import x from`, `import {x} from`, `import * as x from`.
-            local s, e, modname = text:find(
-                "^import[%s%w_${},*]+from%s*[\"']hull:([%w_:]+)[\"']", i)
-            if not s then
-                -- Dynamic `import("hull:X")`
+            -- A TypeScript `import type ... from` is erased, so it needs no
+            -- declaration: skipped.
+            local s, e, modname
+            if not ident_before(text, i) then
                 s, e, modname = text:find(
-                    "^import%s*%(%s*[\"']hull:([%w_:]+)[\"']%s*%)", i)
+                    "^import[%s%w_${},*]+from%s*[\"']hull:([%w_:%-]+)[\"']", i)
+                if s and text:find("^import%s+type[%s{*]", i) then
+                    out_skip = true
+                end
+                if not s then
+                    -- Dynamic `import("hull:X")`
+                    s, e, modname = text:find(
+                        "^import%s*%(%s*[\"']hull:([%w_:%-]+)[\"']%s*%)", i)
+                end
             end
             if s then
-                local canonical = "hull/" .. modname:gsub(":", "/")
-                out[canonical] = true
+                if not out_skip then
+                    out[(("hull/" .. modname):gsub(":", "/"))] = true
+                end
+                out_skip = false
                 i = e + 1
             else
-                i = i + 1
+                i = scan_decoration(text, i, out)
             end
         end
     end
@@ -183,35 +250,31 @@ end
 
 -- ── Manifest module collection ──────────────────────────────────────
 
--- Intrinsic modules are always admitted by the resolver (no declaration
--- needed) - seed them into the "declared" set so the analyzer doesn't
--- flag imports of `hull:app` / `hull:log` / `hull:json` as undeclared.
--- Mirrors hl_module_registry: every entry with intrinsic = 1.
-local INTRINSICS = {
-    ["hull/app"]  = true,
-    ["hull/log"]  = true,
-    ["hull/json"] = true,
-}
+-- The registry, by name (tool.modules_available: the same table the
+-- resolver and the loaders use).
+local function registry()
+    local reg = {}
+    for _, spec in ipairs(tool.modules_available().modules) do reg[spec.name] = spec end
+    return reg
+end
 
+-- The registered module a used name belongs to: itself, else its nearest
+-- registered parent (hull/crypto/sealbox -> hull/crypto), as the loader
+-- gates a sub-module import; nil when none is registered.
+local function registered(reg, name)
+    while name and not reg[name] do name = name:match("^(.+)/[^/]+$") end
+    return name
+end
+
+-- The manifest's top-level declarations: { ["hull/crypto"] = true, ... }.
+-- The array form holds specs ("hull/crypto@1", "hull/gpu@1?"); the legacy
+-- keyed form holds them in its values.
 local function collect_declared(manifest)
-    -- Returns a set of canonical names ({ ["hull/crypto"]=true, ... }).
-    -- Manifest format: an array of "vendor/name@version" specs.
-    -- Legacy keyed form is also tolerated (values, not keys, hold the spec).
     local out = {}
-    for k, _ in pairs(INTRINSICS) do out[k] = true end
-    if not manifest or not manifest.modules then return out end
-    local m = manifest.modules
-    if #m > 0 then
-        for _, spec in ipairs(m) do
-            local at = spec:find("@", 1, true)
-            local name = at and spec:sub(1, at - 1) or spec
-            out[name] = true
-        end
-    else
-        for _, spec in pairs(m) do
-            local at = spec:find("@", 1, true)
-            local name = at and spec:sub(1, at - 1) or spec
-            out[name] = true
+    if not manifest or type(manifest.modules) ~= "table" then return out end
+    for _, spec in pairs(manifest.modules) do
+        if type(spec) == "string" then
+            out[(spec:gsub("@.*$", ""):gsub("%?$", ""))] = true
         end
     end
     return out
@@ -219,24 +282,26 @@ end
 
 -- ── Comparison ──────────────────────────────────────────────────────
 
-local function diff_sets(declared, used_by_file)
-    -- used_by_file: array of { path, set } entries.
-    -- Returns: undeclared = [{ path, name }, ...], unused = [name, ...]
+-- used_by_file: { { path, set }, ... }; admitted: the resolver's set.
+-- Returns undeclared = { { path, module }, ... }, unused = { name, ... }.
+local function diff_sets(reg, declared, admitted, used_by_file)
     local undeclared = {}
     local used_anywhere = {}
     for _, e in ipairs(used_by_file) do
+        local seen = {}
         for name, _ in pairs(e.set) do
-            used_anywhere[name] = true
-            if not declared[name] then
-                undeclared[#undeclared + 1] = { path = e.path, module = name }
+            local mod = registered(reg, name) or name
+            used_anywhere[mod] = true
+            if not admitted[mod] and not seen[mod] then
+                seen[mod] = true
+                undeclared[#undeclared + 1] = { path = e.path, module = mod }
             end
         end
     end
     local unused = {}
     for name, _ in pairs(declared) do
-        -- Don't surface intrinsics as "unused" - they're always declared
-        -- automatically regardless of whether the app imports them.
-        if not used_anywhere[name] and not INTRINSICS[name] then
+        -- An intrinsic is always admitted, declared or not.
+        if not used_anywhere[name] and not (reg[name] and reg[name].intrinsic) then
             unused[#unused + 1] = name
         end
     end
@@ -253,37 +318,42 @@ end
 local function main()
     local want_json, app_dir = parse_args()
 
-    local entry = app_dir .. "/app.lua"
-    local runtime = "lua"
-    if not tool.file_exists(entry) then
-        local js_entry = app_dir .. "/app.js"
-        if tool.file_exists(js_entry) then
-            entry = js_entry
-            runtime = "js"
-        else
-            tool.stderr("hull modules analyze: no app.lua or app.js in " ..
-                        app_dir .. "\n")
-            tool.exit(1)
-        end
-    end
-
     -- Load app to extract manifest. App load can fail in tool-mode for
     -- legitimate reasons (apps that require relative JSON files via
     -- `require("./data.json")` - the tool VM lacks the real
     -- app-context's filesystem-fallback wiring). Treat it as
     -- "skipping analysis" rather than a hard failure so `hull check`
     -- still runs the rest of its pipeline. A genuine import problem
-    -- still surfaces at server startup via the resolver.
-    -- The app's top level runs in a Lua runtime of its own, never this tool
-    -- VM (see hl_lua_extract_manifest_json).
-    local json_s, run_err = tool.extract_manifest_lua(entry)
+    -- still surfaces at server startup via the resolver. A missing entry
+    -- is an error. The entry is app.lua, app.js or a TypeScript one, each
+    -- read by its own runtime (an app.js was run through the Lua one).
+    local fcompose = require("hull.feature_compose")
+    local found, runtime = fcompose.app_entry(app_dir)
+    if not found then
+        tool.stderr("hull modules analyze: " .. runtime .. "\n")
+        tool.exit(1)
+    end
+    local manifest, run_err = fcompose.app_manifest(app_dir, "hull modules analyze")
     if run_err then
         tool.stderr("hull modules analyze: app load error (" ..
-                    tostring(run_err) .. ") - skipping\n")
+                    run_err .. ") - skipping\n")
         return
     end
-    local manifest = json_s and json.decode(json_s) or nil
     local declared = collect_declared(manifest)
+    -- What the app may use: the module resolver's set for this manifest (the
+    -- declared modules, their dependencies, the intrinsics), as the runtime
+    -- admits it. A manifest it refuses fails the app's load too. Resolved
+    -- with the composable features' capabilities (gpu, tui), which `hull
+    -- build` composes into the app whether or not this hull has them: the
+    -- question is what the app declares, not what this binary can run.
+    local reg = registry()
+    local resolved = tool.modules_resolve(manifest or {}, nil, { "gpu", "tui" })
+    if not resolved.ok then
+        tool.stderr("hull modules analyze: " .. tostring(resolved.error) .. "\n")
+        tool.exit(1)
+    end
+    local admitted = {}
+    for _, m in ipairs(resolved.modules) do admitted[m.name] = true end
 
     -- Scan only source files matching the entry-point runtime. Apps
     -- run as Lua OR JS; the two variants have independent manifests,
@@ -302,7 +372,7 @@ local function main()
         end
     end
 
-    local undeclared, unused = diff_sets(declared, used)
+    local undeclared, unused = diff_sets(reg, declared, admitted, used)
 
     if want_json then
         -- Encoded JSON: written raw (json.encode escapes every C0 control
@@ -322,13 +392,13 @@ local function main()
 
     -- Human-readable.
     if #undeclared == 0 and #unused == 0 then
-        print("hull modules analyze: OK - every imported module is declared, " ..
+        print("hull modules analyze: OK - every module used is declared, " ..
               "no unused declarations.")
         return
     end
 
     if #undeclared > 0 then
-        print("Undeclared imports (will fail at runtime):")
+        print("Undeclared modules (the app fails to load, or the call raises):")
         for _, x in ipairs(undeclared) do
             print(string.format("  %s - %s", x.path, x.module))
         end
@@ -339,7 +409,7 @@ local function main()
 
     if #unused > 0 then
         if #undeclared > 0 then print("") end
-        print("Declared but never imported (capability surface larger than needed):")
+        print("Declared but never used (capability surface larger than needed):")
         for _, name in ipairs(unused) do
             print("  " .. name)
         end
