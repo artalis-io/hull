@@ -244,6 +244,15 @@ has "$WORK/d1.json" '{"n":42}' && has "$WORK/dev.log" "lib/a.ts:6:1: ts.unsuppor
     ok "hull dev keeps its last good build across a refused edit, and a fix reloads" ||
     { bad "hull dev"; cat "$WORK/dev.log"; cat "$WORK/d1.json" "$WORK/d2.json" "$WORK/d3.json"; }
 
+echo "== typescript: an app below a build/ directory"
+u="$WORK/build/vendor/app"
+mkdir -p "$u"
+printf 'import { app } from "hull:app";\nimport { d } from "./lib.ts";\napp.manifest({ modules: [] });\napp.main((ctx) => { ctx.stdout.write("v" + d(2) + "\\n"); return 0; });\n' > "$u/app.ts"
+printf 'export function d(n: number): number { return n * 2; }\n' > "$u/lib.ts"
+(cd "$u" && "$HULL" app.ts) > "$WORK/under.txt" 2>&1 && has "$WORK/under.txt" "v4" &&
+    ok "a TypeScript app whose path has a build/ directory is erased and runs" ||
+    { bad "app below build/"; cat "$WORK/under.txt"; }
+
 echo "== typescript: entries refused"
 : > "$s/app.js"
 rc=0; "$HULL" test "$s" > "$WORK/amb.txt" 2>&1 || rc=$?

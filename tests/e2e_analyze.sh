@@ -161,6 +161,18 @@ if [ "$rc" = "0" ] && echo "$out" | grep -q "no issues"; then
     pass "excluded dirs (build/site-build/vendor/.git/.hull/node_modules) not scanned → exit 0"
 else fail "exclusions (rc=$rc, out=$out)"; fi
 
+# ── Test 11b: an app whose OWN path has an excluded name (…/build/app) is ─
+# scanned: only segments below the root are excluded (it was 0 files scanned).
+UND="$TMP/build/vendor/app"
+mkdir -p "$UND/lib" "$UND/build"
+printf 'app.main(function() return 0 end)\n' > "$UND/app.lua"
+printf 'local M = {}\nfunction M.oops() return { ok = ) end\nreturn M\n' > "$UND/lib/bad.lua"
+printf 'this is ) not valid lua\n' > "$UND/build/gen.lua"
+rc=$(hull_run2 "$RC_OUT" "$RC_ERR" "$HULL" analyze "$UND"); out=$(cat "$RC_OUT")
+if [ "$rc" = "1" ] && echo "$out" | grep -q "lib/bad.lua" && ! echo "$out" | grep -q "gen.lua"; then
+    pass "an app below build/ and vendor/ is scanned; its own build/ is still pruned"
+else fail "app below an excluded name (rc=$rc, out=$out)"; fi
+
 # ── Test 12: --quiet (clean → empty stdout; broken → diagnostics only) ─
 qc=$("$HULL" analyze "$APP" --quiet 2>/dev/null || true)
 qb=$("$HULL" analyze "$BROKEN" --quiet 2>/dev/null || true)

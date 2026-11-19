@@ -191,6 +191,12 @@ release-artifact layout).
 
 ### Fixed
 
+- An app whose own path has a directory named `build`, `vendor`, `node_modules`, `.git` or
+  `.hull` (`~/build/myapp`) is analyzed again: source discovery excluded a file when ANY segment
+  of its path had such a name, the app root's ancestors included, so `hull analyze /abs/path`
+  scanned no files, `hull agent inspect` found no sources, and a TypeScript app there was never
+  erased ("is TypeScript and was not erased by the build pipeline"). Only directories below the
+  app root are excluded now.
 - The test `hull new --type tui` scaffolds (and `examples/tui_modular`'s) loads its view again:
   it required `./../../views/menu`, a path relative to the test file, but a Lua test file's
   `require` resolves from the app root, so the test failed with "module not found". It now
