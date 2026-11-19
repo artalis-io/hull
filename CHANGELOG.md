@@ -200,6 +200,13 @@ release-artifact layout).
 
 ### Fixed
 
+- `hull new --type rest` and `hull init --profile htmx` scaffold working database code again:
+  their models, app and tests called `db.query` / `db.exec` on the `hull/db` module, which since
+  the handles-only API has no query methods, so every route that touched the database answered
+  500 - two of the REST scaffold's four tests and all eight of the htmx scaffold's failed, in
+  both runtimes. They now use `db.default()`, as `examples/rest_api_modular` does.
+  `tests/e2e_test_cli.sh` runs `hull test` on the REST, htmx and flat server scaffolds too, and
+  `make hull-test-examples` (CI) runs `examples/rest_api_modular`.
 - `hull new` / `hull init` take `--runtime=js` (and `hull new --type=cli`): an option with `=`
   was skipped as unknown, so `hull init myapp --runtime=js` - the spelling the agent quickstarts
   use - scaffolded a Lua app without a word. An option either command does not take, or one
