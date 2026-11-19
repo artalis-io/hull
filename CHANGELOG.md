@@ -10,6 +10,16 @@ release-artifact layout).
 
 ### Added
 
+- `hull check --types [app_dir]` type-checks a TypeScript (or typed JavaScript) app before its
+  other steps: the compiler runs over the app's `tsconfig.json` and then `tests/tsconfig.json`
+  (both written by `hull types`) with `--noEmit`, and a type error fails the check with the
+  compiler's status. The compiler is the one already installed - the app's
+  `node_modules/.bin/tsgo`, then `node_modules/.bin/tsc`, else `tsgo`, then `tsc`, on PATH;
+  Hull ships none (docs/typescript_design.md §6, question 3, which no longer plans a
+  re-published tsgo). `tsc` and `tsgo` join the tool spawn allowlist. `hull types`, `hull new
+  --runtime ts` and `hull init --runtime ts` point at it, and `tests/e2e_check_types.sh` (`make
+  e2e-check-types`, CI job `types`) covers the lookup order, the failures and a real run with
+  the pinned compiler.
 - Two TypeScript examples: `examples/rest_api_ts` (the task API of `examples/rest_api`) and
   `examples/cli_modular_ts` (the subcommand dispatcher of `examples/cli_modular`, which imports a
   command's `.ts` module by name at run time). `make check-types` type-checks them, `make

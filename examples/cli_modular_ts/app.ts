@@ -8,7 +8,7 @@
 // Run:        hull app.ts -- greet world
 // Test:       hull test .
 // Build:      hull build . && ./app count a b c
-// Type-check: hull types . && tsc --noEmit -p .    (tsc or tsgo, from npm)
+// Type-check: hull types . && hull check --types .  (tsgo or tsc, from npm)
 
 import { app } from "hull:app";
 import { log } from "hull:log";

@@ -377,7 +377,7 @@ local function main()
         print("  cd " .. dir)
         print("  " .. mt.next_step(ext))
         if runtime == "ts" then
-            print("  tsc --noEmit -p .          (type-check; tests: -p tests)")
+            print("  hull check --types .       (type-check, with tsgo or tsc from npm)")
         end
         return
     end
@@ -426,7 +426,7 @@ local function main()
         print("  hull app" .. ext)
     end
     if runtime == "ts" then
-        print("  tsc --noEmit -p .          (type-check; tests: -p tests)")
+        print("  hull check --types .       (type-check, with tsgo or tsc from npm)")
     end
 end
 

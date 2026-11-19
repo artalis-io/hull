@@ -13,7 +13,7 @@ M.app = [[// Declare every first-party module the app imports.
 // alongside `modules` when a module needs them.
 //
 // Hull runs this file by erasing its types; it does not type-check it.
-// Check it with tsc (or tsgo): `tsc --noEmit -p .`
+// Check it with `hull check --types .` (tsgo or tsc, from npm).
 import { app }  from "hull:app";
 import { log }  from "hull:log";
 import { time } from "hull:time";
@@ -60,7 +60,7 @@ M.cli_app = [[// CLI app - `hull run app.ts [-- args...]` invokes app.main once 
 // (app.main) or server mode (app.get/etc), not both.
 //
 // Hull runs this file by erasing its types; it does not type-check it.
-// Check it with tsc (or tsgo): `tsc --noEmit -p .`
+// Check it with `hull check --types .` (tsgo or tsc, from npm).
 
 import { app } from "hull:app";
 

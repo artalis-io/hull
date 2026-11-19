@@ -7,7 +7,7 @@
 // Run:        hull app.ts -p 3000
 // Test:       hull test .
 // Build:      hull build .
-// Type-check: hull types . && tsc --noEmit -p .    (tsc or tsgo, from npm)
+// Type-check: hull types . && hull check --types .  (tsgo or tsc, from npm)
 
 import { app } from "hull:app";
 import { db as dbModule } from "hull:db";

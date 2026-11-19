@@ -2266,6 +2266,13 @@ hull-test-examples: $(BUILDDIR)/hull
 e2e-types: $(BUILDDIR)/hull
 	sh tests/e2e_types.sh
 
+# hull check --types (tests/e2e_check_types.sh): stand-in compilers for the
+# lookup order and exit statuses, and the pinned tsc when it is installed
+# (HULL_REQUIRE_TSC=1 fails instead of skipping without it; CI job `types`).
+.PHONY: e2e-check-types
+e2e-check-types: $(BUILDDIR)/hull
+	HULL=$(BUILDDIR)/hull sh tests/e2e_check_types.sh
+
 # A pipeline generation handed to an app run from source (shared/
 # generation.c) and the loaders' overlay it installs (vfs.c).
 $(BUILDDIR)/test_generation: $(TESTDIR)/hull/test_generation.c $(TEST_COMMON_DEPS) | $(BUILDDIR)

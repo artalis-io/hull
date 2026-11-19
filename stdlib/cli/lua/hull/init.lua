@@ -1902,7 +1902,7 @@ local function main()
         print("  hull " .. app_path)
     end
     if runtime == "ts" then
-        print("  tsc --noEmit -p " .. dir .. "   (type-check)")
+        print("  hull check --types " .. dir .. "   (type-check, with tsgo or tsc from npm)")
     end
 end
 

@@ -153,7 +153,15 @@ _hull() {
                         '*:entry point:_files'
                     ;;
 
-                test|check|inspect|verify|manifest|eject)
+                check)
+                    _arguments \
+                        '--types[Type-check with the installed TypeScript compiler first]' \
+                        '--json[Machine-readable JSON output]' \
+                        '--developer-key[Developer public key]:file:_files' \
+                        '*:app dir:_files -/'
+                    ;;
+
+                test|inspect|verify|manifest|eject)
                     _arguments \
                         '--json[Machine-readable JSON output]' \
                         '--developer-key[Developer public key]:file:_files' \

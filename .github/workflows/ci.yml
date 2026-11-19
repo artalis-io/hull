@@ -3056,6 +3056,11 @@ jobs:
         run: make check-types
       - name: hull types E2E
         run: make e2e-types
+      # The real-compiler half needs the compiler check-types installed above.
+      - name: hull check --types E2E
+        env:
+          HULL_REQUIRE_TSC: "1"
+        run: make e2e-check-types
       # M5 (docs/typescript_design.md section 5): Node's type stripper agrees with the
       # TypeScript frontend's corpus. Last, so the pinned Node does not change the steps above.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0

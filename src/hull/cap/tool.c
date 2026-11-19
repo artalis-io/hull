@@ -244,6 +244,9 @@ static const char *const allowed_prefixes[] = {
      * for hl_db_backend_sqlite to decide whether to auto-compose the SQLite
      * feature onto a SQLite-less base (docs/sqlite_feature.md). */
     "nm",
+    /* The TypeScript compilers `hull check --types` runs (tsgo, or tsc), from
+     * the app's node_modules/.bin or PATH; only ever with --noEmit -p DIR. */
+    "tsc", "tsgo",
     NULL
 };
 
