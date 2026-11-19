@@ -16,8 +16,10 @@
 #     app.ts`, `hull test` of tests/test_*.ts, `hull agent test`, a served
 #     route, a stack trace naming the .ts file and line, `hull dev` keeping
 #     its last good build across a refused edit; an entry beside another is
-#     refused, as is a .ts module no pipeline erased, and `hull build` says
-#     it does not build TypeScript apps yet.
+#     refused, as is a .ts module no pipeline erased;
+#   - `hull build` embeds the erased modules: the binary runs with no .ts on
+#     disk, --sign records each one's provenance, hull verify checks the
+#     source against it, and the signed binary starts under --verify-sig.
 #   - `hull new --runtime ts` scaffolds (flat, --cli, rest, cli) write .ts
 #     sources, the declarations and a tsconfig.json, and pass hull test.
 #   - `hull init --runtime ts` (server, --cli, --profile htmx) likewise, and
@@ -325,8 +327,66 @@ rc=0; (cd "$j" && "$HULL" app.js) > "$WORK/jts.txt" 2>&1 || rc=$?
 [ "$rc" -ne 0 ] && has "$WORK/jts.txt" "is TypeScript and was not erased by the build pipeline" &&
     ok "a .ts module no pipeline erased is refused, never run as JavaScript" ||
     { bad "unerased .ts (rc $rc)"; cat "$WORK/jts.txt"; }
-rc=0; "$HULL" build "$s" > "$WORK/build.txt" 2>&1 || rc=$?
-[ "$rc" -ne 0 ] && has "$WORK/build.txt" "does not build TypeScript apps yet" &&
-    ok "hull build says it does not build a TypeScript app yet" || { bad "build (rc $rc)"; cat "$WORK/build.txt"; }
+echo "== typescript: hull build"
+# A built binary runs the erased modules embedded under their source names,
+# with no TypeScript on disk; --sign records each one's provenance, and hull
+# verify checks the source against it. Needs the platform library.
+# Outputs go below $WORK: it is $HOME's parent, which a build may not write.
+mkdir -p "$WORK/out"
+rc=0; "$HULL" build --no-verify-platform "$d" -o "$WORK/out/bin_main" > "$WORK/b1.txt" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ] && has "$WORK/b1.txt" "libhull_platform.a"; then
+    echo "  SKIP: hull build (no platform library in this tree)"
+else
+    mkdir -p "$WORK/run1"
+    cp "$WORK/out/bin_main" "$WORK/run1/app" 2>/dev/null || true
+    out=$(cd "$WORK/run1" && ./app 2>&1) || true
+    [ "$rc" -eq 0 ] && has "$WORK/b1.txt" "2 generated file(s) from the build pipeline" &&
+        case "$out" in *"hi x"*) true ;; *) false ;; esac &&
+        ok "a built app.main TypeScript app runs with no .ts on disk" ||
+        { bad "built app.main (rc $rc)"; cat "$WORK/b1.txt"; echo "$out"; }
+
+    rc=0; "$HULL" build --no-verify-platform "$s" -o "$WORK/out/bin_srv" > "$WORK/b2.txt" 2>&1 || rc=$?
+    mkdir -p "$WORK/run2"
+    cp "$WORK/out/bin_srv" "$WORK/run2/app" 2>/dev/null || true
+    port=$((port + 1))
+    (cd "$WORK/run2" && exec ./app -p "$port") > "$WORK/run2.log" 2>&1 &
+    pid=$!
+    n=0; until curl -s "http://127.0.0.1:$port/n" > "$WORK/bn.json" 2>/dev/null || [ $n -ge 50 ]; do sleep 0.1; n=$((n+1)); done
+    curl -s "http://127.0.0.1:$port/boom" > /dev/null 2>&1 || true
+    sleep 0.3
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+    [ "$rc" -eq 0 ] && has "$WORK/bn.json" '{"n":42}' && has "$WORK/run2.log" "lib/a.ts:4:" &&
+        ok "a built server answers, its stack trace naming the .ts file and line" ||
+        { bad "built server (rc $rc)"; cat "$WORK/b2.txt" "$WORK/run2.log"; }
+
+    k="$WORK/keys"
+    mkdir -p "$k"
+    cp build/libhull_platform.a "$k/" 2>/dev/null || true
+    cp build/platform_canary_hash "$k/" 2>/dev/null || true
+    (cd "$k" && "$HULL" keygen > /dev/null 2>&1 && "$HULL" sign-platform --dir "$k/" "$k/developer" > /dev/null 2>&1) || true
+    rc=0; "$HULL" build --no-verify-platform --sign "$k/developer.key" --platform-sig "$k/platform.sig" \
+        "$s" -o "$s/app" > "$WORK/b3.txt" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ] && has "$s/package.sig" '"generated":{"app.ts":{"key":"' &&
+       has "$s/package.sig" '"plugin":"stdlib:ts-erase@1","source":"'; then
+        ok "--sign records each generated file's plugin, action key and source hash"
+    else
+        bad "sign (rc $rc)"; cat "$WORK/b3.txt"; cat "$s/package.sig" 2>/dev/null
+    fi
+    "$HULL" verify --no-verify-platform --platform-key "$k/developer.pub" "$s" > "$WORK/v1.txt" 2>&1 &&
+        has "$WORK/v1.txt" "all checks passed" && ok "hull verify checks the source against the recorded hash" ||
+        { bad "verify"; cat "$WORK/v1.txt"; }
+    port=$((port + 1))
+    (cd "$s" && exec ./app --verify-sig "$k/developer.pub" --hull-no-verify-platform -p "$port") > "$WORK/vs.log" 2>&1 &
+    pid=$!
+    n=0; until curl -s "http://127.0.0.1:$port/n" > "$WORK/vs.json" 2>/dev/null || [ $n -ge 50 ]; do sleep 0.1; n=$((n+1)); done
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+    has "$WORK/vs.json" '{"n":42}' && ok "the signed binary starts under --verify-sig" ||
+        { bad "--verify-sig"; cat "$WORK/vs.log"; }
+    printf '// changed\n' >> "$s/lib/a.ts"
+    rc=0; "$HULL" verify --no-verify-platform --platform-key "$k/developer.pub" "$s" > "$WORK/v2.txt" 2>&1 || rc=$?
+    cp "$WORK/sa.good" "$s/lib/a.ts"
+    [ "$rc" -ne 0 ] && has "$WORK/v2.txt" "lib/a.ts" && ok "an edited .ts source fails hull verify" ||
+        { bad "verify tamper (rc $rc)"; cat "$WORK/v2.txt"; }
+fi
 
 [ "$fail" -eq 0 ] && echo "e2e_typescript: OK" || { echo "e2e_typescript: FAILED"; exit 1; }

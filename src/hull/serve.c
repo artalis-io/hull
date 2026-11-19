@@ -219,11 +219,7 @@ static HlRuntimeType detect_runtime(const char *entry_point)
 static int embedded_app_present(void)
 {
     extern const HlEntry hl_app_entries[];
-    for (int i = 0; hl_app_entries[i].name; i++)
-        if (strcmp(hl_app_entries[i].name, "./app.js") == 0 ||
-            strcmp(hl_app_entries[i].name, "./app") == 0)
-            return 1;
-    return 0;
+    return hl_app_entry_embedded(hl_app_entries) != NULL;
 }
 
 /* Set when the working directory's entry is ambiguous (already reported). */
@@ -233,16 +229,9 @@ static const char *auto_detect_entry(void)
 {
     /* Check embedded app entries first (hull build binaries) */
     extern const HlEntry hl_app_entries[];
-    for (int i = 0; hl_app_entries[i].name; i++) {
-#ifdef HL_ENABLE_JS
-        if (strcmp(hl_app_entries[i].name, "./app.js") == 0)
-            return "app.js";
-#endif
-#ifdef HL_ENABLE_LUA
-        if (strcmp(hl_app_entries[i].name, "./app") == 0)
-            return "app.lua";
-#endif
-    }
+    const char *embedded = hl_app_entry_embedded(hl_app_entries);
+    if (embedded)
+        return embedded;
 
     /* Filesystem fallback (development mode) */
 #ifdef HL_ENABLE_JS

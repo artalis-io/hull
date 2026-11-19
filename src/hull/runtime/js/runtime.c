@@ -828,7 +828,10 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         if (e && e->name[0] == '.') {
             /* Check it's a JS/JSON entry (not Lua-only) */
             size_t elen = strlen(e->name);
-            int is_js = (elen >= 3 && strcmp(e->name + elen - 3, ".js") == 0);
+            /* A TypeScript module is embedded as its erased JavaScript (hull
+             * build embeds the pipeline's generated entry under its name). */
+            int is_js = (elen >= 3 && strcmp(e->name + elen - 3, ".js") == 0) ||
+                        hl_app_entry_is_ts(e->name);
             int is_json = (elen >= 5 && strcmp(e->name + elen - 5, ".json") == 0);
 
             if (is_js || is_json) {

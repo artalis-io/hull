@@ -425,6 +425,9 @@ local function main()
         if sig.modules_resolved then
             reconstructed.modules_resolved = sig.modules_resolved
         end
+        if sig.generated then
+            reconstructed.generated = sig.generated
+        end
         payload = json.encode(reconstructed)
     else
         -- Legacy hull.sig format
@@ -459,6 +462,16 @@ local function main()
         local path = app_dir .. "/" .. name
         local is_aot = name:match("^compute/.+%.aot%.") ~= nil
         local data
+        -- A file the build pipeline generated: its signed hash is of the
+        -- bytes embedded, so binary_hash covers it, and the source file of
+        -- that name must hash to the recorded source hash (none: the file
+        -- exists only in the binary). docs/dev_pipeline_generations_design.md §6.
+        local gen = type(sig.generated) == "table" and sig.generated[name]
+        if gen and sig.binary_hash then
+            aot_unchecked = aot_unchecked + 1
+            if type(gen) ~= "table" or gen.source == nil then goto continue_files end
+            expected_hash = gen.source
+        end
         if is_aot and sig.binary_hash then
             -- A build artifact (made in the build's tmpdir, only embedded):
             -- covered by binary_hash below - which must then actually be
@@ -582,8 +595,8 @@ local function main()
             -- with no binary checked they went unverified while this still
             -- reported OK (e.g. after `hull build -o myapp`).
             tool.stderr("Binary: not present (" .. bin .. ") - " .. aot_unchecked
-                        .. " AOT module(s) are verifiable only through it; pass "
-                        .. "--binary PATH\n")
+                        .. " AOT module(s) or generated file(s) are verifiable "
+                        .. "only through it; pass --binary PATH\n")
             issues = issues + 1
         else
             print("Binary: not present (" .. bin .. "), binary_hash not checked "

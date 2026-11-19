@@ -16,8 +16,19 @@ release-artifact layout).
   server, `--cli` and `--profile htmx` scaffolds, with the declarations for Hull's API,
   `tsconfig.json` and `tests/tsconfig.json` installed as `hull types` installs them. `hull init`
   detects an existing `app.ts` / `app.mts`, and refuses to add an entry beside one in another
-  language. `make check-types` type-checks every scaffold with the pinned TypeScript. An import of a `.ts` file that does not exist is now
-  "module not found", as for JavaScript, instead of "was not erased".
+  language. `make check-types` type-checks every scaffold with the pinned TypeScript. An import
+  of a `.ts` file that does not exist is now "module not found", as for JavaScript, instead of
+  "was not erased".
+- `hull build` builds TypeScript apps, and any app with build plugins, from its pipeline
+  generation (docs/typescript_design.md §4.4, docs/dev_pipeline_generations_design.md §6). The
+  build runs the pipeline first, extracts the manifest with the generation installed, and
+  embeds each generated file in place of the file of its name: a built TypeScript app runs its
+  erased modules under their source names (`./app.ts`, `./lib/a.ts`), with no TypeScript on
+  disk, and its stack traces name the `.ts` file and line. `hull build --sign` records in
+  `package.sig` a signed `generated` map - each generated file's plugin, action key and source
+  hash - and signs the embedded bytes in `files`, so `--verify-sig` checks the built binary as
+  usual and `hull verify` checks each source file against its recorded hash. A generated file
+  that is neither a module nor under an asset directory stops the build.
 - TypeScript apps run from source (docs/typescript_design.md §4.3, §4.4): an app's entry may be
   `app.ts` or `app.mts`, which runs on the JavaScript runtime. Such an app runs its build
   pipeline whether or not it has a `hull.build.json`, so `hull app.ts`, `hull dev`, `hull test`,
@@ -27,8 +38,7 @@ release-artifact layout).
   A TypeScript module the pipeline did not erase is refused rather than run as JavaScript (a
   `.js` entry importing one needs a `hull.build.json`), and an `app.ts` beside `app.js`,
   `app.lua` or `app.mts` is refused as ambiguous wherever Hull looks for an app's entry. `hull
-  dev` keeps serving its last good build while an edit is refused. `hull build` refuses a
-  TypeScript app for now: embedding its erased modules comes next.
+  dev` keeps serving its last good build while an edit is refused.
 - TypeScript erasure through the build pipeline (docs/typescript_design.md §4.1, §4.2;
   docs/buildcontext_design.md §13.8): the bundled build plugin `stdlib:ts-erase@1` runs on the
   Hull route `typescript-erasure` over every analyzed `.ts` / `.mts` file of an app and writes

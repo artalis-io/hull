@@ -471,30 +471,6 @@ static uint64_t dev_inputs_sig(const char *app_dir, const DevInputs *in)
 /* The generation's bytes on a descriptor the child inherits (an unlinked
  * temporary file, so nothing is left in the tree or in $TMPDIR). -1 on
  * failure. */
-static int dev_generation_fd(const uint8_t *b, size_t len)
-{
-    const char *t = getenv("TMPDIR");
-    char path[PATH_MAX];
-    int n = snprintf(path, sizeof path, "%s/hull-generation-XXXXXX",
-                     t && t[0] == '/' ? t : "/tmp");
-    if (n < 0 || (size_t)n >= sizeof path) return -1;
-    int fd = mkstemp(path);
-    if (fd < 0) return -1;
-    (void)unlink(path);
-    size_t off = 0;
-    while (off < len) {
-        ssize_t w = write(fd, b + off, len - off);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            close(fd);
-            return -1;
-        }
-        off += (size_t)w;
-    }
-    if (lseek(fd, 0, SEEK_SET) != 0) { close(fd); return -1; }
-    return fd;
-}
-
 /* Run the pipeline when the app has build plugins. 1 = a generation in
  * *gen_fd (and *inputs), 0 = no pipeline work, -1 = it failed. */
 static int dev_run_pipeline(const char *app_dir, const char *entry, int agent_mode,
@@ -524,7 +500,7 @@ static int dev_run_pipeline(const char *app_dir, const char *entry, int agent_mo
         dev_inputs_clear(&fresh);
         return -1;
     }
-    int fd = dev_generation_fd(b, len);
+    int fd = hl_generation_fd(b, len);
     free(b);
     if (fd < 0) {
         hl_eprintf_line("[hull:dev] cannot hand over the generation: %s",

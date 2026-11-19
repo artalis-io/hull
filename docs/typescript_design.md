@@ -2,8 +2,7 @@
 
 Status: **T1 (types + `hull types`) and T2 (the TypeScript frontend, §3.5) implemented;
 T3's erasure plugin and route (§4.1, §4.2) implemented (buildcontext_design.md §13.8); running
-`.ts` modules from source (§4.3, §4.4) implemented; `hull build` of a TypeScript app
-design-only.** Builds on
+`.ts` modules from source and `hull build` of a TypeScript app (§4.3, §4.4) implemented.** Builds on
 [buildcontext_design.md](buildcontext_design.md) (BuildContext),
 [dev_pipeline_generations_design.md](dev_pipeline_generations_design.md) (pipeline
 generations), [javascript_source_frontend_design.md](javascript_source_frontend_design.md)
@@ -461,8 +460,18 @@ imports a `.ts` module needs one. The JavaScript module, entry and test-file loa
 TypeScript name (`.ts`, `.mts`, `.cts`, `.tsx`) only from the generation overlay and refuse it
 otherwise: its bytes on disk are not JavaScript. `hull test` runs `tests/test_*.ts` /
 `test_*.mts` on the JavaScript runtime (`hl_js_test_file_patterns`), and the erasure route
-covers them, since project discovery analyzes every `.ts` file in the app. Until `hull build`
-embeds erased modules, it refuses a TypeScript app with that message.
+covers them, since project discovery analyzes every `.ts` file in the app.
+
+`hull build` of an app with pipeline work (a TypeScript entry or a `hull.build.json`) runs
+the pipeline in its tool process (`hull.buildctx.generation.produce`, the step `hull plugins
+generation` runs) before anything reads the app. Manifest extraction loads the entry with
+the generation handed to the extraction child on a descriptor
+(`hl_manifest_extract_js_with_generation`; no in-process fallback then). Each generated
+entry is embedded in place of the file of its name, under the name the runtime looks that
+file up by: `./app.ts`, `./lib/a.ts`, a Lua module without `.lua`, an asset under
+`templates/` and the like bare. A built binary finds its entry by that name
+(`hl_app_entry_embedded`), and its JavaScript loader takes an embedded `.ts` / `.mts` as
+JavaScript. Signing is dev_pipeline_generations_design.md §6 as built.
 
 ### 4.5 Scaffolding (`hull new` / `hull init --runtime ts`)
 

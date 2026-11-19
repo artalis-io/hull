@@ -58,6 +58,17 @@
  * hl_generation_error() and refuses to start). */
 int hl_generation_take_env(int embedded);
 
+/* hl_generation_take_env's work once the descriptor is known: read `fd`
+ * whole, close it, keep the bundle for hl_generation_apply. For a process
+ * handed the descriptor another way (hull build's manifest-extraction
+ * child, named in its arguments). Once per process; same results. */
+int hl_generation_take_fd(int fd);
+
+/* A descriptor holding `len` bytes of bundle `b`, at offset 0, to hand to a
+ * child (HULL_GENERATION_FD or an argument): an unlinked temporary file
+ * under TMPDIR (else /tmp), so no path names it. -1 with errno set. */
+int hl_generation_fd(const uint8_t *b, size_t len);
+
 /* hl_generation_take_env, and when no generation was handed over: run the
  * app's build pipeline in a child (`<this hull> plugins generation <app_dir>`,
  * its diagnostics on this process's stderr) when `app_dir` holds a
