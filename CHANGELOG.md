@@ -10,6 +10,12 @@ release-artifact layout).
 
 ### Added
 
+- Two TypeScript examples: `examples/rest_api_ts` (the task API of `examples/rest_api`) and
+  `examples/cli_modular_ts` (the subcommand dispatcher of `examples/cli_modular`, which imports a
+  command's `.ts` module by name at run time). `make check-types` type-checks them, `make
+  hull-test-examples` runs their tests, and `tests/e2e_typescript_examples.sh` (`make
+  e2e-typescript-examples`, in CI) takes copies through `hull types`, `hull test`, running from
+  source, `hull manifest`, `hull deploy`, `hull build --sign`, `hull inspect` and `hull verify`.
 - `hull new --runtime ts` and `hull init --runtime ts` scaffold a TypeScript app
   (docs/typescript_design.md §4.5): `app.ts` and `tests/test_*.ts` for `hull new`'s flat layout,
   `--cli`, `--type rest` and `--type cli` (`--type tui` stays Lua-only) and for `hull init`'s
@@ -200,6 +206,19 @@ release-artifact layout).
 
 ### Fixed
 
+- TypeScript apps through the tooling, found by the TypeScript examples:
+  - `hull build` embedded every `.d.ts` file under the app as an erased module - the 80-odd
+    declarations `hull types` installs under `types/`, signed and embedded in every built
+    TypeScript app. Project discovery now skips declaration files (`.d.ts`, `.d.mts`,
+    `.d.cts`): they hold only types, so nothing is erased, analyzed or embedded for them.
+  - `hull inspect` reported the application layer INVALID for every app built through the
+    pipeline (a TypeScript app, or one with build plugins): it rebuilt the signed payload
+    without the `generated` map `hull build --sign` signs. `hull build`, `hull verify` and
+    `hull inspect` now take the payload from one function (`hull.app_sig`).
+  - `hull manifest` and `hull deploy` found no `app.ts` / `app.mts` ("no app.lua or app.js
+    found"). Both now find a TypeScript entry and refuse one beside another entry, as every
+    runner does (through `tool.app_entry_ts`, over the C rule), and `hull manifest` runs the
+    build pipeline first, so the entry is evaluated from its erased modules.
 - `hull new --type rest` and `hull init --profile htmx` scaffold working database code again:
   their models, app and tests called `db.query` / `db.exec` on the `hull/db` module, which since
   the handles-only API has no query methods, so every route that touched the database answered

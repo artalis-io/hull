@@ -75,6 +75,23 @@ curl -X PUT http://localhost:3000/tasks/1 \
 curl -X DELETE http://localhost:3000/tasks/1
 ```
 
+### rest_api_ts, cli_modular_ts (TypeScript)
+
+The TypeScript twins of `rest_api` and `cli_modular`. Hull erases the types and
+runs the result on its JavaScript runtime, so running, testing and building need
+no Node or `tsc`. Type-checking is the TypeScript compiler's job:
+
+```bash
+./build/hull -p 3000 examples/rest_api_ts/app.ts
+./build/hull examples/cli_modular_ts/app.ts -- greet world
+
+./build/hull test examples/rest_api_ts/
+./build/hull build examples/cli_modular_ts && examples/cli_modular_ts/app count a b c
+
+# Install the declarations and a tsconfig.json, then type-check (tsc or tsgo, from npm):
+./build/hull types examples/rest_api_ts && tsc --noEmit -p examples/rest_api_ts
+```
+
 ### bench_db
 
 SQLite performance benchmark endpoints - read-heavy, write-heavy, batch writes, mixed workloads. Seeds 1000 rows on startup.

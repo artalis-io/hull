@@ -194,21 +194,18 @@ local function introspect_app(app_dir)
         hosts          = {},
     }
 
-    -- Detect runtime
-    if tool.file_exists(app_dir .. "/app.lua") then
-        info.runtime = "lua"
-        info.entry = "app.lua"
-    elseif tool.file_exists(app_dir .. "/app.js") then
-        info.runtime = "js"
-        info.entry = "app.js"
-    else
-        tool.stderr("hull deploy: no app.lua or app.js found in " .. app_dir .. "\n")
+    -- Detect runtime: app.lua, app.js, or a TypeScript entry (the JavaScript
+    -- runtime runs it).
+    local entry_path, runtime = require("hull.feature_compose").app_entry(app_dir)
+    if not entry_path then
+        tool.stderr("hull deploy: " .. runtime .. "\n")
         tool.exit(1)
     end
+    info.runtime = runtime
+    info.entry = entry_path:match("[^/]+$")
 
     -- Try to extract manifest (Lua only - JS needs C runtime)
     if info.runtime == "lua" then
-        local entry_path = app_dir .. "/app.lua"
         -- The app's top level runs in a Lua runtime of its own, never this
         -- tool VM (see hl_lua_extract_manifest_json).
         local json_s, run_err = tool.extract_manifest_lua(entry_path)

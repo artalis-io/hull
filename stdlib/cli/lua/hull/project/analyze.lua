@@ -185,7 +185,7 @@ local function analyze_unprotected(root_in, opts)
                                         message = "source discovery failed: " .. tostring(derr), path = root }
         else
             for _, path in ipairs(files) do
-                local ext = path:match("%.([%w]+)$")
+                local ext = registry.source_ext(path)
                 local row = ext and registry.for_ext(ext)
                 local rel = rel_path(root, path)
                 if row and row.analyzable then

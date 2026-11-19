@@ -61,6 +61,15 @@ function M.known_exts()
     return out
 end
 
+-- The extension (no dot) that makes `path` a candidate source, or nil. A TypeScript
+-- declaration file (`x.d.ts`, `x.d.mts`, `x.d.cts`) holds only types and runs nothing: it is
+-- not app source, so it is never analyzed, erased or embedded (`hull types` writes dozens of
+-- them under types/).
+function M.source_ext(path)
+    if path:find("%.d%.[mc]?ts$") then return nil end
+    return path:match("%.([%w]+)$")
+end
+
 -- The registry row for an extension (no dot), or nil if unknown. Returns a COPY whose
 -- `analyzable` is computed at query time from engine availability (so a JS-less hull reports
 -- JavaScript known-but-unanalyzable, exactly as before this frontend shipped).

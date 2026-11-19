@@ -10,10 +10,12 @@
   "include": [
     "../../types/hull/**/*.d.ts",
     "../../types/hull-test/**/*.d.ts",
-    "../../examples/**/*.js"
+    "../../examples/**/*.js",
+    "../../examples/**/*.ts"
   ],
   "exclude": [
     "../../examples/**/static/**",
+    "../../examples/**/types/**",
     "../../examples/**/node_modules/**"
   ]
 }

@@ -1,0 +1,6 @@
+# hull types writes these; regenerate them with `hull types .`
+types/
+tsconfig.json
+tests/tsconfig.json
+/app
+package.sig

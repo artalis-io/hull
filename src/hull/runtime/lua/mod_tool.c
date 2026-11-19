@@ -36,6 +36,7 @@
 #include "hull/embedded_platform_sig.h"
 #include "hull/platform_sig.h"
 #include "hull/release_io.h"
+#include "hull/shared/app_entry.h"
 #include "hull/shared/host.h"
 #include "hull/shared/cli_log.h"
 #include "hull/shared/term_escape.h"   /* tool.stderr / stdout (audit 33) */
@@ -690,6 +691,34 @@ static int l_tool_realpath(lua_State *L)
         return 2;
     }
     lua_pushstring(L, buf);
+    return 1;
+}
+
+/* ── tool.app_entry_ts(dir) → path | nil | (nil, err) ─────────────────
+ * The TypeScript entry of the app at @p dir ("<dir>/app.ts" or app.mts), nil
+ * when it has none, or (nil, err) when one sits beside another entry: the
+ * same rule every runner applies (hl_app_entry_ts), so a tool command reads
+ * the entry `hull dev` / `hull test` would run, or refuses as they do. */
+static int l_tool_app_entry_ts(lua_State *L)
+{
+    const char *dir = luaL_checkstring(L, 1);
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+
+    if (ctx && hl_tool_unveil_check(ctx, dir, 'r') != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    char path[PATH_MAX], err[512];
+    int ts = hl_app_entry_ts(dir, path, sizeof path, err, sizeof err);
+    if (ts < 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, err);
+        return 2;
+    }
+    if (ts == 0)
+        lua_pushnil(L);
+    else
+        lua_pushstring(L, path);
     return 1;
 }
 
@@ -2446,6 +2475,7 @@ static const luaL_Reg tool_funcs[] = {
     { "read_file",              l_tool_read_file },
     { "write_file",             l_tool_write_file },
     { "file_exists",            l_tool_file_exists },
+    { "app_entry_ts",           l_tool_app_entry_ts },
     { "path_kind",              l_tool_path_kind },
     { "is_symlink",             l_tool_is_symlink },
     { "realpath",               l_tool_realpath },

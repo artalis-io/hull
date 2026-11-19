@@ -618,6 +618,10 @@ jobs:
         timeout-minutes: 3
         run: make e2e-typescript
 
+      - name: TypeScript examples E2E tests (types, test, run, manifest, deploy, build, inspect, verify)
+        timeout-minutes: 4
+        run: make e2e-typescript-examples
+
       - name: Pipeline generation E2E tests (the loaders' overlay, the refusals)
         timeout-minutes: 3
         run: make e2e-generation

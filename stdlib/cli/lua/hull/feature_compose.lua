@@ -107,6 +107,53 @@ function M.set_generation(app_dir, bundle)
     _manifest_cache[app_dir] = nil
 end
 
+-- The generation bundle set for app_dir (nil when it has none).
+function M.generation(app_dir)
+    return _generation[app_dir]
+end
+
+-- The app's entry and the runtime that runs it: (path, "lua" | "js"), or
+-- (nil, err). A TypeScript entry (app.ts / app.mts) runs on the JavaScript
+-- runtime and is refused beside another entry, the rule every runner applies
+-- (tool.app_entry_ts); otherwise app.lua, then app.js.
+function M.app_entry(app_dir)
+    local ts, err = tool.app_entry_ts(app_dir)
+    if err then return nil, err end
+    if ts then return ts, "js" end
+    for _, e in ipairs({ { "app.lua", "lua" }, { "app.js", "js" } }) do
+        local p = app_dir .. "/" .. e[1]
+        if file_exists(p) then return p, e[2] end
+    end
+    return nil, "no app.lua, app.js or app.ts found in " .. tool.escape(app_dir)
+end
+
+-- Run the app's build pipeline, when it has pipeline work (build plugins, or
+-- a TypeScript entry whose modules the erasure route makes), and hand the
+-- generation to extract_manifest, so the entry is evaluated as it will run
+-- (docs/dev_pipeline_generations_design.md §1.1). Returns the generation, nil
+-- when the app has no pipeline work, or (nil, err). `cmd` labels each
+-- diagnostic a plugin reports ("hull build", "hull manifest").
+function M.prepare_generation(app_dir, cmd)
+    if not (file_exists(app_dir .. "/hull.build.json") or file_exists(app_dir .. "/app.ts")
+            or file_exists(app_dir .. "/app.mts")) then
+        return nil
+    end
+    local root = tool.realpath(app_dir)
+    if not root then return nil, tool.escape(app_dir) .. ": not a directory" end
+    local hex, crypto = require("hull.encoding").hex, require("hull.crypto")
+    local g, bundle, err = require("hull.buildctx.generation").produce(root, {
+        sha256_hex = function(d) return hex.encode(crypto.sha256(d)) end,
+        report = function(r, d)
+            local where = d.path and (d.path .. ": ") or ""
+            tool.stderr(("%s: %s: %s %s: %s%s\n"):format(cmd, r.identity, d.severity,
+                d.code, where, d.message))
+        end,
+    })
+    if not g then return nil, err end
+    M.set_generation(app_dir, bundle)
+    return g
+end
+
 function M.extract_manifest(app_dir)
     local cached = _manifest_cache[app_dir]
     if cached ~= nil then return cached.manifest, cached.err end
