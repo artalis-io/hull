@@ -226,9 +226,13 @@ port=$((port + 1))
 pid=$!
 n=0; until curl -s "http://127.0.0.1:$port/n" > "$WORK/d1.json" 2>/dev/null || [ $n -ge 100 ]; do sleep 0.1; n=$((n+1)); done
 cp "$s/lib/a.ts" "$WORK/sa.good"
+# The watcher compares modification times in whole seconds: each edit comes
+# a second after the state it changes.
+sleep 1.1
 printf 'enum E { A }\n' >> "$s/lib/a.ts"
 n=0; until has "$WORK/dev.log" "keeps running its last good build" || [ $n -ge 100 ]; do sleep 0.1; n=$((n+1)); done
 curl -s "http://127.0.0.1:$port/n" > "$WORK/d2.json" 2>/dev/null || true
+sleep 1.1
 sed 's/n \* 2/n * 3/' "$WORK/sa.good" > "$s/lib/a.ts"
 n=0; until { curl -s "http://127.0.0.1:$port/n" > "$WORK/d3.json" 2>/dev/null && has "$WORK/d3.json" '63'; } || [ $n -ge 100 ]; do sleep 0.1; n=$((n+1)); done
 kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
