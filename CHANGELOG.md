@@ -182,6 +182,11 @@ release-artifact layout).
 
 ### Fixed
 
+- `hull new` / `hull init` take `--runtime=js` (and `hull new --type=cli`): an option with `=`
+  was skipped as unknown, so `hull init myapp --runtime=js` - the spelling the agent quickstarts
+  use - scaffolded a Lua app without a word. An option either command does not take, or one
+  missing its value, is now an error, and a refused run removes the directory it made for its
+  target (`hull new app --runtiem js` used to leave an empty `js/`).
 - The test `hull new --type tui` scaffolds (and `examples/tui_modular`'s) loads its view again:
   it required `./../../views/menu`, a path relative to the test file, but a Lua test file's
   `require` resolves from the app root, so the test failed with "module not found". It now
