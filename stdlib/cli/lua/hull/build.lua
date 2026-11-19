@@ -1956,6 +1956,15 @@ local function without_plugin_dirs(files, prefixes)
 end
 
 local function discover(opts)
+    -- A TypeScript app runs from source (hull dev / hull test / hull app.ts);
+    -- embedding its erased modules is not built yet (docs/typescript_design.md §4.4).
+    for _, name in ipairs({ "app.ts", "app.mts" }) do
+        if tool.file_exists(opts.app_dir .. "/" .. name) then
+            tool.stderr("hull build: " .. tool.escape(name) .. " is a TypeScript entry; hull build "
+                .. "does not build TypeScript apps yet (run it with hull dev or hull " .. name .. ")\n")
+            tool.exit(1)
+        end
+    end
     local plugin_dirs = plugin_dir_prefixes(opts.app_dir)
     local lua_files = without_plugin_dirs(find_lua_files(opts.app_dir), plugin_dirs)
     local js_files = without_plugin_dirs(find_js_files(opts.app_dir), plugin_dirs)

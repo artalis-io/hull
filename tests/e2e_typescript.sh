@@ -11,7 +11,13 @@
 #     generation;
 #   - `hull plugins list` shows the bundled plugin and its claim;
 #   - the plugin's own tests pass under `hull test`, and the Lua stub host
-#     answers erased_source as the JavaScript one does.
+#     answers erased_source as the JavaScript one does;
+#   - a TypeScript app runs (docs/typescript_design.md §4.3, §4.4): `hull
+#     app.ts`, `hull test` of tests/test_*.ts, `hull agent test`, a served
+#     route, a stack trace naming the .ts file and line, `hull dev` keeping
+#     its last good build across a refused edit; an entry beside another is
+#     refused, as is a .ts module no pipeline erased, and `hull build` says
+#     it does not build TypeScript apps yet.
 set -eu
 
 HULL=${HULL:-build/hull}
@@ -166,5 +172,86 @@ end)
 LUA
 "$HULL" test "$l" > "$WORK/ltest.txt" 2>&1 && has "$WORK/ltest.txt" "3/3 tests passed" &&
     ok "the Lua stub host answers erased_source the same way" || { bad "lua stub"; cat "$WORK/ltest.txt"; }
+
+echo "== typescript: running an app"
+out=$(cd "$d" && "$HULL" app.ts 2>&1) || true
+case "$out" in *"hi x"*) ok "hull app.ts runs the erased entry and its .ts import" ;;
+    *) bad "hull app.ts"; echo "$out" ;; esac
+
+s="$WORK/srv"
+mkdir -p "$s/lib" "$s/tests"
+cat > "$s/app.ts" <<'TS'
+import { app } from "hull:app";
+import { double, boom } from "./lib/a.ts";
+type Reply = { n: number };
+app.manifest({ modules: ["hull/http-server@1"] });
+app.get("/n", (_req: unknown, res: any) => { const r: Reply = { n: double(21) }; res.json(r); });
+app.get("/boom", (_req: unknown, res: any) => { res.json({ v: boom() }); });
+TS
+cat > "$s/lib/a.ts" <<'TS'
+export function double(n: number): number { return n * 2; }
+export function boom(): number {
+  const why: string = "typed";
+  throw new Error("boom " + why);
+}
+TS
+cat > "$s/tests/test_app.ts" <<'TS'
+import { double } from "../lib/a.ts";
+test("double", () => { const v: number = double(4); test.eq(v, 8); });
+test("route", () => { const r = test.get("/n"); test.eq(r.status, 200); test.eq(r.json.n, 42); });
+TS
+# Run from the app directory: a test file's relative import does not resolve
+# yet when the app directory is named through a symbolic link (mktemp's /var
+# on macOS), a JavaScript test's included.
+(cd "$s" && "$HULL" test .) > "$WORK/stest.txt" 2>&1 && has "$WORK/stest.txt" "test_app.ts" &&
+    has "$WORK/stest.txt" "2/2 tests passed" && ok "hull test runs tests/test_*.ts" ||
+    { bad "hull test"; cat "$WORK/stest.txt"; }
+(cd "$s" && "$HULL" agent test .) > "$WORK/atest.json" 2>&1 &&
+    has "$WORK/atest.json" '"name":"test_app.ts"' && has "$WORK/atest.json" '"passed":2' &&
+    ok "hull agent test runs them too" || { bad "agent test"; cat "$WORK/atest.json"; }
+
+port=$((20000 + $$ % 20000))
+(cd "$s" && exec "$HULL" app.ts -p "$port") > "$WORK/srv.log" 2>&1 &
+pid=$!
+n=0; until curl -s "http://127.0.0.1:$port/n" > "$WORK/n.json" 2>/dev/null || [ $n -ge 50 ]; do sleep 0.1; n=$((n+1)); done
+has "$WORK/n.json" '{"n":42}' && ok "a served route answers" || { bad "serve"; cat "$WORK/srv.log"; }
+curl -s "http://127.0.0.1:$port/boom" > /dev/null 2>&1 || true
+sleep 0.3
+kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+has "$WORK/srv.log" "lib/a.ts:4:" && ok "a stack trace names the .ts file and line" ||
+    { bad "stack trace"; cat "$WORK/srv.log"; }
+
+port=$((port + 1))
+(cd "$s" && exec "$HULL" dev -p "$port") > "$WORK/dev.log" 2>&1 &
+pid=$!
+n=0; until curl -s "http://127.0.0.1:$port/n" > "$WORK/d1.json" 2>/dev/null || [ $n -ge 100 ]; do sleep 0.1; n=$((n+1)); done
+cp "$s/lib/a.ts" "$WORK/sa.good"
+printf 'enum E { A }\n' >> "$s/lib/a.ts"
+n=0; until has "$WORK/dev.log" "keeps running its last good build" || [ $n -ge 100 ]; do sleep 0.1; n=$((n+1)); done
+curl -s "http://127.0.0.1:$port/n" > "$WORK/d2.json" 2>/dev/null || true
+sed 's/n \* 2/n * 3/' "$WORK/sa.good" > "$s/lib/a.ts"
+n=0; until { curl -s "http://127.0.0.1:$port/n" > "$WORK/d3.json" 2>/dev/null && has "$WORK/d3.json" '63'; } || [ $n -ge 100 ]; do sleep 0.1; n=$((n+1)); done
+kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+cp "$WORK/sa.good" "$s/lib/a.ts"
+has "$WORK/d1.json" '{"n":42}' && has "$WORK/dev.log" "lib/a.ts:6:1: ts.unsupported" &&
+    has "$WORK/d2.json" '{"n":42}' && has "$WORK/d3.json" '{"n":63}' &&
+    ok "hull dev keeps its last good build across a refused edit, and a fix reloads" ||
+    { bad "hull dev"; cat "$WORK/dev.log"; cat "$WORK/d1.json" "$WORK/d2.json" "$WORK/d3.json"; }
+
+echo "== typescript: entries refused"
+: > "$s/app.js"
+rc=0; "$HULL" test "$s" > "$WORK/amb.txt" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && has "$WORK/amb.txt" "has both app.ts and app.js" &&
+    ok "an app.ts beside app.js is ambiguous" || { bad "ambiguity (rc $rc)"; cat "$WORK/amb.txt"; }
+rm -f "$s/app.js"
+printf 'export function d(n: number): number { return n; }\n' > "$j/b.ts"
+printf 'import { app } from "hull:app";\nimport { d } from "./b.ts";\napp.manifest({ modules: [] });\napp.main(() => d(0));\n' > "$j/app.js"
+rc=0; (cd "$j" && "$HULL" app.js) > "$WORK/jts.txt" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && has "$WORK/jts.txt" "is TypeScript and was not erased by the build pipeline" &&
+    ok "a .ts module no pipeline erased is refused, never run as JavaScript" ||
+    { bad "unerased .ts (rc $rc)"; cat "$WORK/jts.txt"; }
+rc=0; "$HULL" build "$s" > "$WORK/build.txt" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && has "$WORK/build.txt" "does not build TypeScript apps yet" &&
+    ok "hull build says it does not build a TypeScript app yet" || { bad "build (rc $rc)"; cat "$WORK/build.txt"; }
 
 [ "$fail" -eq 0 ] && echo "e2e_typescript: OK" || { echo "e2e_typescript: FAILED"; exit 1; }

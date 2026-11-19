@@ -77,7 +77,9 @@ const char *hl_generation_error(void);
  * set. The `hull dev` supervisor calls it before every (re)spawn. */
 int hl_generation_produce(const char *app_dir, uint8_t **out, size_t *len);
 
-/* 1 when `app_dir` has build plugins to run (a regular hull.build.json). */
+/* 1 when `app_dir` has a build pipeline to run: build plugins (a regular
+ * hull.build.json), or a TypeScript entry (app.ts / app.mts), whose modules
+ * the pipeline erases. */
 int hl_generation_has_pipeline(const char *app_dir);
 
 /* The workspace paths the generation's inputs name (its manifest's

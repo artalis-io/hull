@@ -91,6 +91,38 @@ static void test_runner_env_done(HlRuntime *rt, HlManifest *m, int have)
     if (have) hl_manifest_free(m);
 }
 
+static int path_cmp(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+char **hl_test_runner_find_files(const char *app_dir, const char *const *patterns)
+{
+    char **all = NULL;
+    size_t n = 0;
+    for (const char *const *p = patterns; p && *p; p++) {
+        char **got = hl_tool_find_files(app_dir, *p, NULL);
+        if (!got) continue;
+        size_t k = 0;
+        while (got[k]) k++;
+        char **grown = k ? realloc(all, (n + k + 1) * sizeof *all) : all;
+        if (k && !grown) {
+            for (size_t i = 0; i < k; i++) free(got[i]);
+            free(got);
+            continue;
+        }
+        all = grown;
+        for (size_t i = 0; i < k; i++) all[n++] = got[i];
+        if (all) all[n] = NULL;
+        free(got);
+    }
+    if (!all) return NULL;
+    qsort(all, n, sizeof *all, path_cmp);
+    /* A build plugin directory's tests are the plugin's (hull test <dir>). */
+    hl_build_plugin_drop_dirs(app_dir, all);
+    return all;
+}
+
 int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
 {
     HlRuntime *rt = hl_app_context_runtime(ctx);
@@ -100,8 +132,8 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
 
     /* Test file glob comes from the vtable - keeps the runner free of
      * per-runtime knowledge. */
-    const char *pattern = rt->vt->test_file_pattern;
-    if (!pattern) return -1;
+    const char *const *patterns = rt->vt->test_file_patterns;
+    if (!patterns || !patterns[0]) return -1;
 
     /* Standalone KlHttpRouter so tests can dispatch HTTP in-process. */
     KlAllocator alloc = kl_allocator_default();
@@ -135,9 +167,7 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
     env_allow[nenv] = NULL;
     rt->test_env_allow = env_allow;
 
-    char **test_files = hl_tool_find_files(app_dir, pattern, NULL);
-    /* A build plugin directory's tests are the plugin's (hull test <dir>). */
-    hl_build_plugin_drop_dirs(app_dir, test_files);
+    char **test_files = hl_test_runner_find_files(app_dir, patterns);
     if (!test_files || !test_files[0]) {
         if (writer && writer->on_file_load_error)
             writer->on_file_load_error(writer->user, "no test files found");

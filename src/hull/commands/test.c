@@ -18,6 +18,8 @@
 #include "hull/cap/test.h"
 #include "hull/cap/tool.h"
 #include "hull/test_runner.h"
+#include "hull/shared/app_entry.h"
+#include "hull/shared/term_escape.h"   /* hl_eprintf_line */
 #include "hull/shared/cli_log.h"   /* hl_log_fputs_escaped */
 
 #include <stdio.h>
@@ -147,9 +149,19 @@ static const char *detect_lua_entry(const char *app_dir)
     return NULL;
 }
 
-static const char *detect_js_entry(const char *app_dir)
+/* app.js, else a TypeScript entry (shared/app_entry.h); *ambiguous is set
+ * (and reported) when a TypeScript entry sits beside another entry. */
+static const char *detect_js_entry(const char *app_dir, int *ambiguous)
 {
     static char js_buf[4096];
+    char err[512];
+    int ts = hl_app_entry_ts(app_dir, js_buf, sizeof js_buf, err, sizeof err);
+    if (ts < 0) {
+        hl_eprintf_line("hull test: %s", err);
+        *ambiguous = 1;
+        return NULL;
+    }
+    if (ts > 0) return js_buf;
     snprintf(js_buf, sizeof(js_buf), "%s/app.js", app_dir);
     if (access(js_buf, F_OK) == 0) return js_buf;
     return NULL;
@@ -163,11 +175,14 @@ int hl_cmd_test(int argc, char **argv, const HlCommandEnv *env)
     if (argc >= 2 && argv[1][0] != '-')
         app_dir = argv[1];
 
+    int ambiguous = 0;
+    const char *js_entry  = detect_js_entry(app_dir, &ambiguous);
+    if (ambiguous)
+        return 1;
     const char *lua_entry = detect_lua_entry(app_dir);
-    const char *js_entry  = detect_js_entry(app_dir);
 
     if (!lua_entry && !js_entry) {
-        fprintf(stderr, "hull test: no entry point found (app.js or app.lua) in %s\n",
+        fprintf(stderr, "hull test: no entry point found (app.js, app.ts or app.lua) in %s\n",
                 app_dir);
         test_usage();
         return 1;
@@ -178,8 +193,8 @@ int hl_cmd_test(int argc, char **argv, const HlCommandEnv *env)
 
 #ifdef HL_ENABLE_LUA
     if (lua_entry) {
-        char **lua_tests = hl_tool_find_files(app_dir, "test_*.lua", NULL);
-        hl_build_plugin_drop_dirs(app_dir, lua_tests);
+        static const char *const lua_patterns[] = { "test_*.lua", NULL };
+        char **lua_tests = hl_test_runner_find_files(app_dir, lua_patterns);
         if (lua_tests && lua_tests[0]) {
             ran_any = 1;
             result |= run_tests_for_entry(app_dir, lua_entry);
@@ -193,8 +208,8 @@ int hl_cmd_test(int argc, char **argv, const HlCommandEnv *env)
 
 #ifdef HL_ENABLE_JS
     if (js_entry) {
-        char **js_tests = hl_tool_find_files(app_dir, "test_*.js", NULL);
-        hl_build_plugin_drop_dirs(app_dir, js_tests);
+        char **js_tests = hl_test_runner_find_files(app_dir,
+                                                    hl_js_test_file_patterns);
         if (js_tests && js_tests[0]) {
             ran_any = 1;
             result |= run_tests_for_entry(app_dir, js_entry);

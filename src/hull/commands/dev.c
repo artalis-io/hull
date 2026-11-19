@@ -16,6 +16,7 @@
 #include "hull/shared/host.h" /* hl_host_find_in_path */
 #include "hull/shared/dev_session.h" /* HL_DEV_SESSION_ENV, sidecar MAC (audit 36/37) */
 #include "hull/shared/generation.h"
+#include "hull/shared/app_entry.h"
 #include "hull/shared/term_escape.h"  /* hl_eprintf_line */  /* the pipeline generation handed to the child */
 #include "hull/tool.h"
 
@@ -557,8 +558,21 @@ static void derive_app_dir(const char *entry_point, char *out, size_t out_size)
 
 /* ── Auto-detect entry point (same as main.c) ────────────────────── */
 
+/* Set when the working directory's entry is ambiguous (already reported). */
+static int g_dev_entry_ambiguous;
+
 static const char *dev_detect_entry(void)
 {
+    /* A TypeScript entry, refused beside another (shared/app_entry.h). */
+    static char ts_entry[64];
+    char err[512];
+    int ts = hl_app_entry_ts(NULL, ts_entry, sizeof ts_entry, err, sizeof err);
+    if (ts < 0) {
+        hl_eprintf_line("hull dev: %s", err);
+        g_dev_entry_ambiguous = 1;
+        return NULL;
+    }
+    if (ts > 0) return ts_entry + 2;   /* "./app.ts" -> "app.ts" */
     if (access("app.js", F_OK) == 0) return "app.js";
     if (access("app.lua", F_OK) == 0) return "app.lua";
     return NULL;
@@ -873,8 +887,10 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
     if (!entry_point)
         entry_point = dev_detect_entry();
 
+    if (!entry_point && g_dev_entry_ambiguous)
+        return 1;
     if (!entry_point) {
-        fprintf(stderr, "hull dev: no entry point found (app.js or app.lua)\n");
+        fprintf(stderr, "hull dev: no entry point found (app.js, app.ts or app.lua)\n");
         return 1;
     }
 

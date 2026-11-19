@@ -370,13 +370,22 @@ int hl_generation_apply(int verify_sig)
 
 /* ── Running the pipeline ─────────────────────────────────────────── */
 
-int hl_generation_has_pipeline(const char *app_dir)
+/* 1 when `<app_dir>/<name>` is a regular file. */
+static int app_file(const char *app_dir, const char *name)
 {
     char path[4096];
     struct stat st;
-    int n = app_dir ? snprintf(path, sizeof path, "%s/hull.build.json", app_dir) : -1;
+    int n = app_dir ? snprintf(path, sizeof path, "%s/%s", app_dir, name) : -1;
     return n > 0 && (size_t)n < sizeof path && lstat(path, &st) == 0 &&
            S_ISREG(st.st_mode);
+}
+
+int hl_generation_has_pipeline(const char *app_dir)
+{
+    /* Build plugins, or a TypeScript entry: its erased modules come from
+     * the pipeline's erasure route (docs/typescript_design.md §4.4). */
+    return app_file(app_dir, "hull.build.json") ||
+           app_file(app_dir, "app.ts") || app_file(app_dir, "app.mts");
 }
 
 int hl_generation_produce(const char *app_dir, uint8_t **out, size_t *len)

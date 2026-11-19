@@ -98,10 +98,11 @@ static int cmd_run(const char *app_dir, const char *db_path)
 
 /* ── The internal-database move ───────────────────────────────────── */
 
-/* 1 when @p app_dir holds an app entry (app.lua / app.js). */
+/* 1 when @p app_dir holds an app entry (app.lua / app.js / app.ts /
+ * app.mts). */
 static int has_entry(const char *app_dir)
 {
-    static const char *const names[] = { "app.lua", "app.js" };
+    static const char *const names[] = { "app.lua", "app.js", "app.ts", "app.mts" };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
         char p[PATH_MAX];
         int n = snprintf(p, sizeof p, "%s/%s", app_dir, names[i]);

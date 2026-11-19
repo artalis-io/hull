@@ -46,6 +46,9 @@ typedef struct HlRuntimeBaseConfig {
  * `name` is a human-readable identifier (used in logs / doctor output).
  * `entry_extension` is the file extension match (".lua", ".js"); the
  * registry picks the factory whose extension matches the entry point.
+ * `also_extensions` (NULL, or NULL-terminated) are further entry extensions
+ * the runtime runs: the JavaScript runtime runs a TypeScript entry (".ts",
+ * ".mts") from its pipeline-erased bytes (docs/typescript_design.md §4.3).
  *
  * `create()` allocates HlLua/HlJS storage on the heap, builds the
  * runtime-specific config from `opts` (heap_limit, instruction_limit,
@@ -60,6 +63,7 @@ typedef struct HlRuntimeBaseConfig {
 typedef struct HlRuntimeFactory {
     const char *name;
     const char *entry_extension;
+    const char *const *also_extensions;
 
     int  (*create)(HlRuntime **out,
                    const HlAppContextOpts *opts,

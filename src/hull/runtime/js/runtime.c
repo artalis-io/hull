@@ -21,6 +21,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/http_feature.h"  /* hl_http_ws_registry_free (HTTP-feature seam) */
 #include "hull/shared/async_backend.h"
+#include "hull/shared/app_entry.h"
 #include "hull/limits/runtime.h"
 #include "hull/manifest.h"
 #include "hull/module_registry.h"
@@ -950,6 +951,14 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         memcpy(buf, ov->data, ov->len);
         nread = ov->len;
         buf[nread] = '\0';
+    } else if (hl_app_name_is_ts(relpath)) {
+        /* TypeScript runs only as the pipeline's erased output: its bytes
+         * on disk are not JavaScript (docs/typescript_design.md §4.4). */
+        JS_ThrowReferenceError(ctx, "module %s is TypeScript and was not "
+                               "erased by the build pipeline (only an app "
+                               "with an app.ts / app.mts entry or a "
+                               "hull.build.json runs it)", module_name);
+        return NULL;
     } else {
         FILE *f = NULL;
         const char *fserr = NULL;
@@ -1593,6 +1602,10 @@ static int js_load_app_impl(HlJS *js, const char *filename)
         memcpy(buf, ov->data, ov->len);
         nread = ov->len;
         buf[nread] = '\0';
+    } else if (hl_app_name_is_ts(filename)) {
+        log_error("[hull:c] %s is TypeScript and was not erased by the build "
+                  "pipeline", filename);
+        return -1;
     } else {
         /* Load from filesystem (development mode) */
         FILE *f = fopen(filename, "rb");
@@ -2252,19 +2265,52 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
     HlJS *js = (HlJS *)rt;
     hl_js_test_clear(js->ctx);
 
-    FILE *f = fopen(file_path, "r");
-    if (!f) { if (load_err) *load_err = err_open; return -1; }
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); if (load_err) *load_err = err_read; return -1; }
-    long flen = ftell(f);
-    if (flen < 0) { fclose(f); if (load_err) *load_err = err_read; return -1; }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); if (load_err) *load_err = err_read; return -1; }
-    char *src = malloc((size_t)flen + 1);
-    if (!src) { fclose(f); if (load_err) *load_err = err_oom; return -1; }
-    if (fread(src, 1, (size_t)flen, f) != (size_t)flen) {
-        free(src); fclose(f); if (load_err) *load_err = err_read; return -1;
+    /* Test files are a development read: a built binary runs none. */
+    if (hl_vfs_embedded(js->base.app_vfs)) {
+        if (load_err) *load_err = "a built binary runs no test files";
+        return -1;
     }
-    src[flen] = '\0';
-    fclose(f);
+
+    /* A pipeline generation entry shadows the test file, as it does a
+     * module (shared/generation.h): a TypeScript test file runs from its
+     * erased bytes, never from the file. The name is app-relative: the
+     * runner found the file under the app VFS's root. */
+    const char *rel = file_path;
+    const char *root = js->base.app_vfs && js->base.app_vfs->root_dir
+                       ? js->base.app_vfs->root_dir : js->app_dir;
+    if (root) {
+        size_t adl = strlen(root);
+        while (adl > 0 && root[adl - 1] == '/') adl--;
+        if (adl && strncmp(file_path, root, adl) == 0 && file_path[adl] == '/')
+            rel = file_path + adl + 1;
+    }
+    const HlEntry *ov = hl_vfs_overlay_find(rel);
+    char *src;
+    long flen;
+    if (ov) {
+        src = malloc((size_t)ov->len + 1);
+        if (!src) { if (load_err) *load_err = err_oom; return -1; }
+        memcpy(src, ov->data, ov->len);
+        flen = (long)ov->len;
+        src[flen] = '\0';
+    } else if (hl_app_name_is_ts(file_path)) {
+        if (load_err) *load_err = "TypeScript test file was not erased by the build pipeline";
+        return -1;
+    } else {
+        FILE *f = fopen(file_path, "r");
+        if (!f) { if (load_err) *load_err = err_open; return -1; }
+        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); if (load_err) *load_err = err_read; return -1; }
+        flen = ftell(f);
+        if (flen < 0) { fclose(f); if (load_err) *load_err = err_read; return -1; }
+        if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); if (load_err) *load_err = err_read; return -1; }
+        src = malloc((size_t)flen + 1);
+        if (!src) { fclose(f); if (load_err) *load_err = err_oom; return -1; }
+        if (fread(src, 1, (size_t)flen, f) != (size_t)flen) {
+            free(src); fclose(f); if (load_err) *load_err = err_read; return -1;
+        }
+        src[flen] = '\0';
+        fclose(f);
+    }
 
     /* Reset stack base - see the stack-top contract block in
      * vt_js_init (above). The test runner adds C frames between
@@ -4085,7 +4131,7 @@ const HlRuntimeVtable hl_js_vtable = {
     .destroy              = vt_js_destroy,
     .name                 = "QuickJS",
     .kind                 = HL_RT_JS,
-    .test_file_pattern    = "test_*.js",
+    .test_file_patterns   = hl_js_test_file_patterns,
     .has_main             = vt_js_has_main,
     .has_server_handlers  = vt_js_has_server_handlers,
     .run_main             = vt_js_run_main,

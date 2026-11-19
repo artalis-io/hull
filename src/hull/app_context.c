@@ -8,6 +8,7 @@
  */
 
 #include "hull/shared/generation.h"
+#include "hull/shared/app_entry.h"
 #include "hull/app_context.h"
 #include "hull/cap/run_watchdog.h"   /* hl_run_watchdog_set_app_limits */
 #include "hull/entry.h"
@@ -261,6 +262,20 @@ static int resolve_entry_and_runtime(HlAppContext *ctx,
 {
     const char *entry = opts->entry_point;
 
+    if (!entry) {
+        /* A TypeScript entry first: it is refused beside another entry. */
+        char ts_err[512];
+        int ts = hl_app_entry_ts(ctx->app_dir_copy, entry_buf, buf_size,
+                                 ts_err, sizeof ts_err);
+        if (ts < 0) {
+            hl_eprintf_line("hull: %s", ts_err);
+            return -1;
+        }
+        if (ts > 0) {
+            entry = entry_buf;
+            ctx->factory = hl_runtime_factory_for_filename(entry);
+        }
+    }
     if (!entry) {
         /* Discover entry by trying each factory's extension in order: the
          * compile-time base factories first, then any runtime composed as a

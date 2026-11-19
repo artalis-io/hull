@@ -34,6 +34,7 @@
 #include "hull/shared/cli_log.h"
 #include "hull/shared/build_plugin.h"
 #include "hull/shared/generation.h"
+#include "hull/shared/app_entry.h"
 #include "hull/shared/dev_session.h"   /* HL_DEV_SESSION_ENV (audit 36) */
 
 #include "hull/utils/alloc.h"
@@ -207,7 +208,7 @@ typedef enum {
 static HlRuntimeType detect_runtime(const char *entry_point)
 {
     const char *ext = strrchr(entry_point, '.');
-    if (ext && strcmp(ext, ".js") == 0)
+    if ((ext && strcmp(ext, ".js") == 0) || hl_app_entry_is_ts(entry_point))
         return HL_RUNTIME_JS;
     return HL_RUNTIME_LUA; /* default */
 }
@@ -224,6 +225,9 @@ static int embedded_app_present(void)
             return 1;
     return 0;
 }
+
+/* Set when the working directory's entry is ambiguous (already reported). */
+static int g_entry_ambiguous;
 
 static const char *auto_detect_entry(void)
 {
@@ -242,6 +246,19 @@ static const char *auto_detect_entry(void)
 
     /* Filesystem fallback (development mode) */
 #ifdef HL_ENABLE_JS
+    /* A TypeScript entry, refused beside another entry (shared/
+     * app_entry.h). */
+    static char ts_entry[64];
+    char ts_err[512];
+    int ts = hl_app_entry_ts(NULL, ts_entry, sizeof ts_entry, ts_err,
+                             sizeof ts_err);
+    if (ts < 0) {
+        hl_eprintf_line("hull: %s", ts_err);
+        g_entry_ambiguous = 1;
+        return NULL;
+    }
+    if (ts > 0)
+        return ts_entry + 2;   /* "./app.ts" -> "app.ts" */
     FILE *f = fopen("app.js", "r");
     if (f) { fclose(f); return "app.js"; }
 #endif
@@ -257,7 +274,7 @@ static const char *auto_detect_entry(void)
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "Usage: %s [options] <app.js|app.lua>\n"
+    fprintf(stderr, "Usage: %s [options] <app.js|app.ts|app.lua>\n"
             "\n"
             "Options:\n"
             "  -p PORT              Listen port (default: 3000)\n"
@@ -1014,8 +1031,10 @@ static int hl_serve_resolve_entry(HlServerState *s, const char *argv0)
         s->entry_point = embedded;
     }
 
+    if (!s->entry_point && g_entry_ambiguous)
+        return -1;
     if (!s->entry_point) {
-        fprintf(stderr, "hull: no entry point found (app.js or app.lua)\n");
+        fprintf(stderr, "hull: no entry point found (app.js, app.ts or app.lua)\n");
         usage(argv0);
         return -1;
     }

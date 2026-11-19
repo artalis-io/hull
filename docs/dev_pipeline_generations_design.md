@@ -382,7 +382,8 @@ These interleave with BuildContext's (BuildContext §13); each stops for review.
   result's dependency manifest observed; `pipeline_plan_hash` (also the `generation_id`) hashes
   the actions' identities and keys.
 - **One-shot entry points.** With no generation handed over, an app from source whose
-  directory holds a regular `hull.build.json` runs that child before it loads
+  directory holds a regular `hull.build.json`, or a TypeScript entry (`app.ts` / `app.mts`,
+  whose modules the erasure route makes; typescript_design.md §4.4), runs that child before it loads
   (`hl_generation_take`, `shared/generation.c`): `hull app.*` (serve.c and serve_cli.c, right
   after the entry resolves, before any sandbox) and `hull test`, `hull agent`, `hull mcp` (the
   app context). A failed pipeline is a load error. Never in a built binary, never in a build
