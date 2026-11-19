@@ -374,6 +374,30 @@ for rt in lua js; do
     fi
 done
 
+# ── An app directory named through a symbolic link ──────────────────
+# The test runner finds test files under the canonical app directory; the
+# JS entry's directory was left as named, so a test file's relative import
+# resolved outside the app ("module not found").
+mkdir -p "$TMP/real/sym_js/lib" "$TMP/real/sym_js/tests"
+ln -s "$TMP/real" "$TMP/link"
+cat > "$TMP/real/sym_js/app.js" <<'JS'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/http-server@1"] });
+app.get("/", (req, res) => res.json({}));
+JS
+printf 'export const v = 1;\n' > "$TMP/real/sym_js/lib/a.js"
+cat > "$TMP/real/sym_js/tests/test_a.js" <<'JS'
+import { v } from "../lib/a.js";
+test("relative import", () => test.eq(v, 1));
+JS
+rc=0
+out="$("$HULL" test "$TMP/link/sym_js" 2>&1)" || rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '1/1 tests passed'; then
+    pass "test_harness.symlinked_app_dir (js)"
+else
+    fail "test_harness.symlinked_app_dir (js)" "rc=$rc $out"
+fi
+
 echo ""
 echo "=== Summary ==="
 echo "PASSED: $PASS"
