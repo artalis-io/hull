@@ -692,9 +692,9 @@ Undeclared capabilities are blocked. An empty manifest `{}` means no filesystem,
 - Format is `"namespace/name@major"` (e.g. `"hull/crypto@1"`). Major version is required.
 - Only first-party modules from the registry are accepted. List them with `hull modules available`.
 - Module imports are checked at `require`/`import` time. Undeclared imports fail with an error like `module 'hull/crypto' not declared in manifest. Add it to modules = { ... }`.
-- The transitive closure is enforced: if you import `hull/web/middleware/session`, you must also declare `hull/db` and `hull/crypto`. The error message lists exactly which deps to add.
+- A declared module's dependencies come with it: declaring `hull/web/middleware/session` admits `hull/db`, `hull/crypto` and the rest of its dependencies, so importing them needs no declaration of their own (`hull modules list` shows the declarations; the resolver adds the dependencies).
 - Capability bits piggy-back: declaring `hull/fs` doesn't grant filesystem access. You still need `fs_read`/`fs_write`. The module declaration only opens the import; the capability declaration grants the data path.
-- `hull modules analyze [app_dir]` static-scans your code and reports imports you didn't declare. Run it before `hull build`.
+- `hull modules analyze [app_dir]` static-scans your code (Lua, JavaScript or TypeScript) and reports the modules you use but didn't declare - an import, or an `app` method a module adds (`app.get` needs `hull/http-server`, `app.every` `hull/timers`, `app.sse` `hull/web/sse`, `app.ws` `hull/web/ws-server`) - against what the resolver admits (your declarations, their dependencies, `hull/app`). Run it before `hull build`.
 - `hull check` includes the same analysis as a pre-test gate.
 
 ## Available Standard Library

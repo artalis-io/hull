@@ -127,6 +127,39 @@ function M.app_entry(app_dir)
     return nil, "no app.lua, app.js or app.ts found in " .. tool.escape(app_dir)
 end
 
+-- The manifest of the app at app_dir, for the commands that only read it
+-- (hull manifest, hull modules list / analyze, hull deploy): (manifest, nil,
+-- entry, runtime), manifest nil when the app declares none, or (nil, err) when
+-- there is no entry or it fails to load before declaring one. A TypeScript
+-- app's pipeline runs first, so its entry is evaluated from the erased
+-- modules. As for extract_manifest, a manifest app.manifest() declared counts
+-- even when the top level raised after it: the extraction runtime has no
+-- database, so a top-level `session.init()` (examples/todo) raises there and
+-- not when the app runs. `cmd` labels a plugin's diagnostics.
+function M.app_manifest(app_dir, cmd)
+    local entry, runtime = M.app_entry(app_dir)
+    if not entry then return nil, runtime end
+    local _, gen_err = M.prepare_generation(app_dir, cmd)
+    if gen_err then return nil, gen_err end
+    local json_s
+    if runtime == "lua" then
+        -- The app's top level runs in a Lua runtime of its own, never this
+        -- tool VM (see hl_lua_extract_manifest_json).
+        local run_err
+        json_s, run_err = tool.extract_manifest_lua(entry)
+        if not json_s and run_err then return nil, tostring(run_err) end
+    else
+        -- A transient JS runtime in a child, handed the generation.
+        local ok, res = pcall(tool.extract_manifest_js, entry, _generation[app_dir])
+        if not ok then return nil, tostring(res) end
+        json_s = res
+    end
+    if not json_s then return nil, nil, entry, runtime end
+    local m, decode_err = json.decode(json_s)
+    if not m then return nil, "manifest JSON decode failed: " .. tostring(decode_err) end
+    return m, nil, entry, runtime
+end
+
 -- Run the app's build pipeline, when it has pipeline work (build plugins, or
 -- a TypeScript entry whose modules the erasure route makes), and hand the
 -- generation to extract_manifest, so the entry is evaluated as it will run

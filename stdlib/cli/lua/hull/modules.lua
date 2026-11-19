@@ -15,12 +15,7 @@
 --
 
 local json = require("hull.json")
-
-local function find_entry(dir)
-    local path = dir .. "/app.lua"
-    if tool.file_exists(path) then return path end
-    return nil
-end
+local fcompose = require("hull.feature_compose")
 
 local function main()
     -- arg[0] is "list" (the subcommand). Scan the rest for --json and
@@ -37,22 +32,15 @@ local function main()
     end
     app_dir = app_dir or "."
 
-    local entry = find_entry(app_dir)
-    if not entry then
-        tool.stderr("hull modules list: no app.lua found in " .. app_dir .. "\n")
+    -- app.lua, app.js or a TypeScript entry (it looked for app.lua alone, so
+    -- a JavaScript app - and hull check, which starts here - always failed).
+    local m, err, entry = fcompose.app_manifest(app_dir, "hull modules list")
+    if err then
+        tool.stderr("hull modules list: " .. err .. "\n")
         tool.exit(1)
     end
-
-    -- The app's top level runs in a Lua runtime of its own, never this tool
-    -- VM (see hl_lua_extract_manifest_json).
-    local json_s, run_err = tool.extract_manifest_lua(entry)
-    if run_err then
-        tool.stderr("hull modules list: " .. tostring(run_err) .. "\n")
-        tool.exit(1)
-    end
-    local m = json_s and json.decode(json_s) or nil
     if not m then
-        tool.stderr("hull modules list: no app.manifest() declared in " .. entry .. "\n")
+        tool.stderr("hull modules list: no app.manifest() declared in " .. tool.escape(entry) .. "\n")
         tool.exit(1)
     end
 
