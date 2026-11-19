@@ -191,6 +191,11 @@ release-artifact layout).
 
 ### Fixed
 
+- `hull new` / `hull init` take `--runtime=js` (and `hull new --type=cli`): an option with `=`
+  was skipped as unknown, so `hull init myapp --runtime=js` - the spelling the agent quickstarts
+  use - scaffolded a Lua app without a word. An option either command does not take, or one
+  missing its value, is now an error, and a refused run removes the directory it made for its
+  target (`hull new app --runtiem js` used to leave an empty `js/`).
 - An app whose own path has a directory named `build`, `vendor`, `node_modules`, `.git` or
   `.hull` (`~/build/myapp`) is analyzed again: source discovery excluded a file when ANY segment
   of its path had such a name, the app root's ancestors included, so `hull analyze /abs/path`
