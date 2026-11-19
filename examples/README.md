@@ -88,8 +88,9 @@ no Node or `tsc`. Type-checking is the TypeScript compiler's job:
 ./build/hull test examples/rest_api_ts/
 ./build/hull build examples/cli_modular_ts && examples/cli_modular_ts/app count a b c
 
-# Install the declarations and a tsconfig.json, then type-check (tsc or tsgo, from npm):
-./build/hull types examples/rest_api_ts && tsc --noEmit -p examples/rest_api_ts
+# Install the declarations and a tsconfig.json, then type-check with the
+# compiler in the app's node_modules or on PATH (tsgo or tsc, from npm):
+./build/hull types examples/rest_api_ts && ./build/hull check --types examples/rest_api_ts
 ```
 
 ### bench_db

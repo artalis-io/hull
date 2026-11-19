@@ -79,6 +79,16 @@ UTEST(tool, allowlist_versioned_clang)
     ASSERT_EQ(hl_tool_check_allowlist("clang-18"), 0);
 }
 
+/* The TypeScript compilers `hull check --types` runs, by name or path. */
+UTEST(tool, allowlist_typescript_compilers)
+{
+    ASSERT_EQ(hl_tool_check_allowlist("tsc"), 0);
+    ASSERT_EQ(hl_tool_check_allowlist("tsgo"), 0);
+    ASSERT_EQ(hl_tool_check_allowlist("/app/node_modules/.bin/tsgo"), 0);
+    ASSERT_NE(hl_tool_check_allowlist("node"), 0);
+    ASSERT_NE(hl_tool_check_allowlist("tsx"), 0);
+}
+
 UTEST(tool, allowlist_versioned_gcc)
 {
     ASSERT_EQ(hl_tool_check_allowlist("gcc-12"), 0);

@@ -37,7 +37,7 @@ Install the TypeScript declarations for Hull's JavaScript API into
   --check            write nothing; exit 1 if the installed declarations differ
                      from this hull's
 
-Type-check the app with an installed TypeScript:  tsc --noEmit -p .
+Type-check the app with an installed TypeScript (tsgo or tsc):  hull check --types .
 ]])
 end
 
@@ -339,9 +339,8 @@ local function main(opts)
         end
     end
     print("")
-    print("Type-check with an installed TypeScript:  tsc --noEmit -p " ..
-          (opts.dir == "." and "." or opts.dir) ..
-          ((tool.path_kind(tests) == "dir" and not tool.is_symlink(tests)) and ("  (tests: -p " .. join(opts.dir, "tests") .. ")") or ""))
+    print("Type-check with an installed TypeScript (tsgo or tsc):  hull check --types " ..
+          (opts.dir == "." and "." or opts.dir))
 end
 
 return main

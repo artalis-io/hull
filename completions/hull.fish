@@ -151,6 +151,8 @@ end
 # `hull compute new <name> [--lang c]`
 # `hull compute build [name]`
 # `hull compute test  <name>`
+complete -c hull -n '__hull_subcommand check' -l types -d 'Type-check with the installed TypeScript compiler first'
+
 # `hull compute check <name>`
 
 function __hull_compute_no_subsub

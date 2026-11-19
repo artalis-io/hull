@@ -2,7 +2,8 @@
  * commands/check.c - hull check: modules + test + verify in one pass
  *
  * Runs each step sequentially, stopping on first failure. Intended for
- * CI validation and a single command before pushing.
+ * CI validation and a single command before pushing. `--types` adds a
+ * type check first, with a TypeScript compiler already installed.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -13,10 +14,68 @@
 #endif
 #include "hull/commands/verify.h"
 #include "hull/commands/modules.h"
+#include "hull/cap/tool.h"
+#include "hull/shared/host.h"
+#include "hull/shared/term_escape.h"
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+
+/* The TypeScript compiler `hull check --types` runs: the app's own
+ * (node_modules/.bin, tsgo before tsc), else one on PATH (tsgo, then tsc).
+ * Hull ships none; it runs the one the project or the user installed.
+ * 0 with its path in `out`, -1 when there is none. */
+static int find_type_checker(const char *app_dir, char *out, size_t outsz)
+{
+    static const char *const names[] = { "tsgo", "tsc" };
+    for (size_t i = 0; i < sizeof names / sizeof *names; i++) {
+        int n = snprintf(out, outsz, "%s/node_modules/.bin/%s", app_dir, names[i]);
+        if (n > 0 && (size_t)n < outsz && access(out, X_OK) == 0) return 0;
+    }
+    for (size_t i = 0; i < sizeof names / sizeof *names; i++)
+        if (hl_host_find_in_path(names[i], out, outsz) == 1) return 0;
+    return -1;
+}
+
+/* `--types`: the compiler over the app's tsconfig.json (`hull types`
+ * writes it), then tests/tsconfig.json when there is one, with nothing
+ * emitted. Run before every other step: the ones that load the app go
+ * through the tool sandbox, which stays applied to this process, and a
+ * compiler under ~/.nvm or the app's node_modules could not run there. */
+static int check_types(const char *app_dir)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof path, "%s/tsconfig.json", app_dir);
+    if (n < 0 || (size_t)n >= sizeof path || access(path, F_OK) != 0) {
+        hl_eprintf_line("[hull:check] --types: no tsconfig.json in %s; "
+                        "install the declarations with `hull types %s`", app_dir, app_dir);
+        return 1;
+    }
+    char checker[PATH_MAX];
+    if (find_type_checker(app_dir, checker, sizeof checker) != 0) {
+        fprintf(stderr, "[hull:check] --types: no TypeScript compiler found - install one "
+                "in the app (npm install --save-dev typescript) or on PATH (tsgo or tsc)\n");
+        return 1;
+    }
+    hl_eprintf_line("[hull:check] type-checking with %s", checker);
+    const char *argv[] = { checker, "--noEmit", "-p", app_dir, NULL };
+    int rc = hl_tool_spawn(argv);
+    if (rc != 0) return rc < 0 ? 1 : rc;
+
+    char tests[PATH_MAX];
+    n = snprintf(tests, sizeof tests, "%s/tests", app_dir);
+    if (n < 0 || (size_t)n >= sizeof tests) return 1;
+    n = snprintf(path, sizeof path, "%s/tsconfig.json", tests);
+    if (n > 0 && (size_t)n < sizeof path && access(path, F_OK) == 0) {
+        const char *targv[] = { checker, "--noEmit", "-p", tests, NULL };
+        rc = hl_tool_spawn(targv);
+        if (rc != 0) return rc < 0 ? 1 : rc;
+    }
+    return 0;
+}
 
 int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
 {
@@ -27,6 +86,7 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
      * and imports and passed a CI gate for the wrong app. */
     const char *app_dir = env->app_dir;
     int positional = 0;
+    int types = 0;
     /* The options hull check forwards to verify that take a value, which
      * is not the app directory (`hull check --developer-key k.pub api`). */
     static const char *const value_flags[] = {
@@ -56,6 +116,7 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
             return 2;
         }
         if (strcmp(a, "--app-dir") == 0) { i++; continue; }  /* env has it */
+        if (strcmp(a, "--types") == 0) { types = 1; continue; }
         if (strcmp(a, "--verbose") == 0 || strcmp(a, "--json") == 0 ||
             strncmp(a, "--app-dir=", 10) == 0)
             continue;   /* global flags, read by the dispatcher */
@@ -69,6 +130,17 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
     }
     verify_argv[vc++] = (char *)(uintptr_t)app_dir;   /* verify takes the LAST positional */
     verify_argv[vc] = NULL;
+
+    /* Step 0 (--types): the type check, before anything applies the tool
+     * sandbox (check_types). */
+    if (types) {
+        fprintf(stderr, "[hull:check] checking types...\n");
+        int rc = check_types(app_dir);
+        if (rc != 0) {
+            fprintf(stderr, "[hull:check] type check failed\n");
+            return rc;
+        }
+    }
 
     /* Step 1: load the app's manifest and print declared modules.
      * Surfaces top-level load errors (unparseable manifest, missing

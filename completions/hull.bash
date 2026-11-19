@@ -95,7 +95,15 @@ _hull() {
             fi
             ;;
 
-        test|check|inspect|verify|manifest|eject)
+        check)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--types --json --developer-key" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -d -- "$cur"))
+            fi
+            ;;
+
+        test|inspect|verify|manifest|eject)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=($(compgen -W "--json --developer-key" -- "$cur"))
             else
