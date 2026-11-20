@@ -8,6 +8,19 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Security
+
+- `hull dev` no longer runs the app's own `node_modules/.bin/tsgo` or `tsc` unless asked
+  (audit 49, High, A2). The type check added in this release looked there first, by default,
+  so `hull dev` on a cloned repository with a `tsconfig.json` ran whatever executable the
+  repository shipped at that path, as the user and outside every sandbox. It now uses `tsgo`
+  or `tsc` on PATH, never one that resolves inside the app tree, and the app's own compiler
+  only with the new `hull dev --types` - the explicit request `hull check --types` already
+  made. Without it, a repository that has only its own compiler gets a one-line hint. Also,
+  `.hull/types.json` is written terminal-safe (DEL and C1 as `\u00NN`): a diagnostic quoting
+  such a character made `hull agent errors` report the genuine file as not Hull's. Covered by
+  `tests/e2e_dev_types.sh` (`dev_audit49.*`).
+
 ### Added
 
 - `hull dev` type-checks the app after each reload, when it has a `tsconfig.json` and a

@@ -89,7 +89,7 @@ _hull() {
                 return
             fi
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "-p --port -d --database --agent --no-types --no-migrate --no-sandbox --audit --ca-bundle --no-ca-bundle" -- "$cur"))
+                COMPREPLY=($(compgen -W "-p --port -d --database --agent --types --no-types --no-migrate --no-sandbox --audit --ca-bundle --no-ca-bundle" -- "$cur"))
             else
                 COMPREPLY=($(compgen -f -- "$cur"))
             fi

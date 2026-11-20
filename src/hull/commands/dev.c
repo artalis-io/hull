@@ -17,6 +17,7 @@
 #include "hull/shared/dev_session.h" /* HL_DEV_SESSION_ENV, sidecar MAC (audit 36/37) */
 #include "hull/shared/generation.h"
 #include "hull/shared/app_entry.h"
+#include "hull/shared/json_term_safe.h"  /* hl_json_write_terminal_safe */
 #include "hull/shared/term_escape.h"  /* hl_eprintf_line */  /* the pipeline generation handed to the child */
 #include "hull/shared/type_check.h"
 #include "hull/cap/tool.h"   /* hl_tool_spawn */
@@ -827,7 +828,9 @@ static int dev_self_exe(const char *argv0, char *out, size_t out_sz)
  * `--noEmit --pretty false -p <app>` in the background; an edit before it
  * ends stops it. It never holds up or decides a reload: when it ends its
  * diagnostics are summarised on stderr and, under --agent, written to
- * .hull/types.json for `hull agent errors`. `--no-types` turns it off.
+ * .hull/types.json for `hull agent errors`. `--no-types` turns it off. The
+ * compiler is tsgo or tsc on PATH; the app's own node_modules/.bin one is the
+ * repository's code and runs only with `--types` (audit 49).
  */
 
 #define DEV_TYPES_OUT_MAX   (1024 * 1024)   /* compiler output kept */
@@ -1002,7 +1005,14 @@ static void dev_types_report(DevTypes *t, int status, const char *app_dir,
         sh_json_write_kv_int(&w, "timestamp", (int64_t)time(NULL));
         sh_json_write_kv_int(&w, "session_pid", (int64_t)getpid());
         sh_json_write_object_end(&w);
-        hl_dev_types_write(app_dir, g_dev_nonce, (long)getpid(), jb.buf, jb.len);
+        /* DEL and C1 as \u00NN, as every agent output is written: the
+         * compiler quotes source text, and `hull agent errors` refuses a
+         * document that is not terminal-safe (audit 49). */
+        ShJsonBuf safe;
+        sh_json_buf_init(&safe);
+        if (hl_json_write_terminal_safe(sh_json_buf_write, &safe, jb.buf, jb.len) == 0)
+            hl_dev_types_write(app_dir, g_dev_nonce, (long)getpid(), safe.buf, safe.len);
+        sh_json_buf_free(&safe);
     }
     sh_json_buf_free(&jb);
 }
@@ -1035,6 +1045,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
     int agent_mode = 0;
     int tui_mode = 0;
     int no_types = 0;
+    int app_types = 0;     /* --types: the app's own node_modules compiler too */
     int port = 3000;
 
     /* Parse args: first positional is the entry point, rest are passthrough */
@@ -1049,6 +1060,10 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
         }
         if (strcmp(argv[i], "--no-types") == 0) {
             no_types = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--types") == 0) {
+            app_types = 1;
             continue;
         }
         if (argv[i][0] != '-') {
@@ -1104,7 +1119,8 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
      * be silently ignored, depending on the build. --agent is
      * already a server-mode flag, so pass that through. */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--tui") == 0 || strcmp(argv[i], "--no-types") == 0)
+        if (strcmp(argv[i], "--tui") == 0 || strcmp(argv[i], "--no-types") == 0 ||
+            strcmp(argv[i], "--types") == 0)
             continue;
         child_argv[ci++] = argv[i];
     }
@@ -1147,9 +1163,14 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
         fprintf(stderr, "[hull:dev] types are not checked by this build; "
                 "run `hull check --types`\n");
 #else
-        if (hl_type_check_find(app_dir, types.checker, sizeof types.checker) == 0)
+        char local[PATH_MAX];
+        if (hl_type_check_find(app_dir, app_types, types.checker, sizeof types.checker) == 0)
             hl_eprintf_line("[hull:dev] type-checking with %s after each reload "
                             "(--no-types to turn off)", types.checker);
+        else if (hl_type_check_app_local(app_dir, local, sizeof local) == 0)
+            /* The repository's own code: run only when asked (audit 49). */
+            hl_eprintf_line("[hull:dev] types are not checked: the app's %s is run "
+                            "only with --types (it is the repository's own code)", local);
         else
             fprintf(stderr, "[hull:dev] tsconfig.json but no TypeScript compiler "
                     "(tsgo or tsc) installed: types are not checked\n");
