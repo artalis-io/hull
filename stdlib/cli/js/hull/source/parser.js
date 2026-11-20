@@ -463,6 +463,48 @@ function parseInternal(bytes, opts, inject) {
         if (info.typed && isP("=>") && tsLineBreakBetween(close.stop, cur.start))
             diag("error", "ts.unsupported", "a line break before '=>' after TypeScript parameter or return types is not supported: keep '=>' on the line the types end", cur.start, cur.stop);
     }
+    // Inside a conditional's consequent or a case test, with an untyped list and cur the `:`
+    // (before tsArrowTail): TypeScript reads `(a): T => body` as an arrow with a return type
+    // when the whole arrow is followed by a `:` (parseParenthesizedArrowFunctionExpression
+    // without allowReturnTypeInArrowFunction), else `(a)` as the consequent and `T => body` as
+    // the alternate. In a case test both readings parse (`case c ? (x): T => 1 : w:` - the
+    // leftover `:` ends the clause and `w` becomes a label), so the arrow is read ahead the way
+    // TypeScript reads it: `items` (the list) must be parameters, then the return type, `=>`,
+    // the body and the `:`. Returns the arrow, kept, or null with everything rewound. One that
+    // reaches that `:` with a diagnostic on the way is refused: which reading TypeScript took
+    // cannot be told.
+    function tsConsequentArrow(start, info, isAsync, items, makeParams) {
+        if (!ts || info.typed || condConsequent === 0 || !isP(":")) return null;
+        if (!tsSpeculateAllowed()) { tsLookaheadRefuse(cur); return null; }
+        const at = cur, close = prev;
+        let node = null, colon = false;
+        // State a statement or a class inside the body touches, which tsSpeculate (written for
+        // the type grammar) does not restore.
+        const ctxLen = ctxStack.length, watch = jsWatch, watchTok = jsWatch !== null ? jsWatch.tok : null;
+        const sigAllowed = tsSigAllowed, sigFound = tsSigFound, fieldAsi = tsFieldAsi;
+        const kept = tsSpeculate(function () {
+            const d0 = diagCount;
+            for (let i = 0; i < items.length; i++) {
+                const it = items[i];
+                if (it.type === "SpreadElement") toBinding(it.argument, false);
+                else if (it.type !== "RestElement") toBinding(it, true);
+            }
+            if (diagCount !== d0) return false;      // not a parameter list: JavaScript's reading
+            tsReturnType();
+            if (!isP("=>") || nl()) return false;
+            if (tsLineBreakBetween(close.stop, cur.start))
+                diag("error", "ts.unsupported", "a line break before '=>' after TypeScript parameter or return types is not supported: keep '=>' on the line the types end", cur.start, cur.stop);
+            node = finishArrow(start, makeParams(), isAsync);
+            colon = isP(":");
+            return colon;
+        });
+        if (kept) return node;
+        ctxStack.length = ctxLen; jsWatch = watch; if (watch !== null) watch.tok = watchTok;
+        tsSigAllowed = sigAllowed; tsSigFound = sigFound; tsFieldAsi = fieldAsi;
+        if (colon)
+            diag("error", "ts.unsupported", "an arrow function with a return type and untyped parameters is not supported here unless it parses cleanly: parenthesize the arrow or annotate a parameter", at.start, at.stop);
+        return null;
+    }
 
     function mk(type, start) { return { type: type, start: start, stop: start }; }
     // Finalize a node's half-open range. stop = the last consumed token's stop, but NEVER before
@@ -554,8 +596,11 @@ function parseInternal(bytes, opts, inject) {
         tsErasedStatementEnd(before);
         return null;
     }
-    // After an erased statement whose JavaScript predecessor ends at `before`.
+    // After an erased statement whose JavaScript predecessor ends at `before`. cur starts the
+    // next statement, but the erased declaration's last token read it with the operator goal:
+    // a `/` there is a regular expression (TypeScript rescans it the same way).
     function tsErasedStatementEnd(before) {
+        if (la.length === 0 && (isP("/") || isP("/="))) { const r = tk.rescanRegex(); if (r !== null) cur = r; }
         if (before === null || before !== asiEnd) return;
         if (tsContinuesExpression(cur))
             diag("error", "ts.unsupported", "an erased TypeScript declaration between a statement without ';' and a line that would continue it is not supported: end the statement before it with ';'", cur.start, cur.stop);
@@ -1051,7 +1096,9 @@ function parseInternal(bytes, opts, inject) {
     // ASI-aware semicolon consumption.
     function semicolon() {
         if (eatP(";", true)) return;
-        if (isP("}") || atEof() || nl()) { if (ts) asiEnd = lastJs; return; }   // automatic semicolon insertion
+        // Automatic semicolon insertion. Inside an erased statement (`import type ...`) the end
+        // is not a JavaScript statement's: asiEnd keeps the one before it.
+        if (isP("}") || atEof() || nl()) { if (ts && typeDepth === 0) asiEnd = lastJs; return; }
         synErr("expected ';'");
     }
 
@@ -1764,6 +1811,12 @@ function parseInternal(bytes, opts, inject) {
     function asyncParenTail(start, callee, nlParen) {
         const info = { spreadComma: false, typed: false };
         const args = parseArguments(info);
+        const ca = tsConsequentArrow(start, info, true, args, function () { return argsToParams(args, info); });
+        if (ca !== null) {
+            if (nlParen)
+                diag("error", "ts.unsupported", "a line break between an async arrow's type parameters and its parameters is not supported", nlParen.start, nlParen.stop);
+            return ca;
+        }
         if (ts) tsArrowTail(info);
         if (isP("=>") && !nl()) {
             if (nlParen)
@@ -1801,6 +1854,8 @@ function parseInternal(bytes, opts, inject) {
             if (isP(")")) { trailing = prev; break; }
         }
         expectP(")", false);
+        const ca = tsConsequentArrow(start, info, false, items, function () { return items; });
+        if (ca !== null) return ca;
         if (ts) tsArrowTail(info);
         if (isP("=>") && !nl()) return finishArrow(start, items, false);
         if (trailing) synErr("unexpected trailing ','", trailing);

@@ -606,4 +606,70 @@ UTEST(js_typescript, corpus_refuse)
     hl_js_session_destroy(s);
 }
 
+/* ---- audit 49 ---- */
+
+/* The erasure of `src` must parse cleanly, refuse nothing, and give exactly `want`. */
+static int erases_clean_to(HlJsSession *s, const char *src, const char *want)
+{
+    char *o = run(s, "eraseTs", src, strlen(src), "t.ts", NULL, NULL);
+    char *hx = json_str(o, "erased_hex");
+    char *er = hx ? (char *)malloc(strlen(hx) / 2 + 1) : NULL;
+    size_t en = (hx && er) ? unhex(hx, er) : (size_t)-1;
+    int ok = has(o, "\"valid\":true") && has(o, "\"refusals\":[]") && has(o, "\"erased_valid\":true") &&
+             en == strlen(want) && memcmp(er, want, en) == 0;
+    if (!ok) fprintf(stderr, "[audit49] %s\n  %s\n", src, o ? o : "(null)");
+    free(er); free(hx); free(o);
+    return ok;
+}
+
+/* Inside a conditional's consequent in a case test, `(x = 5): number => 1` followed by `:` is
+ * an arrow with a return type for TypeScript; read as `(x = 5)` the consequent and
+ * `number => 1` the alternate, the leftover `:` ended the clause and `w` became a label - both
+ * readings parsed, and Hull ran the other one. */
+UTEST(parser_audit49, case_conditional_arrow_return_type)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    EXPECT_TRUE(erases_clean_to(s,
+        "switch (x) { case a ? (x = 5): number => 1 : w: f(); }\n",
+        "switch (x) { case a ? (x = 5)         => 1 : w: f(); }\n"));
+    EXPECT_TRUE(erases_clean_to(s,
+        "switch (x) { case a ? async (x = 5): number => 1 : w: f(); }\n",
+        "switch (x) { case a ? async (x = 5)         => 1 : w: f(); }\n"));
+    /* Nested: the inner arrow, then the outer, each followed by its `:`. */
+    EXPECT_TRUE(erases_clean_to(s,
+        "switch (x) { case a ? (y): T => (z): U => 1 : w: f(); }\n",
+        "switch (x) { case a ? (y)    => (z)    => 1 : w: f(); }\n"));
+    /* Not followed by `:`: JavaScript's reading, as TypeScript's. */
+    EXPECT_TRUE(erases_clean_to(s, "const g = a ? (x) : y => 1;\n", "const g = a ? (x) : y => 1;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "switch (x) { case (y): z => 1; }\n", "switch (x) { case (y): z => 1; }\n"));
+    /* Not a parameter list (TypeScript reads no arrow): JavaScript's reading. */
+    EXPECT_TRUE(erases_clean_to(s, "switch (x) { case a ? (b + 1): T => 1 : w: f(); }\n",
+                                   "switch (x) { case a ? (b + 1): T => 1 : w: f(); }\n"));
+    EXPECT_TRUE(erases_clean_to(s, "switch (x) { case a ? async (b.c): T => 1 : w: f(); }\n",
+                                   "switch (x) { case a ? async (b.c): T => 1 : w: f(); }\n"));
+    /* Read ahead to the `:` with a diagnostic on the way: refused. */
+    char *o = ts(s, "switch (x) { case a ? (y): T => <U>z : w: f(); }\n");
+    EXPECT_TRUE(has(o, "\"valid\":false") && has(o, "unless it parses cleanly"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* A statement starting with a regular expression after a declaration erased whole and ended by
+ * automatic semicolon insertion: the declaration's last token had read the `/` as division. */
+UTEST(parser_audit49, regex_after_erased_declaration)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    EXPECT_TRUE(erases_clean_to(s, "let z = 1;\ntype T = number\n/x/.test(\"x\");\n",
+                             "let z = 1;\n               \n/x/.test(\"x\");\n"));
+    EXPECT_TRUE(erases_clean_to(s, "let z = 1;\ninterface I { a: number }\n/x/g.test(\"x\");\n",
+                             "let z = 1;\n                         \n/x/g.test(\"x\");\n"));
+    EXPECT_TRUE(erases_clean_to(s, "let z = 1;\ndeclare const q: number\n/=x/.test(\"x\");\n",
+                             "let z = 1;\n                       \n/=x/.test(\"x\");\n"));
+    EXPECT_TRUE(erases_clean_to(s, "let z = 1;\nimport type { X } from \"./m.ts\"\n/x/.test(\"x\");\n",
+                             "let z = 1;\n                               \n/x/.test(\"x\");\n"));
+    hl_js_session_destroy(s);
+}
+
 UTEST_MAIN()
