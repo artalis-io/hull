@@ -2972,8 +2972,10 @@ must preserve:
   `"` `'` `<` `>` backtick, whitespace and controls in the URL it keeps (raw
   `{{{ u | safe_url }}}` emitted `https://a"><script>`); a dot path reads only
   own / raw-table fields and renders no function (Lua `{{ s.rep }}` printed a
-  native address); `search` snippet / highlight hand FTS5 U+E000-E002
-  sentinels, HTML-escape the text, then splice in the caller's markers.
+  native address), and neither does a loop variable (audit 49); `search`
+  snippet / highlight hand FTS5 per-query random sentinels (fixed U+E000-E002
+  could be planted in indexed text; audit 49), HTML-escape the text, then
+  splice in the caller's markers.
 - **Stored request / app text goes through the shared safe-text helper
   (audit 39)**: any stdlib write of text that comes from an app, a request
   (headers, body, path, a filename) or a remote reply (an error body, an

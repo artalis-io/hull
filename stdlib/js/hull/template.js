@@ -464,7 +464,9 @@ function resolveIncludes(ast, loadFn, visited, depth, nest, budget) {
 // Generate dot path access, one own-property read per segment:
 // "user.name" → '__g(__g(__d, "user"), "name")'
 // "title" → '__g(__d, "title")'
-// If the first segment is a loop-local variable, use it directly.
+// If the first segment is a loop-local variable, read it through __v: it
+// drops a function as __g does. Emitted bare, a loop variable bound to a
+// function rendered the function's whole source text (audit 49).
 // __g (emitted by codegen) reads only an OWN property of a non-nullish
 // value: `{{ user.constructor }}` resolved through the prototype chain and
 // rendered the Object constructor's source, as i18n's deepGet did before
@@ -484,7 +486,7 @@ function genDotPath(path, prefix, localsSet) {
     let i = 0;
     // Check if first segment is a loop-local variable
     if (localsSet && localsSet[parts[0]]) {
-        code = parts[0];
+        code = "__v(" + parts[0] + ")";
         i = 1;
     } else {
         code = prefix;
@@ -635,6 +637,7 @@ function codegen(ast) {
     lines.push("  const __hasOwn = Object.prototype.hasOwnProperty;");
     lines.push("  const __g = (o, k) => { if (o === null || o === undefined || !__hasOwn.call(o, k)) return undefined;"
         + " const v = o[k]; return typeof v === \"function\" ? undefined : v; };");
+    lines.push("  const __v = (v) => typeof v === \"function\" ? undefined : v;");
     genBody(ast);
     lines.push("  return __p.join(\"\");");
     lines.push("})");
