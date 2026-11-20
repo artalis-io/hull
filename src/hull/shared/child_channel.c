@@ -198,6 +198,19 @@ pid_t hl_chan_spawn(const char *exe, char *const argv[], int fd,
     return hl_chan_spawn_env(exe, argv, fd, env_ok, NULL);
 }
 
+/* A copy of the channel @p fd at 3 or above, close-on-exec, when @p fd is one
+ * of 0-2: a process started with stdio closed gets its socketpair there, and
+ * the /dev/null set-up of 0-2 replaced it before it reached fd 3 (audit 50).
+ * @p fd itself otherwise. *owned is set when the caller must close the copy. */
+static int chan_fd_above_stdio(int fd, int *owned)
+{
+    *owned = 0;
+    if (fd > 2) return fd;
+    int hi = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+    if (hi >= 0) *owned = 1;
+    return hi;
+}
+
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)
 /* Linux: posix_spawn has no close-by-default (Apple's spawn takes
  * POSIX_SPAWN_CLOEXEC_DEFAULT below), so a descriptor the parent holds
@@ -206,26 +219,64 @@ pid_t hl_chan_spawn(const char *exe, char *const argv[], int fd,
  * read or wrote through it (audit 49). Fork, and in the child set up the
  * same layout the spawn would, close every descriptor from 4 on and exec.
  * Everything is allocated before the fork, and the child calls only
- * async-signal-safe functions (the parent may have threads). */
+ * async-signal-safe functions (the parent may have threads).
+ *
+ * A failed set-up or execve is reported as posix_spawn reports it: the child
+ * writes its errno to a close-on-exec socket, which reads EOF once the exec
+ * succeeded (audit 50: the pid of a child that only _exit(127)ed). */
+static void close_fds_from(unsigned lo);
+
+static void child_fail(int ew)
+{
+    int e = errno;
+    ssize_t w = write(ew, &e, sizeof e);
+    (void)w;
+    _exit(127);
+}
+
 pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
                         int (*env_ok)(const char *kv), const char *const *extra)
 {
+    int owned;
+    fd = chan_fd_above_stdio(fd, &owned);
+    if (fd < 0) return -1;
+    int ep[2];
+    /* A socketpair, not pipe2 (which glibc hides outside _GNU_SOURCE): made
+     * close-on-exec atomically, so another thread's spawn cannot hold it. */
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, ep) != 0) {
+        int e = errno;
+        if (owned) close(fd);
+        errno = e;
+        return -1;
+    }
     char **env = filtered_env(env_ok, extra);
-    if (!env) { errno = ENOMEM; return -1; }
+    if (!env) {
+        close(ep[0]); close(ep[1]);
+        if (owned) close(fd);
+        errno = ENOMEM;
+        return -1;
+    }
     sigset_t all, prev;
     sigfillset(&all);
     pthread_sigmask(SIG_SETMASK, &all, &prev);   /* no handler runs in the child */
     pid_t pid = fork();
     if (pid == 0) {
+        /* The report pipe out of the way of 0-4 until its final place. */
+        int ew = fcntl(ep[1], F_DUPFD_CLOEXEC, 5);
+        if (ew < 0) _exit(127);
         int nul = open("/dev/null", O_RDWR);
         if (nul < 0 || dup2(nul, 0) < 0 || dup2(nul, 1) < 0 || dup2(nul, 2) < 0)
-            _exit(127);
+            child_fail(ew);
         if (fd == 3) {
-            if (fcntl(3, F_SETFD, 0) < 0) _exit(127);
+            if (fcntl(3, F_SETFD, 0) < 0) child_fail(ew);
         } else if (dup2(fd, 3) < 0) {
-            _exit(127);
+            child_fail(ew);
         }
-        hl_chan_close_extra_fds();
+        if (ew != 4) {
+            if (dup2(ew, 4) < 0 || fcntl(4, F_SETFD, FD_CLOEXEC) < 0) child_fail(ew);
+            ew = 4;
+        }
+        close_fds_from(5);
         struct sigaction dfl;
         memset(&dfl, 0, sizeof dfl);
         dfl.sa_handler = SIG_DFL;
@@ -235,11 +286,26 @@ pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
         sigemptyset(&none);
         sigprocmask(SIG_SETMASK, &none, NULL);
         execve(exe, argv, env);
-        _exit(127);
+        child_fail(ew);
     }
     int err = errno;
     pthread_sigmask(SIG_SETMASK, &prev, NULL);
     free(env);
+    close(ep[1]);
+    if (owned) close(fd);
+    if (pid > 0) {
+        int child_err = 0;
+        ssize_t r;
+        do r = read(ep[0], &child_err, sizeof child_err);
+        while (r < 0 && errno == EINTR);
+        if (r == (ssize_t)sizeof child_err) {
+            int st;
+            while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { }
+            pid = -1;
+            err = child_err ? child_err : ECHILD;
+        }
+    }
+    close(ep[0]);
     if (pid < 0) errno = err;
     return pid;
 }
@@ -247,11 +313,18 @@ pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
 pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
                         int (*env_ok)(const char *kv), const char *const *extra)
 {
+    int owned;
+    fd = chan_fd_above_stdio(fd, &owned);
+    if (fd < 0) return -1;
     posix_spawn_file_actions_t fa;
     posix_spawnattr_t at;
-    if (posix_spawn_file_actions_init(&fa) != 0) return -1;
+    if (posix_spawn_file_actions_init(&fa) != 0) {
+        if (owned) close(fd);
+        return -1;
+    }
     if (posix_spawnattr_init(&at) != 0) {
         posix_spawn_file_actions_destroy(&fa);
+        if (owned) close(fd);
         return -1;
     }
     int ok = 1;
@@ -277,6 +350,7 @@ pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
     free(env);
     posix_spawnattr_destroy(&at);
     posix_spawn_file_actions_destroy(&fa);
+    if (owned) close(fd);
     if (pid < 0) errno = err;
     return pid;
 }
@@ -303,19 +377,83 @@ int hl_chan_self_exe(char *out, size_t sz)
 #endif
 }
 
-void hl_chan_close_extra_fds(void)
+#ifdef HL_CHAN_TEST_HOOKS
+static int g_close_fallback;   /* 1: skip close_range, 2: skip /proc too */
+void hl_chan_test_force_close_fallback(int mode) { g_close_fallback = mode; }
+#else
+enum { g_close_fallback = 0 };
+#endif
+
+#if defined(__linux__)
+/* Close every descriptor from @p lo on that /proc/self/fd lists, through the
+ * raw getdents64 into a stack buffer (async-signal-safe: no malloc, no
+ * opendir). Passes repeat until one closes nothing, since closing entries
+ * while reading the directory may skip some. 0, or -1 when /proc is not
+ * there. */
+static int close_fds_proc(unsigned lo)
+{
+    int dfd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd < 0) return -1;
+    for (int closed = 1; closed; ) {
+        closed = 0;
+        if (lseek(dfd, 0, SEEK_SET) < 0) { close(dfd); return -1; }
+        char buf[4096] __attribute__((aligned(8)));
+        for (;;) {
+            long n = syscall(SYS_getdents64, dfd, buf, sizeof buf);
+            if (n < 0) { close(dfd); return -1; }
+            if (n == 0) break;
+            for (long off = 0; off < n; ) {
+                unsigned short reclen;
+                memcpy(&reclen, buf + off + 16, sizeof reclen);
+                const char *name = buf + off + 19;   /* d_ino, d_off, d_reclen, d_type */
+                off += reclen;
+                if (reclen == 0) break;
+                if (name[0] < '0' || name[0] > '9') continue;
+                long v = 0;
+                for (const char *c = name; *c >= '0' && *c <= '9' && v <= INT_MAX; c++)
+                    v = v * 10 + (*c - '0');
+                if (v >= (long)lo && v <= INT_MAX && v != dfd) {
+                    (void)close((int)v);
+                    closed = 1;
+                }
+            }
+        }
+    }
+    close(dfd);
+    return 0;
+}
+#endif
+
+static void close_fds_from(unsigned lo)
 {
 #if defined(__linux__) && defined(__NR_close_range)
-    if (syscall(__NR_close_range, 4u, ~0u, 0u) == 0)
+    if (g_close_fallback < 1 && syscall(__NR_close_range, lo, ~0u, 0u) == 0)
         return;
 #endif
+#if defined(__linux__)
+    /* An old kernel (< 5.9) or a filter that answers ENOSYS (audit 50: the
+     * loop below stopped at 4096 under a large limit, and the descriptors
+     * past it reached the child). */
+    if (g_close_fallback < 2 && close_fds_proc(lo) == 0)
+        return;
+#endif
+    /* Up to the soft limit, or the hard one when that is finite and higher
+     * (a descriptor opened before the soft limit was lowered can sit above
+     * it), capped. */
     struct rlimit rl;
-    long max = 4096;
-    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
-        rl.rlim_cur < 65536)
-        max = (long)rl.rlim_cur;
-    for (long fd = 4; fd < max; fd++)
+    long max = 1L << 20;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        rlim_t lim = rl.rlim_cur;
+        if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max > lim) lim = rl.rlim_max;
+        if (lim != RLIM_INFINITY && lim < (rlim_t)max) max = (long)lim;
+    }
+    for (long fd = (long)lo; fd < max; fd++)
         (void)close((int)fd);
+}
+
+void hl_chan_close_extra_fds(void)
+{
+    close_fds_from(4);
 }
 
 int hl_chan_reap(pid_t pid, int *status, uint32_t ms, uint64_t *maxrss)

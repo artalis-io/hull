@@ -112,8 +112,16 @@ pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
  * /proc/self/exe itself). 0 / -1. */
 int hl_chan_self_exe(char *out, size_t sz);
 
-/* In the child: close every descriptor above 3 (it inherits only 0-3). */
+/* In the child: close every descriptor above 3 (it inherits only 0-3).
+ * Linux: close_range, else every entry of /proc/self/fd, else every number
+ * up to the descriptor limit. Async-signal-safe. */
 void hl_chan_close_extra_fds(void);
+
+#ifdef HL_CHAN_TEST_HOOKS
+/* Tests only (child_channel_th.o): 1 skips close_range, 2 skips /proc too,
+ * so the fallbacks run on a kernel that has both. */
+void hl_chan_test_force_close_fallback(int mode);
+#endif
 
 /* Reap @p pid within @p ms (it was killed, or is exiting). 1 = reaped (its
  * status in *status, its peak RSS in bytes in *maxrss when non-NULL),
