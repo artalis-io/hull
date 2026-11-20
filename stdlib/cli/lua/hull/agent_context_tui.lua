@@ -192,9 +192,9 @@ tui.run({
 -- pipe the chosen context elsewhere.
 if final_action then
     local raw = tool.agent_context(final_action.task, final_action.level)
-    -- Hull's own encoded JSON, so written raw (print escapes control bytes,
-    -- and would turn a DEL into \x7f; audit 33). io.* is sandboxed.
-    if raw then tool.stderr_raw(raw .. "\n") end
+    -- JSON, written through the JSON writer (print escapes control bytes,
+    -- and would turn a DEL into \x7f; audit 33 / 50). io.* is sandboxed.
+    if raw then tool.stderr_json(raw .. "\n") end
 end
 
 tool.exit(0)

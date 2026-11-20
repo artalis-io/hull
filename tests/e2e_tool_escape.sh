@@ -259,6 +259,41 @@ else
     echo "  SKIP: curl not found (multipart leg)"
 fi
 
+# ── cli_audit50.json_c1_escaped: tool JSON output escapes DEL and C1 ─────
+# json.encode escapes only C0, and the tools wrote its output raw, so a
+# manifest string's U+009B (a CSI to a terminal in 8-bit mode) or DEL
+# reached the terminal from `hull manifest` / `hull plugins list --json`.
+# They now go through the agent / MCP JSON rewrite (\u009b, \u007f).
+echo ""
+echo "=== tool JSON output escapes DEL and C1 (audit 50) ==="
+C1APP="$WORKDIR/c1app"
+mkdir -p "$C1APP/plugins"
+cat > "$C1APP/app.lua" <<'EOF'
+app.manifest({ modules = { "hull/env@1" }, env = { "A\u{9b}31mB\127C" } })
+app.main(function() return 0 end)
+EOF
+cp -R "$SRCDIR/tests/fixtures/plugin_demo/inventory_lua" "$C1APP/plugins/inventory"
+printf '%s\n' '{"plugins":[{"path":"plugins/inventory","config":{"title":"T\u009b31mX\u007fY"}}]}' \
+    > "$C1APP/hull.build.json"
+C2=$(printf '\302\233')
+DEL=$(printf '\177')
+# check_json NAME FILE NEEDLE: no raw C2 9B / 0x7F, and the escaped value is there.
+check_json() {
+    if LC_ALL=C grep -q "$C2" "$2" || LC_ALL=C grep -q "$DEL" "$2"; then
+        fail "cli_audit50.json_c1_escaped: $1 wrote a raw C1 / DEL byte"
+        od -c "$2" | head -5
+    elif grep -qF "$3" "$2" && grep -qF '\u007f' "$2"; then
+        pass "cli_audit50.json_c1_escaped: $1"
+    else
+        fail "cli_audit50.json_c1_escaped: $1 did not print the escaped value"
+        head -5 "$2"
+    fi
+}
+"$HULL" manifest "$C1APP" > "$WORKDIR/out.c1manifest" 2>&1
+check_json "hull manifest" "$WORKDIR/out.c1manifest" 'A\u009b31mB'
+"$HULL" plugins list "$C1APP" --json > "$WORKDIR/out.c1plugins" 2>&1
+check_json "hull plugins list --json" "$WORKDIR/out.c1plugins" 'T\u009b31mX'
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

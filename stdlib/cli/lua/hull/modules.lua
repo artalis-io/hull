@@ -49,7 +49,7 @@ local function main()
     if want_json then
         -- Emit a stable object even when no modules are declared.
         -- Encoded JSON: raw (json.encode escapes every C0 control itself).
-        tool.stderr_raw(json.encode({ modules = modules or {} }) .. "\n")
+        tool.stderr_json(json.encode({ modules = modules or {} }) .. "\n")
         return
     end
 
