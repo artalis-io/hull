@@ -166,8 +166,6 @@ UTEST(child_channel, reap_a_running_child_times_out)
     close(sv[0]);
 }
 
-#endif /* HL_CHAN_SUPPORTED */
-
 /* A descriptor the parent holds without close-on-exec does not reach the
  * child: on Linux posix_spawn passed it on (audit 49), so a build plugin could
  * use one the build host had open. */
@@ -193,5 +191,7 @@ UTEST(child_channel_audit49, spawn_closes_inherited_fds)
     EXPECT_EQ(0, WEXITSTATUS(st));            /* 3: the descriptor was there */
     close(leak); close(p[0]); close(p[1]); close(sv[0]);
 }
+
+#endif /* HL_CHAN_SUPPORTED */
 
 UTEST_MAIN()
