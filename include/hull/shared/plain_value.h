@@ -12,8 +12,8 @@
  *   0x07 map      u32 count, count x (u32 key length, UTF-8 key, value),
  *                 keys in strictly ascending byte order
  * One encoding per value: the ascending keys make it canonical and refuse a
- * duplicate key. Depth is bounded by HL_PV_MAX_DEPTH, the whole encoding by
- * the caller's max.
+ * duplicate key. Depth is bounded by HL_PV_MAX_DEPTH, the number of values
+ * by HL_PV_MAX_ITEMS, the whole encoding by the caller's max.
  *
  * The writer is driven by each runtime's walker (runtime/lua/plain_value.c,
  * runtime/js/plain_value.c), which reads the value without running app code;
@@ -29,6 +29,11 @@
 #include <stdint.h>
 
 #define HL_PV_MAX_DEPTH 64
+/* The most values (containers included; a map key is not one) one encoding
+ * holds. A value can be shared (Lua and JS references), so a small one can
+ * encode to millions of empty containers that the decoder must allocate
+ * (audit 49): the count, not the byte size, bounds the decoded heap. */
+#define HL_PV_MAX_ITEMS (1u << 18)
 
 enum {
     HL_PV_NIL = 0, HL_PV_FALSE = 1, HL_PV_TRUE = 2, HL_PV_INT = 3,
@@ -42,11 +47,14 @@ typedef struct {
     size_t   len, cap;
     size_t   max;        /* the largest encoding allowed */
     int      err;        /* sticky: HL_PV_E_* */
+    size_t   items;      /* values written, at most HL_PV_MAX_ITEMS */
+    int      depth;      /* where a walker's value sits: 1 inside an
+                          * envelope the caller wrote itself */
 } HlPvWriter;
 
 #define HL_PV_OK          0
 #define HL_PV_E_NOMEM    -1
-#define HL_PV_E_TOO_BIG  -2   /* past the writer's max */
+#define HL_PV_E_TOO_BIG  -2   /* past the writer's max, or HL_PV_MAX_ITEMS */
 #define HL_PV_E_TEXT     -3   /* text or a key that is not UTF-8 */
 #define HL_PV_E_SHAPE    -4   /* a malformed or non-canonical encoding */
 #define HL_PV_E_DEPTH    -5
@@ -100,8 +108,9 @@ int hl_pv_next_key(HlPvReader *r, const uint8_t **s, size_t *n);
 
 /* Whether @p buf holds exactly one well-formed, canonical value: valid tags,
  * lengths and counts within the buffer, UTF-8 text and keys, keys strictly
- * ascending, depth at most HL_PV_MAX_DEPTH, nothing after it. HL_PV_OK or an
- * HL_PV_E_* code. */
+ * ascending, depth at most HL_PV_MAX_DEPTH, at most HL_PV_MAX_ITEMS values
+ * (HL_PV_E_TOO_BIG past it), nothing after it. HL_PV_OK or an HL_PV_E_*
+ * code. */
 int hl_pv_check(const void *buf, size_t len);
 
 /* The token for an HL_PV_E_* code ("too_big", "not_text", ...). */

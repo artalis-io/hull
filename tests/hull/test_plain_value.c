@@ -16,6 +16,7 @@
 #include "lauxlib.h"
 #include "lualib.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* ── The codec ──────────────────────────────────────────────────────── */
@@ -368,6 +369,95 @@ UTEST(plain_value, lua_and_js_encode_alike)
     hl_pv_writer_free(&jw);
     js_close(&j);
     lua_close(L);
+}
+
+/* ── Audit 49: a value's item count ─────────────────────────────────── */
+
+/* A shared value encodes once per reference: a DAG of 100^3 empty tables is
+ * small in the plugin and a million tables on the host. The count of values
+ * (1 << 18) bounds an encoding, in the writer and in the check. */
+UTEST(plain_value_audit49, item_count_bounded)
+{
+    const size_t max = (size_t)1 << 18;
+    /* An array of n nils is n + 1 values. */
+    for (size_t n = max - 1; n <= max; n++) {
+        size_t len = 5 + n;
+        uint8_t *b = calloc(1, len);
+        ASSERT_TRUE(b != NULL);
+        b[0] = HL_PV_ARRAY;
+        b[1] = (uint8_t)n; b[2] = (uint8_t)(n >> 8); b[3] = (uint8_t)(n >> 16);
+        ASSERT_EQ(n == max - 1 ? HL_PV_OK : HL_PV_E_TOO_BIG, hl_pv_check(b, len));
+        free(b);
+    }
+    HlPvWriter w;
+    hl_pv_writer_init(&w, 64u << 20);
+    hl_pv_put_array(&w, (uint32_t)max);
+    for (size_t i = 0; i < max - 1; i++) hl_pv_put_nil(&w);
+    ASSERT_EQ(HL_PV_OK, w.err);
+    hl_pv_put_nil(&w);
+    ASSERT_EQ(HL_PV_E_TOO_BIG, w.err);
+    hl_pv_writer_free(&w);
+
+    lua_State *L = lua_new();
+    ASSERT_EQ(LUA_OK, luaL_dostring(L, "local d = {} for _ = 1, 3 do local u = {} "
+                                      "for i = 1, 100 do u[i] = d end d = u end return d"));
+    hl_pv_writer_init(&w, 64u << 20);
+    ASSERT_EQ(HL_PV_E_TOO_BIG, hl_lua_pv_encode(L, -1, &w));
+    hl_pv_writer_free(&w);
+    lua_close(L);
+
+    Js j = js_new();
+    /* 360601 one-byte values: 363 KB, under the byte cap. */
+    ASSERT_EQ(HL_PV_E_TOO_BIG, js_enc(&j, "(() => { const a = new Array(600).fill(true); "
+                                         "return new Array(600).fill(a); })()", &w));
+    hl_pv_writer_free(&w);
+    js_close(&j);
+}
+
+/* A Lua allocator that fails past a limit. */
+static size_t g_lim_used, g_lim_max;
+static void *lim_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
+{
+    (void)ud;
+    size_t old = ptr ? osize : 0;
+    if (nsize == 0) {
+        g_lim_used -= old;
+        free(ptr);
+        return NULL;
+    }
+    if (nsize > old && g_lim_used + (nsize - old) > g_lim_max) return NULL;
+    void *p = realloc(ptr, nsize);
+    if (p) g_lim_used = g_lim_used - old + nsize;
+    return p;
+}
+
+/* A decode that runs out of memory raised past the frame its caller held
+ * off the heap (the build host's recv, the plugin's next / call): the
+ * protected decode hands the error back instead. */
+UTEST(plain_value_audit49, lua_decode_raise_returns)
+{
+    const uint32_t n = 100000;      /* an array of empty maps */
+    size_t len = 5 + (size_t)n * 5;
+    uint8_t *b = calloc(1, len);
+    ASSERT_TRUE(b != NULL);
+    b[0] = HL_PV_ARRAY;
+    b[1] = (uint8_t)n; b[2] = (uint8_t)(n >> 8); b[3] = (uint8_t)(n >> 16);
+    for (uint32_t i = 0; i < n; i++) b[5 + (size_t)i * 5] = HL_PV_MAP;
+    ASSERT_EQ(HL_PV_OK, hl_pv_check(b, len));
+
+    g_lim_used = 0;
+    g_lim_max = 1u << 20;
+    lua_State *L = lua_newstate(lim_alloc, NULL);
+    ASSERT_TRUE(L != NULL);
+    int top = lua_gettop(L);
+    ASSERT_EQ(HL_LUA_PV_RAISED, hl_lua_pv_decode_protected(L, b, len));
+    ASSERT_EQ(top + 1, lua_gettop(L));          /* the error */
+    lua_settop(L, top);
+    g_lim_max = 64u << 20;
+    ASSERT_EQ(HL_PV_OK, hl_lua_pv_decode_protected(L, b, len));
+    ASSERT_EQ((lua_Integer)n, (lua_Integer)lua_rawlen(L, -1));
+    lua_close(L);
+    free(b);
 }
 
 UTEST_MAIN()

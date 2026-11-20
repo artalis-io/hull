@@ -26,6 +26,14 @@ int hl_lua_pv_encode(lua_State *L, int idx, HlPvWriter *w);
  * or an HL_PV_E_* code (nothing pushed). May raise a memory error. */
 int hl_lua_pv_decode(lua_State *L, const void *buf, size_t len);
 
+/* hl_lua_pv_decode under lua_pcall, so a caller holding @p buf off the VM
+ * heap can free it before anything raises (audit 49: a memory error in the
+ * decode skipped the frame's free). HL_PV_OK (the value pushed), an
+ * HL_PV_E_* code (nothing pushed), or HL_LUA_PV_RAISED (the error pushed:
+ * free, then lua_error). */
+#define HL_LUA_PV_RAISED -100
+int hl_lua_pv_decode_protected(lua_State *L, const void *buf, size_t len);
+
 /* Push a bytes box holding the string at @p idx. */
 void hl_lua_pv_push_bytes(lua_State *L, int idx);
 

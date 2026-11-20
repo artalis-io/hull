@@ -9,6 +9,7 @@
 
 #include "lauxlib.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 
 /* The bytes box's metatable, keyed in the registry by this address. */
@@ -73,10 +74,10 @@ static int table_shape(lua_State *L, int idx, lua_Integer *count, int *is_map)
         if (lua_type(L, -1) == LUA_TSTRING) strs = 1;
         else if (lua_isinteger(L, -1)) {
             lua_Integer k = lua_tointeger(L, -1);
-            if (k < 1) return -1;
+            if (k < 1) { lua_pop(L, 1); return -1; }
             if (k > max) max = k;
             ints = 1;
-        } else return -1;
+        } else { lua_pop(L, 1); return -1; }
     }
     if (ints && strs) return -1;
     if (ints && max != n) return -1;        /* a hole: not an array */
@@ -173,7 +174,7 @@ int hl_lua_pv_encode(lua_State *L, int idx, HlPvWriter *w)
     idx = lua_absindex(L, idx);
     /* A nil inside an array cannot be written from Lua (the array would
      * have a hole), so arrays never hold one. */
-    return encode(L, idx, w, 0);
+    return encode(L, idx, w, w->depth);
 }
 
 static void decode(lua_State *L, HlPvReader *r)
@@ -216,5 +217,33 @@ int hl_lua_pv_decode(lua_State *L, const void *buf, size_t len)
     HlPvReader r;
     hl_pv_reader_init(&r, buf, len);
     decode(L, &r);
+    return HL_PV_OK;
+}
+
+static int pv_decode_k(lua_State *L)
+{
+    const void *buf = lua_touserdata(L, 1);
+    size_t len = (size_t)lua_tointeger(L, 2);
+    lua_settop(L, 0);
+    int rc = hl_lua_pv_decode(L, buf, len);
+    lua_pushinteger(L, rc);
+    lua_insert(L, 1);
+    return lua_gettop(L);   /* the code, then the value when it is 0 */
+}
+
+int hl_lua_pv_decode_protected(lua_State *L, const void *buf, size_t len)
+{
+    /* Nothing below allocates before the call, so nothing raises outside it. */
+    if (!lua_checkstack(L, 4)) return HL_PV_E_NOMEM;
+    lua_pushcfunction(L, pv_decode_k);
+    lua_pushlightuserdata(L, (void *)(uintptr_t)buf);
+    lua_pushinteger(L, (lua_Integer)len);
+    if (lua_pcall(L, 2, 2, 0) != LUA_OK) return HL_LUA_PV_RAISED;   /* the error pushed */
+    int rc = (int)lua_tointeger(L, -2);
+    if (rc != HL_PV_OK) {
+        lua_pop(L, 2);
+        return rc;
+    }
+    lua_remove(L, -2);
     return HL_PV_OK;
 }

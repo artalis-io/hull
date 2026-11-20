@@ -71,9 +71,10 @@ static int chan_next(lua_State *L)
     }
     /* An action is a run of its own, as a tui.poll event is. */
     HL_LUA_ARM_KIND(lua, L, HL_RUN_MAIN);
-    int err = hl_lua_pv_decode(L, f.buf, f.len);
+    int err = hl_lua_pv_decode_protected(L, f.buf, f.len);
     size_t len = f.len;
     hl_chan_frame_reset(&f);
+    if (err == HL_LUA_PV_RAISED) return lua_error(L);
     if (err != HL_PV_OK) {
         hl_build_plugin_end();
         return luaL_error(L, "build plugin: the host sent a %s action",
@@ -109,7 +110,9 @@ static int chan_call(lua_State *L)
     hl_pv_writer_init(&w, HL_BP_MAX_PAYLOAD);
     hl_pv_put_map(&w, 2);
     hl_pv_put_key(&w, "args", 4);
+    w.depth = 1;   /* inside the envelope, as the host's check counts it */
     hl_lua_pv_encode(L, 2, &w);
+    w.depth = 0;
     hl_pv_put_key(&w, "op", 2);
     hl_pv_put_text(&w, op, oplen);
     if (w.err != HL_PV_OK) {
@@ -135,9 +138,10 @@ static int chan_call(lua_State *L)
                                  : "build plugin: %s: the channel to the host broke",
                           op);
     }
-    int err = hl_lua_pv_decode(L, f.buf, f.len);
+    int err = hl_lua_pv_decode_protected(L, f.buf, f.len);
     size_t len = f.len;
     hl_chan_frame_reset(&f);
+    if (err == HL_LUA_PV_RAISED) return lua_error(L);
     if (err != HL_PV_OK) {
         hl_build_plugin_end();
         return luaL_error(L, "build plugin: %s: the host sent a %s reply", op,
@@ -154,13 +158,7 @@ static int chan_done(lua_State *L)
     const char *msg = lua_isnoneornil(L, 1) ? NULL : luaL_tolstring(L, 1, &n);
     HlPvWriter w;
     hl_pv_writer_init(&w, 64 * 1024);
-    if (msg) {
-        hl_pv_put_map(&w, 1);
-        hl_pv_put_key(&w, "error", 5);
-        hl_pv_put_bytes(&w, msg, n);   /* a message may not be UTF-8 */
-    } else {
-        hl_pv_put_map(&w, 0);
-    }
+    hl_build_plugin_put_done(&w, msg, n);
     int rc = w.err ? -1 : hl_build_plugin_send(HL_BP_DONE, 0, w.buf, w.len,
                                               hl_chan_mono_ms() + HL_BP_REPLY_TIMEOUT_MS);
     hl_pv_writer_free(&w);

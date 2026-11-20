@@ -22,8 +22,12 @@ local function usage(msg)
     tool.exit(2)
 end
 
+-- A plugin's text (its error, a diagnostic, an output's name) on one line:
+-- the writers keep LF, so a raw one forged output lines (audit 49).
+local function esc(v) return tool.escape(tostring(v)) end
+
 local function fail(msg)
-    tool.stderr("hull plugins: " .. msg .. "\n")
+    tool.stderr("hull plugins: " .. esc(msg) .. "\n")
     tool.exit(2)
 end
 
@@ -103,23 +107,24 @@ local function run(root, o)
     for _, r in ipairs(shown) do
         local head = r.identity .. "  " .. r.status
         if r.units then head = head .. "  " .. r.units .. (r.units == 1 and " unit" or " units") end
-        if r.error then head = head .. "  " .. r.error end
+        if r.error then head = head .. "  " .. esc(r.error) end
         tool.stdout(head .. "\n")
-        if r.detail then tool.stdout("  " .. tostring(r.detail) .. "\n") end
+        if r.detail then tool.stdout("  " .. esc(r.detail) .. "\n") end
         for _, out in ipairs(r.outputs or {}) do
-            local name = type(out.descriptor) == "table" and out.descriptor.name or "?"
+            local name = esc(type(out.descriptor) == "table" and out.descriptor.name or "?")
             if out.sha256 then
                 tool.stdout(("  %s %s  sha256 %s  %d bytes\n"):format(out.declared, name, out.sha256, out.size))
             else
                 tool.stdout(("  %s %s  %d files\n"):format(out.declared, name, #out.entries))
                 for _, ent in ipairs(out.entries) do
-                    tool.stdout(("    %s  sha256 %s  %d bytes\n"):format(ent.path, ent.sha256, ent.size))
+                    tool.stdout(("    %s  sha256 %s  %d bytes\n"):format(esc(ent.path), ent.sha256, ent.size))
                 end
             end
         end
         for _, d in ipairs(r.diagnostics or {}) do
-            local where = d.path and (d.path .. ": ") or ""
-            tool.stdout(("  %s %s: %s%s\n"):format(d.severity, d.code, where, d.message))
+            local where = d.path and (esc(d.path) .. ": ") or ""
+            tool.stdout(("  %s %s: %s%s\n"):format(esc(d.severity), esc(d.code), where,
+                                                    esc(d.message)))
         end
     end
     return failed and 1 or 0
@@ -134,14 +139,14 @@ local function generation(root)
     local _, bundle, err, stage = require("hull.buildctx.generation").produce(root, {
         sha256_hex = sha256_hex,
         report = function(r, d)
-            local where = d.path and (d.path .. ": ") or ""
+            local where = d.path and (esc(d.path) .. ": ") or ""
             tool.stderr(("hull plugins: %s: %s %s: %s%s\n"):format(
-                r.identity, d.severity, d.code, where, d.message))
+                r.identity, esc(d.severity), esc(d.code), where, esc(d.message)))
         end,
     })
     if not bundle then
         if stage == "run" then fail(err) end
-        tool.stderr("hull plugins: " .. err .. "\n")
+        tool.stderr("hull plugins: " .. esc(err) .. "\n")
         return 1
     end
     tool.stdout_raw(bundle)

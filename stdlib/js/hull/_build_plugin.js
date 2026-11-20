@@ -30,6 +30,18 @@
     return e;
   }
 
+  // A thrown value as the error text. Whatever was thrown (an object whose
+  // toString or message getter throws, a Proxy), the DONE still goes out:
+  // an exception here left the action loop without one.
+  function errorText(e) {
+    try {
+      const s = e instanceof Error ? e.message : String(e);
+      return typeof s === "string" ? s : String(s);
+    } catch {
+      return "error";
+    }
+  }
+
   // The ctx of one action. call(op, args) answers { ok } / { error } / {};
   // asBytes(b) is what a write sends.
   function makeCtx(action, call, asBytes) {
@@ -229,7 +241,7 @@
         try {
           await fn(makeCtx(action, chan.call, asBytes));
         } catch (e) {
-          err = e instanceof Error ? e.message : String(e);
+          err = errorText(e);
         }
         chan.done(err);
       }
@@ -247,7 +259,7 @@
     try {
       await transform(makeCtx(action, host.call, (b) => b));
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = errorText(e);
     }
     const r = { outputs: host.outputs, diagnostics: host.diagnostics };
     if (error !== undefined) r.error = error;

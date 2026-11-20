@@ -2530,6 +2530,33 @@ static int l_tool_plugin_spawn(lua_State *L)
     return lua_gettop(L);
 }
 
+/* hull.buildctx._fs.open / _store.open in the tool VM: the root is checked
+ * against the tool sandbox's grants (upvalue 2: the permission, "r" or "w")
+ * before the binding (upvalue 1) opens anything under it (audit 49). */
+static int l_tool_root_open(lua_State *L)
+{
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+    const char *root = luaL_checkstring(L, 1);
+    const char *perm = lua_tostring(L, lua_upvalueindex(2));
+    if (ctx && hl_tool_unveil_check(ctx, root, perm[0]) != 0) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "permission");
+        return 2;
+    }
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
+    return lua_gettop(L);
+}
+
+static void wrap_root_open(lua_State *L, const char *perm)
+{
+    lua_getfield(L, -1, "open");
+    lua_pushstring(L, perm);
+    lua_pushcclosure(L, l_tool_root_open, 2);
+    lua_setfield(L, -2, "open");
+}
+
 void hl_lua_tool_register(lua_State *L, HlToolUnveilCtx *ctx)
 {
     /* Store unveil context in registry */
@@ -2546,7 +2573,9 @@ void hl_lua_tool_register(lua_State *L, HlToolUnveilCtx *ctx)
     /* The BuildContext host's native pieces (hull.buildctx.action / plugin /
      * registry require them): tool VM only. */
     luaL_requiref(L, "hull.buildctx._fs", luaopen_hull_buildctx_fs, 0);
+    wrap_root_open(L, "r");
     luaL_requiref(L, "hull.buildctx._store", luaopen_hull_buildctx_store, 0);
+    wrap_root_open(L, "w");
     luaL_requiref(L, "hull.buildctx._plugin", luaopen_hull_buildctx_plugin, 0);
     lua_getfield(L, -1, "spawn");
     lua_pushcclosure(L, l_tool_plugin_spawn, 1);

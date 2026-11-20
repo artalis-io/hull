@@ -216,6 +216,15 @@ local function stub_host(spec)
     return call, outputs, diagnostics
 end
 
+-- A raised value as the error text: whatever it is (nil and false
+-- included, which once read as success), and a __tostring that raises
+-- cannot stop the DONE going out.
+local function error_text(e)
+    local ok, s = pcall(tostring, e)
+    if ok and type(s) == "string" then return s end
+    return "error"
+end
+
 return function(app, chan)
     local transform
 
@@ -227,7 +236,7 @@ return function(app, chan)
                 local action = chan.next()
                 if action == nil then return 0 end
                 local ok, err = pcall(fn, make_ctx(action, chan.call, chan.bytes))
-                chan.done(not ok and err or nil)
+                if ok then chan.done() else chan.done(error_text(err)) end
             end
         end)
     end
@@ -240,6 +249,6 @@ return function(app, chan)
         local call, outputs, diagnostics = stub_host(spec)
         local action = { config = spec.config or {}, meta = spec.meta or {} }
         local ok, err = pcall(transform, make_ctx(action, call, function(s) return s end))
-        return { outputs = outputs, diagnostics = diagnostics, error = not ok and tostring(err) or nil }
+        return { outputs = outputs, diagnostics = diagnostics, error = not ok and error_text(err) or nil }
     end
 end

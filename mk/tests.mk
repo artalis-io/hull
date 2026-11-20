@@ -476,8 +476,8 @@ $(BUILDDIR)/test_child_channel: $(TESTDIR)/hull/test_child_channel.c $(CHILD_CHA
 
 # The plugin side of a build plugin's channel (shared/build_plugin.c): the
 # manifest preset and the inherited descriptor.
-$(BUILDDIR)/test_build_plugin: $(TESTDIR)/hull/test_build_plugin.c $(BUILD_PLUGIN_OBJ) $(CHILD_CHANNEL_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILD_PLUGIN_OBJ) $(CHILD_CHANNEL_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
+$(BUILDDIR)/test_build_plugin: $(TESTDIR)/hull/test_build_plugin.c $(BUILD_PLUGIN_OBJ) $(PLAIN_VALUE_OBJ) $(CHILD_CHANNEL_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILD_PLUGIN_OBJ) $(PLAIN_VALUE_OBJ) $(CHILD_CHANNEL_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
 
 # The build plugin channel's value encoding and its Lua / QuickJS walkers:
 # the codec, both engines and the two walker objects, nothing else.

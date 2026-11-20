@@ -130,4 +130,31 @@ else
     bad "discovery"; head -c 2000 "$WORK/inspect.json"
 fi
 
+echo "== plugins: a plugin's text stays on its own lines"
+# plugins_audit49.text_escaped: a plugin's error and diagnostic text were
+# printed raw, so a newline in them started a line of the plugin's choosing.
+d=$(make_app lua lua)
+cat > "$d/plugins/inventory/app.lua" <<'EOF'
+app.manifest({
+    modules = { "hull/build-plugin@1" },
+    build_plugin = {
+        id = "inventory", version = 1, input = "source",
+        languages = { "lua", "javascript" }, annotations = { "demo" },
+        output = "demo-inventory",
+        config = { title = { type = "string", required = true }, module = { type = "string" } },
+    },
+})
+app.transform(function(ctx)
+    ctx.diagnostics.emit({ severity = "info", code = "c", message = "m\nFAKE PASS" })
+    error("e\nfake line", 0)
+end)
+EOF
+"$HULL" plugins run "$d" > "$WORK/esc.txt" 2>&1 || true
+if has "$WORK/esc.txt" "plugin_failed" && has "$WORK/esc.txt" 'e\nfake line' &&
+   has "$WORK/esc.txt" 'm\nFAKE PASS' && ! grep -q '^FAKE PASS\|^fake line' "$WORK/esc.txt"; then
+    ok "plugins_audit49.text_escaped"
+else
+    bad "plugins_audit49.text_escaped"; cat "$WORK/esc.txt"
+fi
+
 [ "$fail" -eq 0 ] && echo "e2e_plugins: OK" || { echo "e2e_plugins: FAILED"; exit 1; }

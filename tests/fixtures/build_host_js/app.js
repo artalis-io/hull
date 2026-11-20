@@ -25,6 +25,22 @@ app.transform(async (ctx) => {
   const mode = ctx.meta.mode;
   if (mode === "fail") throw new Error("boom");
   if (mode === "spin") for (;;) { /* until the host or the budget stops it */ }
+  // Audit 49: the channel's edges (stdlib/cli/lua/hull/buildctx/tests/
+  // test_plugin_audit49.lua).
+  if (mode === "bigerr") throw new Error("A".repeat(4095) + "\u00e9" + "B".repeat(70000));
+  if (mode === "nilerr") throw { toString() { throw new Error("no text"); } };
+  if (mode === "deep" || mode === "wide") {
+    let d;
+    if (mode === "deep") {              // 62 levels: one past what the host takes
+      d = ["x"];
+      for (let i = 0; i < 61; i++) d = [d];
+    } else {                            // a DAG of 100^3 shared empty objects
+      d = {};
+      for (let k = 0; k < 3; k++) d = new Array(100).fill(d);
+    }
+    ctx.diagnostics.emit({ severity: "info", code: "c", message: "m", data: d });
+    return;
+  }
   const src = ctx.inputs.read("src/a.txt");
   const st = ctx.inputs.stat("src/a.txt", { size: true });
   const list = ctx.inputs.list("src");

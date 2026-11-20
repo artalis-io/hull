@@ -62,8 +62,21 @@ static uint32_t get_u32(const uint8_t *p)
     return v;
 }
 
+/* One more value: refused past HL_PV_MAX_ITEMS, as the reader refuses it. */
+static int count_item(HlPvWriter *w)
+{
+    if (w->err) return -1;
+    if (w->items >= HL_PV_MAX_ITEMS) {
+        w->err = HL_PV_E_TOO_BIG;
+        return -1;
+    }
+    w->items++;
+    return 0;
+}
+
 static void put_tag(HlPvWriter *w, int tag)
 {
+    if (count_item(w)) return;
     uint8_t *p = room(w, 1);
     if (p) *p = (uint8_t)tag;
 }
@@ -77,6 +90,7 @@ void hl_pv_put_bool(HlPvWriter *w, int v)
 
 void hl_pv_put_int(HlPvWriter *w, int64_t v)
 {
+    if (count_item(w)) return;
     uint8_t *p = room(w, 9);
     if (!p) return;
     p[0] = HL_PV_INT;
@@ -90,6 +104,7 @@ static void put_counted(HlPvWriter *w, int tag, const void *s, size_t n)
         if (!w->err) w->err = HL_PV_E_TOO_BIG;
         return;
     }
+    if (tag >= 0 && count_item(w)) return;   /* a key is not a value */
     size_t pre = tag >= 0 ? 5 : 4;
     uint8_t *p = room(w, pre + n);
     if (!p) return;
@@ -123,6 +138,7 @@ void hl_pv_put_key(HlPvWriter *w, const void *s, size_t n)
 
 static void put_header(HlPvWriter *w, int tag, uint32_t count)
 {
+    if (count_item(w)) return;
     uint8_t *p = room(w, 5);
     if (!p) return;
     p[0] = (uint8_t)tag;
@@ -240,10 +256,11 @@ int hl_pv_next_key(HlPvReader *r, const uint8_t **s, size_t *n)
     return take(r, *n, s);
 }
 
-static int check_value(HlPvReader *r, int depth)
+static int check_value(HlPvReader *r, int depth, size_t *items)
 {
     HlPvItem it;
     if (hl_pv_next(r, &it)) return HL_PV_E_SHAPE;
+    if (++*items > HL_PV_MAX_ITEMS) return HL_PV_E_TOO_BIG;
     switch (it.type) {
     case HL_PV_TEXT:
         return hl_utf8_valid(it.s, it.n) ? HL_PV_OK : HL_PV_E_TEXT;
@@ -269,7 +286,7 @@ static int check_value(HlPvReader *r, int depth)
                 prev = k;
                 prev_n = kn;
             }
-            int rc = check_value(r, depth + 1);
+            int rc = check_value(r, depth + 1, items);
             if (rc) return rc;
         }
         return HL_PV_OK;
@@ -283,7 +300,8 @@ int hl_pv_check(const void *buf, size_t len)
 {
     HlPvReader r;
     hl_pv_reader_init(&r, buf, len);
-    int rc = check_value(&r, 0);
+    size_t items = 0;
+    int rc = check_value(&r, 0, &items);
     if (rc) return rc;
     return r.pos == len ? HL_PV_OK : HL_PV_E_SHAPE;
 }

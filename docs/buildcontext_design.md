@@ -497,7 +497,10 @@ through one channel.
   no twin binding to drift.
 - **Value model.** nil / null, booleans, integers (int64), byte strings, arrays, and
   maps with string keys - nothing else crosses: no functions, userdata, metatables,
-  prototypes, getters, cycles, or handles. Depth and size are bounded. Each runtime
+  prototypes, getters, cycles, or handles. Depth (64), size and the number of values
+  (2^18, containers included: a shared value encodes once per reference) are bounded,
+  in the encoder and in the check of every frame received. A transform's error crosses
+  cut to 4 KiB. Each runtime
   copies a value into this model (Lua: raw accessors, no metamethods; QuickJS: own data
   properties only, as `hl_manifest_json_js` reads a manifest) before it is sent, and
   replies arrive as fresh values, so neither side can hold the other's objects. Workspace

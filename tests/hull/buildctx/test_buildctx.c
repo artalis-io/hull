@@ -192,6 +192,35 @@ UTEST(buildctx, pipeline_plan)
     EXPECT_GT(pass, 0LL);
 }
 
+/* Audit 49: the channel's edges, one case of test_plugin_audit49.lua each. */
+static const char *g_case;
+
+static void setup_case(lua_State *L)
+{
+    setup(L);
+    lua_getglobal(L, "T");
+    lua_pushstring(L, g_case);
+    lua_setfield(L, -2, "case");
+    lua_pop(L, 1);
+}
+
+static void run_audit49(int *utest_result, const char *name)
+{
+    long long pass = 0, fail = -1;
+    g_case = name;
+    int rc = run_lua_test_with("stdlib/cli/lua/hull/buildctx/tests/test_plugin_audit49.lua",
+                               setup_case, &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
+UTEST(buildctx_audit49, big_error_reported) { run_audit49(utest_result, "big_error_reported"); }
+UTEST(buildctx_audit49, nil_error_fails) { run_audit49(utest_result, "nil_error_fails"); }
+UTEST(buildctx_audit49, deep_args_refused_cleanly) { run_audit49(utest_result, "deep_args_refused_cleanly"); }
+UTEST(buildctx_audit49, shared_value_bounded) { run_audit49(utest_result, "shared_value_bounded"); }
+UTEST(buildctx_audit49, recv_raise_contained) { run_audit49(utest_result, "recv_raise_contained"); }
+
 int main(int argc, const char *const argv[])
 {
     int rc = utest_main(argc, argv);

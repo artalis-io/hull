@@ -20,6 +20,28 @@
 
 static int g_fd = -1;
 
+void hl_build_plugin_put_done(HlPvWriter *w, const char *msg, size_t n)
+{
+    if (!msg) {
+        hl_pv_put_map(w, 0);
+        return;
+    }
+    char buf[HL_BP_ERROR_MAX + 3];
+    if (n > HL_BP_ERROR_MAX) {
+        size_t cut = HL_BP_ERROR_MAX;
+        /* Back over the continuation bytes of a sequence the cut splits. */
+        for (int i = 0; i < 3 && cut > 0 && ((unsigned char)msg[cut] & 0xC0) == 0x80; i++)
+            cut--;
+        memcpy(buf, msg, cut);
+        memcpy(buf + cut, "...", 3);
+        msg = buf;
+        n = cut + 3;
+    }
+    hl_pv_put_map(w, 1);
+    hl_pv_put_key(w, "error", 5);
+    hl_pv_put_bytes(w, msg, n);
+}
+
 int hl_build_plugin_take_env(void)
 {
     const char *v = getenv(HL_BUILD_PLUGIN_ENV);
@@ -29,6 +51,13 @@ int hl_build_plugin_take_env(void)
 #ifdef HL_CHAN_SUPPORTED
     struct stat st;
     if (!ok || fstat(3, &st) != 0 || !S_ISSOCK(st.st_mode)) return -1;
+#if defined(__linux__)
+    /* posix_spawn there has no close-by-default (Apple's spawn sets
+     * POSIX_SPAWN_CLOEXEC_DEFAULT): a descriptor the build host held without
+     * close-on-exec would reach plugin code past Landlock. Nothing above 3
+     * is this process's yet. */
+    hl_chan_close_extra_fds();
+#endif
     (void)fcntl(3, F_SETFD, FD_CLOEXEC);
     hl_chan_set_nonblock(3);
     hl_chan_set_nosigpipe(3);
