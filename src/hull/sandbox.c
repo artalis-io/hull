@@ -34,6 +34,7 @@
 #include <strings.h>   /* strncasecmp (DSN scheme match) */
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>      /* tzset (hl_sandbox_preload_tz) */
 #include <unistd.h>    /* isatty / STDIN_FILENO (controlling-terminal probe) */
 
 /* Buffer size for cross-platform path resolution. Big enough to
@@ -1147,8 +1148,25 @@ int hl_sandbox_pledged(void)
     return g_pledged;
 }
 
+/* Read the local time zone while the zone file can still be opened. Every
+ * sandbox grants it nothing, and libc loads it lazily: the first
+ * localtime() after the sandbox applied found /etc/localtime unreadable and
+ * fell back to UTC for the rest of the process, so log lines written before
+ * the sandbox were local time and later ones (app.main, request handlers)
+ * were UTC - unless --verbose had logged something early. glibc, musl and
+ * Apple libc keep the loaded zone while TZ is unchanged. */
+void hl_sandbox_preload_tz(void)
+{
+    tzset();
+    time_t now = time(NULL);
+    struct tm tm;
+    (void)localtime_r(&now, &tm);
+}
+
 int hl_sandbox_apply_pledge(void)
 {
+    hl_sandbox_preload_tz();
+
     /* Probe the controlling terminal before ANY sandbox is installed. glibc
      * stdio issues isatty() -> ioctl(TCGETS) on first write to a character
      * device (a real tty) to pick line- vs full-buffering; that ioctl is
@@ -1243,6 +1261,9 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
 {
     if (!policy)
         return 0;
+
+    /* An embedder may skip phase 1 (include/hull/embed.h). */
+    hl_sandbox_preload_tz();
 
     /* The app directory is unveiled read-only for the app's own files. A
      * built binary takes it from its working directory, so one started

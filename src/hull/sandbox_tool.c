@@ -370,6 +370,7 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
 {
     if (!ctx) return -1;
 
+    hl_sandbox_preload_tz();
     hl_tool_unveil_init(ctx);
 
     /* cosmo/Windows: unveil needs the build temp dir to EXIST when added,
