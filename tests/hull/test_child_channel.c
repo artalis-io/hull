@@ -166,6 +166,32 @@ UTEST(child_channel, reap_a_running_child_times_out)
     close(sv[0]);
 }
 
+/* A descriptor the parent holds without close-on-exec does not reach the
+ * child: on Linux posix_spawn passed it on (audit 49), so a build plugin could
+ * use one the build host had open. */
+UTEST(child_channel_audit49, spawn_closes_inherited_fds)
+{
+    int sv[2];
+    child_pair(sv);
+    int p[2];
+    ASSERT_EQ(0, pipe(p));
+    int leak = fcntl(p[1], F_DUPFD, 20);      /* high, and inheritable */
+    ASSERT_GE(leak, 20);
+    ASSERT_EQ(0, fcntl(leak, F_SETFD, 0));
+    char script[96];
+    snprintf(script, sizeof script, "if [ -e /dev/fd/%d ]; then exit 3; fi; exit 0", leak);
+    char a0[] = "/bin/sh", a1[] = "-c";
+    char *argv[] = { a0, a1, script, NULL };
+    pid_t pid = hl_chan_spawn("/bin/sh", argv, sv[1], NULL);
+    close(sv[1]);
+    ASSERT_GT(pid, 0);
+    int st = -1;
+    ASSERT_EQ(1, hl_chan_reap(pid, &st, 5000, NULL));
+    ASSERT_TRUE(WIFEXITED(st));
+    EXPECT_EQ(0, WEXITSTATUS(st));            /* 3: the descriptor was there */
+    close(leak); close(p[0]); close(p[1]); close(sv[0]);
+}
+
 #endif /* HL_CHAN_SUPPORTED */
 
 UTEST_MAIN()
