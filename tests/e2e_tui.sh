@@ -500,6 +500,74 @@ APP
             ;;
     esac
 
+    # The type check after each reload, with a stand-in compiler (the app's
+    # node_modules/.bin/tsc) so no TypeScript install is needed: its
+    # diagnostic lands in the log and its summary in the status line, and
+    # --no-types runs nothing.
+    TYPES_TMP=$(mktemp -d 2>/dev/null || mktemp -d -t hulldevtypes)
+    mkdir -p "${TYPES_TMP}/node_modules/.bin"
+    cat > "${TYPES_TMP}/app.ts" <<'APP'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/http-server@1"] });
+// BADTYPE
+app.get("/", (_req, res) => res.text("ok"));
+APP
+    printf '{ "compilerOptions": { "noEmit": true } }\n' > "${TYPES_TMP}/tsconfig.json"
+    cat > "${TYPES_TMP}/node_modules/.bin/tsc" <<'SH'
+#!/bin/sh
+echo "$*" >> "$(dirname "$0")/../../calls.log"
+if grep -q BADTYPE "$5/app.ts"; then
+    echo "app.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'."
+    exit 2
+fi
+exit 0
+SH
+    chmod +x "${TYPES_TMP}/node_modules/.bin/tsc"
+    TPORT=$((21000 + $$ % 20000))
+    # --types: the stand-in is the app's own compiler, run only when asked.
+    OUT=$("${DRIVE}" "types: 1 error" "%s2500%q" -- \
+          "${HULL_BIN}" dev --tui --types -p "${TPORT}" "${TYPES_TMP}/app.ts" 2>/dev/null)
+    case "${OUT}" in
+        *"TS2322"*"types: 1 error"*|*"types: 1 error"*"TS2322"*)
+            pass "hull dev --tui shows the type check's diagnostic and summary"
+            ;;
+        *)
+            fail "hull dev --tui did not show the type check (got: ${OUT})"
+            ;;
+    esac
+    case "$(cat "${TYPES_TMP}/calls.log" 2>/dev/null)" in
+        *"--noEmit --pretty false -p "*)
+            pass "hull dev --tui runs the compiler as hull dev does"
+            ;;
+        *)
+            fail "hull dev --tui did not run the compiler"
+            ;;
+    esac
+    # Without --types the app's own compiler is never run (audit 49).
+    : > "${TYPES_TMP}/calls.log"
+    OUT=$(PATH=/usr/bin:/bin "${DRIVE}" "types are not checked" "%s1500%q" -- \
+          "${HULL_BIN}" dev --tui -p "$((TPORT + 2))" "${TYPES_TMP}/app.ts" 2>/dev/null)
+    if [ -s "${TYPES_TMP}/calls.log" ]; then
+        fail "dev_tui_audit49.app_local_checker_not_run: the app's compiler ran"
+    else
+        case "${OUT}" in
+            *"types are not checked"*) pass "dev_tui_audit49.app_local_checker_not_run" ;;
+            *) fail "dev_tui_audit49.app_local_checker_not_run: no hint (got: ${OUT})" ;;
+        esac
+    fi
+    : > "${TYPES_TMP}/calls.log"
+    OUT=$("${DRIVE}" "hull dev" "%s1500%q" -- \
+          "${HULL_BIN}" dev --tui --types --no-types -p "$((TPORT + 1))" "${TYPES_TMP}/app.ts" 2>/dev/null)
+    if [ -s "${TYPES_TMP}/calls.log" ]; then
+        fail "hull dev --tui --no-types ran the compiler"
+    else
+        case "${OUT}" in
+            *"types:"*) fail "hull dev --tui --no-types shows a type status" ;;
+            *)          pass "hull dev --tui --no-types runs no type check" ;;
+        esac
+    fi
+    rm -rf "${TYPES_TMP}"
+
 
     # ── hull modules available --tui ──────────────────────────────
     echo "--- hull modules available --tui ---"

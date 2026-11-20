@@ -23,6 +23,13 @@ release-artifact layout).
 
 ### Added
 
+- `hull dev --tui` runs the type check after each reload, as `hull dev` does: the
+  diagnostics go into the log pane and the status line shows the summary (`types:
+  checking`, `types: no errors`, `types: 2 errors`); `--types` admits the app's own
+  `node_modules/.bin` compiler, as for `hull dev`, and `--no-types` turns it off. The TUI
+  runs in the tool VM, whose sandbox grants the app directory no execute, so the compiler is
+  run by a process forked before that sandbox applies, told to check after each respawn.
+  `tests/e2e_tui.sh` covers it with a stand-in compiler.
 - `hull dev` type-checks the app after each reload, when it has a `tsconfig.json` and a
   TypeScript compiler is installed (the lookup `hull check --types` uses): one `--noEmit
   --pretty false -p <app>` in the background, stopped by the next edit, never holding up or
