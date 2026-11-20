@@ -51,13 +51,6 @@ int hl_build_plugin_take_env(void)
 #ifdef HL_CHAN_SUPPORTED
     struct stat st;
     if (!ok || fstat(3, &st) != 0 || !S_ISSOCK(st.st_mode)) return -1;
-#if defined(__linux__)
-    /* posix_spawn there has no close-by-default (Apple's spawn sets
-     * POSIX_SPAWN_CLOEXEC_DEFAULT): a descriptor the build host held without
-     * close-on-exec would reach plugin code past Landlock. Nothing above 3
-     * is this process's yet. */
-    hl_chan_close_extra_fds();
-#endif
     (void)fcntl(3, F_SETFD, FD_CLOEXEC);
     hl_chan_set_nonblock(3);
     hl_chan_set_nosigpipe(3);
