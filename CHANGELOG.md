@@ -8,6 +8,19 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- `ctx.stdin:read_secret(prompt)` (Lua) / `ctx.stdin.readSecret(prompt)` (JS) in `app.main`
+  read one line the way `getpass` does (platform gap 4, found by hscli, whose `login` showed
+  the pasted key): on a terminal the prompt goes to stderr, echo is off while the line is
+  typed, and the terminal's settings are put back before it returns; from a pipe it reads one
+  line with no prompt and no terminal call. nil / null at end of input; a SIGINT / SIGTERM
+  while it waits raises / throws `interrupted` with echo back on. On macOS the sandbox gives a
+  terminal stdin one new rule, its settings ioctls only (TIOCGETA / TIOCSETA / TIOCSETAW /
+  TIOCSETAF, no TIOCSTI, no read or write grant); Linux and OpenBSD already had the `tty`
+  promise. `test.run_main`'s stdin feeds it a line. Covered by `tests/e2e_read_secret.sh`
+  (`make e2e-read-secret`, in CI) and `test_sandbox_grant`'s `sandbox_tty` case.
+
 ## [0.23.0] - 2026-11-20
 
 TypeScript apps and build plugins. An app's entry and modules may be `.ts` (types erased by the

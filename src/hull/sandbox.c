@@ -836,6 +836,18 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
                  "    (ioctl-command TIOCGWINSZ TIOCGETA TIOCSETA"
                  " TIOCSETAW TIOCSETAF)))\n\n",
                  tty_rules);
+    } else if (ttys && tty_count > 0 && hl_sandbox_tty_path_ok(ttys[0])) {
+        /* Not a TUI, stdin a terminal (the caller passes its tty alone):
+         * its settings only, for ctx.stdin's read_secret (platform gap 4),
+         * which turns echo off and back on. tcgetattr / isatty (TIOCGETA) and
+         * tcsetattr (TIOCSETA / TIOCSETAW / TIOCSETAF) on that one device -
+         * no read or write grant (fd 0 is already open), no /dev/tty, no
+         * TIOCGWINSZ, and never TIOCSTI. */
+        PARAM_ADD("TTY_0", ttys[0]);
+        SBPL_LIT("; A terminal stdin's settings (read_secret's echo off)\n"
+                 "(allow file-ioctl (require-all\n"
+                 "    (literal (param \"TTY_0\"))\n"
+                 "    (ioctl-command TIOCGETA TIOCSETA TIOCSETAW TIOCSETAF)))\n\n");
     }
 
     /* ── Signals, sysctl ────────────────────────────────────── */
@@ -1448,6 +1460,12 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         if (policy->tui) {
             tty_count = hl_sandbox_own_ttys(tty_buf);
             for (int i = 0; i < tty_count; i++) ttys[i] = tty_buf[i];
+        } else if (g_std_tty[0] == 1 &&
+                   ttyname_r(STDIN_FILENO, tty_buf[0], sizeof tty_buf[0]) == 0 &&
+                   hl_sandbox_tty_path_ok(tty_buf[0])) {
+            /* A terminal stdin's settings only (read_secret, gap 4). */
+            ttys[0] = tty_buf[0];
+            tty_count = 1;
         }
 
         if (seatbelt_build_profile(policy, resolved_app, resolved_db,

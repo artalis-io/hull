@@ -446,11 +446,30 @@ UTEST(sandbox_tty, seatbelt_profile_names_only_own_ttys)
     EXPECT_TRUE(strstr(buf, "(allow file-ioctl (require-all\n"
                             "    (require-any (literal \"/dev/tty\"))\n") != NULL);
 
-    /* Not a TUI: no terminal grant at all. */
+    /* Not a TUI, no terminal stdin: no terminal grant at all. */
     p.tui = 0;
-    ASSERT_EQ(hl_sandbox_seatbelt_profile_for_test(&p, ttys, 1, buf, sizeof buf,
+    ASSERT_EQ(hl_sandbox_seatbelt_profile_for_test(&p, NULL, 0, buf, sizeof buf,
                                                    params, 256), 0);
     EXPECT_TRUE(strstr(buf, "/dev/tty\"") == NULL);
+    EXPECT_TRUE(strstr(buf, "TTY_0") == NULL);
+
+    /* Not a TUI, stdin a terminal (platform gap 4, read_secret): that one
+     * device's settings - get and set only, no read / write grant, no
+     * /dev/tty, no TIOCGWINSZ, no TIOCSTI. */
+    ASSERT_EQ(hl_sandbox_seatbelt_profile_for_test(&p, ttys, 1, buf, sizeof buf,
+                                                   params, 256), 0);
+    EXPECT_TRUE(strstr(buf, "(allow file-ioctl (require-all\n"
+                            "    (literal (param \"TTY_0\"))\n"
+                            "    (ioctl-command TIOCGETA TIOCSETA TIOCSETAW"
+                            " TIOCSETAF)))") != NULL);
+    EXPECT_TRUE(strstr(buf, "/dev/tty\"") == NULL);
+    EXPECT_TRUE(strstr(buf, "TIOCGWINSZ") == NULL);
+    EXPECT_TRUE(strstr(buf, "TIOCSTI") == NULL);
+    EXPECT_TRUE(strstr(buf, "file-read* file-write* (literal (param \"TTY_0\"))") == NULL);
+    /* A path that is not a terminal device is not granted. */
+    const char *bad[] = { "/dev/ttys\")(allow default" };
+    ASSERT_EQ(hl_sandbox_seatbelt_profile_for_test(&p, bad, 1, buf, sizeof buf,
+                                                   params, 256), 0);
     EXPECT_TRUE(strstr(buf, "TTY_0") == NULL);
 }
 

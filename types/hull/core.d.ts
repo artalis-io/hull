@@ -412,6 +412,13 @@ declare namespace Hull {
         read(mode?: "l" | "*l"): string | null;
         /** Read up to `count` bytes; `null` at end of input. */
         read(count: number): string | null;
+        /**
+         * Read one line with echo off when stdin is a terminal (the prompt, if
+         * given, on stderr), as `getpass` does; from a pipe, one line with no
+         * prompt. `null` at end of input. Throws when SIGINT / SIGTERM arrives
+         * while it waits (echo is back on by then).
+         */
+        readSecret(prompt?: string): string | null;
         /** No-op (stdin is never closed). */
         close(): void;
     }

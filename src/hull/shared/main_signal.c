@@ -325,6 +325,11 @@ int hl_main_signal_received(void)
     return (int)g_sig;
 }
 
+int hl_main_signal_count(void)
+{
+    return atomic_load(&g_count);
+}
+
 int hl_main_signal_ended(void)
 {
     return g_ended;

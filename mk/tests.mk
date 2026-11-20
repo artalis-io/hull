@@ -2267,6 +2267,15 @@ endif
 e2e-tui: $(E2E_TUI_DEPS)
 	sh tests/e2e_tui.sh
 
+# app.main reads a secret without echo (ctx.stdin read_secret / readSecret,
+# platform gap 4): on a PTY the key is not echoed and echo comes back, Ctrl-C
+# while it waits is "interrupted", a pipe gives one line with no prompt, and
+# test.run_main's stdin feeds it. Both runtimes, sandboxed. The terminal cases
+# skip without e2e_tui_drive.
+.PHONY: e2e-read-secret
+e2e-read-secret: $(E2E_TUI_DEPS)
+	sh tests/e2e_read_secret.sh
+
 hull-test-examples: $(BUILDDIR)/hull
 	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \
 	            examples/jwt_api examples/crud_with_auth examples/middleware examples/webhooks \

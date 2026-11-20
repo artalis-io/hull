@@ -1147,6 +1147,11 @@ CAP_OBJS += $(APP_ENTRY_OBJ)
 # shared/type_check.h). libc + host; rides CAP_OBJS like app_entry.
 TYPE_CHECK_OBJ := $(BUILDDIR)/type_check.o
 CAP_OBJS += $(TYPE_CHECK_OBJ)
+# stdin_secret reads one line from stdin with echo off on a terminal
+# (app.main's ctx.stdin read_secret / readSecret; shared/stdin_secret.h,
+# platform gap 4). libc + termios; rides CAP_OBJS like host.
+STDIN_SECRET_OBJ := $(BUILDDIR)/stdin_secret.o
+CAP_OBJS += $(STDIN_SECRET_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -3438,6 +3443,9 @@ $(APP_ENTRY_OBJ): $(SRCDIR)/hull/shared/app_entry.c $(INCDIR)/hull/shared/app_en
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(TYPE_CHECK_OBJ): $(SRCDIR)/hull/shared/type_check.c $(INCDIR)/hull/shared/type_check.h $(INCDIR)/hull/shared/host.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(STDIN_SECRET_OBJ): $(SRCDIR)/hull/shared/stdin_secret.c $(INCDIR)/hull/shared/stdin_secret.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(GENERATION_OBJ): $(SRCDIR)/hull/shared/generation.c $(INCDIR)/hull/shared/generation.h $(INCDIR)/hull/vfs.h | $(BUILDDIR)

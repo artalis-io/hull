@@ -50,6 +50,7 @@ app.main(function(ctx)
     -- ctx.args   : array (1-indexed) of argv, excluding the binary name
     -- ctx.env    : table of env vars the manifest's `env` allowlist admits
     -- ctx.stdin  : reader . :read("*l" | "*a" | bytes_n) → string|nil, :close()
+    --              :read_secret(prompt?) → string|nil (echo off on a terminal)
     -- ctx.stdout : writer . :write(str), :flush()
     -- ctx.stderr : writer . :write(str), :flush()
     -- ctx.interrupted()    : nil, or "SIGINT" / "SIGTERM" once one arrived
@@ -73,6 +74,7 @@ app.main(async (ctx) => {
     //   null at end of input. mode "l" (the default) is the next line without
     //   its newline, "a" the rest of the input, a number n up to n bytes
     //   ("*l" / "*a" are accepted too, as in Lua)
+    //   readSecret(prompt?) is one line with echo off on a terminal
     // ctx.stdout : { write(...chunks), flush() }
     // ctx.stderr : { write(...chunks), flush() }
     //   a chunk is a string (written as UTF-8), an ArrayBuffer or a typed
@@ -92,6 +94,22 @@ deadline. That is fine in app.main, which holds nothing else up, so a read is
 allowed only in app.main's own code: from a request handler, a timer or a task
 (a `ctx` kept past main) it raises. Writes and flushes work anywhere and are
 charged to the run's instruction budget like any other output (audit 41).
+
+**Reading a secret** (platform gap 4). `ctx.stdin:read_secret(prompt)` (Lua) /
+`ctx.stdin.readSecret(prompt)` (JS) reads one line the way `getpass` does: on a
+terminal the prompt goes to stderr, echo is off while the line is typed (the
+Enter still moves the cursor), and the terminal's settings are put back before
+it returns. From a pipe or a file there is no prompt and no terminal call: it
+reads one line as `read()` does, so `printf %s "$KEY" | tool login` works. It
+returns nil / null at end of input, and raises / throws `interrupted` when a
+SIGINT or SIGTERM arrives while it waits (checked every 100 ms; echo is back on
+by then, and the app's interrupt handler runs as usual). A line is at most 64
+KiB. It is a read, so only app.main's own code may call it. The kernel sandbox
+allows it: on Linux and OpenBSD through the `tty` promise a terminal-connected
+CLI already has, on macOS through one Seatbelt rule for a terminal stdin -
+`tcgetattr` / `tcsetattr` on that device only (no TIOCGWINSZ, no TIOCSTI, no
+read or write grant). Under `hull test`, `test.run_main`'s `opts.stdin` is no
+terminal, so it gives the next line.
 
 ### Interrupts (SIGINT / SIGTERM)
 
