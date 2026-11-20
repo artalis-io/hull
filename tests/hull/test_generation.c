@@ -13,6 +13,7 @@
 #include "hull/cap/crypto.h"
 #include "hull/shared/generation.h"
 #include "hull/shared/app_entry.h"
+#include "hull/shared/dev_session.h"   /* HL_DEV_SESSION_ENV */
 #include "hull/vfs.h"
 #include "../../src/hull/utils/hex.h"
 #include "test_tmpdir.h"
@@ -530,4 +531,67 @@ UTEST(generation, a_typescript_entry_runs_the_pipeline)
     ASSERT_FALSE(hl_app_name_is_ts(NULL));
 }
 
-UTEST_MAIN()
+/* An app directory holding a hull.build.json (into app, which must hold
+ * HL_TEST_PATH_MAX bytes). */
+static int pipeline_app(char *app)
+{
+    const char *dir = hl_test_tmpdir();
+    if (!dir) return -1;
+    snprintf(app, HL_TEST_PATH_MAX, "%s/hull-gen-pipe-XXXXXX", dir);
+    if (!mkdtemp(app)) return -1;
+    return touch_in(app, "hull.build.json");
+}
+
+/* The pipeline child is this binary (main, below, answers `plugins
+ * generation` with whether it was handed the dev-session key).
+ * dev_audit50.pipeline_env_no_session: `hull dev` sets the key in its own
+ * environment for the served child, and the pipeline child - plugin and
+ * app top-level code - inherited it. */
+UTEST(dev_audit50, pipeline_env_no_session)
+{
+    char app[HL_TEST_PATH_MAX];
+    ASSERT_EQ(0, pipeline_app(app));
+    ASSERT_EQ(0, setenv(HL_DEV_SESSION_ENV,
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 1));
+    uint8_t *b = NULL;
+    size_t len = 0;
+    int rc = hl_generation_produce(app, &b, &len);
+    unsetenv(HL_DEV_SESSION_ENV);
+    ASSERT_EQ(0, rc);
+    ASSERT_TRUE(b != NULL);
+    ASSERT_EQ((size_t)6, len);
+    ASSERT_EQ(0, memcmp(b, "absent", 6));
+    free(b);
+    unlink_in(app, "hull.build.json");
+    rmdir(app);
+}
+
+/* generation_audit50.verify_sig_take_runs_nothing: under --verify-sig the
+ * pipeline is not run (its generation would be refused). */
+UTEST(generation_audit50, verify_sig_take_runs_nothing)
+{
+    char app[HL_TEST_PATH_MAX];
+    ASSERT_EQ(0, pipeline_app(app));
+    unsetenv(HL_GENERATION_ENV);
+    hl_generation_reset();
+    ASSERT_EQ(0, hl_generation_take(0, app, 1));
+    ASSERT_EQ(0, hl_generation_apply(1));
+    /* Without it the pipeline (this binary) runs, and its output is kept. */
+    hl_generation_reset();
+    ASSERT_EQ(1, hl_generation_take(0, app, 0));
+    hl_generation_reset();
+    unlink_in(app, "hull.build.json");
+    rmdir(app);
+}
+
+UTEST_STATE();
+
+int main(int argc, const char *const argv[])
+{
+    if (argc == 4 && strcmp(argv[1], "plugins") == 0 &&
+        strcmp(argv[2], "generation") == 0) {
+        fputs(getenv(HL_DEV_SESSION_ENV) ? "present" : "absent", stdout);
+        return 0;
+    }
+    return utest_main(argc, argv);
+}
