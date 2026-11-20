@@ -208,7 +208,7 @@ local function introspect_app(app_dir)
 
     local m, run_err = fcompose.app_manifest(app_dir, "hull deploy")
     if run_err then
-        tool.stderr("hull deploy: warning: manifest extraction failed: " .. run_err .. "\n")
+        tool.stderr("hull deploy: warning: manifest extraction failed: " .. tool.escape(run_err) .. "\n")
     end
     if m then
         info.manifest = m

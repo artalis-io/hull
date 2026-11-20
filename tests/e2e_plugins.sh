@@ -157,6 +157,20 @@ else
     bad "plugins_audit49.text_escaped"; cat "$WORK/esc.txt"
 fi
 
+# plugins_audit50.compose_text_escaped: the same text reached the terminal
+# raw through every other command that runs the pipeline (hull manifest,
+# hull build, hull deploy): a newline in it started a forged line.
+: > "$WORK/esc50.txt"
+"$HULL" manifest "$d" >> "$WORK/esc50.txt" 2>&1 || true
+"$HULL" build "$d" -o "$d/out/app" >> "$WORK/esc50.txt" 2>&1 || true
+"$HULL" deploy dockerfile "$d" >> "$WORK/esc50.txt" 2>&1 || true
+if has "$WORK/esc50.txt" 'm\nFAKE PASS' && has "$WORK/esc50.txt" 'e\nfake line' &&
+   ! grep -q '^FAKE PASS\|^fake line' "$WORK/esc50.txt"; then
+    ok "plugins_audit50.compose_text_escaped"
+else
+    bad "plugins_audit50.compose_text_escaped"; cat "$WORK/esc50.txt"
+fi
+
 echo "== plugins: generated files get a committed file's checks (audit 49)"
 # gen_app NAME OUTPUTS - an app whose plugin generates OUTPUTS, Lua table
 # entries { "name", "bytes" }.
