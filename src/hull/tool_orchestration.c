@@ -649,6 +649,9 @@ static int l_tool_dev_status(lua_State *L)
     lua_pushinteger(L, (lua_Integer)s->last_reload_ms); lua_setfield(L, -2, "last_reload_ms");
     lua_pushinteger(L, s->log_count);               lua_setfield(L, -2, "log_count");
     lua_pushstring(L,  s->app_dir);                 lua_setfield(L, -2, "app_dir");
+    if (s->types_status[0]) {
+        lua_pushstring(L, s->types_status);         lua_setfield(L, -2, "types");
+    }
 
     int alive = 0;
     if (s->child_pid > 0) {

@@ -53,6 +53,18 @@ typedef struct {
     /* Partial-line accumulator (bytes since last newline). */
     char    partial[HL_DEV_PARTIAL_MAX];
     size_t  partial_len;
+
+    /* The type check after each reload (commands/dev.c): a runner process
+     * started before the tool sandbox, told to check by a byte on
+     * types_cmd_fd, writing its report to types_fd (drained into the log
+     * ring). types_status is the last summary ("checking", "no errors",
+     * "2 errors", ...), "" when no check runs. */
+    pid_t   types_pid;
+    int     types_cmd_fd;
+    int     types_fd;
+    char    types_partial[HL_DEV_LOG_LINE_MAX];
+    size_t  types_partial_len;
+    char    types_status[128];
 } HlDevState;
 
 /* Access the singleton. Returns NULL if `hull dev --tui` hasn't

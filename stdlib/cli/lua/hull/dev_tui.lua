@@ -6,6 +6,10 @@
 --   drain the pipe via tool.dev_drain, render the most-recent
 --   lines, check for file changes, and react to key presses.
 --
+-- The type check (commands/dev.c) runs after each reload when the app has
+-- a tsconfig.json and a compiler is installed; its report lands in the log
+-- and its summary in the status line ("types: 2 errors").
+--
 -- Keys
 --   r              trigger reload (kill+respawn the child)
 --   f              toggle the filter prompt (filter log lines)
@@ -44,6 +48,11 @@ local function format_status_line(status, cols)
     local left = string.format(
         "pid=%s   reloads=%d   lines=%d   app=%s",
         pid, status.reload_count, status.log_count, status.app_dir)
+    if status.types then
+        -- Before the app dir, so a narrow terminal still shows it.
+        left = string.format("pid=%s   reloads=%d   lines=%d   types: %s   app=%s",
+            pid, status.reload_count, status.log_count, status.types, status.app_dir)
+    end
     if #left > cols - 2 then left = left:sub(1, cols - 2) end
     return left
 end

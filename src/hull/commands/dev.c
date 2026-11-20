@@ -571,6 +571,11 @@ static const char *dev_detect_entry(void)
  * "g_dev_state_inited always false" tautology (cppcheck). */
 #ifdef HL_TUI_LINKED
 
+#ifndef __COSMOPOLITAN__
+static pid_t dev_types_runner_start(const char *checker, const char *app_dir,
+                                    int *cmd_fd, int *out_fd);
+#endif
+
 static HlDevState g_dev_state;
 static int        g_dev_state_inited = 0;
 
@@ -591,19 +596,35 @@ static void dev_log_append(HlDevState *s, const char *line, size_t n)
     s->log_count++;
 }
 
-int hl_dev_state_drain(HlDevState *s)
+/* A line of the type check's report: logged, and its summary kept for the
+ * status line. */
+static void dev_types_line(HlDevState *s, const char *line, size_t n)
 {
-    if (!s || s->pipe_fd < 0) return -1;
+    static const char pre[] = "[hull:dev] types: ";
+    if (n > sizeof pre - 1 && memcmp(line, pre, sizeof pre - 1) == 0) {
+        size_t k = n - (sizeof pre - 1);
+        if (k >= sizeof s->types_status) k = sizeof s->types_status - 1;
+        memcpy(s->types_status, line + sizeof pre - 1, k);
+        s->types_status[k] = '\0';
+    }
+    dev_log_append(s, line, n);
+}
+
+/* Read what @p fd has into the ring, one line at a time; bytes after the
+ * last newline wait in @p partial (capacity @p cap). Bytes read, or -1. */
+static int dev_drain_fd(HlDevState *s, int fd, char *partial, size_t *plen,
+                        size_t cap, int types)
+{
     int total = 0;
     for (;;) {
-        struct pollfd pfd = { .fd = s->pipe_fd, .events = POLLIN };
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
         int pr = poll(&pfd, 1, 0);
         if (pr <= 0) break;
 
         char buf[1024];
-        ssize_t n = read(s->pipe_fd, buf, sizeof buf);
+        ssize_t n = read(fd, buf, sizeof buf);
         if (n < 0) { if (errno == EINTR) continue; return -1; }
-        if (n == 0) break;        /* EOF - child closed */
+        if (n == 0) break;        /* EOF - writer closed */
         total += (int)n;
 
         /* Walk the buffer, splitting on '\n'. */
@@ -611,33 +632,40 @@ int hl_dev_state_drain(HlDevState *s)
         for (size_t i = 0; i < (size_t)n; i++) {
             if (buf[i] != '\n') continue;
             size_t llen = i - start;
-            /* Concatenate accumulated partial + this segment. */
-            if (s->partial_len > 0) {
-                /* Copy into a local merge buffer; pcopy + llen are
-                 * clamped to sizeof merged below, so we don't need a
-                 * separate "need" pre-check. */
-                char merged[HL_DEV_LOG_LINE_MAX];
-                size_t pcopy = s->partial_len;
-                if (pcopy > sizeof merged) pcopy = sizeof merged;
-                memcpy(merged, s->partial, pcopy);
-                size_t rem = sizeof merged - pcopy;
-                if (llen > rem) llen = rem;
-                memcpy(merged + pcopy, buf + start, llen);
-                dev_log_append(s, merged, pcopy + llen);
-                s->partial_len = 0;
-            } else {
-                dev_log_append(s, buf + start, llen);
-            }
+            /* The accumulated partial + this segment, clamped to one line. */
+            char merged[HL_DEV_LOG_LINE_MAX];
+            size_t pcopy = *plen;
+            if (pcopy > sizeof merged) pcopy = sizeof merged;
+            memcpy(merged, partial, pcopy);
+            size_t rem = sizeof merged - pcopy;
+            if (llen > rem) llen = rem;
+            memcpy(merged + pcopy, buf + start, llen);
+            if (types) dev_types_line(s, merged, pcopy + llen);
+            else       dev_log_append(s, merged, pcopy + llen);
+            *plen = 0;
             start = i + 1;
         }
         /* Anything past the last '\n' is a partial line - buffer it. */
         if (start < (size_t)n) {
-            size_t plen = (size_t)n - start;
-            size_t room = sizeof s->partial - s->partial_len;
-            if (plen > room) plen = room;
-            memcpy(s->partial + s->partial_len, buf + start, plen);
-            s->partial_len += plen;
+            size_t take = (size_t)n - start;
+            size_t room = cap - *plen;
+            if (take > room) take = room;
+            memcpy(partial + *plen, buf + start, take);
+            *plen += take;
         }
+    }
+    return total;
+}
+
+int hl_dev_state_drain(HlDevState *s)
+{
+    if (!s || s->pipe_fd < 0) return -1;
+    int total = dev_drain_fd(s, s->pipe_fd, s->partial, &s->partial_len,
+                             sizeof s->partial, 0);
+    if (s->types_fd >= 0) {
+        int t = dev_drain_fd(s, s->types_fd, s->types_partial,
+                             &s->types_partial_len, sizeof s->types_partial, 1);
+        if (t > 0 && total >= 0) total += t;
     }
     return total;
 }
@@ -743,6 +771,12 @@ int hl_dev_state_reload(HlDevState *s)
     s->last_reload_ms  = dev_now_ms();
     s->baseline_mtime  = scan_mtime(s->app_dir);
     s->pending_reload  = 0;
+    if (s->types_cmd_fd >= 0) {
+        /* A check of the code before this reload is stopped by the runner. */
+        char c = 'S';
+        if (write(s->types_cmd_fd, &c, 1) == 1)
+            snprintf(s->types_status, sizeof s->types_status, "checking");
+    }
     return 0;
 }
 
@@ -750,7 +784,7 @@ int hl_dev_state_reload(HlDevState *s)
 
 static int run_dev_tui(int argc, char **argv,
                        const char *hull_exe, const char **child_argv,
-                       int child_argc, const char *app_dir)
+                       int child_argc, const char *app_dir, int no_types)
 {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
         fprintf(stderr,
@@ -762,6 +796,8 @@ static int run_dev_tui(int argc, char **argv,
     /* Initialize singleton. */
     memset(&g_dev_state, 0, sizeof g_dev_state);
     g_dev_state.pipe_fd     = -1;
+    g_dev_state.types_cmd_fd = -1;
+    g_dev_state.types_fd    = -1;
     g_dev_state.child_argv  = child_argv;
     g_dev_state.child_argc  = child_argc;
     g_dev_state.hull_exe    = hull_exe;
@@ -772,6 +808,34 @@ static int run_dev_tui(int argc, char **argv,
         return -1;
     }
     g_dev_state_inited = 1;
+
+    /* The type check, as in the plain loop, but run by a process of its own
+     * started here: the TUI runs in the tool VM, whose sandbox (applied by
+     * hull_tool below) grants the app directory no execute, so the app's
+     * node_modules/.bin compiler could not run from inside it. */
+    char types_note[PATH_MAX + 96] = "";
+    if (!no_types && hl_type_check_configured(app_dir)) {
+#ifdef __COSMOPOLITAN__
+        snprintf(types_note, sizeof types_note, "[hull:dev] types are not "
+                 "checked by this build; run `hull check --types`");
+#else
+        char checker[PATH_MAX];
+        if (hl_type_check_find(app_dir, checker, sizeof checker) != 0) {
+            snprintf(types_note, sizeof types_note, "[hull:dev] tsconfig.json "
+                     "but no TypeScript compiler (tsgo or tsc) installed: types "
+                     "are not checked");
+        } else {
+            g_dev_state.types_pid = dev_types_runner_start(
+                checker, app_dir, &g_dev_state.types_cmd_fd, &g_dev_state.types_fd);
+            if (g_dev_state.types_pid > 0)
+                snprintf(types_note, sizeof types_note, "[hull:dev] type-checking "
+                         "with %s after each reload (--no-types to turn off)", checker);
+            else
+                snprintf(types_note, sizeof types_note, "[hull:dev] could not "
+                         "start the type check");
+        }
+#endif
+    }
 
     /* First child spawn - uses the reload path so the pipe + bookkeeping
      * land in one place. */
@@ -784,6 +848,8 @@ static int run_dev_tui(int argc, char **argv,
     g_dev_state.log_count = 0;
     g_dev_state.log_head  = 0;
     g_dev_state.reload_count = 0;
+    if (types_note[0])   /* tui.print drops control characters */
+        dev_log_append(&g_dev_state, types_note, strlen(types_note));
 
     int rc = hull_tool("hull.dev_tui", argc, argv, hull_exe);
 
@@ -793,6 +859,12 @@ static int run_dev_tui(int argc, char **argv,
         waitpid(g_dev_state.child_pid, NULL, 0);
     }
     if (g_dev_state.pipe_fd >= 0) close(g_dev_state.pipe_fd);
+    if (g_dev_state.types_pid > 0) {
+        /* EOF on its command pipe: the runner stops a check and exits. */
+        close(g_dev_state.types_cmd_fd);
+        (void)waitpid(g_dev_state.types_pid, NULL, 0);
+        close(g_dev_state.types_fd);
+    }
     g_dev_state_inited = 0;
     return rc;
 }
@@ -1022,6 +1094,65 @@ static void dev_types_poll(DevTypes *t, const char *app_dir, int agent_mode)
     dev_types_stop(t);
 }
 
+#if defined(HL_TUI_LINKED) && !defined(__COSMOPOLITAN__)
+/* `hull dev --tui`'s type check: a process forked before the tool sandbox,
+ * so the compiler is run as the plain loop runs it. Each byte 'S' on
+ * @p cmd starts a check (stopping one still running); EOF stops it and
+ * exits. The report the plain loop prints on stderr goes to the pipe whose
+ * read end is *@p out_fd. The pid, or -1. */
+static pid_t dev_types_runner_start(const char *checker, const char *app_dir,
+                                    int *cmd_fd, int *out_fd)
+{
+    int cp[2], op[2];
+    if (pipe(cp) != 0) return -1;
+    if (pipe(op) != 0) { close(cp[0]); close(cp[1]); return -1; }
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(cp[0]); close(cp[1]); close(op[0]); close(op[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        /* The TUI puts the terminal in raw mode; the runner never reads it,
+         * and a SIGINT meant for the TUI must not leave a compiler behind. */
+        signal(SIGINT, SIG_IGN);
+        signal(SIGTERM, SIG_DFL);
+        int nul = open("/dev/null", O_RDONLY);
+        if (nul >= 0) { dup2(nul, STDIN_FILENO); close(nul); }
+        dup2(op[1], STDOUT_FILENO);
+        dup2(op[1], STDERR_FILENO);
+        close(op[0]);
+        close(op[1]);
+        close(cp[1]);
+        DevTypes t;
+        memset(&t, 0, sizeof t);
+        t.fd = -1;
+        snprintf(t.checker, sizeof t.checker, "%s", checker);
+        for (;;) {
+            struct pollfd pf = { .fd = cp[0], .events = POLLIN };
+            int pr = poll(&pf, 1, 200);
+            if (pr < 0 && errno != EINTR) break;
+            if (pr > 0) {
+                char c;
+                ssize_t r = read(cp[0], &c, 1);
+                if (r == 0 || (r < 0 && errno != EINTR)) break;
+                if (r == 1 && c == 'S') dev_types_start(&t, app_dir);
+            }
+            dev_types_poll(&t, app_dir, 0);
+        }
+        dev_types_stop(&t);
+        _exit(0);
+    }
+    close(cp[0]);
+    close(op[1]);
+    (void)fcntl(cp[1], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(op[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(op[0], F_SETFL, fcntl(op[0], F_GETFL) | O_NONBLOCK);
+    *cmd_fd = cp[1];
+    *out_fd = op[0];
+    return pid;
+}
+#endif
+
 int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 {
     static char hull_exe_buf[PATH_MAX];
@@ -1114,7 +1245,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 #ifdef HL_TUI_LINKED
     if (tui_mode) {
         int rc = run_dev_tui(argc, argv, hull_exe,
-                              child_argv, ci, app_dir);
+                              child_argv, ci, app_dir, no_types);
         free(child_argv);
         return rc;
     }

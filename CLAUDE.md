@@ -3015,7 +3015,7 @@ These ship as Lua tool modules under `stdlib/cli/lua/hull/`; the C dispatchers i
 | Command | What | Module |
 |---------|------|--------|
 | `hull doctor --tui` | Live readiness check w/ ✓/✗ glyphs, sections for platform/compilers/subsystems/compute/CA-bundle, summary. `r` reprobes, `c` copies JSON via OSC 52, `q` quits. | `hull/doctor_tui.lua` |
-| `hull dev --tui` | Live request log streamed from child's stderr/stdout into a ring buffer, status line (pid, reloads, lines, app_dir), inline filter prompt, file-watch auto-reload, manual `r` reload. | `hull/dev_tui.lua` (+ `src/hull/dev_state.h`) |
+| `hull dev --tui` | Live request log streamed from child's stderr/stdout into a ring buffer, status line (pid, reloads, lines, type-check summary, app_dir), inline filter prompt, file-watch auto-reload, manual `r` reload. The type check after each reload runs in a process `commands/dev.c` forks before the tool sandbox applies (it grants the app's `node_modules/.bin` no execute), its report drained into the log; `--no-types` turns it off. | `hull/dev_tui.lua` (+ `include/hull/dev_state.h`) |
 | `hull agent context --interactive` | Two-pane task picker w/ live preview; ←/→ cycles level (minimal/compact/full); Enter prints chosen context as JSON to stdout for shell pipelines. | `hull/agent_context_tui.lua` |
 | `hull agent errors --tui` | Scrollable error list + detail panel. Normalizes varied error shapes. Empty-state shows clean "✓ No errors". | `hull/agent_errors_tui.lua` |
 | `hull modules available --tui` | Two-pane searchable registry; `/` opens filter prompt; right pane shows caps + deps + manifest snippet. | `hull/modules_available_tui.lua` |

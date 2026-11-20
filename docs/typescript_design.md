@@ -596,7 +596,8 @@ conversion and the declarations install are one module both share
      background (`shared/type_check.h`, dev.c): an edit stops a check still running, and
      none holds up or decides a reload. It prints a summary of the diagnostics; under
      `--agent` it writes `.hull/types.json` (MAC'd under the session key, as the other
-     sidecars), which `hull agent errors` / MCP `hull_errors` serve as `types`. With no
+     sidecars), which `hull agent errors` / MCP `hull_errors` serve as `types`; `hull dev
+     --tui` shows the diagnostics in its log and the summary in its status line. With no
      `tsconfig.json` nothing runs; with no compiler it says so once; `--no-types` turns it
      off. It depends on as little of the compiler as `hull check --types` does: its path,
      those arguments, its exit status and the diagnostic line `FILE(LINE,COL): SEVERITY
