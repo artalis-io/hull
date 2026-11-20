@@ -765,6 +765,10 @@ $(BUILDDIR)/test_url: $(TESTDIR)/hull/test_url.c $(SRCDIR)/hull/utils/url.h $(SR
 $(BUILDDIR)/test_host: $(TESTDIR)/hull/test_host.c $(HOST_TH_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HOST_TH_OBJ)
 
+# The TypeScript compiler lookup + its diagnostic line (shared/type_check.c).
+$(BUILDDIR)/test_type_check: $(TESTDIR)/hull/test_type_check.c $(TYPE_CHECK_OBJ) $(HOST_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TYPE_CHECK_OBJ) $(HOST_OBJ)
+
 # CLI logging policy (src/hull/shared/cli_log.c). Needs the vendored log.c it
 # configures, and nothing else.
 # -DHL_CLI_LOG_TEST_HOOKS exposes the suspend-flag reset (production suspend is
@@ -1847,6 +1851,12 @@ e2e-generation: $(BUILDDIR)/hull
 # typescript route, the result store, the refusals, the plugin's own tests.
 e2e-typescript: $(BUILDDIR)/hull
 	HULL=$(BUILDDIR)/hull sh tests/e2e_typescript.sh
+
+# hull dev's type check after each reload, with a stand-in compiler
+# (tests/e2e_dev_types.sh).
+.PHONY: e2e-dev-types
+e2e-dev-types: $(BUILDDIR)/hull
+	HULL=$(BUILDDIR)/hull sh tests/e2e_dev_types.sh
 
 # The TypeScript examples through hull types / test / run / manifest / deploy /
 # build / inspect / verify (tests/e2e_typescript_examples.sh).

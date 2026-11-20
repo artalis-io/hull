@@ -792,21 +792,12 @@ static int agent_inspect_stream_live(const char *app_dir)
      * MAC'd document is the file with that member removed. A session_pid match alone
      * bound nothing: the app running under the session read dev.json and rewrote
      * discovery.json to match (audit 37). */
-    size_t end = disc_len;
-    if (end > 0 && disc[end - 1] == '\n') end--;
-    const size_t klen = sizeof(HL_DEV_DISCOVERY_MAC_KEY) - 1;
-    const size_t tail = klen + HL_DEV_SIDECAR_MAC_LEN + 2;   /* key + mac + "\"}" */
     int mac_ok = 0;
     size_t doc_len = 0;
-    if (end > tail + 1 && disc[end - 1] == '}' && disc[end - 2] == '"' &&
-        memcmp(disc + end - tail, HL_DEV_DISCOVERY_MAC_KEY, klen) == 0) {
-        const char *mac = disc + end - tail + klen;
-        doc_len = end - tail;            /* bytes before the member */
-        disc[doc_len] = '}';             /* the MAC'd document: "...}" */
-        doc_len++;
+    const char *mac = NULL;
+    if (hl_dev_sidecar_doc_split(disc, disc_len, &doc_len, &mac))
         mac_ok = hl_dev_sidecar_mac_ok(key, HL_DEV_SIDECAR_DISCOVERY, app_dir, sp_dev,
                                        disc, doc_len, mac);
-    }
     hl_secure_zero(key, sizeof key);
     if (!mac_ok) { free(disc); return -1; }
     disc[doc_len] = '\0';

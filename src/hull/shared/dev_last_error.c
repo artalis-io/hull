@@ -1,8 +1,9 @@
 /*
- * dev_last_error.c - the `hull dev --agent` load-failure sidecar,
- * <app>/.hull/last_error.json (see include/hull/shared/dev_session.h).
- * Written by the served child when the app fails to load (serve.c) and by the
- * supervisor when the build pipeline fails before a (re)spawn (dev.c).
+ * dev_last_error.c - the `hull dev --agent` diagnostic sidecars (see
+ * include/hull/shared/dev_session.h): <app>/.hull/last_error.json, written by
+ * the served child when the app fails to load (serve.c) and by the supervisor
+ * when the build pipeline fails before a (re)spawn (dev.c), and
+ * <app>/.hull/types.json, the supervisor's type check of the app (dev.c).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -21,35 +22,37 @@ static int stdio_write(void *ctx, const char *data, size_t len)
     return fwrite(data, 1, len, (FILE *)ctx) == len ? 0 : -1;
 }
 
+/* <app_dir>/.hull/<name>, created afresh: only in a real .hull directory
+ * this user owns, never through a planted link (fopen "w" truncated whatever
+ * .hull/last_error.json pointed at). NULL when it cannot be. */
+static FILE *sidecar_create(const char *app_dir, const char *name)
+{
+    char dir[4096], path[4096];
+    int nd = snprintf(dir, sizeof(dir), "%s/.hull", app_dir);
+    int np = snprintf(path, sizeof(path), "%s/.hull/%s", app_dir, name);
+    if (nd <= 0 || (size_t)nd >= sizeof(dir) || np <= 0 || (size_t)np >= sizeof(path))
+        return NULL;
+    mkdir(dir, 0755);
+    /* The app tree may be a cloned repo. */
+    struct stat dst;
+    if (!(lstat(dir, &dst) == 0 && S_ISDIR(dst.st_mode)
+#ifndef _WIN32
+          && dst.st_uid == geteuid()
+#endif
+         ))
+        return NULL;
+    (void)unlink(path);
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, "w");
+    if (!f) close(fd);
+    return f;
+}
+
 void hl_dev_last_error_write(const char *app_dir, const char *nonce,
                              long session_pid, const char *msg)
 {
-    char err_dir[4096], err_path[4096];
-    int nd = snprintf(err_dir, sizeof(err_dir), "%s/.hull", app_dir);
-    int np = snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json",
-                      app_dir);
-    if (nd <= 0 || (size_t)nd >= sizeof(err_dir) ||
-        np <= 0 || (size_t)np >= sizeof(err_path))
-        return;
-    mkdir(err_dir, 0755);
-    /* The app tree may be a cloned repo: write only into a real .hull
-     * directory of ours, and never through a planted link (fopen "w"
-     * truncated whatever .hull/last_error.json pointed at). */
-    struct stat dst;
-    FILE *ef = NULL;
-    if (lstat(err_dir, &dst) == 0 && S_ISDIR(dst.st_mode)
-#ifndef _WIN32
-        && dst.st_uid == geteuid()
-#endif
-       ) {
-        (void)unlink(err_path);
-        int efd = open(err_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW |
-                       O_CLOEXEC, 0644);
-        if (efd >= 0) {
-            ef = fdopen(efd, "w");
-            if (!ef) close(efd);
-        }
-    }
+    FILE *ef = sidecar_create(app_dir, "last_error.json");
     if (!ef) return;
     ShJsonWriter w;
     sh_json_writer_init(&w, stdio_write, ef);
@@ -76,4 +79,29 @@ void hl_dev_last_error_write(const char *app_dir, const char *nonce,
     sh_json_write_object_end(&w);
     fputc('\n', ef);
     fclose(ef);
+}
+
+void hl_dev_types_write(const char *app_dir, const char *nonce, long session_pid,
+                        const char *doc, size_t len)
+{
+    char mac[HL_DEV_SIDECAR_MAC_LEN + 1];
+    if (!nonce || !nonce[0] || len < 2 || doc[len - 1] != '}' ||
+        hl_dev_sidecar_mac(nonce, HL_DEV_SIDECAR_TYPES, app_dir, session_pid,
+                           doc, len, mac) != 0)
+        return;
+    FILE *f = sidecar_create(app_dir, "types.json");
+    if (!f) return;
+    /* The document without its closing brace, then the MAC member. */
+    int ok = fwrite(doc, 1, len - 1, f) == len - 1 &&
+             fprintf(f, "%s%s\"}\n", HL_DEV_DISCOVERY_MAC_KEY, mac) > 0;
+    if (fclose(f) != 0 || !ok) hl_dev_types_remove(app_dir);
+}
+
+void hl_dev_types_remove(const char *app_dir)
+{
+    char path[4096];
+    int n = snprintf(path, sizeof(path), "%s/.hull/types.json", app_dir);
+    struct stat st;
+    if (n > 0 && (size_t)n < sizeof(path) && lstat(path, &st) == 0 && S_ISREG(st.st_mode))
+        (void)unlink(path);
 }

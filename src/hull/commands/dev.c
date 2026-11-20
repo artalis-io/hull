@@ -18,7 +18,10 @@
 #include "hull/shared/generation.h"
 #include "hull/shared/app_entry.h"
 #include "hull/shared/term_escape.h"  /* hl_eprintf_line */  /* the pipeline generation handed to the child */
+#include "hull/shared/type_check.h"
+#include "hull/cap/tool.h"   /* hl_tool_spawn */
 #include "hull/tool.h"
+#include "sh_json.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -146,6 +149,7 @@ static void dev_session_prune(void)
 static void agent_session_begin(const char *app_dir)
 {
     agent_remove_last_error(app_dir);
+    hl_dev_types_remove(app_dir);
     if (g_dev_nonce[0]) return;
     dev_session_prune();
     unsigned char r[32];
@@ -336,6 +340,7 @@ static void agent_remove_sidecars(const char *app_dir)
     if (n > 0 && (size_t)n < sizeof(path)) unlink(path);
     n = snprintf(path, sizeof(path), "%s/.hull/discovery.json", app_dir);
     if (n > 0 && (size_t)n < sizeof(path)) unlink(path);
+    hl_dev_types_remove(app_dir);
 }
 
 /* ── Signal handling ──────────────────────────────────────────────── */
@@ -815,6 +820,208 @@ static int dev_self_exe(const char *argv0, char *out, size_t out_sz)
     return hl_host_find_in_path(argv0, out, out_sz) == 1 ? 0 : -1;
 }
 
+/* ── Type check after each reload ─────────────────────────────────── */
+/*
+ * When the app has a tsconfig.json and a TypeScript compiler is installed
+ * (shared/type_check.h), each successful (re)spawn starts one
+ * `--noEmit --pretty false -p <app>` in the background; an edit before it
+ * ends stops it. It never holds up or decides a reload: when it ends its
+ * diagnostics are summarised on stderr and, under --agent, written to
+ * .hull/types.json for `hull agent errors`. `--no-types` turns it off.
+ */
+
+#define DEV_TYPES_OUT_MAX   (1024 * 1024)   /* compiler output kept */
+#define DEV_TYPES_SHOW      10              /* diagnostics printed per run */
+#define DEV_TYPES_SIDECAR   100             /* diagnostics in types.json */
+
+typedef struct {
+    char   checker[PATH_MAX];   /* "" = off */
+    pid_t  pid;                 /* the running check's process group, 0 = none */
+    int    fd;                  /* its output, -1 = none */
+    char  *out;
+    size_t len;
+    int    truncated;
+} DevTypes;
+
+static void dev_types_stop(DevTypes *t)
+{
+    if (t->pid > 0) {
+        kill(-t->pid, SIGTERM);
+        (void)waitpid(t->pid, NULL, 0);
+        /* The compiler is the helper's child, in the same group: whatever
+         * of it is left once the helper is reaped goes too. */
+        kill(-t->pid, SIGKILL);
+        t->pid = 0;
+    }
+    if (t->fd >= 0) { close(t->fd); t->fd = -1; }
+    free(t->out);
+    t->out = NULL;
+    t->len = 0;
+    t->truncated = 0;
+}
+
+static void dev_types_start(DevTypes *t, const char *app_dir)
+{
+    dev_types_stop(t);
+    if (!t->checker[0]) return;
+    int p[2];
+    if (pipe(p) != 0) return;
+    /* SIGINT / SIGTERM blocked across the fork, as for the served child: one
+     * landing before the child reset its handlers ran the supervisor's in it
+     * (which only records the signal), and the compiler it then spawned
+     * outlived the stop. */
+    sigset_t blk, prev;
+    sigemptyset(&blk);
+    sigaddset(&blk, SIGINT);
+    sigaddset(&blk, SIGTERM);
+    sigprocmask(SIG_BLOCK, &blk, &prev);
+    pid_t pid = fork();
+    if (pid < 0) {
+        sigprocmask(SIG_SETMASK, &prev, NULL);
+        close(p[0]);
+        close(p[1]);
+        return;
+    }
+    if (pid == 0) {
+        /* Its own process group, so a stop reaches the compiler too; the
+         * dev-session key is the supervisor's, never the compiler's (it may
+         * be the app's own node_modules). */
+        setpgid(0, 0);
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        sigprocmask(SIG_SETMASK, &prev, NULL);
+        (void)unsetenv(HL_DEV_SESSION_ENV);
+        int nul = open("/dev/null", O_RDONLY);
+        if (nul >= 0) { dup2(nul, STDIN_FILENO); close(nul); }
+        dup2(p[1], STDOUT_FILENO);
+        dup2(p[1], STDERR_FILENO);
+        close(p[0]);
+        close(p[1]);
+        const char *argv[] = { t->checker, "--noEmit", "--pretty", "false", "-p", app_dir, NULL };
+        int rc = hl_tool_spawn(argv);
+        _exit(rc < 0 ? 127 : rc);
+    }
+    setpgid(pid, pid);
+    sigprocmask(SIG_SETMASK, &prev, NULL);
+    close(p[1]);
+    (void)fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL) | O_NONBLOCK);
+    t->pid = pid;
+    t->fd = p[0];
+}
+
+/* Read what the check has written so far. */
+static void dev_types_drain(DevTypes *t)
+{
+    if (t->fd < 0) return;
+    char buf[8192];
+    for (;;) {
+        ssize_t r = read(t->fd, buf, sizeof buf);
+        if (r <= 0) return;
+        /* Past the cap the rest is read and dropped, so the compiler never
+         * blocks on a full pipe. */
+        size_t take = (size_t)r;
+        if (take > DEV_TYPES_OUT_MAX - t->len) {
+            take = DEV_TYPES_OUT_MAX - t->len;
+            t->truncated = 1;
+        }
+        if (take == 0) continue;
+        char *grown = realloc(t->out, t->len + take + 1);
+        if (!grown) { t->truncated = 1; continue; }
+        t->out = grown;
+        memcpy(t->out + t->len, buf, take);
+        t->len += take;
+        t->out[t->len] = '\0';
+    }
+}
+
+/* The check ended with @p status: report it. */
+static void dev_types_report(DevTypes *t, int status, const char *app_dir,
+                             int agent_mode)
+{
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    ShJsonBuf jb;
+    sh_json_buf_init(&jb);
+    ShJsonWriter w;
+    sh_json_writer_init(&w, sh_json_buf_write, &jb);
+    sh_json_write_object_start(&w);
+    sh_json_write_key(&w, "diagnostics");
+    sh_json_write_array_start(&w);
+
+    int count = 0, errors = 0, shown = 0;
+    const char *s = t->out ? t->out : "";
+    while (*s) {
+        const char *nl = strchr(s, '\n');
+        size_t n = nl ? (size_t)(nl - s) : strlen(s);
+        HlTypeDiag d;
+        /* A line that starts with a space continues the diagnostic before
+         * it (related information); it is part of the printed output only. */
+        if (n > 0 && s[0] != ' ' && hl_type_check_parse_line(s, n, &d)) {
+            count++;
+            if (d.parsed && strcmp(d.severity, "error") == 0) errors++;
+            if (shown < DEV_TYPES_SHOW) {
+                if (d.parsed)
+                    hl_eprintf_line("[hull:dev]   %s:%ld:%ld %s %s", d.file, d.line,
+                                    d.col, d.code, d.message);
+                else
+                    hl_eprintf_line("[hull:dev]   %s", d.message);
+                shown++;
+            }
+            if (count <= DEV_TYPES_SIDECAR) {
+                sh_json_write_object_start(&w);
+                if (d.parsed) {
+                    sh_json_write_kv_string(&w, "file", d.file);
+                    sh_json_write_kv_int(&w, "line", d.line);
+                    sh_json_write_kv_int(&w, "col", d.col);
+                    sh_json_write_kv_string(&w, "severity", d.severity);
+                    sh_json_write_kv_string(&w, "code", d.code);
+                }
+                sh_json_write_kv_string(&w, "message", d.message);
+                sh_json_write_object_end(&w);
+            }
+        }
+        s = nl ? nl + 1 : s + n;
+    }
+    sh_json_write_array_end(&w);
+
+    const char *verdict = code == 0 ? "ok" : (count > 0 ? "errors" : "failed");
+    if (code == 0)
+        fprintf(stderr, "[hull:dev] types: no errors\n");
+    else if (count > 0)
+        hl_eprintf_line("[hull:dev] types: %d error%s%s", errors ? errors : count,
+                        (errors ? errors : count) == 1 ? "" : "s",
+                        count > shown ? " (first shown; `hull check --types` for all)" : "");
+    else
+        fprintf(stderr, "[hull:dev] types: the compiler failed (exit %d)\n", code);
+
+    if (agent_mode) {
+        sh_json_write_kv_string(&w, "status", verdict);
+        sh_json_write_kv_int(&w, "count", count);
+        sh_json_write_kv_int(&w, "errors", errors);
+        sh_json_write_kv_bool(&w, "truncated", t->truncated || count > DEV_TYPES_SIDECAR);
+        sh_json_write_kv_int(&w, "exit", code);
+        sh_json_write_kv_int(&w, "timestamp", (int64_t)time(NULL));
+        sh_json_write_kv_int(&w, "session_pid", (int64_t)getpid());
+        sh_json_write_object_end(&w);
+        hl_dev_types_write(app_dir, g_dev_nonce, (long)getpid(), jb.buf, jb.len);
+    }
+    sh_json_buf_free(&jb);
+}
+
+/* Call from the poll loop: drains the output and reports a check that
+ * ended. */
+static void dev_types_poll(DevTypes *t, const char *app_dir, int agent_mode)
+{
+    if (t->pid <= 0) return;
+    dev_types_drain(t);
+    int status;
+    pid_t w = waitpid(t->pid, &status, WNOHANG);
+    if (w != t->pid) return;
+    t->pid = 0;
+    dev_types_drain(t);
+    dev_types_report(t, status, app_dir, agent_mode);
+    dev_types_stop(t);
+}
+
 int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 {
     static char hull_exe_buf[PATH_MAX];
@@ -827,6 +1034,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
     const char *entry_point = NULL;
     int agent_mode = 0;
     int tui_mode = 0;
+    int no_types = 0;
     int port = 3000;
 
     /* Parse args: first positional is the entry point, rest are passthrough */
@@ -837,6 +1045,10 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
         }
         if (strcmp(argv[i], "--tui") == 0) {
             tui_mode = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--no-types") == 0) {
+            no_types = 1;
             continue;
         }
         if (argv[i][0] != '-') {
@@ -892,7 +1104,8 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
      * be silently ignored, depending on the build. --agent is
      * already a server-mode flag, so pass that through. */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--tui") == 0) continue;
+        if (strcmp(argv[i], "--tui") == 0 || strcmp(argv[i], "--no-types") == 0)
+            continue;
         child_argv[ci++] = argv[i];
     }
 
@@ -924,6 +1137,25 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 
     fprintf(stderr, "[hull:dev] watching %s for changes...\n", app_dir);
 
+    /* The type check: on when the app has a tsconfig.json and a compiler is
+     * installed (a cosmo build has no fork to run it in the background). */
+    DevTypes types;
+    memset(&types, 0, sizeof types);
+    types.fd = -1;
+    if (!no_types && hl_type_check_configured(app_dir)) {
+#ifdef __COSMOPOLITAN__
+        fprintf(stderr, "[hull:dev] types are not checked by this build; "
+                "run `hull check --types`\n");
+#else
+        if (hl_type_check_find(app_dir, types.checker, sizeof types.checker) == 0)
+            hl_eprintf_line("[hull:dev] type-checking with %s after each reload "
+                            "(--no-types to turn off)", types.checker);
+        else
+            fprintf(stderr, "[hull:dev] tsconfig.json but no TypeScript compiler "
+                    "(tsgo or tsc) installed: types are not checked\n");
+#endif
+    }
+
     if (agent_mode) {
         agent_ensure_dir(app_dir);
         agent_session_begin(app_dir);
@@ -943,6 +1175,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 
         if (need_build) {
             need_build = 0;
+            dev_types_stop(&types);   /* a check of the code before this edit */
             int gen_fd = -1;
             int built = dev_run_pipeline(app_dir, entry_point, agent_mode,
                                          &gen_fd, &inputs);
@@ -1023,6 +1256,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
                     generation++;
                     agent_publish_discovery(hull_exe, app_dir, generation);
                 }
+                dev_types_start(&types, app_dir);
             }
         }
 
@@ -1057,6 +1291,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
             /* Sleep 1 second between polls */
             struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
             nanosleep(&ts, NULL);
+            dev_types_poll(&types, app_dir, agent_mode);
 
             /* Check for file changes */
             if (scan_mtime(app_dir) > baseline ||
@@ -1076,6 +1311,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
         (void)waitpid(pid, NULL, 0);
         dev_child_pid = 0;
     }
+    dev_types_stop(&types);
     dev_inputs_clear(&inputs);
 
     if (agent_mode)
