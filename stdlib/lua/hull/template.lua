@@ -639,7 +639,10 @@ end
 -- Generate dot path access, one raw table read per segment:
 -- "user.name" → '__g(__g(__d, "user"), "name")'
 -- "title" → '__g(__d, "title")'
--- If the first segment is a loop-local variable, use it directly instead of __d.
+-- If the first segment is a loop-local variable, read it through __v instead
+-- of __d: __v drops a function the same way __g does. Emitted bare, a loop
+-- variable bound to a function (`{% for it in list %}{{ it }}`, the value of
+-- `{% for k, v in obj %}`) rendered "function: 0x..." (audit 49).
 -- __g (emitted by codegen) reads a field only of a TABLE, with rawget, and
 -- never hands back a function: plain `__d.a.b` indexed a string through its
 -- metatable, so `{{ title.rep }}` reached string.rep and rendered its native
@@ -661,7 +664,7 @@ local function gen_dot_path(path, prefix, locals_set)
 
     local code, i = prefix, 1
     if locals_set and locals_set[parts[1]] then
-        code, i = parts[1], 2
+        code, i = "__v(" .. parts[1] .. ")", 2
     end
     for j = i, #parts do
         code = "__g(" .. code .. ", \"" .. parts[j] .. "\")"
@@ -833,6 +836,9 @@ local function codegen(ast)
     lines[#lines + 1] = "  local function __g(o, k)"
                         .. " if __type(o) ~= \"table\" then return nil end"
                         .. " local v = __rawget(o, k)"
+                        .. " if __type(v) == \"function\" then return nil end"
+                        .. " return v end"
+    lines[#lines + 1] = "  local function __v(v)"
                         .. " if __type(v) == \"function\" then return nil end"
                         .. " return v end"
     lines[#lines + 1] = "  local __p = {}"
