@@ -8,6 +8,20 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Security
+
+- The TypeScript type check no longer lets the app's `tsconfig.json` write files (audit 50, High,
+  A2). `hull dev` (by default, whenever the app has a `tsconfig.json` and `tsc` / `tsgo` is on
+  PATH) and `hull check --types` ran the compiler with `--noEmit`, which does not stop
+  `incremental` / `composite` writing a `.tsbuildinfo` to any `tsBuildInfoFile` path, or
+  `generateTrace` writing a trace directory anywhere. A cloned repository's config could write
+  over a file such as a shell startup file, with file names it chose inside it, as the user and
+  outside every sandbox. Every compiler run now also gets `--incremental false --composite false
+  --tsBuildInfoFile null --generateTrace null` (`HL_TYPE_CHECK_ARGS` in
+  `shared/type_check.h`), which the command line holds over the config, on TypeScript 5 and 7.
+  Covered by `tests/e2e_check_types.sh` (`check_types_audit50.no_write_outside`, with the real
+  compiler) and `tests/e2e_dev_types.sh`.
+
 ### Added
 
 - `ctx.stdin:read_secret(prompt)` (Lua) / `ctx.stdin.readSecret(prompt)` (JS) in `app.main`

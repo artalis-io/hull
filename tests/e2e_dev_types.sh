@@ -57,7 +57,7 @@ cat > "$app/node_modules/.bin/tsc" <<SH
 echo "\$*" >> "$CALLS"
 echo "\$(date +%s) pid \$\$ ppid \$PPID dev \$(ps -o ppid= -p \$PPID 2>/dev/null | tr -d ' ')" >> "$WORK/who.log"
 env | grep -c HULL_DEV_SESSION >> "$ENVS"
-dir=\$5
+for a in "\$@"; do dir=\$a; done   # -p DIR comes last
 if grep -q SLOWTYPE "\$dir/app.ts"; then echo \$\$ > "$WORK/slow.pid"; sleep 30; fi
 if grep -q C1TYPE "\$dir/app.ts"; then
     printf 'app.ts(1,2): error TS2345: quoted \302\233x and \177y\\n'
@@ -111,8 +111,8 @@ echo "== hull dev --types: the type check"
 start_dev "--types"
 if wait_for "$WORK/dev.log" "[hull:dev] types: no errors"; then
     has "$WORK/dev.log" "type-checking with ./node_modules/.bin/tsc after each reload" &&
-        [ "$(head -n 1 "$CALLS")" = "--noEmit --pretty false -p ." ] &&
-        ok "on start: one run, --noEmit --pretty false -p <app>, no errors" ||
+        [ "$(head -n 1 "$CALLS")" = "--noEmit --incremental false --composite false --tsBuildInfoFile null --generateTrace null --pretty false -p ." ] &&
+        ok "on start: one run, the no-write options (dev_audit50.no_write_args), -p <app>, no errors" ||
         { bad "start"; cat "$WORK/dev.log" "$CALLS"; }
 else
     bad "no type check on start"; cat "$WORK/dev.log"
