@@ -230,6 +230,13 @@ release-artifact layout).
 
 ### Fixed
 
+- Log timestamps no longer switch to UTC part-way through a process. libc reads the time
+  zone file on the first `localtime()`, and the sandbox grants no zone file, so a process
+  whose first log line came after the sandbox applied - an `app.main` program, a TypeScript
+  app - wrote UTC from then on, while lines logged earlier (and every line under `--verbose`)
+  were local time. Both sandbox phases and the tool sandbox now load the zone before they
+  apply (`hl_sandbox_preload_tz`), granting nothing new. Covered by `tests/e2e_sandbox.sh`
+  Test 10 (`TZ=Asia/Tokyo`).
 - The commands that read an app's manifest without serving it now take every runtime's app.
   `hull modules list` looked for `app.lua` alone, so a JavaScript or TypeScript app failed
   with "no app.lua found" - and so did `hull check`, which starts there. `hull modules analyze`

@@ -784,6 +784,35 @@ EOF
     fi
 fi
 
+# ── Test 10: log timestamps keep the local zone under the sandbox ────
+# libc loads the zone file on the first localtime(). The sandbox grants no
+# zone file, so a process whose first log line came after it logged in UTC
+# from then on while earlier lines were local time. A named zone is loaded
+# from a file the same way, so TZ=Asia/Tokyo (UTC+9, no DST) shows it on any
+# host and any CI time zone.
+echo ""
+echo "=== Test 10: log timestamps keep the local zone under the sandbox ==="
+H10_TOKYO=$(TZ=Asia/Tokyo date +%H)
+H10_UTC=$(TZ=UTC date +%H)
+if [ "$H10_TOKYO" = "$H10_UTC" ]; then
+    skip "sandbox_logtime - no Asia/Tokyo zone data on this host"
+else
+    mkdir -p "$WORKDIR/t10"
+    cat > "$WORKDIR/t10/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/log@1" } })
+local log = require("hull.log")
+app.main(function() log.info("t10 in main") return 0 end)
+LUA
+    OUT10=$(cd "$WORKDIR/t10" && TZ=Asia/Tokyo "$HULL" app.lua 2>&1)
+    H10_AFTER=$(TZ=Asia/Tokyo date +%H)
+    H10_LOG=$(printf '%s\n' "$OUT10" | sed -n 's/^\([0-9][0-9]\):[0-9][0-9]:[0-9][0-9] INFO .*t10 in main.*/\1/p' | head -1)
+    if [ -n "$H10_LOG" ] && { [ "$H10_LOG" = "$H10_TOKYO" ] || [ "$H10_LOG" = "$H10_AFTER" ]; }; then
+        pass "sandbox_logtime.app_main_line_local_zone"
+    else
+        fail "sandbox_logtime.app_main_line_local_zone - want hour $H10_TOKYO, got: $OUT10"
+    fi
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────
 
 echo ""
