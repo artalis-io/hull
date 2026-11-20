@@ -37,7 +37,7 @@ static int check_types(const char *app_dir)
         return 1;
     }
     char checker[PATH_MAX];
-    if (hl_type_check_find(app_dir, checker, sizeof checker) != 0) {
+    if (hl_type_check_find(app_dir, 1, checker, sizeof checker) != 0) {
         fprintf(stderr, "[hull:check] --types: no TypeScript compiler found - install one "
                 "in the app (npm install --save-dev typescript) or on PATH (tsgo or tsc)\n");
         return 1;

@@ -272,21 +272,30 @@ function remove(name, id) {
 // snippet() / highlight() return the INDEXED text, unescaped, with the
 // markers spliced in: a document holding `<img src=x onerror=...>` came back
 // as markup, and the `<b>` default forced apps to render the result raw
-// (stored XSS; audit 26). So FTS5 is handed private-use sentinels as the
+// (stored XSS; audit 26). So FTS5 is handed sentinel tokens as the
 // markers, the text is HTML-escaped, and the sentinels are then replaced by
-// the caller's before / after / ellipsis (app-chosen, trusted markup). A
-// document that itself contains U+E000-U+E002 gets an extra caller marker
-// there - still only the app's own markup, though it can unbalance tags.
-const MARK_BEFORE = "", MARK_AFTER = "", MARK_ELLIPSIS = "";
+// the caller's before / after / ellipsis (app-chosen, trusted markup).
+// The sentinels are drawn per query (newMarks), not fixed: indexed text
+// holding the fixed U+E000-U+E002 got the caller's markup wherever its
+// author put them, unbalancing the page's tags (audit 49). A random token
+// between control bytes cannot be planted, and the HTML escape leaves it
+// whole. Same tokens as the Lua twin.
+function newMarks() {
+    const r = db.query("SELECT hex(randomblob(16)) AS t");
+    const t = r && r[0] && r[0].t;
+    if (typeof t !== "string" || t.length !== 32)
+        throw new Error("search.query: could not draw a marker token");
+    return ["\x01" + t + "b\x01", "\x01" + t + "a\x01", "\x01" + t + "e\x01"];
+}
 
-function escapeMarked(text, before, after, ellipsis) {
+function escapeMarked(text, mk, before, after, ellipsis) {
     if (typeof text !== "string") return text;
-    return text.replace(/[&<>"'-]/g, (c) =>
-        c === MARK_BEFORE ? before
-            : c === MARK_AFTER ? after
-            : c === MARK_ELLIPSIS ? (ellipsis === null ? c : ellipsis)
-            : c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;"
+    text = text.replace(/[&<>"']/g, (c) =>
+        c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;"
             : c === "\"" ? "&quot;" : "&#39;");
+    text = text.split(mk[0]).join(before).split(mk[1]).join(after);
+    if (ellipsis !== null) text = text.split(mk[2]).join(ellipsis);
+    return text;
 }
 
 // Integer option in [min, max], or `def` when undefined. A string, NaN or a
@@ -392,6 +401,7 @@ function query(name, q, opts) {
     let highlightParams = null;
     let snippetMarks = null;
     let highlightMarks = null;
+    const mk = (o.snippet || o.highlight) ? newMarks() : null;
 
     if (o.snippet) {
         const s = o.snippet;
@@ -407,7 +417,7 @@ function query(name, q, opts) {
         const sTokens = intOpt(s, "tokens", 32, 1, 64);
         selectCols += ", snippet(" + table + ", " + sCol +
             ", ?, ?, ?, ?) AS snippet";
-        snippetParams = [MARK_BEFORE, MARK_AFTER, MARK_ELLIPSIS, sTokens];
+        snippetParams = [mk[0], mk[1], mk[2], sTokens];
         snippetMarks = [sBefore, sAfter, sEllipsis];
     }
 
@@ -418,7 +428,7 @@ function query(name, q, opts) {
         const hAfter = marker(h.after, "</b>");
         selectCols += ", highlight(" + table + ", " + hCol +
             ", ?, ?) AS highlight";
-        highlightParams = [MARK_BEFORE, MARK_AFTER];
+        highlightParams = [mk[0], mk[1]];
         highlightMarks = [hBefore, hAfter];
     }
 
@@ -468,10 +478,10 @@ function query(name, q, opts) {
         for (let k = 0; k < rows.length; k++) {
             const row = rows[k];
             if (snippetMarks)
-                row.snippet = escapeMarked(row.snippet, snippetMarks[0],
+                row.snippet = escapeMarked(row.snippet, mk, snippetMarks[0],
                                            snippetMarks[1], snippetMarks[2]);
             if (highlightMarks)
-                row.highlight = escapeMarked(row.highlight, highlightMarks[0],
+                row.highlight = escapeMarked(row.highlight, mk, highlightMarks[0],
                                              highlightMarks[1], null);
         }
     }

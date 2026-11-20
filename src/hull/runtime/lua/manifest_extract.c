@@ -21,10 +21,12 @@
 #include "hull/module_registry.h"
 #include "hull/cap/tui.h"   /* hl_tui_admit_set (audit 31) */
 #include "hull/utils/alloc.h"
+#include "hull/vfs.h"   /* hl_vfs_overlay_find (audit 49) */
 
 #include "lua.h"
 #include "lauxlib.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -157,7 +159,18 @@ static int extract_manifest_json_impl(const char *path,
     }
 
     char *run_err = NULL;
-    int status = luaL_loadfilex(L, load_name, "t");
+    /* A pipeline generation's entry shadows the file, as in hl_lua_load_app:
+     * the manifest is read from the entry that will run (audit 49). */
+    const char *ebase = slash ? slash + 1 : path;
+    const HlEntry *ov = hl_vfs_overlay_find(ebase);
+    int status;
+    if (ov) {
+        char chunk[4096 + 2];
+        snprintf(chunk, sizeof chunk, "@%s", load_name);
+        status = luaL_loadbufferx(L, (const char *)ov->data, ov->len, chunk, "t");
+    } else {
+        status = luaL_loadfilex(L, load_name, "t");
+    }
     if (status == LUA_OK)
         status = lua_pcall(L, 0, 0, 0);
     if (status != LUA_OK) {

@@ -285,6 +285,17 @@ inspection; this document adds no second diagnostic channel.
   source file with `source` instead, and skips an entry with none: an edited source fails
   even before the binary is rebuilt. Re-deriving the entries through the pipeline is not
   done; the source hash and the action key say what they were made from.
+- A generated file gets the checks a committed file of the same name gets (audit 49):
+  `hull build` takes under `templates/`, `static/`, `migrations/`, `compute/` and
+  `shaders/` only the kinds the directory walks take, skips a nested migration, holds a
+  `compute/` entry to the module name rule and the committed-AOT rule (a generated
+  `*.aot.*` is not embedded and AOT bytes under a `.wasm` name fail the build, unless
+  `--trust-prebuilt-aot`), and runs generated shaders through `tool.gpu_shaders_check`
+  with the committed ones. It names every generated file it embeds.
+- The manifest the tools read (`hull manifest`, `modules`, `check`, `deploy`) and the one
+  `hull build --sign` signs is extracted with the generation for a Lua app as for a
+  JavaScript one: `tool.extract_manifest_lua(entry, bundle)` installs it as the overlay
+  for the extraction only, so a generated `app.lua` or module is the one read (audit 49).
 
 ## 7. Security invariants (in addition to BuildContext §11)
 

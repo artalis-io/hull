@@ -20,8 +20,17 @@
 int hl_type_check_configured(const char *app_dir);
 
 /* The compiler to run for the app at @p app_dir: 0 with its path in @p out,
- * -1 when none is installed. */
-int hl_type_check_find(const char *app_dir, char *out, size_t outsz);
+ * -1 when none is found. The app's own node_modules/.bin compiler is the
+ * repository's code, so it is considered (first) only when @p app_local is
+ * non-zero - an explicit request such as `hull check --types`; otherwise only
+ * tsgo, then tsc, on PATH, and never one that resolves inside the app tree
+ * (audit 49: `hull dev` ran a cloned repo's node_modules/.bin/tsc outside
+ * the sandbox). */
+int hl_type_check_find(const char *app_dir, int app_local, char *out, size_t outsz);
+
+/* The app's own node_modules/.bin tsgo or tsc: 0 with its path in @p out,
+ * -1 when there is none. Never run without an explicit request. */
+int hl_type_check_app_local(const char *app_dir, char *out, size_t outsz);
 
 /* One diagnostic. `parsed` is 0 for a line of another shape, kept whole in
  * `message` (file empty, line / col 0). */

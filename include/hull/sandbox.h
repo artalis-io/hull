@@ -198,6 +198,11 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
  */
 int hl_sandbox_apply_pledge(void);
 
+/* Load the local time zone before a sandbox makes the zone file unreadable,
+ * so log timestamps stay local time for the whole process. Called by both
+ * phases and by hl_tool_sandbox_init. */
+void hl_sandbox_preload_tz(void);
+
 /* Whether standard fd @p fd (0-2) was a terminal when hl_sandbox_apply_pledge
  * probed it, before any filter: 1 / 0, or -1 before that probe. Code that runs
  * sandboxed asks this instead of isatty(): without a terminal at startup the
