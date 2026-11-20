@@ -2972,6 +2972,23 @@ void hl_gpu_test_set_compile_timeout_ms(uint32_t ms)
     g_compile_timeout_ms = ms;
 }
 
+#ifdef HL_GPU_TEST_HOOKS
+/* Test-only (audit 49): called at the two points of the settle / abandon
+ * race, so a test can interleave them. Built into the tests' cap_gpu_th.o
+ * only; the product has no hook. */
+static void (*g_async_race_hook)(int point);
+
+void hl_gpu_test_set_async_race_hook(void (*fn)(int point))
+{
+    g_async_race_hook = fn;
+}
+
+#define GPU_ASYNC_RACE_HOOK(pt) \
+    do { if (g_async_race_hook) g_async_race_hook(pt); } while (0)
+#else
+#define GPU_ASYNC_RACE_HOOK(pt) ((void)0)
+#endif
+
 /* One backend compile, shared by the waiting event loop and the compile
  * thread (audit 40). The wait has a deadline: a compile past it, or past
  * the run's deadline / budget, is abandoned - the loop returns and the
@@ -2992,6 +3009,10 @@ struct HlGpuCompileJob {
     int                 done;       /* the thread is finished with the backend */
     int                 abandoned;  /* nobody takes `out`: the thread frees it */
     int                 async;      /* a gpu.async.compile's (set before start) */
+    int                 settling;   /* async: claimed by compile_async_settle
+                                     * (set under `mu` with the claim), so
+                                     * an abandon leaves `out` to it
+                                     * (audit 49) */
     int                 settled;    /* async: its pipeline was installed
                                      * (by the finisher or the first holder
                                      * of the device mutex after it was
@@ -3217,10 +3238,17 @@ static void compile_install(HlGpuDevice *dev, const HlGpuCompileJob *job);
 static void compile_async_settle(HlGpuDevice *dev, HlGpuCompileJob *job)
 {
     pthread_mutex_lock(&job->mu);
-    int todo = job->async && job->done && !job->settled && !job->abandoned;
+    int todo = job->async && job->done && !job->settling && !job->settled &&
+               !job->abandoned;
+    /* Claimed here, in the section that decides: a finisher abandoning at
+     * its deadline (compile_async_abandon, without the device mutex) then
+     * leaves `out` alone, instead of releasing the pipeline this installs
+     * (audit 49). */
+    if (todo) job->settling = 1;
     int rc = job->rc;
     pthread_mutex_unlock(&job->mu);
     if (!todo) return;
+    GPU_ASYNC_RACE_HOOK(2);
     if (rc == HL_GPU_OK) {
         if (find_pipeline(dev, job->name) ||
             dev->pipeline_count >= HL_GPU_PIPELINE_MAX) {
@@ -3650,12 +3678,19 @@ int hl_cap_gpu_compile_async_begin(HlGpuCtx *ctx, int device,
 
 /* Abandon an unsettled async job, touching only the job: the thread frees
  * a pipeline it has yet to make, and one already made is released here.
- * The device drops its reference once the thread is done (compile_busy). */
-static void compile_async_abandon(HlGpuCompileJob *job)
+ * The device drops its reference once the thread is done (compile_busy).
+ * 0 when a holder of the device mutex has claimed the job meanwhile (it
+ * installs the pipeline), 1 when it was abandoned. */
+static int compile_async_abandon(HlGpuCompileJob *job)
 {
     pthread_mutex_lock(&job->mu);
-    int release = job->done && !job->abandoned && !job->settled &&
-                  job->rc == HL_GPU_OK;
+    if (job->settling || job->settled) {
+        /* Done since the wait gave up, and claimed by the holder of the
+         * device mutex: the pipeline is its to install (audit 49). */
+        pthread_mutex_unlock(&job->mu);
+        return 0;
+    }
+    int release = job->done && !job->abandoned && job->rc == HL_GPU_OK;
     job->abandoned = 1;
     pthread_mutex_unlock(&job->mu);
     /* Released before `settled`, which frees the device (as the compile
@@ -3665,6 +3700,7 @@ static void compile_async_abandon(HlGpuCompileJob *job)
     pthread_mutex_lock(&job->mu);
     job->settled = 1;
     pthread_mutex_unlock(&job->mu);
+    return 1;
 }
 
 int hl_cap_gpu_compile_async_finish(HlGpuCompileAsync *a,
@@ -3708,11 +3744,12 @@ int hl_cap_gpu_compile_async_finish(HlGpuCompileAsync *a,
          * (audit 45). */
         rc = HL_GPU_ERR_TIMEOUT;
     } else if (!done) {
-        compile_async_abandon(job);
+        GPU_ASYNC_RACE_HOOK(1);
         rc = HL_GPU_ERR_TIMEOUT;
-        log_warn("[hull:gpu] shader '%s' async compile abandoned: past its "
-                 "deadline (%zu bytes of WGSL); the device is busy until it "
-                 "finishes", job->name, job->wgsl_len);
+        if (compile_async_abandon(job))
+            log_warn("[hull:gpu] shader '%s' async compile abandoned: past its "
+                     "deadline (%zu bytes of WGSL); the device is busy until it "
+                     "finishes", job->name, job->wgsl_len);
     } else {
         /* Settled under the device mutex, here or already by compile_busy.
          * A pool thread has no run, so dev_lock waits as a gpu.async

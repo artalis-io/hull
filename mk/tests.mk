@@ -144,7 +144,11 @@ GPU_HELPER_TH_OBJ := $(BUILDDIR)/cap_gpu_helper_th.o
 # -DHL_HOST_TEST_HOOKS (hl_host_test_force_windows, so the Windows-only path
 # checks run on every CI host - audit 44).
 HOST_TH_OBJ := $(BUILDDIR)/host_th.o
-TEST_CAP_OBJS := $(filter-out $(BUILDDIR)/cap_gpu_helper.o $(HOST_OBJ),$(CAP_OBJS)) $(GPU_HELPER_TH_OBJ) $(HOST_TH_OBJ)
+# cap/gpu.c likewise: the tests link cap_gpu_th.o, built with
+# -DHL_GPU_TEST_HOOKS (hl_gpu_test_set_async_race_hook, so the
+# gpu.async.compile settle / abandon race is interleaved - audit 49).
+GPU_TH_OBJ := $(BUILDDIR)/cap_gpu_th.o
+TEST_CAP_OBJS := $(filter-out $(BUILDDIR)/cap_gpu_helper.o $(BUILDDIR)/cap_gpu.o $(HOST_OBJ),$(CAP_OBJS)) $(GPU_HELPER_TH_OBJ) $(GPU_TH_OBJ) $(HOST_TH_OBJ)
 # cap/db_duckdb.c likewise (DuckDB builds only): the tests link
 # cap_db_duckdb_th.o, built with -DHL_DUCKDB_TEST_HOOKS
 # (hl_db_duckdb_test_set_abandon_ceiling_ms, so the abandoned-statement exit
@@ -157,6 +161,8 @@ $(DUCKDB_TH_OBJ): $(SRCDIR)/hull/cap/db_duckdb.c | $(BUILDDIR)
 endif
 $(GPU_HELPER_TH_OBJ): $(SRCDIR)/hull/cap/gpu_helper.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_GPU_HELPER_TEST_HOOKS $(INCLUDES) -c -o $@ $<
+$(GPU_TH_OBJ): $(SRCDIR)/hull/cap/gpu.c $(INCDIR)/hull/cap/gpu.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_GPU_TEST_HOOKS $(INCLUDES) -c -o $@ $<
 $(HOST_TH_OBJ): $(SRCDIR)/hull/shared/host.c $(INCDIR)/hull/shared/host.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_HOST_TEST_HOOKS $(INCLUDES) -c -o $@ $<
 

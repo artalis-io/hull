@@ -383,6 +383,13 @@ void hl_gpu_test_set_precheck_bypass(int on);
  * that outlives it is abandoned. */
 void hl_gpu_test_set_compile_timeout_ms(uint32_t ms);
 
+/* TEST-ONLY (audit 49): a function called at the two points of the
+ * gpu.async.compile settle / abandon race - 1: a finisher past its deadline,
+ * between its wait and the abandon; 2: compile_async_settle, between its
+ * claim and the install - so a test can interleave them. Defined only in
+ * the unit tests' cap_gpu_th.o (-DHL_GPU_TEST_HOOKS). */
+void hl_gpu_test_set_async_race_hook(void (*fn)(int point));
+
 /* Persistent named buffer */
 typedef struct HlGpuBuffer {
     char    name[HL_GPU_NAME_MAX];
