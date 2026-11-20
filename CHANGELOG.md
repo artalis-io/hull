@@ -8,6 +8,18 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-20
+
+TypeScript apps and build plugins. An app's entry and modules may be `.ts` (types erased by the
+build pipeline, from source and in `hull build`), `hull new` / `hull init --runtime ts` scaffold
+one, `hull check --types` and `hull dev` type-check it with the installed compiler, and two
+TypeScript examples ship. Build plugins (`hull.build.json`, `hull plugins list|run`) run before an
+app loads and before every `hull dev` reload. Then audit round 49's fixes (1 High, 2 Medium, the
+rest Low), Windows fixes for `fs.write`, drive letters and dev sessions, and log timestamps that stay in local time. A
+minor release for the new surface. No upgrade notes: everything that changes behaviour here is
+new in this release (`hull dev` type-checks only an app with a `tsconfig.json`, and uses the
+app's own compiler only under `hull dev --types`).
+
 ### Security
 
 - On Linux, a build plugin (and the GPU compile helper) no longer inherits the descriptors its
