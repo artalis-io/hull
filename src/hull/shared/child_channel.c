@@ -34,6 +34,7 @@ void hl_chan_frame_reset(HlChanFrame *r)
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdlib.h>
@@ -197,6 +198,52 @@ pid_t hl_chan_spawn(const char *exe, char *const argv[], int fd,
     return hl_chan_spawn_env(exe, argv, fd, env_ok, NULL);
 }
 
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+/* Linux: posix_spawn has no close-by-default (Apple's spawn takes
+ * POSIX_SPAWN_CLOEXEC_DEFAULT below), so a descriptor the parent holds
+ * without close-on-exec - one a library or an earlier open left - reached
+ * the child: a build plugin, a cloned repository's code under Landlock,
+ * read or wrote through it (audit 49). Fork, and in the child set up the
+ * same layout the spawn would, close every descriptor from 4 on and exec.
+ * Everything is allocated before the fork, and the child calls only
+ * async-signal-safe functions (the parent may have threads). */
+pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
+                        int (*env_ok)(const char *kv), const char *const *extra)
+{
+    char **env = filtered_env(env_ok, extra);
+    if (!env) { errno = ENOMEM; return -1; }
+    sigset_t all, prev;
+    sigfillset(&all);
+    pthread_sigmask(SIG_SETMASK, &all, &prev);   /* no handler runs in the child */
+    pid_t pid = fork();
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDWR);
+        if (nul < 0 || dup2(nul, 0) < 0 || dup2(nul, 1) < 0 || dup2(nul, 2) < 0)
+            _exit(127);
+        if (fd == 3) {
+            if (fcntl(3, F_SETFD, 0) < 0) _exit(127);
+        } else if (dup2(fd, 3) < 0) {
+            _exit(127);
+        }
+        hl_chan_close_extra_fds();
+        struct sigaction dfl;
+        memset(&dfl, 0, sizeof dfl);
+        dfl.sa_handler = SIG_DFL;
+        for (int sig = 1; sig < NSIG; sig++)
+            (void)sigaction(sig, &dfl, NULL);   /* SIGKILL / SIGSTOP refuse: fine */
+        sigset_t none;
+        sigemptyset(&none);
+        sigprocmask(SIG_SETMASK, &none, NULL);
+        execve(exe, argv, env);
+        _exit(127);
+    }
+    int err = errno;
+    pthread_sigmask(SIG_SETMASK, &prev, NULL);
+    free(env);
+    if (pid < 0) errno = err;
+    return pid;
+}
+#else
 pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
                         int (*env_ok)(const char *kv), const char *const *extra)
 {
@@ -233,6 +280,7 @@ pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
     if (pid < 0) errno = err;
     return pid;
 }
+#endif
 
 int hl_chan_self_exe(char *out, size_t sz)
 {

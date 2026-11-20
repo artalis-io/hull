@@ -10,6 +10,11 @@ release-artifact layout).
 
 ### Security
 
+- On Linux, a build plugin (and the GPU compile helper) no longer inherits the descriptors its
+  parent holds without close-on-exec (audit 49). `posix_spawn` there has no close-by-default,
+  unlike Apple's spawn, so a plugin - a cloned repository's code, under Landlock - could read
+  or write through a descriptor the build host had open. `hl_chan_spawn_env` now forks and, in
+  the child, closes every descriptor from 4 on before it executes the program.
 - Files a build plugin generates now get the checks a committed file of the same name gets
   (audit 49): `hull build` embedded a generated `compute/*.aot.*`, AOT bytes under a generated
   `compute/*.wasm` name and a generated `shaders/*.wgsl` without the committed-AOT rule, the
