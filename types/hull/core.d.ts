@@ -467,4 +467,6 @@ declare namespace Hull {
     interface Image {}
     /** An Error a Hull runtime refusal throws, carrying its refusal code. */
     interface RefusalError extends Error { code: "wait_refused" | "busy" }
+    /** The Error a host `manifest.hosts` does not admit throws (`http.*`, `ws.connect`). */
+    interface HostDeniedError extends Error { code: "denied"; host: string }
 }

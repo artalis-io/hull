@@ -2027,6 +2027,9 @@ const r = await httpClient.async.get("https://api.example.com/report", { timeout
 - **On timeout** the call fails like any other transport error: the sync calls raise
   / throw `http.get failed: ...`; `http.async.*` resolves to `nil` (Lua) / `undefined`
   (JS) - the same as a refused connection.
+  A host `manifest.hosts` does not admit is not a transport error: every call
+  raises / throws coded `denied` before anything is sent ([Runtime refusal
+  codes](#runtime-refusal-codes)).
 - **Opts go third on `post` / `put` / `patch`** (sync and `http.async.*`): the
   second argument is the body. With no body, pass `nil` / `undefined` there -
   `http.post(url, nil, { timeout_ms = 5000 })`. An opts table in the body's place
@@ -2043,8 +2046,13 @@ says so with a stable code (audit 35) - test the code, never the message text:
 |---|---|---|
 | `wait_refused` | a wait is attempted with a transaction open on a connection, in middleware (JS), while `req.multipart()` is parked (JS), outside a handler / task / `app.main` (Lua), or while the runtime shuts down (Lua) | the call is in the wrong place: a bug in the caller |
 | `busy` | an admission cap of this VM is full: 64 `http.fetch` / `http.async.*` requests in flight (`HL_HTTP_MAX_INFLIGHT`), the SMTP admission cap (`max(1, floor(W/2))` sends in flight), the VM's off-heap copy total (a `db.async` / `worker.dispatch` / `smtp.send` / `http.fetch` / `compute.async` / `compute.stream` / `gpu.*` copy that would pass its heap limit), 64 live `ws.connect` clients, 256 open blob readers / writers | local and transient: nothing was sent, a later call may be admitted |
+| `denied` | the URL's host is not admitted by `manifest.hosts`: `http.fetch` / `http.async.*`, the synchronous `http.*` calls and `ws.connect` (platform gap 3; a redirect to such a host is still reported by the request's own error) | the manifest said no: nothing was sent, and the same call will be denied again. Not an admission refusal - the stdlib counts it as a failure (outbox counts the attempt) |
 
 - **JS:** the thrown `Error` has an own `code` property: `e.code === "busy"`.
+  A `denied` error also has an own `host` (the refused host). Its message is
+  `"<call>: host '<host>' is not in manifest.hosts"`, and when an allowlist entry
+  is a `"$VAR"` whose variable is unset or empty, it adds `(its entry $VAR names
+  an unset variable)` - the usual reason a host an app meant to allow is refused.
 - **Lua:** the error string starts with `"[hull:<code>] "` (no `chunk:line:`
   prefix in front): `tostring(e):match("^%[hull:([%w_]+)%] ")`. Match it at
   the start only - a remote message can contain the text.

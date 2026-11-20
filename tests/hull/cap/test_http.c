@@ -40,6 +40,31 @@ UTEST(host, denied)
     ASSERT_NE(0, hl_http_check_host(&cfg, "evil.com", 8));
 }
 
+/* Gap 3: the bindings tell a refused host from a network failure. */
+UTEST(host, url_denied)
+{
+    const char *hosts[] = { "api.example.com", "$HULL_TEST_GAP3_UNSET" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 2 };
+    HlHttpDenial d;
+    unsetenv("HULL_TEST_GAP3_UNSET");
+
+    EXPECT_EQ(0, hl_http_url_denied(&cfg, "https://api.example.com/x", &d));
+    EXPECT_EQ(0, hl_http_url_denied(&cfg, "not a url", &d));
+
+    ASSERT_EQ(1, hl_http_url_denied(&cfg, "https://evil.example/x?q", &d));
+    EXPECT_STREQ("evil.example", d.host);
+    EXPECT_STREQ("$HULL_TEST_GAP3_UNSET", d.unset_ref);
+
+    /* Set, the variable is no longer named; no manifest.hosts denies all. */
+    setenv("HULL_TEST_GAP3_UNSET", "other.example", 1);
+    ASSERT_EQ(1, hl_http_url_denied(&cfg, "https://evil.example/", &d));
+    EXPECT_STREQ("", d.unset_ref);
+    EXPECT_EQ(0, hl_http_url_denied(&cfg, "https://other.example/", &d));
+    unsetenv("HULL_TEST_GAP3_UNSET");
+    ASSERT_EQ(1, hl_http_url_denied(NULL, "https://api.example.com/", &d));
+    EXPECT_STREQ("api.example.com", d.host);
+}
+
 UTEST(host, case_insensitive)
 {
     const char *hosts[] = { "API.Example.COM" };

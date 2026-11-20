@@ -120,6 +120,26 @@ int hl_http_chain_remaining_ms(uint64_t deadline_ms, uint64_t now_ms);
 int hl_http_check_host(const HlHttpConfig *cfg,
                         const char *host, size_t host_len);
 
+/** Why manifest.hosts refused an outbound call (gap 3). */
+typedef struct {
+    char host[256];        /**< the refused host, non-printable bytes as '?' */
+    char unset_ref[136];   /**< a "$VAR" allowlist entry whose variable is
+                            *   unset or empty, "" when there is none */
+} HlHttpDenial;
+
+/**
+ * @brief Whether a failed outbound call was refused by manifest.hosts (gap 3).
+ *
+ * The cap entry points return one failure for a denied host and for a network
+ * error, so the bindings ask this on the failure path to tell them apart. A
+ * NULL @p cfg (no manifest.hosts at all) denies every host.
+ *
+ * @return 1 when @p url parses and its host is not admitted, filling @p out;
+ * 0 when the host is admitted or the URL does not parse.
+ */
+int hl_http_url_denied(const HlHttpConfig *cfg, const char *url,
+                       HlHttpDenial *out);
+
 /**
  * @brief A URL as the audit log writes it: scheme://host/path, with any
  * userinfo and the query string and fragment dropped (audit 17: they carry

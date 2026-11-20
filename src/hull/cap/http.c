@@ -12,6 +12,7 @@
 #include "hull/cap/run_watchdog.h"     /* hl_run_deadline_clamp_ms (§6.2) */
 #include "hull/cap/audit.h"
 #include "hull/host_match.h"
+#include "hull/utils/env_ref.h"
 #include "hull/cap/db_budget.h"       /* hl_db_budget_charge: a redirect hop */
 #include "hull/shared/work_charge.h"   /* HL_WORK_HTTP_REQUEST_UNITS */
 
@@ -23,6 +24,8 @@
 #include <keel/url.h>
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -40,6 +43,34 @@ int hl_http_check_host(const HlHttpConfig *cfg,
      * ws.connect (same cfg) and smtp.send (§2.8). */
     return hl_host_match_any_env_n(cfg->allowed_hosts, cfg->count, host, host_len)
            ? 0 : -1;
+}
+
+int hl_http_url_denied(const HlHttpConfig *cfg, const char *url,
+                       HlHttpDenial *out)
+{
+    KlUrl parsed;
+    if (!out || !url || kl_url_parse(url, &parsed) != 0)
+        return 0;
+    if (cfg && hl_http_check_host(cfg, parsed.host, parsed.host_len) == 0)
+        return 0;
+    size_t n = parsed.host_len < sizeof out->host - 1 ? parsed.host_len
+                                                       : sizeof out->host - 1;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)parsed.host[i];
+        out->host[i] = (c > 0x20 && c < 0x7f && c != '\'') ? (char)c : '?';
+    }
+    out->host[n] = '\0';
+    out->unset_ref[0] = '\0';
+    char var[128];
+    for (int i = 0; cfg && i < cfg->count; i++) {
+        const char *pat = cfg->allowed_hosts[i];
+        if (!pat || !hl_env_ref(pat, var, sizeof var)) continue;
+        const char *v = getenv(var);
+        if (v && v[0]) continue;
+        snprintf(out->unset_ref, sizeof out->unset_ref, "%s", pat);
+        break;
+    }
+    return 1;
 }
 
 /* ── Audit-log URL redaction ─────────────────────────────────────── */

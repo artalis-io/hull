@@ -695,8 +695,29 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
     if (!js->base.http_cfg ||
         hl_http_check_host(js->base.http_cfg, parsed.host,
                            parsed.host_len) != 0) {
+        /* Coded "denied" with an own `host` (gap 3), as http.fetch's. */
+        HlHttpDenial d;
+        int denied = hl_http_url_denied(js->base.http_cfg, url, &d);
         JS_FreeCString(ctx, url);
-        return JS_ThrowTypeError(ctx, "host not in allowlist");
+        if (!denied)
+            return JS_ThrowTypeError(ctx, "host not in allowlist");
+        if (d.unset_ref[0])
+            JS_ThrowTypeError(ctx, "ws.connect: host '%s' is not in "
+                              "manifest.hosts (its entry %s names an unset "
+                              "variable)", d.host, d.unset_ref);
+        else
+            JS_ThrowTypeError(ctx, "ws.connect: host '%s' is not in "
+                              "manifest.hosts", d.host);
+        JSValue e = JS_GetException(ctx);
+        JSValue h = JS_NewString(ctx, d.host);
+        if (JS_IsException(h)) {
+            JS_FreeValue(ctx, e);
+            return JS_EXCEPTION;
+        }
+        JS_DefinePropertyValueStr(ctx, e, "host", h,
+                                  JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE);
+        JS_Throw(ctx, e);
+        return hl_js_refusal_tag(ctx, HL_REFUSAL_DENIED);
     }
     /* wss:// takes the client TLS config http.fetch uses (audit 24: Keel
      * needs cfg->tls for it and NULL was passed, so every wss:// failed). */

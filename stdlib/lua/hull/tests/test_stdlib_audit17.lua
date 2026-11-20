@@ -240,4 +240,25 @@ test("audit 35: pwned raises on a wait refusal", function()
     assert_eq(tostring(e):find("^%[hull:wait_refused%] ") ~= nil, true, "code kept: " .. tostring(e))
 end)
 
+-- Gap 3: "[hull:denied] " (a host manifest.hosts does not admit) is not an
+-- admission refusal: the same delivery is denied every time, so outbox counts
+-- it, as JS's code() already did, instead of handing the row back for ever.
+test("gap 3: a denied host is a counted delivery failure, not a refusal", function()
+    outbox.init()
+    outbox_rows("http://gap3.test/denied")
+    local p0, f0 = counts()
+    local real = http_client.async.post
+    http_client.async.post = function()
+        error("[hull:denied] http.fetch: host 'gap3.test' is not in manifest.hosts", 0)
+    end
+    local ok, r = pcall(outbox.flush)
+    http_client.async.post = real
+    assert_eq(ok, true, "not raised: " .. tostring(r))
+    assert_eq(r.busy, nil, "not busy")
+    assert_eq(r.failed, p0, "all counted")
+    local p, f = counts()
+    assert_eq(p, 0, "none pending")
+    assert_eq(f, f0 + p0, "all failed")
+end)
+
 return { pass = pass, fail = fail }
