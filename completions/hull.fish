@@ -133,6 +133,7 @@ complete -c hull -n '__hull_subcommand build' -l trust-prebuilt-aot -d 'Embed AO
 complete -c hull -n '__hull_subcommand dev' -s p -l port      -r -d 'Listen port'
 complete -c hull -n '__hull_subcommand dev' -s d -l database  -r -d 'Database file'
 complete -c hull -n '__hull_subcommand dev' -l agent          -d 'Enable agent sidecar files'
+complete -c hull -n '__hull_subcommand dev' -l types          -d "Also run the app's own node_modules compiler"
 complete -c hull -n '__hull_subcommand dev' -l no-types       -d 'Do not type-check after each reload'
 complete -c hull -n '__hull_subcommand dev' -l no-migrate     -d 'Skip auto-migrate on startup'
 complete -c hull -n '__hull_subcommand dev' -l no-sandbox     -d 'Disable kernel sandbox'

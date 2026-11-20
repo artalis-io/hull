@@ -6437,6 +6437,21 @@ UTEST(js_stdlib, stdlib_audit28_suite)
 }
 #endif
 
+/* Stdlib regressions from audit 49: template loop variables render no
+ * function, search snippet / highlight markers cannot be planted. */
+UTEST(js_stdlib, stdlib_audit49_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit49.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+    cleanup_js_caps();
+}
+
 /* Stdlib regressions from audit 29: jobs keys stored as strings and capped
  * at the column, csrf 413 / empty header, one Bearer rule. */
 UTEST(js_stdlib, stdlib_audit29_suite)

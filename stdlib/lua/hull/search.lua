@@ -247,22 +247,33 @@ end
 -- snippet() / highlight() return the INDEXED text, unescaped, with the
 -- markers spliced in: a document holding `<img src=x onerror=...>` came back
 -- as markup, and the `<b>` default forced apps to render the result raw
--- (stored XSS; audit 26). So FTS5 is handed private-use sentinels as the
+-- (stored XSS; audit 26). So FTS5 is handed sentinel tokens as the
 -- markers, the text is HTML-escaped, and the sentinels are then replaced by
--- the caller's before / after / ellipsis (app-chosen, trusted markup). A
--- document that itself contains U+E000-U+E002 gets an extra caller marker
--- there - still only the app's own markup, though it can unbalance tags.
-local MARK_BEFORE, MARK_AFTER, MARK_ELLIPSIS = "\238\128\128", "\238\128\129", "\238\128\130"
+-- the caller's before / after / ellipsis (app-chosen, trusted markup).
+-- The sentinels are drawn per query (new_marks), not fixed: indexed text
+-- holding the fixed U+E000-U+E002 got the caller's markup wherever its
+-- author put them, unbalancing the page's tags (audit 49). A random token
+-- between control bytes cannot be planted, and the HTML escape leaves it
+-- whole.
+local function new_marks()
+    local r = db.query("SELECT hex(randomblob(16)) AS t")
+    local t = r and r[1] and r[1].t
+    if type(t) ~= "string" or #t ~= 32 then
+        error("search.query: could not draw a marker token")
+    end
+    return "\1" .. t .. "b\1", "\1" .. t .. "a\1", "\1" .. t .. "e\1"
+end
 local SNIPPET_ESCAPES = { ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;",
                           ['"'] = "&quot;", ["'"] = "&#39;" }
 
-local function escape_marked(text, before, after, ellipsis)
+-- The tokens are "\1" + hex + a letter + "\1": no pattern magic character.
+local function escape_marked(text, mk, before, after, ellipsis)
     if type(text) ~= "string" then return text end
     text = text:gsub("[&<>\"']", SNIPPET_ESCAPES)
-    text = text:gsub(MARK_BEFORE, function() return before end)
-    text = text:gsub(MARK_AFTER, function() return after end)
+    text = text:gsub(mk[1], function() return before end)
+    text = text:gsub(mk[2], function() return after end)
     if ellipsis then
-        text = text:gsub(MARK_ELLIPSIS, function() return ellipsis end)
+        text = text:gsub(mk[3], function() return ellipsis end)
     end
     return text
 end
@@ -355,6 +366,7 @@ function search.query(name, query, opts)
     local select_cols = { "id" }
     local params = {}
     local marks = {}   -- { { column, before, after, ellipsis? }, ... }
+    local mk = (opts.snippet or opts.highlight) and { new_marks() } or nil
 
     if opts.snippet then
         local s = opts.snippet
@@ -364,9 +376,9 @@ function search.query(name, query, opts)
         local tokens = int_opt(s, "tokens", 32, 1, 64)
         select_cols[#select_cols + 1] = "snippet(" .. tbl .. ", " ..
             tostring(col) .. ", ?, ?, ?, " .. tostring(tokens) .. ") AS snippet"
-        params[#params + 1] = MARK_BEFORE
-        params[#params + 1] = MARK_AFTER
-        params[#params + 1] = MARK_ELLIPSIS
+        params[#params + 1] = mk[1]
+        params[#params + 1] = mk[2]
+        params[#params + 1] = mk[3]
         marks[#marks + 1] = { "snippet", tostring(s.before or "<b>"),
                               tostring(s.after or "</b>"), tostring(s.ellipsis or "...") }
     end
@@ -375,8 +387,8 @@ function search.query(name, query, opts)
         local col = int_opt(h, "column", 1, 0, SNIPPET_MAX_COLUMN)
         select_cols[#select_cols + 1] = "highlight(" .. tbl .. ", " ..
             tostring(col) .. ", ?, ?) AS highlight"
-        params[#params + 1] = MARK_BEFORE
-        params[#params + 1] = MARK_AFTER
+        params[#params + 1] = mk[1]
+        params[#params + 1] = mk[2]
         marks[#marks + 1] = { "highlight", tostring(h.before or "<b>"),
                               tostring(h.after or "</b>") }
     end
@@ -411,7 +423,7 @@ function search.query(name, query, opts)
         for _, m in ipairs(marks) do
             local col = m[1]
             for _, row in ipairs(rows) do
-                row[col] = escape_marked(row[col], m[2], m[3], m[4])
+                row[col] = escape_marked(row[col], mk, m[2], m[3], m[4])
             end
         end
         return rows

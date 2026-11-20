@@ -157,4 +157,71 @@ else
     bad "plugins_audit49.text_escaped"; cat "$WORK/esc.txt"
 fi
 
+echo "== plugins: generated files get a committed file's checks (audit 49)"
+# gen_app NAME OUTPUTS - an app whose plugin generates OUTPUTS, Lua table
+# entries { "name", "bytes" }.
+gen_app() {
+    d="$WORK/gen-$1"
+    rm -rf "$d"
+    mkdir -p "$d/plugins/gen"
+    printf '%s\n' '{ "plugins": [ { "path": "plugins/gen" } ] }' > "$d/hull.build.json"
+    cat > "$d/app.lua" <<'AEOF'
+app.manifest({ modules = {} })
+---@demo x
+local function f() return 1 end
+app.main(function(ctx) ctx.stdout:write("source\n") return 0 end)
+AEOF
+    cat > "$d/plugins/gen/app.lua" <<PEOF
+app.manifest({
+    modules = { "hull/build-plugin@1" },
+    build_plugin = { id = "gen", version = 1, input = "source",
+        languages = { "lua" }, annotations = { "demo" }, output = "x" },
+})
+app.transform(function(ctx)
+    for i, o in ipairs({ $2 }) do
+        local w = assert(ctx.outputs.create_blob("b" .. i))
+        assert(w:write(o[2])); assert(w:close())
+        assert(ctx.outputs.declare_generated_output({ name = o[1], position_map = "none" }, w))
+    end
+end)
+PEOF
+    echo "$d"
+}
+d=$(gen_app aotwasm '{ "compute/evil.wasm", "\0aotNATIVECODE" }')
+"$HULL" build "$d" -o "$d/out/app" > "$WORK/g-aotwasm.txt" 2>&1 || true
+has "$WORK/g-aotwasm.txt" "compute/evil.wasm (generated) holds AOT code" &&
+    ok "plugins_audit49.generated_aot_wasm: AOT bytes under a generated .wasm name fail the build" ||
+    { bad "plugins_audit49.generated_aot_wasm"; cat "$WORK/g-aotwasm.txt"; }
+d=$(gen_app aot '{ "compute/evil.aot.aarch64", "\0aotNATIVECODE" }')
+"$HULL" build "$d" -o "$d/out/app" > "$WORK/g-aot.txt" 2>&1 || true
+has "$WORK/g-aot.txt" "not embedding 1 generated AOT file(s) (compute/evil.aot.aarch64)" &&
+    ok "plugins_audit49.generated_aot: a generated compute/*.aot.* is not embedded" ||
+    { bad "plugins_audit49.generated_aot"; cat "$WORK/g-aot.txt"; }
+d=$(gen_app name '{ "compute/a.b.wasm", "\0asm\1\0\0\0" }')
+"$HULL" build "$d" -o "$d/out/app" > "$WORK/g-name.txt" 2>&1 || true
+has "$WORK/g-name.txt" "invalid compute module name 'a.b'" &&
+    ok "plugins_audit49.generated_compute_name: the module name rule applies" ||
+    { bad "plugins_audit49.generated_compute_name"; cat "$WORK/g-name.txt"; }
+d=$(gen_app shader '{ "shaders/bad.wgsl", "fn main() { let a = $; }\n" }')
+"$HULL" build "$d" -o "$d/out/app" > "$WORK/g-shader.txt" 2>&1 || true
+has "$WORK/g-shader.txt" "shader check failed: shaders/bad.wgsl" &&
+    ok "plugins_audit49.generated_shader: a generated shader is checked" ||
+    { bad "plugins_audit49.generated_shader"; cat "$WORK/g-shader.txt"; }
+d=$(gen_app sql '{ "migrations/down/001_x.sql", "DROP TABLE t;" }')
+"$HULL" build "$d" -o "$d/out/app" > "$WORK/g-sql.txt" 2>&1 || true
+has "$WORK/g-sql.txt" "skipping 1 generated .sql file(s) in subdirectories of migrations/" &&
+    ok "plugins_audit49.generated_nested_migration: only top-level migrations are embedded" ||
+    { bad "plugins_audit49.generated_nested_migration"; cat "$WORK/g-sql.txt"; }
+
+echo "== plugins: a generated Lua entry's manifest is the one read (audit 49)"
+d=$(gen_app manifest '{ "app.lua", "app.manifest({ modules = { \"hull/env@1\" }, env = { \"HOME\" } })\napp.main(function() return 0 end)\n" }')
+"$HULL" manifest "$d" > "$WORK/g-manifest.txt" 2>&1 || true
+"$HULL" modules list "$d" > "$WORK/g-modules.txt" 2>&1 || true
+if has "$WORK/g-manifest.txt" '"env":["HOME"]' && has "$WORK/g-manifest.txt" 'hull/env@1' &&
+   has "$WORK/g-modules.txt" "hull/env"; then
+    ok "plugins_audit49.lua_manifest_generation: hull manifest / modules list read the generated entry"
+else
+    bad "plugins_audit49.lua_manifest_generation"; cat "$WORK/g-manifest.txt" "$WORK/g-modules.txt"
+fi
+
 [ "$fail" -eq 0 ] && echo "e2e_plugins: OK" || { echo "e2e_plugins: FAILED"; exit 1; }

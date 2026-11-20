@@ -206,7 +206,7 @@ frontend checks each span's neighbourhood and reports these as `ts.unsupported` 
 fix hint (keep the return type on the arrow's line). The conformance corpus (§5) carries
 one case per shape.
 
-Implemented, six rules (the first two in slice 1):
+Implemented, seven rules (the first two in slice 1):
 
 - **Arrow types and `=>`.** A line break between the end of an arrow's typed parameter
   list or return type and its `=>` is refused ("keep '=>' on the line the types end").
@@ -223,7 +223,8 @@ Implemented, six rules (the first two in slice 1):
   adds `<` to those tokens (a generic arrow's erased `<T>` leaves its `(`), extends the
   rule to overload signatures, which erase with their statement, and refuses a `;` there
   too: `x` / `interface I {}` / `;` is two statements in TypeScript and one in the erased
-  JavaScript.
+  JavaScript. The token after an erased declaration starts a statement, so a `/` there is a
+  regular expression (`type T = number` / `/x/.test(s)`), as TypeScript rescans it.
 - **`as` and `satisfies` before a line.** TypeScript ends an `as` / `satisfies` type at a
   line break, and the statement then ends by automatic semicolon insertion; erased, the
   expression before it would take the next line. Refused when that line starts with a token
@@ -244,6 +245,15 @@ Implemented, six rules (the first two in slice 1):
   after a field named `static`, `get` or `set` with no initializer, any member (`static:
   number` / `x = 1` reads `static x = 1`). Node writes a `;` after an erased modifier, but
   its output for an erased member there joins the lines (`refuse/asi_class_member.ts`).
+- **An arrow's return type in a conditional's consequent.** There `(a): T => b` is an arrow
+  with a return type to TypeScript only when the whole arrow is followed by a `:`; otherwise
+  `(a)` is the consequent and `T => b` the alternate. Hull reads it the same way: with no
+  annotated parameter, the arrow (plain or `async`) is read ahead and kept when the list is a
+  parameter list and a `:` follows. This matters in a `case` test, where both readings parse
+  (`case c ? (x = 0): number => 1 : w:` - the other reading ends the clause at the leftover
+  `:` and makes `w` a label). An arrow read ahead to that `:` with a diagnostic on the way is
+  refused, since which reading TypeScript took cannot be told; parenthesise the arrow or
+  annotate a parameter.
 - **Instantiation expressions add none.** A `<...>` erased after an expression (§3.6)
   leaves exactly what TypeScript goes on to parse after it, a line break included, so no
   shape arises there.
@@ -591,9 +601,12 @@ conversion and the declarations install are one module both share
      vouch for a third party's preview binaries, a pinned preview goes stale between
      releases, and an app author writing TypeScript has a compiler already (the editor's, or
      `npm`'s; TypeScript 7's `tsc` is the native compiler). Revisit if that stops holding.
-   - **In the dev loop (as built):** `hull dev` runs the same compiler lookup, once at start
-     and after each successful (re)spawn, as `--noEmit --pretty false -p <app>` in the
-     background (`shared/type_check.h`, dev.c): an edit stops a check still running, and
+   - **In the dev loop (as built):** `hull dev` looks up `tsgo`, then `tsc`, on PATH (never
+     one that resolves inside the app tree). The app's `node_modules/.bin` compiler is the
+     repository's code, so it is considered only with `hull dev --types`, the same explicit
+     request `hull check --types` makes (audit 49: it ran, unsandboxed, by default). The
+     compiler runs once at start and after each successful (re)spawn, as `--noEmit --pretty
+     false -p <app>` in the background (`shared/type_check.h`, dev.c): an edit stops a check still running, and
      none holds up or decides a reload. It prints a summary of the diagnostics; under
      `--agent` it writes `.hull/types.json` (MAC'd under the session key, as the other
      sidecars), which `hull agent errors` / MCP `hull_errors` serve as `types`. With no

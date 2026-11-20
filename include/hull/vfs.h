@@ -208,7 +208,8 @@ int hl_vfs_overlay_active(void);
  * ignored), or NULL when nothing shadows it. */
 const HlEntry *hl_vfs_overlay_find(const char *rel);
 
-/* Remove the overlay (tests, shutdown). */
+/* Remove the overlay (tests, shutdown, and the tool VM after the Lua
+ * manifest extraction it installed one for: tool.extract_manifest_lua). */
 void hl_vfs_overlay_reset(void);
 
 #endif /* HL_VFS_H */

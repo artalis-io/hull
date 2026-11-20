@@ -8,6 +8,7 @@
 #include "hull/shared/type_check.h"
 #include "hull/shared/host.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,15 +21,37 @@ int hl_type_check_configured(const char *app_dir)
     return n > 0 && (size_t)n < sizeof path && access(path, F_OK) == 0;
 }
 
-int hl_type_check_find(const char *app_dir, char *out, size_t outsz)
+static const char *const CHECKERS[] = { "tsgo", "tsc" };
+#define CHECKERS_N (sizeof CHECKERS / sizeof *CHECKERS)
+
+/* 1 when @p path resolves inside @p app_dir (or either cannot be resolved:
+ * a PATH entry that leads into the app tree is the tree's own code). */
+static int inside_app(const char *app_dir, const char *path)
 {
-    static const char *const names[] = { "tsgo", "tsc" };
-    for (size_t i = 0; i < sizeof names / sizeof *names; i++) {
-        int n = snprintf(out, outsz, "%s/node_modules/.bin/%s", app_dir, names[i]);
+    char app[PATH_MAX], real[PATH_MAX];
+    if (!realpath(app_dir, app) || !realpath(path, real)) return 1;
+    size_t n = strlen(app);
+    if (n == 1 && app[0] == '/') return 1;
+    return strncmp(real, app, n) == 0 && (real[n] == '/' || real[n] == '\0');
+}
+
+int hl_type_check_app_local(const char *app_dir, char *out, size_t outsz)
+{
+    for (size_t i = 0; i < CHECKERS_N; i++) {
+        int n = snprintf(out, outsz, "%s/node_modules/.bin/%s", app_dir, CHECKERS[i]);
         if (n > 0 && (size_t)n < outsz && access(out, X_OK) == 0) return 0;
     }
-    for (size_t i = 0; i < sizeof names / sizeof *names; i++)
-        if (hl_host_find_in_path(names[i], out, outsz) == 1) return 0;
+    if (outsz) out[0] = '\0';
+    return -1;
+}
+
+int hl_type_check_find(const char *app_dir, int app_local, char *out, size_t outsz)
+{
+    if (app_local && hl_type_check_app_local(app_dir, out, outsz) == 0) return 0;
+    for (size_t i = 0; i < CHECKERS_N; i++)
+        if (hl_host_find_in_path(CHECKERS[i], out, outsz) == 1 &&
+            (app_local || !inside_app(app_dir, out)))
+            return 0;
     if (outsz) out[0] = '\0';
     return -1;
 }

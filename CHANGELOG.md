@@ -8,6 +8,19 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Security
+
+- `hull dev` no longer runs the app's own `node_modules/.bin/tsgo` or `tsc` unless asked
+  (audit 49, High, A2). The type check added in this release looked there first, by default,
+  so `hull dev` on a cloned repository with a `tsconfig.json` ran whatever executable the
+  repository shipped at that path, as the user and outside every sandbox. It now uses `tsgo`
+  or `tsc` on PATH, never one that resolves inside the app tree, and the app's own compiler
+  only with the new `hull dev --types` - the explicit request `hull check --types` already
+  made. Without it, a repository that has only its own compiler gets a one-line hint. Also,
+  `.hull/types.json` is written terminal-safe (DEL and C1 as `\u00NN`): a diagnostic quoting
+  such a character made `hull agent errors` report the genuine file as not Hull's. Covered by
+  `tests/e2e_dev_types.sh` (`dev_audit49.*`).
+
 ### Added
 
 - `hull dev` type-checks the app after each reload, when it has a `tsconfig.json` and a
@@ -230,6 +243,13 @@ release-artifact layout).
 
 ### Fixed
 
+- Log timestamps no longer switch to UTC part-way through a process. libc reads the time
+  zone file on the first `localtime()`, and the sandbox grants no zone file, so a process
+  whose first log line came after the sandbox applied - an `app.main` program, a TypeScript
+  app - wrote UTC from then on, while lines logged earlier (and every line under `--verbose`)
+  were local time. Both sandbox phases and the tool sandbox now load the zone before they
+  apply (`hl_sandbox_preload_tz`), granting nothing new. Covered by `tests/e2e_sandbox.sh`
+  Test 10 (`TZ=Asia/Tokyo`).
 - The commands that read an app's manifest without serving it now take every runtime's app.
   `hull modules list` looked for `app.lua` alone, so a JavaScript or TypeScript app failed
   with "no app.lua found" - and so did `hull check`, which starts there. `hull modules analyze`

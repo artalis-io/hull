@@ -145,8 +145,10 @@ function M.app_manifest(app_dir, cmd)
     if runtime == "lua" then
         -- The app's top level runs in a Lua runtime of its own, never this
         -- tool VM (see hl_lua_extract_manifest_json).
+        -- Handed the generation, so a generated entry or module is the one
+        -- read (audit 49), as the JS child is.
         local run_err
-        json_s, run_err = tool.extract_manifest_lua(entry)
+        json_s, run_err = tool.extract_manifest_lua(entry, _generation[app_dir])
         if not json_s and run_err then return nil, tostring(run_err) end
     else
         -- A transient JS runtime in a child, handed the generation.
@@ -213,7 +215,7 @@ function M.extract_manifest(app_dir)
         -- backing here) can legitimately throw. Only a failure that leaves an
         -- INTENDED manifest undetermined fails - matching the JS side.
         if tool.log_app_phase then tool.log_app_phase(true) end
-        local json_s, run_err = tool.extract_manifest_lua(lua_entry)
+        local json_s, run_err = tool.extract_manifest_lua(lua_entry, _generation[app_dir])
         if tool.log_app_phase then tool.log_app_phase(false) end
         if json_s then
             local decoded, decode_err = json.decode(json_s)

@@ -5679,6 +5679,21 @@ UTEST(lua_stdlib, stdlib_audit28_suite)
     cleanup_lua_caps();
 }
 
+/* Stdlib regressions from audit 49: template loop variables render no
+ * function, search snippet / highlight markers cannot be planted. */
+UTEST(lua_stdlib, stdlib_audit49_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit49.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
 /* Stdlib regressions from audit 29: jobs keys stored as strings and capped
  * at the column, csrf 413 / empty header, one Bearer rule. */
 UTEST(lua_stdlib, stdlib_audit29_suite)

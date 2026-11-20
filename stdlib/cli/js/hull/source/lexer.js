@@ -637,9 +637,24 @@ export function createTokenizer(bytes, opts) {
         return g;
     }
 
+    // TypeScript mode only: the last token is a `/` or `/=` scanned with the operator goal, read
+    // where the parser now knows a statement starts (after a declaration erased whole, ended by
+    // automatic semicolon insertion: `type T = number` LF `/x/.test(s)`). Called with that token
+    // still current (no lookahead read past it), it scans the same bytes again as a regular
+    // expression and returns the new token, or null when the last token is not one of those.
+    function rescanRegex() {
+        const t = lastToken;
+        if (!t || t.type !== "punctuator" || (t.value !== "/" && t.value !== "/=")) return null;
+        p = t.start - 1;                 // 0-based: the `/`
+        nlPending = t.nlBefore;
+        tokenCount--;
+        scanRegex();
+        return lastToken;
+    }
+
     const _linemap = buildLinemap(bytes);
     return { next: next, comments: comments, diagnostics: budget.list, linemap: _linemap, peekMark: peekMark, peekRewind: peekRewind, splitGreater: splitGreater,
-             specMark: specMark, specRewind: specRewind, ctxDepth: ctxDepth };
+             specMark: specMark, specRewind: specRewind, ctxDepth: ctxDepth, rescanRegex: rescanRegex };
 }
 
 // lex(bytes, opts) -> { tokens, comments, diagnostics, linemap }. Convenience that drives the
