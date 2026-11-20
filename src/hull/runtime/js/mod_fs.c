@@ -28,11 +28,29 @@ static const JSClassDef js_mmap_class = {
     .finalizer = js_mmap_finalizer,
 };
 
+/* A MappedBuffer `this`: a closed one has a NULL opaque, a normal state, so
+ * it is read with JS_GetOpaque (JS_GetOpaque2 throws on NULL, and close() /
+ * length then returned normally with that TypeError left pending - the next
+ * call that checked for an exception reported it; audit 50). Only a `this`
+ * of another class throws, and the caller returns JS_EXCEPTION. Returns 0
+ * with *out set (NULL when closed), or -1 with a TypeError pending. */
+static int js_mmap_this(JSContext *ctx, JSValueConst this_val,
+                        HlMappedBuffer **out)
+{
+    if (JS_GetClassID(this_val) != js_mmap_class_id) {
+        JS_ThrowTypeError(ctx, "not a MappedBuffer");
+        return -1;
+    }
+    *out = JS_GetOpaque(this_val, js_mmap_class_id);
+    return 0;
+}
+
 static JSValue js_mmap_close(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlMappedBuffer *buf = JS_GetOpaque2(ctx, this_val, js_mmap_class_id);
+    HlMappedBuffer *buf;
+    if (js_mmap_this(ctx, this_val, &buf) < 0) return JS_EXCEPTION;
     if (buf) {
         hl_cap_fs_munmap(buf);
         JS_SetOpaque(this_val, NULL);
@@ -44,7 +62,8 @@ static JSValue js_mmap_get_length(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlMappedBuffer *buf = JS_GetOpaque2(ctx, this_val, js_mmap_class_id);
+    HlMappedBuffer *buf;
+    if (js_mmap_this(ctx, this_val, &buf) < 0) return JS_EXCEPTION;
     if (!buf || buf->closed) return JS_NewInt32(ctx, 0);
     return JS_NewInt64(ctx, (int64_t)buf->len);
 }

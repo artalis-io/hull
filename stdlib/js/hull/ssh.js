@@ -356,10 +356,10 @@ const pathArg = (p) => bytesArg(p, "path");
 // An SFTP session (hull:ssh:sftp_client; docs/ssh.md for applications).
 const SftpHandle = Object.freeze({
     realpath(p) { const o = self(this); return guard(() => o.realpath(pathArg(p))); },
-    async list(p) {
+    async list(p, opts) {
         const o = self(this);
         const r = await guard(async () => {
-            const res = await o.list(pathArg(p));
+            const res = await o.list(pathArg(p), opts);
             // [safe, refused] (Lua's two returns) -> one object
             if (Array.isArray(res) && !isNil(res[0])) {
                 return [{ entries: res[0], refused: res[1] || [] }];

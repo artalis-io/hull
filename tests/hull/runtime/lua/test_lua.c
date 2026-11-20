@@ -6116,6 +6116,73 @@ UTEST(lua_stdlib_audit44, text_storable)
 }
 #endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* Stdlib regressions from audit 50 (stdlib/lua/hull/tests/test_stdlib_audit50.lua):
+ * pwned fails closed on a denied host, retry.run does not retry one, sftp
+ * list() bounds its bytes, ratelimit's sweep at the cap sheds to 90%. Each
+ * case runs the script in a fresh state, named in the global __audit50_case.
+ * One UTEST per case, written out, so scripts/check_regression_test.sh sees
+ * each. */
+static int run_audit50_case(const char *name, long long *pass, long long *fail)
+{
+    init_lua_with_caps();
+    if (!lua_initialized) return -1;
+    lua_pushstring(lua_rt.L, name);
+    lua_setglobal(lua_rt.L, "__audit50_case");
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit50.lua", pass, fail);
+    cleanup_lua_caps();
+    return rc;
+}
+
+UTEST(pwned_audit50, denied_unset_var_throws)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("pwned_audit50.denied_unset_var_throws", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 1LL);
+}
+
+UTEST(pwned_audit50, denied_cidr_throws)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("pwned_audit50.denied_cidr_throws", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 1LL);
+}
+
+UTEST(pwned_audit50, outage_still_fails_open)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("pwned_audit50.outage_still_fails_open", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 1LL);
+}
+
+UTEST(retry_audit50, denied_not_retried)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("retry_audit50.denied_not_retried", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 1LL);
+}
+
+UTEST(ssh_audit50, list_byte_cap)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("ssh_audit50.list_byte_cap", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 1LL);
+}
+
+UTEST(ratelimit_audit50, sweep_amortised_at_cap)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("ratelimit_audit50.sweep_amortised_at_cap", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 1LL);
+}
+#endif
+
 UTEST(lua_stdlib, ws_stream_suite)
 {
     long long pass = 0, fail = -1;

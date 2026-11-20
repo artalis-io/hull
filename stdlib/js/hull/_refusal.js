@@ -34,5 +34,18 @@ function code(e) {
 function isWait(e) { return code(e) === WAIT; }
 function isBusy(e) { return code(e) === BUSY; }
 
-export const _refusal = { WAIT, BUSY, code, isWait, isBusy };
+const DENIED = "denied";
+
+// True when e is the runtime refusing a host manifest.hosts does not admit
+// (an own `code` "denied", gap 3). Not a code() answer: the same call is
+// denied again, so a caller that hands refusals back must count it. A caller
+// that fails closed on a misconfiguration (pwned) or must not repeat a
+// deterministic failure (retry.run) tests it here (audit 50).
+function isDenied(e) {
+    if (e === null || typeof e !== "object" || !hasOwn.call(e, "code")) return false;
+    if (hasOwn.call(e, "ssh")) return false;
+    return e.code === DENIED;
+}
+
+export const _refusal = { WAIT, BUSY, DENIED, code, isWait, isBusy, isDenied };
 export default _refusal;

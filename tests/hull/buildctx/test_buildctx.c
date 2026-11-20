@@ -138,6 +138,41 @@ static void setup(lua_State *L)
     lua_setglobal(L, "T");
 }
 
+/* P.preset_check swapped the registry's __hull_manifest for the plugin's
+ * table and extracted it unprotected: a raise inside the extraction (a
+ * metamethod, an allocation failure) left the registry naming the plugin's
+ * table and leaked the strings already copied (audit 50). */
+UTEST(buildctx_audit50, preset_check_restores_manifest)
+{
+    lua_State *L = luaL_newstate();
+    ASSERT_TRUE(L != NULL);
+    luaL_openlibs(L);
+    lua_newtable(L);
+    lua_pushliteral(L, "saved");
+    lua_setfield(L, -2, "marker");
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    luaL_requiref(L, "P", luaopen_hull_buildctx_plugin, 1);
+    lua_pop(L, 1);
+    const char *chunk =
+        "local m = setmetatable({ fs = { read = { 'a', 'b' } } },"
+        "  { __index = function(_, k) if k == 'env' then error('boom50', 0) end end })\n"
+        "local ok, err = pcall(P.preset_check, m)\n"
+        "return ok, err";
+    ASSERT_EQ(luaL_dostring(L, chunk), LUA_OK);
+    EXPECT_FALSE(lua_toboolean(L, -2));
+    EXPECT_STREQ(lua_tostring(L, -1) ? lua_tostring(L, -1) : "(null)", "boom50");
+    lua_pop(L, 2);
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    ASSERT_TRUE(lua_istable(L, -1));
+    lua_getfield(L, -1, "marker");
+    EXPECT_STREQ(lua_tostring(L, -1) ? lua_tostring(L, -1) : "(null)", "saved");
+    lua_pop(L, 2);
+    /* A plain table still extracts (the preset refuses an empty manifest). */
+    ASSERT_EQ(luaL_dostring(L, "return P.preset_check({})"), LUA_OK);
+    EXPECT_TRUE(lua_isnil(L, -2));
+    lua_close(L);
+}
+
 UTEST(buildctx, action_core)
 {
     long long pass = 0, fail = -1;

@@ -489,6 +489,7 @@ local data, err = sftp:read("/etc/app/config.toml", 1024 * 1024)  -- max; defaul
 if not data and err.code == "no_such_file" then ... end   -- `max` passed: "too_large"
 -- `max` is a non-negative integer up to 2^53 - 1; anything else is "bad_argument"
 local names, refused = sftp:list("/var/log/app")          -- refused: unsafe names, and why
+-- a listing past 100000 entries or { max_bytes = N } (default 16 MiB) is "too_large"
 ```
 
 The rest of the file operations:

@@ -102,7 +102,9 @@ retry.backoff = function(attempt, opts) {
  * hull:_refusal) is never retried: it is re-thrown at once (audit 39).
  * "wait_refused" recurs on every attempt, and "busy" is this VM's own
  * admission cap - the caller decides (jobs hands the job back uncounted, the
- * outbox gives its claim back), as in the Lua twin.
+ * outbox gives its claim back), as in the Lua twin. An error whose `code` is
+ * "denied" (a host manifest.hosts does not admit) is re-thrown at once too: it
+ * is deterministic (audit 50).
  */
 retry.run = async function(fn, opts) {
     opts = opts || {};
@@ -130,7 +132,9 @@ retry.run = async function(fn, opts) {
         if (ok) {
             if (!(opts.retryOn && (await opts.retryOn(val)))) return val;
         } else {
-            if (_refusal.code(val)) throw val;
+            // A denied host (`code` "denied") is denied on every attempt:
+            // re-thrown at once, unchanged, rather than retried (audit 50).
+            if (_refusal.code(val) || _refusal.isDenied(val)) throw val;
             if (opts.retryOnError && !(await opts.retryOnError(val))) throw val;
         }
         if (attempt < max) {

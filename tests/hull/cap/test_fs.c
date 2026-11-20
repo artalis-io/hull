@@ -133,6 +133,24 @@ UTEST(hl_cap_fs, validate_rejects_dotdot)
     teardown_fs();
 }
 
+/* The root's reserved `.hull` as the first component: refused by the fs
+ * policy but not by hl_cap_fs_validate itself, which db.open / blob roots
+ * also reach (audit 50, defence in depth). */
+UTEST(fs_audit50, validate_refuses_reserved_first_component)
+{
+    setup_fs();
+    const char *err = NULL;
+    EXPECT_EQ(hl_cap_fs_validate(&test_cfg, ".hull/x", &err), -1);
+    EXPECT_STREQ(err ? err : "(null)", "reserved_path");
+    EXPECT_EQ(hl_cap_fs_validate(&test_cfg, ".hull", NULL), -1);
+    EXPECT_EQ(hl_cap_fs_validate(&test_cfg, ".HuLL/internal.db", NULL), -1);
+    EXPECT_EQ(hl_cap_fs_validate(&test_cfg, "./.hull/x", NULL), -1);
+    /* Only the first real component; other names pass as before. */
+    EXPECT_EQ(hl_cap_fs_validate(&test_cfg, ".hullx/y", NULL), 0);
+    EXPECT_EQ(hl_cap_fs_validate(&test_cfg, "subdir/.hull", NULL), 0);
+    teardown_fs();
+}
+
 UTEST(hl_cap_fs, validate_rejects_absolute)
 {
     setup_fs();

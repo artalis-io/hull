@@ -69,7 +69,11 @@ function ratelimit.check(buckets, key, limit, window, now, saturated)
             -- Drop expired entries; if every entry is live (an attacker
             -- spending `limit` requests per key), drop the ones
             -- closest to expiry down to 90% of the cap, so the map has a
-            -- hard bound and each new key does not pay a full sweep.
+            -- hard bound and each new key does not pay a full sweep. Shed
+            -- whenever the sweep leaves more than 90%, not only when every
+            -- entry is live: with a few expired among ~MAX live ones, each
+            -- sweep freed a handful and the next few keys paid another full
+            -- O(MAX) sweep each (audit 50).
             local live = {}
             for k, b in pairs(saturated.map) do
                 if (now - b.window_start) >= window then
@@ -78,7 +82,7 @@ function ratelimit.check(buckets, key, limit, window, now, saturated)
                     live[#live + 1] = k
                 end
             end
-            if #live > MAX_BUCKETS then
+            if #live > math.floor(MAX_BUCKETS * 0.9) then
                 local m = saturated.map
                 table.sort(live, function(a, b)
                     return m[a].window_start < m[b].window_start

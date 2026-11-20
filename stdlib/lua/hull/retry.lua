@@ -114,7 +114,8 @@ end
 -- the outbox gives its claim back), rather than retry.run spending attempts
 -- and sleeping while holding the run. Errors are re-raised with level 0, so
 -- they keep their text (they used to gain a "hull.retry:N: " prefix, which
--- hid the refusal code).
+-- hid the refusal code). A `"[hull:denied] "` error (a host manifest.hosts
+-- does not admit) is re-raised at once too: it is deterministic (audit 50).
 function retry.run(fn, opts)
     opts = opts or {}
     -- 0 and NaN take the default too, as in the JS twin (`maxAttempts ||
@@ -143,7 +144,9 @@ function retry.run(fn, opts)
                 return table.unpack(r, 2, r.n)
             end
         else
-            if refusal.code(r[2]) then error(r[2], 0) end
+            -- A denied host ("[hull:denied] ") is denied on every attempt:
+            -- re-raised at once, unchanged, rather than retried (audit 50).
+            if refusal.code(r[2]) or refusal.is_denied(r[2]) then error(r[2], 0) end
             if opts.retry_on_error and not opts.retry_on_error(r[2]) then
                 error(r[2], 0)
             end
