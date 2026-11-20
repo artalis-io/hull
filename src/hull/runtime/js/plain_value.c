@@ -199,7 +199,7 @@ int hl_js_pv_encode(JSContext *ctx, JSValueConst v, HlPvWriter *w)
         JS_FreeValue(ctx, JS_GetException(ctx));
         return fail(w, HL_PV_E_NOMEM);
     }
-    return encode(ctx, v, w, &cls, 0);
+    return encode(ctx, v, w, &cls, w->depth);
 }
 
 static JSValue decode(JSContext *ctx, HlPvReader *r)

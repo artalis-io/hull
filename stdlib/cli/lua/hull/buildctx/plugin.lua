@@ -226,7 +226,13 @@ local function serve(self, s)
             kill(self)
             return nil, "plugin_timeout"
         end
-        local t, id, v = self.proc:recv(left)
+        -- A frame that raises in its decode (the tool VM out of memory) fails
+        -- this plugin, not the whole command (audit 49).
+        local got, t, id, v = pcall(self.proc.recv, self.proc, left)
+        if not got then
+            kill(self)
+            return nil, "plugin_protocol", t
+        end
         if not t then
             kill(self)
             if id == "timeout" then return nil, "plugin_timeout" end

@@ -138,7 +138,9 @@ static JSValue chan_call(JSContext *ctx, JSValueConst this_val, int argc,
     hl_pv_writer_init(&w, HL_BP_MAX_PAYLOAD);
     hl_pv_put_map(&w, 2);
     hl_pv_put_key(&w, "args", 4);
+    w.depth = 1;   /* inside the envelope, as the host's check counts it */
     hl_js_pv_encode(ctx, argc > 1 ? argv[1] : JS_UNDEFINED, &w);
+    w.depth = 0;
     hl_pv_put_key(&w, "op", 2);
     hl_pv_put_text(&w, op, oplen);
     if (w.err != HL_PV_OK) {
@@ -189,14 +191,8 @@ static JSValue chan_done(JSContext *ctx, JSValueConst this_val, int argc,
     }
     HlPvWriter w;
     hl_pv_writer_init(&w, 64 * 1024);
-    if (msg) {
-        hl_pv_put_map(&w, 1);
-        hl_pv_put_key(&w, "error", 5);
-        hl_pv_put_bytes(&w, msg, n);   /* a lone surrogate is not text */
-        JS_FreeCString(ctx, msg);
-    } else {
-        hl_pv_put_map(&w, 0);
-    }
+    hl_build_plugin_put_done(&w, msg, n);   /* bytes: a lone surrogate is not text */
+    if (msg) JS_FreeCString(ctx, msg);
     int rc = w.err ? -1 : hl_build_plugin_send(HL_BP_DONE, 0, w.buf, w.len,
                                               hl_chan_mono_ms() + HL_BP_REPLY_TIMEOUT_MS);
     hl_pv_writer_free(&w);

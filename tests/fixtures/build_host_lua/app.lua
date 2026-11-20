@@ -13,6 +13,26 @@ app.transform(function(ctx)
     local mode = ctx.meta.mode
     if mode == "fail" then error("boom", 0) end
     if mode == "spin" then while true do end end
+    -- Audit 49: the channel's edges (stdlib/cli/lua/hull/buildctx/tests/
+    -- test_plugin_audit49.lua).
+    if mode == "bigerr" then error(string.rep("A", 4095) .. "\xc3\xa9" .. string.rep("B", 70000), 0) end
+    if mode == "nilerr" then error(nil) end
+    if mode == "deep" or mode == "wide" then
+        local d
+        if mode == "deep" then              -- 62 levels: one past what the host takes
+            d = { "x" }
+            for _ = 1, 61 do d = { d } end
+        else                                -- a DAG of 100^3 shared empty tables
+            d = {}
+            for _ = 1, 3 do
+                local up = {}
+                for i = 1, 100 do up[i] = d end
+                d = up
+            end
+        end
+        ctx.diagnostics.emit({ severity = "info", code = "c", message = "m", data = d })
+        return
+    end
     local src = assert(ctx.inputs.read("src/a.txt"))
     local st = assert(ctx.inputs.stat("src/a.txt", { size = true }))
     local list = assert(ctx.inputs.list("src"))

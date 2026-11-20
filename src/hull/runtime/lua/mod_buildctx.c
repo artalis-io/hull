@@ -632,8 +632,9 @@ static int pl_recv(lua_State *L)
     }
     lua_pushinteger(L, (lua_Integer)f.type);
     lua_pushinteger(L, (lua_Integer)f.id);
-    int err = f.len ? hl_lua_pv_decode(L, f.buf, f.len) : (lua_pushnil(L), HL_PV_OK);
+    int err = f.len ? hl_lua_pv_decode_protected(L, f.buf, f.len) : (lua_pushnil(L), HL_PV_OK);
     hl_chan_frame_reset(&f);
+    if (err == HL_LUA_PV_RAISED) return lua_error(L);   /* the frame is freed first */
     if (err != HL_PV_OK) {
         lua_pop(L, 2);
         return fail(L, "malformed");

@@ -12006,6 +12006,69 @@ UTEST(lua_tool_vm, buildctx_registry_reads_real_plugin_manifests)
     nftw(root, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
 }
 
+/* hull.buildctx._fs.open / _store.open check their root against the tool
+ * sandbox's grants, as every other tool binding does (audit 49): they took
+ * any absolute root, which on macOS (no kernel unveil in tool mode) only the
+ * Hull-chosen callers kept in bounds. */
+UTEST(lua_tool_vm_audit49, buildctx_open_checks_the_allowlist)
+{
+    char granted[HL_TEST_PATH_MAX], other[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(granted, sizeof granted, "hull_tv_a49g") != NULL);
+    ASSERT_TRUE(hl_test_mkdtemp(other, sizeof other, "hull_tv_a49o") != NULL);
+    char rg[PATH_MAX], ro[PATH_MAX];
+    ASSERT_TRUE(realpath(granted, rg) != NULL);
+    ASSERT_TRUE(realpath(other, ro) != NULL);
+
+    HlToolUnveilCtx uctx;
+    hl_tool_unveil_init(&uctx);
+    ASSERT_EQ(hl_tool_unveil_add(&uctx, rg, "rwc"), 0);
+    hl_tool_unveil_seal(&uctx);
+    HlVfs pvfs;
+    void *pvfs_owned = NULL;
+    hl_platform_vfs_init(&pvfs, &pvfs_owned);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.sandbox = 0;
+    HlLua tv;
+    memset(&tv, 0, sizeof tv);
+    tv.tool_unveil_ctx = &uctx;
+    tv.base.platform_vfs = &pvfs;
+    ASSERT_EQ(hl_lua_init(&tv, &cfg), 0);
+    lua_State *L = tv.L;
+
+    /* The natives are the stdlib's to require: take them from _LOADED. */
+    lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+    lua_getfield(L, -1, "hull.buildctx._fs");
+    lua_setglobal(L, "FS");
+    lua_getfield(L, -1, "hull.buildctx._store");
+    lua_setglobal(L, "ST");
+    lua_pop(L, 1);
+    lua_pushstring(L, rg);
+    lua_setglobal(L, "GRANTED");
+    lua_pushstring(L, ro);
+    lua_setglobal(L, "OTHER");
+    const char *chunk =
+        "local g, e = FS.open(OTHER, {})\n"
+        "assert(g == nil and e == 'permission', 'fs outside: ' .. tostring(e))\n"
+        "local s, e2 = ST.open(OTHER .. '/store')\n"
+        "assert(s == nil and e2 == 'permission', 'store outside: ' .. tostring(e2))\n"
+        "g = assert(FS.open(GRANTED, {}))\n"
+        "g:close()\n"
+        "s = assert(ST.open(GRANTED .. '/store'))\n"
+        "s:close()\n"
+        "return true\n";
+    ASSERT_EQ(luaL_loadstring(L, chunk), LUA_OK);
+    int rc = lua_pcall(L, 0, 1, 0);
+    if (rc != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(L, -1));
+    EXPECT_EQ(rc, LUA_OK);
+    lua_pop(L, 1);
+
+    hl_lua_free(&tv);
+    hl_tool_unveil_free(&uctx);
+    hl_platform_vfs_dispose(pvfs_owned);
+    nftw(rg, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+    nftw(ro, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
 /* The app runtime never carries a tool context, even when the caller's struct
  * held one (the field is only kept in tool mode). */
 UTEST(lua_tool_vm, app_runtime_drops_a_stray_unveil_context)

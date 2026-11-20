@@ -31,6 +31,7 @@
 
 #include "hull/manifest.h"
 #include "hull/shared/child_channel.h"
+#include "hull/shared/plain_value.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -51,6 +52,16 @@
 /* How long a plugin waits for the host's REPLY when its run has no
  * deadline of its own. */
 #define HL_BP_REPLY_TIMEOUT_MS 60000u
+
+/* The longest transform error a DONE carries; a longer one is cut on a
+ * UTF-8 boundary and ends "...". */
+#define HL_BP_ERROR_MAX 4096u
+
+/* The DONE payload: {} for @p msg NULL, else { error = <msg, cut to
+ * HL_BP_ERROR_MAX> } (bytes: a message may not be UTF-8). Written into @p w,
+ * whose max must hold HL_BP_ERROR_MAX + 64: a long error used to fail the
+ * writer, no DONE went out, and the host waited out its deadline (audit 49). */
+void hl_build_plugin_put_done(HlPvWriter *w, const char *msg, size_t n);
 
 /* Take the inherited channel: 1 when this process is a build plugin (the
  * descriptor is kept, close-on-exec and non-blocking, and the variable is
