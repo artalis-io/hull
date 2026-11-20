@@ -48,7 +48,8 @@
 #include "hull/release.h"        /* hl_release_verify_manifest_sig */
 #include "hull/signature.h"  /* HL_PLATFORM_PUBKEY_HEX */
 #include "hull/manifest_extract_file.h"
-#include "hull/shared/generation.h"   /* hl_generation_fd */  /* extract_manifest_js helper */
+#include "hull/shared/generation.h"   /* hl_generation_fd, hl_generation_install */
+#include "hull/vfs.h"                 /* hl_vfs_overlay_active / _reset */
 #ifdef HL_FRONTEND_JS
 #include "hull/frontend/js_generation.h"  /* JS source-frontend generation/session manager */
 #endif
@@ -941,27 +942,48 @@ static int l_tool_extract_manifest_js(lua_State *L)
     return 1;
 }
 
-/* ── tool.extract_manifest_lua(path) → json|nil, err|nil ────────────── *
+/* ── tool.extract_manifest_lua(path [, generation]) → json|nil, err|nil ─ *
  *
  * Runs the Lua app's top level in a fresh, sandboxed runtime - never this
  * tool VM - and returns its manifest as JSON (nil when none was declared),
  * plus the error its top level raised, if any. A manifest declared before
  * that error still comes back; the caller decides whether the error counts.
+ * An optional pipeline generation (a bundle string) is installed as the
+ * loaders' overlay for the extraction only, so the entry and the modules it
+ * requires are the ones that will run, as extract_manifest_js's child sees
+ * them (audit 49: the manifest was read from the shadowed source).
  * See hl_lua_extract_manifest_json. */
 static int l_tool_extract_manifest_lua(lua_State *L)
 {
     const char *path = luaL_checkstring(L, 1);
+    size_t gen_len = 0;
+    const char *gen = luaL_optlstring(L, 2, NULL, &gen_len);
     HlToolUnveilCtx *ctx = get_unveil_ctx(L);
     if (ctx && hl_tool_unveil_check(ctx, path, 'r') != 0) {
         lua_pushnil(L);
         lua_pushfstring(L, "%s: not readable in the tool sandbox", path);
         return 2;
     }
+    if (gen) {
+        char gerr[256];
+        if (hl_vfs_overlay_active()) {
+            lua_pushnil(L);
+            lua_pushstring(L, "a pipeline generation is already installed");
+            return 2;
+        }
+        if (hl_generation_install((const uint8_t *)gen, gen_len, gerr,
+                                  sizeof gerr) != 0) {
+            lua_pushnil(L);
+            lua_pushfstring(L, "pipeline generation refused: %s", gerr);
+            return 2;
+        }
+    }
     HlLua *lua = get_hl_lua_from_L(L);
     char *json = NULL, *err = NULL;
     size_t json_len = 0;
     (void)hl_lua_extract_manifest_json(path, lua ? lua->base.platform_vfs : NULL,
                                        &json, &json_len, &err);
+    if (gen) hl_vfs_overlay_reset();
     if (json) lua_pushlstring(L, json, json_len); else lua_pushnil(L);
     /* err is the app's top-level error message: every caller prints it, so
      * it comes back escaped (audit 32: an ESC / OSC 52 sequence in it reached
@@ -2356,7 +2378,9 @@ static int l_tool_frontend_close(lua_State *L)
  * cap and the WGSL pre-check always, and a test compile when this hull has
  * a GPU backend and the host an adapter. Returns true when the test
  * compile ran, false when only the pre-check did; nil plus a message
- * naming the file on the first failure.
+ * naming the file on the first failure. An element may also be a table
+ * { name = ..., data = ... }: a shader the build pipeline generated, checked
+ * from its bytes (audit 49).
  */
 static int l_tool_gpu_shaders_check(lua_State *L)
 {
@@ -2375,11 +2399,34 @@ static int l_tool_gpu_shaders_check(lua_State *L)
     /* Every path first (lua_tostring may run no metamethod on a string). */
     for (size_t i = 0; i < count; i++) {
         lua_rawgeti(L, 1, (lua_Integer)i + 1);
+        if (lua_type(L, -1) == LUA_TTABLE) {
+            /* A generated shader: its bytes, copied as a file read would
+             * (HL_GPU_WGSL_MAX_BYTES + 1 at most, which reads as too large). */
+            lua_pushliteral(L, "name");
+            lua_rawget(L, -2);
+            paths[i] = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+            lua_pop(L, 1);   /* the element keeps the string alive */
+            size_t dlen = 0;
+            const char *d = NULL;
+            lua_pushliteral(L, "data");
+            lua_rawget(L, -2);
+            if (lua_type(L, -1) == LUA_TSTRING) d = lua_tolstring(L, -1, &dlen);
+            if (d) {
+                if (dlen > HL_GPU_WGSL_MAX_BYTES + 1) dlen = HL_GPU_WGSL_MAX_BYTES + 1;
+                bufs[i] = malloc(dlen ? dlen : 1);
+                if (bufs[i]) { memcpy(bufs[i], d, dlen); lens[i] = dlen; }
+            }
+            lua_pop(L, 2);
+            if (!paths[i] || !d) { err = "not a shader"; err_i = i; goto done; }
+            if (!bufs[i]) { err = "out of memory"; err_i = i; goto done; }
+            continue;
+        }
         paths[i] = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
         lua_pop(L, 1);   /* the table keeps the string alive */
         if (!paths[i]) { err = "not a path"; err_i = i; goto done; }
     }
     for (size_t i = 0; i < count; i++) {
+        if (bufs[i]) continue;   /* generated: already read */
         if (uctx && hl_tool_unveil_check(uctx, paths[i], 'r') != 0) {
             err = "outside the tool sandbox"; err_i = i; goto done;
         }
