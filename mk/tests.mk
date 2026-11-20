@@ -1627,6 +1627,13 @@ e2e-http-timeout: $(BUILDDIR)/hull
 e2e-refusal-codes: $(BUILDDIR)/hull
 	sh tests/e2e_refusal_codes.sh
 
+# A host manifest.hosts does not admit is refused with the code "denied",
+# naming the host and an unset "$VAR" entry, not a network failure's message
+# (platform gap 3): http.fetch, sync http.get, ws.connect. Both runtimes.
+.PHONY: e2e-host-denied
+e2e-host-denied: $(BUILDDIR)/hull
+	sh tests/e2e_host_denied.sh
+
 e2e-timers: $(BUILDDIR)/hull
 	sh tests/e2e_timers.sh
 

@@ -16,7 +16,9 @@
 
 #include <keel/http_server.h>
 
+#include <ctype.h>
 #include <limits.h>
+#include <stdio.h>
 #include <stdint.h>
 
 static void js_free_http_headers(JSContext *ctx, HlHttpHeader *hdrs, int count);
@@ -277,6 +279,30 @@ static int js_http_body_get(JSContext *ctx, JSValueConst v, JsHttpBody *b,
     return -1;
 }
 
+/* Gap 3: a host manifest.hosts does not admit throws an Error with an own
+ * `code` "denied" and an own `host`, not the network failure's message. */
+static JSValue js_http_throw_denied(JSContext *ctx, const char *what,
+                                    const HlHttpDenial *d)
+{
+    if (d->unset_ref[0])
+        JS_ThrowTypeError(ctx, "%s: host '%s' is not in manifest.hosts (its "
+                          "entry %s names an unset variable)", what, d->host,
+                          d->unset_ref);
+    else
+        JS_ThrowTypeError(ctx, "%s: host '%s' is not in manifest.hosts",
+                          what, d->host);
+    JSValue e = JS_GetException(ctx);
+    JSValue h = JS_NewString(ctx, d->host);
+    if (JS_IsException(h)) {
+        JS_FreeValue(ctx, e);
+        return JS_EXCEPTION;
+    }
+    JS_DefinePropertyValueStr(ctx, e, "host", h,
+                              JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE);
+    JS_Throw(ctx, e);
+    return hl_js_refusal_tag(ctx, HL_REFUSAL_DENIED);
+}
+
 /* http.request(method, url, opts?) */
 static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
@@ -344,15 +370,19 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, timeout_ms, method, url,
                                     headers, num_headers, body, body_len, &resp);
+    HlHttpDenial denial;
+    int denied = rc != 0 && hl_http_url_denied(js->base.http_cfg, url, &denial);
 
     JS_FreeCString(ctx, method);
     JS_FreeCString(ctx, url);
     js_http_body_free(ctx, &jbody);
     js_free_http_headers(ctx, headers, num_headers);
 
-    if (rc != 0)
+    if (rc != 0) {
+        if (denied) return js_http_throw_denied(ctx, "http request", &denial);
         return JS_ThrowInternalError(ctx, "http request failed: %s",
                                       kl_strerror(resp.error));
+    }
 
     return js_http_response_charged(ctx, &resp);
 }
@@ -397,12 +427,16 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, timeout_ms, "GET", url,
                                     headers, num_headers, NULL, 0, &resp);
+    HlHttpDenial denial;
+    int denied = rc != 0 && hl_http_url_denied(js->base.http_cfg, url, &denial);
     JS_FreeCString(ctx, url);
     js_free_http_headers(ctx, headers, num_headers);
 
-    if (rc != 0)
+    if (rc != 0) {
+        if (denied) return js_http_throw_denied(ctx, "http.get", &denial);
         return JS_ThrowInternalError(ctx, "http.get failed: %s",
                                       kl_strerror(resp.error));
+    }
 
     return js_http_response_charged(ctx, &resp);
 }
@@ -460,13 +494,22 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, timeout_ms, method_name, url,
                                     headers, num_headers, body, body_len, &resp);
+    HlHttpDenial denial;
+    int denied = rc != 0 && hl_http_url_denied(js->base.http_cfg, url, &denial);
     JS_FreeCString(ctx, url);
     js_http_body_free(ctx, &jbody);
     js_free_http_headers(ctx, headers, num_headers);
 
-    if (rc != 0)
+    if (rc != 0) {
+        if (denied) {
+            char what[32];
+            snprintf(what, sizeof what, "http.%s", method_name);
+            for (char *c = what; *c; c++) *c = (char)tolower((unsigned char)*c);
+            return js_http_throw_denied(ctx, what, &denial);
+        }
         return JS_ThrowInternalError(ctx, "http.%s failed: %s",
                                       method_name, kl_strerror(resp.error));
+    }
 
     return js_http_response_charged(ctx, &resp);
 }
@@ -523,12 +566,16 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, timeout_ms, "DELETE", url,
                                     headers, num_headers, NULL, 0, &resp);
+    HlHttpDenial denial;
+    int denied = rc != 0 && hl_http_url_denied(js->base.http_cfg, url, &denial);
     JS_FreeCString(ctx, url);
     js_free_http_headers(ctx, headers, num_headers);
 
-    if (rc != 0)
+    if (rc != 0) {
+        if (denied) return js_http_throw_denied(ctx, "http.del", &denial);
         return JS_ThrowInternalError(ctx, "http.del failed: %s",
                                       kl_strerror(resp.error));
+    }
 
     return js_http_response_charged(ctx, &resp);
 }
@@ -694,6 +741,8 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         js->server, hl_js_cont_suspend_conn(cont), js->base.net_ctx, js->base.alloc,
         js->base.http_cfg, timeout_ms, method, url, headers, num_headers,
         body, body_len);
+    HlHttpDenial denial;
+    int denied = !async_ctx && hl_http_url_denied(js->base.http_cfg, url, &denial);
 
     JS_FreeCString(ctx, method);
     JS_FreeCString(ctx, url);
@@ -706,6 +755,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         hl_offheap_drop(&body_hold);
         cont->destroy(cont);
         JS_FreeValue(ctx, promise);
+        if (denied) return js_http_throw_denied(ctx, "http.fetch", &denial);
         return JS_ThrowInternalError(ctx, "http.fetch: failed to start request");
     }
     async_ctx->cont = cont;

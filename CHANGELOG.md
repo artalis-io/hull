@@ -20,6 +20,17 @@ release-artifact layout).
   TIOCSETAF, no TIOCSTI, no read or write grant); Linux and OpenBSD already had the `tty`
   promise. `test.run_main`'s stdin feeds it a line. Covered by `tests/e2e_read_secret.sh`
   (`make e2e-read-secret`, in CI) and `test_sandbox_grant`'s `sandbox_tty` case.
+- A host `manifest.hosts` does not admit is now refused with a code (platform gap 3, found by
+  hscli). `http.fetch` / `http.async.*`, the synchronous `http.*` calls and `ws.connect` failed
+  with `http.fetch: failed to start request` / `http.get failed: ...` / `host not in
+  allowlist`, the first two the text a refused connection or a DNS failure gives, so an app
+  could not tell "the manifest said no" from "the network said no". They now raise (Lua)
+  `"[hull:denied] <call>: host '<host>' is not in manifest.hosts"` and throw (JS) an `Error`
+  with an own `code` `"denied"` and an own `host`; when an allowlist entry is a `"$VAR"` whose
+  variable is unset or empty the message names it. `denied` is not an admission refusal: Lua's
+  internal `hull._refusal` now reports only `wait_refused` / `busy`, as the JS one did, so
+  `outbox.flush` counts a denied delivery as a failed attempt in both runtimes. Covered by
+  `tests/e2e_host_denied.sh` (`make e2e-host-denied`, in CI) and `test_http`'s `host.url_denied`.
 
 ## [0.23.0] - 2026-11-20
 

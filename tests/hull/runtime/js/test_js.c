@@ -12313,7 +12313,7 @@ UTEST(js_http_timeout, per_call_option_is_validated)
                  "import { httpClient as http } from 'hull:http-client';\n"
                  "let r = 0;\n"
                  "try { %s; r = 2; } catch (e) {\n"
-                 "  r = /failed/.test(e.message) && !/timeoutMs/.test(e.message)"
+                 "  r = /not in manifest\\.hosts/.test(e.message) && !/timeoutMs/.test(e.message)"
                  " ? 1 : 3; }\n"
                  "globalThis.__ht = r;\n", good[i]);
         JSValue v = JS_Eval(js.ctx, code, strlen(code), "<ht>", JS_EVAL_TYPE_MODULE);
@@ -15157,7 +15157,7 @@ UTEST(js_audit24, wss_connect_needs_the_client_tls_config)
     js.base.http_cfg = &cfg;
     static const struct { const char *url; const char *msg; } cases[] = {
         { "wss://ws.example/x",    "wss:// needs TLS" },
-        { "wss://other.example/x", "not in allowlist" },
+        { "wss://other.example/x", "is not in manifest.hosts" },
         { "ws://ws.example/x",     "requires running server" },
     };
     char code[1024];
@@ -15264,7 +15264,7 @@ UTEST(js_audit25, http_body_types)
                  "import { httpClient as http } from 'hull:http-client';\n"
                  "let r = 0;\n"
                  "try { %s; r = 2; } catch (e) {\n"
-                 "  r = /failed/.test(e.message) && !/body/.test(e.message)"
+                 "  r = /not in manifest\\.hosts/.test(e.message) && !/body/.test(e.message)"
                  " ? 1 : 3; }\n"
                  "globalThis.__hb = r;\n", good[i]);
         JSValue v = JS_Eval(js.ctx, code, strlen(code), "<hb>", JS_EVAL_TYPE_MODULE);

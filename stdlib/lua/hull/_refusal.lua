@@ -21,9 +21,14 @@ M.WAIT = "wait_refused"
 M.BUSY = "busy"
 
 --- The refusal code of a caught error, or nil when it is not a refusal.
+-- Only the two codes above: "[hull:denied] " (a host manifest.hosts does not
+-- admit, gap 3) is deterministic, so a caller counts it as a failure rather
+-- than handing it back - as hull:_refusal's code() already reads it in JS.
 function M.code(err)
     if type(err) ~= "string" then return nil end
-    return string.match(err, "^%[hull:([%w_]+)%] ")
+    local c = string.match(err, "^%[hull:([%w_]+)%] ")
+    if c == M.WAIT or c == M.BUSY then return c end
+    return nil
 end
 
 --- True when err is the runtime refusing to wait here.

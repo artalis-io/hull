@@ -12544,7 +12544,7 @@ UTEST(lua_http_timeout, per_call_option_is_validated)
         EXPECT_NE_MSG(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err),
                       LUA_OK, good[i]);
         EXPECT_EQ_MSG(strstr(err, "timeout_ms"), NULL, good[i]);
-        EXPECT_NE_MSG(strstr(err, "failed"), NULL, good[i]);
+        EXPECT_NE_MSG(strstr(err, "is not in manifest.hosts"), NULL, good[i]);
     }
     lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();
@@ -14932,7 +14932,7 @@ UTEST(lua_audit24, wss_connect_needs_the_client_tls_config)
     EXPECT_NE_MSG(strstr(err, "wss:// needs TLS"), NULL, err);
     snprintf(code, sizeof code, "%sws.connect('wss://other.example/x', {}) return 1", pre);
     EXPECT_NE(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
-    EXPECT_NE_MSG(strstr(err, "not in allowlist"), NULL, err);
+    EXPECT_NE_MSG(strstr(err, "[hull:denied] ws.connect: host 'other.example' is not in manifest.hosts"), NULL, err);
     /* ws:// needs no TLS: it gets past both checks to the server one. */
     snprintf(code, sizeof code, "%sws.connect('ws://ws.example/x', {}) return 1", pre);
     EXPECT_NE(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
