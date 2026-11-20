@@ -5151,6 +5151,111 @@ UTEST(gpu_audit45, teardown_frees_a_kept_compile)
     free(ctx);
 }
 
+/* audit 49: a finisher whose deadline passes just before the compile thread
+ * finishes abandons the job without the device mutex, while the first holder
+ * of the device mutex settles it. Only one of them may own the pipeline: it
+ * used to be both installed and released (the device's cache held a released
+ * pipeline, and teardown released it again). The race hook interleaves them:
+ * at point 1 (the finisher, past its deadline, before the abandon) the
+ * compile is let finish and a "loop" thread enters the settle; at point 2
+ * (the settle, before the install) that thread waits for the abandon. */
+static HlGpuCtx *a49_ctx;
+static pthread_mutex_t a49_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t a49_cv = PTHREAD_COND_INITIALIZER;
+static int a49_at1, a49_at2, a49_go;
+static pthread_t a49_loop;
+static int a49_loop_started;
+
+static void *a49_loop_main(void *arg)
+{
+    (void)arg;
+    unsigned char data[16] = { 0 };
+    /* compile_busy settles the done compile under the device mutex. */
+    (void)hl_cap_gpu_buffer_write(a49_ctx, -1, "b", data, 16, 0);
+    return NULL;
+}
+
+/* Wait (bounded) for *flag under a49_mu; the caller holds a49_mu. */
+static int a49_wait_locked(int *flag, long ms)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += ms / 1000;
+    ts.tv_nsec += (ms % 1000) * 1000000L;
+    while (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    while (!*flag)
+        if (pthread_cond_timedwait(&a49_cv, &a49_mu, &ts) != 0) break;
+    return *flag;
+}
+
+static void a49_hook(int point)
+{
+    if (point == 1) {
+        pthread_mutex_lock(&a49_mu);
+        a49_at1 = 1;
+        pthread_mutex_unlock(&a49_mu);
+        a40_release_now();
+        (void)a40_wait_settled(a49_ctx);
+        a40_sleep_ms(20);              /* the thread sets `done` after it */
+        a49_loop_started =
+            pthread_create(&a49_loop, NULL, a49_loop_main, NULL) == 0;
+        pthread_mutex_lock(&a49_mu);
+        (void)a49_wait_locked(&a49_at2, 2000);
+        pthread_mutex_unlock(&a49_mu);
+    } else if (point == 2) {
+        pthread_mutex_lock(&a49_mu);
+        a49_at2 = 1;
+        pthread_cond_broadcast(&a49_cv);
+        /* Bounded: a fix that serialises the abandon on the device mutex
+         * must not deadlock here. */
+        (void)a49_wait_locked(&a49_go, 1000);
+        pthread_mutex_unlock(&a49_mu);
+    }
+}
+
+UTEST(gpu_audit49, abandon_racing_settle_releases_nothing_installed)
+{
+    HlGpuBackend be;
+    HlGpuCtx *ctx = aac_ctx(&be);
+    ASSERT_TRUE(ctx != NULL);
+    a49_ctx = ctx;
+    a49_at1 = a49_at2 = a49_go = 0;
+    a49_loop_started = 0;
+    hl_gpu_test_set_compile_timeout_ms(100);
+    const char *src = "@compute @workgroup_size(1) fn main() {}";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", 16, HL_GPU_USAGE_READWRITE));
+    HlGpuCompileAsync *a = NULL;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile_async_begin(ctx, -1, "slow", src,
+                                                        strlen(src), 0, &a));
+    hl_gpu_test_set_compile_timeout_ms(0);
+    hl_gpu_test_set_async_race_hook(a49_hook);
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_compile_async_finish(a, NULL));
+    a40_release_now();                 /* if the hook never ran */
+    pthread_mutex_lock(&a49_mu);
+    a49_go = 1;
+    pthread_cond_broadcast(&a49_cv);
+    pthread_mutex_unlock(&a49_mu);
+    if (a49_loop_started)
+        pthread_join(a49_loop, NULL);
+    hl_gpu_test_set_async_race_hook(NULL);
+    hl_cap_gpu_compile_async_free(a);
+    /* Both sides of the race were reached. */
+    EXPECT_EQ(1, a49_at1);
+    EXPECT_EQ(1, a49_at2);
+    EXPECT_TRUE(a49_loop_started);
+    /* The settle installed the pipeline; the abandon released nothing. */
+    EXPECT_EQ(1, ctx->devices[0].pipeline_count);
+    EXPECT_EQ(0, aac_destroyed());
+    EXPECT_TRUE(ctx->devices[0].compile_job == NULL);
+    hl_cap_gpu_buffer_destroy(ctx, -1, "b");
+    hl_cap_gpu_destroy(ctx);
+    EXPECT_EQ(1, aac_destroyed());      /* released once, at teardown */
+    free(ctx);
+}
+
 /* audit 45: a second gpu.async.load of a shader still compiling waits for
  * that compile instead of being refused gpu_busy; a joined wait that gives
  * up never abandons the owner's compile. */
