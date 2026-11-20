@@ -785,7 +785,8 @@ int hl_dev_state_reload(HlDevState *s)
 
 static int run_dev_tui(int argc, char **argv,
                        const char *hull_exe, const char **child_argv,
-                       int child_argc, const char *app_dir, int no_types)
+                       int child_argc, const char *app_dir, int no_types,
+                       int app_types)
 {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
         fprintf(stderr,
@@ -820,11 +821,17 @@ static int run_dev_tui(int argc, char **argv,
         snprintf(types_note, sizeof types_note, "[hull:dev] types are not "
                  "checked by this build; run `hull check --types`");
 #else
-        char checker[PATH_MAX];
-        if (hl_type_check_find(app_dir, checker, sizeof checker) != 0) {
-            snprintf(types_note, sizeof types_note, "[hull:dev] tsconfig.json "
-                     "but no TypeScript compiler (tsgo or tsc) installed: types "
-                     "are not checked");
+        char checker[PATH_MAX], local[PATH_MAX];
+        if (hl_type_check_find(app_dir, app_types, checker, sizeof checker) != 0) {
+            if (hl_type_check_app_local(app_dir, local, sizeof local) == 0)
+                /* The repository's own code: run only when asked (audit 49). */
+                snprintf(types_note, sizeof types_note, "[hull:dev] types are not "
+                         "checked: the app's %s is run only with --types (it is the "
+                         "repository's own code)", local);
+            else
+                snprintf(types_note, sizeof types_note, "[hull:dev] tsconfig.json "
+                         "but no TypeScript compiler (tsgo or tsc) installed: types "
+                         "are not checked");
         } else {
             g_dev_state.types_pid = dev_types_runner_start(
                 checker, app_dir, &g_dev_state.types_cmd_fd, &g_dev_state.types_fd);
@@ -1261,7 +1268,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 #ifdef HL_TUI_LINKED
     if (tui_mode) {
         int rc = run_dev_tui(argc, argv, hull_exe,
-                              child_argv, ci, app_dir, no_types);
+                              child_argv, ci, app_dir, no_types, app_types);
         free(child_argv);
         return rc;
     }

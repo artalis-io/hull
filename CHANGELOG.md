@@ -25,7 +25,8 @@ release-artifact layout).
 
 - `hull dev --tui` runs the type check after each reload, as `hull dev` does: the
   diagnostics go into the log pane and the status line shows the summary (`types:
-  checking`, `types: no errors`, `types: 2 errors`), and `--no-types` turns it off. The TUI
+  checking`, `types: no errors`, `types: 2 errors`); `--types` admits the app's own
+  `node_modules/.bin` compiler, as for `hull dev`, and `--no-types` turns it off. The TUI
   runs in the tool VM, whose sandbox grants the app directory no execute, so the compiler is
   run by a process forked before that sandbox applies, told to check after each respawn.
   `tests/e2e_tui.sh` covers it with a stand-in compiler.
