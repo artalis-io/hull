@@ -12,6 +12,9 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/stdin_secret.h"   /* ctx.stdin:read_secret (gap 4) */
+#include "hull/shared/main_signal.h"
+#include "hull/utils/secure_zero.h"
 #include "internal.h"
 #include "hull/shared/dispatch_meter.h"   /* excluded waits */
 
@@ -1123,6 +1126,46 @@ static int cli_stdin_read(lua_State *L)
     return luaL_error(L, "read: unsupported format '%s' (use '*l', '*a', or n bytes)", fmt);
 }
 
+/* ctx.stdin:read_secret(prompt?) (platform gap 4): one line with echo off
+ * when stdin is a terminal (the prompt on stderr), as getpass reads a
+ * password; from a pipe, one line as read() takes it, no prompt. nil at end
+ * of input. Raises when a SIGINT / SIGTERM arrives while it waits - echo is
+ * back on by then - and past HL_STDIN_SECRET_MAX bytes. The line is copied
+ * into a string and the buffer scrubbed. */
+static int cli_secret_stopped(void *ud)
+{
+    return hl_main_signal_count() != *(const int *)ud;
+}
+
+static int cli_stdin_read_secret(lua_State *L)
+{
+    HlLua *lua = get_hl_lua_from_L(L);
+    if (!lua || !lua->cli_main_co || lua->active_co != lua->cli_main_co)
+        return luaL_error(L, "ctx.stdin:read_secret() is only available in "
+                             "app.main's own code (it blocks the event loop)");
+    const char *prompt = luaL_optstring(L, 2, NULL);
+    lua_hlwork(L, HL_WORK_CLI_FLUSH_UNITS, 0);
+    /* A VM box, so a raise below frees it with the VM (malloc leaked it). */
+    char *buf = lua_newuserdatauv(L, HL_STDIN_SECRET_MAX, 0);
+    int start = hl_main_signal_count();
+    size_t n = 0;
+    int rc = hl_stdin_read_secret(prompt, buf, HL_STDIN_SECRET_MAX, &n,
+                                  cli_secret_stopped, &start);
+    if (rc == HL_STDIN_SECRET_OK)
+        lua_pushlstring(L, buf, n);
+    hl_secure_zero(buf, HL_STDIN_SECRET_MAX);
+    switch (rc) {
+    case HL_STDIN_SECRET_OK:          return 1;
+    case HL_STDIN_SECRET_EOF:         lua_pushnil(L); return 1;
+    case HL_STDIN_SECRET_INTERRUPTED: return luaL_error(L, "ctx.stdin:read_secret: interrupted");
+    case HL_STDIN_SECRET_TOO_LONG:    return luaL_error(L, "ctx.stdin:read_secret: "
+                                                        "line longer than %d bytes",
+                                                        HL_STDIN_SECRET_MAX);
+    default:                          return luaL_error(L, "ctx.stdin:read_secret: "
+                                                        "read failed");
+    }
+}
+
 static int cli_writer_write(lua_State *L)
 {
     FILE *f = cli_stream(L);
@@ -1172,6 +1215,7 @@ static void cli_push_stream(lua_State *L, int stream_id,
 
 static const luaL_Reg cli_stdin_methods[]  = {
     { "read",  cli_stdin_read  },
+    { "read_secret", cli_stdin_read_secret },
     { "close", cli_stdin_close },
     { NULL, NULL }
 };
@@ -1280,8 +1324,17 @@ static int cli_cap_read(lua_State *L)
     return 1;
 }
 
+/* test.run_main's read_secret: opts.stdin is no terminal, so one line as
+ * read() takes it, the prompt ignored - what the real one does from a pipe. */
+static int cli_cap_read_secret(lua_State *L)
+{
+    lua_settop(L, 1);
+    return cli_cap_read(L);
+}
+
 static const luaL_Reg cli_cap_stdin_methods[] = {
     { "read",  cli_cap_read    },
+    { "read_secret", cli_cap_read_secret },
     { "close", cli_stdin_close },
     { NULL, NULL }
 };

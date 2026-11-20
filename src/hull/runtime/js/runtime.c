@@ -13,6 +13,9 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/stdin_secret.h"   /* ctx.stdin.readSecret (gap 4) */
+#include "hull/shared/main_signal.h"
+#include "hull/utils/secure_zero.h"
 #include "internal.h"
 #include "mod_buffer.h"   /* hl_js_blob_release */
 
@@ -2465,6 +2468,62 @@ static int cli_fgetc(FILE *f)
     return c;
 }
 
+/* ctx.stdin.readSecret(prompt?) (platform gap 4): one line with echo off
+ * when stdin is a terminal (the prompt on stderr), as getpass reads a
+ * password; from a pipe, one line as read() takes it, no prompt. null at end
+ * of input. Throws when a SIGINT / SIGTERM arrives while it waits - echo is
+ * back on by then - and past HL_STDIN_SECRET_MAX bytes. The buffer is on the
+ * VM heap and scrubbed once the string is made. */
+static int js_cli_secret_stopped(void *ud)
+{
+    return hl_main_signal_count() != *(const int *)ud;
+}
+
+static JSValue js_cli_read_secret(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv, int magic)
+{
+    (void)this_val; (void)magic;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    int mains = js && (js->active_cli_main ||
+                       (js->cli_main_active && js->cli_main_tag != 0 &&
+                        JS_GetJobTag(js->rt) == js->cli_main_tag));
+    if (!mains)
+        return JS_ThrowTypeError(ctx, "ctx.stdin.readSecret() is only available "
+                                      "in app.main's own code (it blocks the "
+                                      "event loop)");
+    const char *prompt = NULL;
+    if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0])) {
+        prompt = JS_ToCString(ctx, argv[0]);
+        if (!prompt) return JS_EXCEPTION;
+    }
+    if (hl_js_budget_charge(ctx, HL_WORK_CLI_FLUSH_UNITS) < 0) {
+        JS_FreeCString(ctx, prompt);
+        return JS_EXCEPTION;
+    }
+    char *buf = js_malloc(ctx, HL_STDIN_SECRET_MAX);
+    if (!buf) { JS_FreeCString(ctx, prompt); return JS_EXCEPTION; }
+    int start = hl_main_signal_count();
+    size_t n = 0;
+    int rc = hl_stdin_read_secret(prompt, buf, HL_STDIN_SECRET_MAX, &n,
+                                  js_cli_secret_stopped, &start);
+    JS_FreeCString(ctx, prompt);
+    JSValue r = rc == HL_STDIN_SECRET_OK ? JS_NewStringLen(ctx, buf, n)
+                                         : JS_UNDEFINED;
+    hl_secure_zero(buf, HL_STDIN_SECRET_MAX);
+    js_free(ctx, buf);
+    switch (rc) {
+    case HL_STDIN_SECRET_OK:          return r;
+    case HL_STDIN_SECRET_EOF:         return JS_NULL;
+    case HL_STDIN_SECRET_INTERRUPTED: return JS_ThrowInternalError(ctx,
+                                          "ctx.stdin.readSecret: interrupted");
+    case HL_STDIN_SECRET_TOO_LONG:    return JS_ThrowRangeError(ctx,
+                                          "ctx.stdin.readSecret: line longer "
+                                          "than %d bytes", HL_STDIN_SECRET_MAX);
+    default:                          return JS_ThrowInternalError(ctx,
+                                          "ctx.stdin.readSecret: read failed");
+    }
+}
+
 static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv, int magic)
 {
@@ -3188,6 +3247,16 @@ static JSValue js_cli_cap_read(JSContext *ctx, JSValueConst this_val,
     return r;
 }
 
+/* test.runMain's readSecret: opts.stdin is no terminal, so one line as read()
+ * takes it, the prompt ignored - what the real one does from a pipe. */
+static JSValue js_cli_cap_read_secret(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv, int magic,
+                                      JSValue *func_data)
+{
+    (void)argc; (void)argv;
+    return js_cli_cap_read(ctx, this_val, 0, NULL, magic, func_data);
+}
+
 /* An error value's text, for a test's captured stderr: .message, else the
  * value as a string. Either conversion can run app code and throw; a throw
  * is cleared, never left pending. */
@@ -3368,6 +3437,19 @@ static int js_main_streams(JSContext *ctx, JSValueConst ctxobj, HlJsMainRun *r)
         }
         JS_SetPropertyStr(ctx, s, n1, f1);
         JS_SetPropertyStr(ctx, s, n2, f2);
+        if (!streams[i].writer) {
+            JSValue f3;
+            if (r->test) {
+                JSValueConst data[1] = { r->cap };
+                f3 = JS_NewCFunctionData(ctx, js_cli_cap_read_secret, 1,
+                                         streams[i].magic, 1, data);
+            } else {
+                f3 = JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_cli_read_secret,
+                                          "readSecret", 1, JS_CFUNC_generic_magic,
+                                          streams[i].magic);
+            }
+            JS_SetPropertyStr(ctx, s, "readSecret", f3);
+        }
         JS_SetPropertyStr(ctx, ctxobj, streams[i].prop, s);
     }
     return 0;

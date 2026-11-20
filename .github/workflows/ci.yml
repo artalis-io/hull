@@ -520,6 +520,9 @@ jobs:
       - name: Runtime refusal codes (pwned / outbox under the fetch cap) E2E tests
         timeout-minutes: 2
         run: make e2e-refusal-codes
+      - name: app.main secret read without echo (platform gap 4) E2E tests
+        timeout-minutes: 3
+        run: make e2e-read-secret
       - name: Refused-host error code (platform gap 3) E2E tests
         timeout-minutes: 2
         run: make e2e-host-denied

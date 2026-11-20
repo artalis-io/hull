@@ -77,6 +77,12 @@ int  hl_main_signal_received(void);
  * thread sets it. */
 int  hl_main_signal_ended(void);
 
+/* How many SIGINT / SIGTERM have arrived since the process started (while an
+ * installation was active). A blocking read in app.main (ctx.stdin's
+ * read_secret) takes it before it waits and stops when it changes. Any
+ * thread; async-signal-safe to read. */
+int  hl_main_signal_count(void);
+
 /* "SIGINT" / "SIGTERM" / "SIGNAL". */
 const char *hl_main_signal_name(int sig);
 
