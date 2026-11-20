@@ -59,6 +59,10 @@ echo "\$(date +%s) pid \$\$ ppid \$PPID dev \$(ps -o ppid= -p \$PPID 2>/dev/null
 env | grep -c HULL_DEV_SESSION >> "$ENVS"
 dir=\$5
 if grep -q SLOWTYPE "\$dir/app.ts"; then echo \$\$ > "$WORK/slow.pid"; sleep 30; fi
+if grep -q C1TYPE "\$dir/app.ts"; then
+    printf 'app.ts(1,2): error TS2345: quoted \302\233x and \177y\\n'
+    exit 2
+fi
 if grep -q BADTYPE "\$dir/app.ts"; then
     echo "app.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'."
     echo "a line of another shape"
@@ -78,8 +82,30 @@ start_dev() {   # $1: extra flags; log in $WORK/dev.log
 stop_dev() { kill "$DEVPID" 2>/dev/null; wait "$DEVPID" 2>/dev/null || true; DEVPID=; port=$((port + 1)); }
 errors() { (cd "$app" && "$HULL" agent errors .) > "$WORK/errors.json" 2>&1 || true; }
 
-echo "== hull dev: the type check"
+echo "== hull dev: the app's own compiler needs --types (audit 49)"
+# The app's node_modules/.bin compiler is the repository's code: a plain
+# hull dev never runs it (it ran unsandboxed, by default).
+: > "$CALLS"
 start_dev ""
+wait_for "$WORK/dev.log" "listening on" || true
+sleep 2
+stop_dev
+[ ! -s "$CALLS" ] && has "$WORK/dev.log" "is run only with --types" &&
+    ok "dev_audit49.app_local_checker_not_run" ||
+    { bad "dev_audit49.app_local_checker_not_run"; cat "$WORK/dev.log" "$CALLS"; }
+# Nor one PATH leads to inside the app tree.
+: > "$CALLS"
+: > "$WORK/dev.log"
+(cd "$app" && PATH="$app/node_modules/.bin:/usr/bin:/bin" exec "$HULL" dev -p "$port") > "$WORK/dev.log" 2>&1 &
+DEVPID=$!
+wait_for "$WORK/dev.log" "listening on" || true
+sleep 2
+stop_dev
+[ ! -s "$CALLS" ] && ok "dev_audit49.path_into_app_not_run" ||
+    { bad "dev_audit49.path_into_app_not_run"; cat "$WORK/dev.log" "$CALLS"; }
+
+echo "== hull dev --types: the type check"
+start_dev "--types"
 if wait_for "$WORK/dev.log" "[hull:dev] types: no errors"; then
     has "$WORK/dev.log" "type-checking with ./node_modules/.bin/tsc after each reload" &&
         [ "$(head -n 1 "$CALLS")" = "--noEmit --pretty false -p ." ] &&
@@ -104,6 +130,21 @@ has "$WORK/errors.json" '"status":"errors","count":2,"errors":1' &&
     has "$WORK/errors.json" '{"file":"app.ts","line":3,"col":7,"severity":"error","code":"TS2322"' &&
     has "$WORK/errors.json" '{"message":"a line of another shape"}' &&
     ok "hull agent errors: the diagnostic, and the other line as text" || { bad "agent errors"; cat "$WORK/errors.json"; }
+
+# A diagnostic quoting DEL / C1 text: written escaped, so the genuine file
+# is still served (audit 49: it was reported as not Hull's).
+sed 's/BADTYPE/C1TYPE/' "$app/app.ts" > "$WORK/app.ts" && cp "$WORK/app.ts" "$app/app.ts"
+if wait_for "$WORK/dev.log" "TS2345"; then
+    sleep 0.5
+    errors
+    has "$WORK/errors.json" '"code":"TS2345"' && ! has "$WORK/errors.json" "types_ignored" &&
+        ok "dev_audit49.types_c1_del_served" || { bad "dev_audit49.types_c1_del_served"; cat "$WORK/errors.json"; }
+else
+    bad "dev_audit49.types_c1_del_served (no report)"; cat "$WORK/dev.log"
+fi
+sed 's/C1TYPE/BADTYPE/' "$app/app.ts" > "$WORK/app.ts" && cp "$WORK/app.ts" "$app/app.ts"
+n=0
+until errors && has "$WORK/errors.json" '"code":"TS2322"' || [ $n -ge 100 ]; do sleep 0.2; n=$((n+1)); done
 
 cp "$app/.hull/types.json" "$WORK/types.saved"
 sed 's/TS2322/TS0000/' "$WORK/types.saved" > "$app/.hull/types.json"
@@ -130,7 +171,7 @@ stop_dev
 
 echo "== hull dev: off"
 : > "$CALLS"
-start_dev "--no-types"
+start_dev "--types --no-types"
 wait_for "$WORK/dev.log" "listening on" || true
 sleep 2
 stop_dev
@@ -149,7 +190,7 @@ has "$WORK/dev.log" "tsconfig.json but no TypeScript compiler (tsgo or tsc) inst
 mv "$WORK/node_modules.off" "$app/node_modules"
 mv "$app/tsconfig.json" "$WORK/tsconfig.off"
 : > "$CALLS"
-start_dev ""
+start_dev "--types"
 wait_for "$WORK/dev.log" "listening on" || true
 sleep 2
 stop_dev

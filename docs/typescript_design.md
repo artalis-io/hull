@@ -591,9 +591,12 @@ conversion and the declarations install are one module both share
      vouch for a third party's preview binaries, a pinned preview goes stale between
      releases, and an app author writing TypeScript has a compiler already (the editor's, or
      `npm`'s; TypeScript 7's `tsc` is the native compiler). Revisit if that stops holding.
-   - **In the dev loop (as built):** `hull dev` runs the same compiler lookup, once at start
-     and after each successful (re)spawn, as `--noEmit --pretty false -p <app>` in the
-     background (`shared/type_check.h`, dev.c): an edit stops a check still running, and
+   - **In the dev loop (as built):** `hull dev` looks up `tsgo`, then `tsc`, on PATH (never
+     one that resolves inside the app tree). The app's `node_modules/.bin` compiler is the
+     repository's code, so it is considered only with `hull dev --types`, the same explicit
+     request `hull check --types` makes (audit 49: it ran, unsandboxed, by default). The
+     compiler runs once at start and after each successful (re)spawn, as `--noEmit --pretty
+     false -p <app>` in the background (`shared/type_check.h`, dev.c): an edit stops a check still running, and
      none holds up or decides a reload. It prints a summary of the diagnostics; under
      `--agent` it writes `.hull/types.json` (MAC'd under the session key, as the other
      sidecars), which `hull agent errors` / MCP `hull_errors` serve as `types`. With no
