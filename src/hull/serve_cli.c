@@ -521,7 +521,8 @@ int hull_serve(int argc, char **argv)
      * serve.c does. */
     {
         extern const HlEntry hl_app_entries[];
-        if (hl_generation_take(hl_app_entries[0].name != NULL, app_dir) < 0) {
+        if (hl_generation_take(hl_app_entries[0].name != NULL, app_dir,
+                               xo.verify_sig != NULL) < 0) {
             hl_eprintf_line("hull: %s", hl_generation_error());
             return 1;
         }

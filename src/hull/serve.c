@@ -3508,7 +3508,8 @@ int hull_serve(int argc, char **argv)
      * (docs/dev_pipeline_generations_design.md §4.3). */
     {
         extern const HlEntry hl_app_entries[];
-        if (hl_generation_take(hl_app_entries[0].name != NULL, s.app_dir) < 0) {
+        if (hl_generation_take(hl_app_entries[0].name != NULL, s.app_dir,
+                               s.cfg.verify_sig_path != NULL) < 0) {
             log_error("[hull:c] %s", hl_generation_error());
             return 1;
         }

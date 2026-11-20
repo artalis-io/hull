@@ -495,13 +495,16 @@ int hl_generation_produce(const char *app_dir, uint8_t **out, size_t *len)
 #endif
 }
 
-int hl_generation_take(int embedded, const char *app_dir)
+int hl_generation_take(int embedded, const char *app_dir, int verify_sig)
 {
     int rc = hl_generation_take_env(embedded);
     if (rc != 0 || g_taken)
         return rc;
     g_taken = 1;
-    if (embedded || hl_build_plugin_fd() >= 0 ||
+    /* --verify-sig refuses any generation (hl_generation_apply), so running
+     * the pipeline first only ran a cloned tree's plugins and top level
+     * before the refusal (audit 50). */
+    if (embedded || verify_sig || hl_build_plugin_fd() >= 0 ||
         !hl_generation_has_pipeline(app_dir))
         return 0;
     uint8_t *b = NULL;

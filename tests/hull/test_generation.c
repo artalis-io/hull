@@ -443,7 +443,7 @@ UTEST(generation, a_pipeline_needs_a_build_config)
     /* No config: hl_generation_take runs nothing. */
     hl_generation_reset();
     unsetenv(HL_GENERATION_ENV);
-    ASSERT_EQ(0, hl_generation_take(0, app));
+    ASSERT_EQ(0, hl_generation_take(0, app, 0));
     ASSERT_EQ(0, hl_generation_apply(0));
     snprintf(cfg, sizeof cfg, "%s/hull.build.json", app);
     /* A link is not a config. */
@@ -457,7 +457,7 @@ UTEST(generation, a_pipeline_needs_a_build_config)
     ASSERT_TRUE(hl_generation_has_pipeline(app));
     /* A built binary runs no pipeline, whatever the tree holds. */
     hl_generation_reset();
-    ASSERT_EQ(0, hl_generation_take(1, app));
+    ASSERT_EQ(0, hl_generation_take(1, app, 0));
     unlink(cfg);
     rmdir(app);
     hl_generation_reset();
