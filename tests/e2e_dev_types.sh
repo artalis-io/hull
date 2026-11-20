@@ -84,9 +84,12 @@ errors() { (cd "$app" && "$HULL" agent errors .) > "$WORK/errors.json" 2>&1 || t
 
 echo "== hull dev: the app's own compiler needs --types (audit 49)"
 # The app's node_modules/.bin compiler is the repository's code: a plain
-# hull dev never runs it (it ran unsandboxed, by default).
+# hull dev never runs it (it ran unsandboxed, by default). PATH holds no
+# compiler here (a CI host may have one, which hull dev would rightly use).
 : > "$CALLS"
-start_dev ""
+: > "$WORK/dev.log"
+(cd "$app" && PATH=/usr/bin:/bin exec "$HULL" dev -p "$port") > "$WORK/dev.log" 2>&1 &
+DEVPID=$!
 wait_for "$WORK/dev.log" "listening on" || true
 sleep 2
 stop_dev
