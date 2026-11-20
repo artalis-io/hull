@@ -353,8 +353,7 @@ end
 -- without software bounds checks would load and store host memory.
 local AOT_STAMP_VERSION = 2
 local AOT_STAMP_REQUIRED_FLAGS = 0x30000
-local function aot_stamp_status(path)
-    local data = tool.read_file(path)
+local function aot_stamp_status_data(data)
     if not data or #data < 64 then return "not an AOT file" end
     local magic, _, sec_type, sec_size = string.unpack("<I4I4I4I4", data, 1)
     if magic ~= 0x746F6100 or sec_type ~= 0 or sec_size ~= 48 then
@@ -371,6 +370,9 @@ local function aot_stamp_status(path)
     end
     return nil
 end
+local function aot_stamp_status(path)
+    return aot_stamp_status_data(tool.read_file(path))
+end
 
 -- The wamrc flags every compute AOT is compiled with (audit 31). Also folded
 -- into the AOT cache key, so an entry compiled under another set is never
@@ -383,10 +385,12 @@ local AOT_WAMRC_FLAGS = {"--enable-shared-heap", "--bounds-checks=1",
 
 -- WAMR picks its loader by these four bytes ("\0aot"), not by the file name,
 -- so AOT code saved as compute/<name>.wasm runs as AOT (round 7).
-local function has_aot_magic(path)
-    local data = tool.read_file(path)
+local function has_aot_magic_data(data)
     return data ~= nil and #data >= 4 and
            string.unpack("<I4", data, 1) == 0x746F6100
+end
+local function has_aot_magic(path)
+    return has_aot_magic_data(tool.read_file(path))
 end
 
 -- Detect if a WASM binary uses Memory64 (64-bit memory addressing).
@@ -2026,9 +2030,93 @@ local function pipeline_generation(app_dir)
         e.source = src and hex.encode(crypto.sha256(src)) or nil
     end
     if #g.entries > 0 then
-        print("hull build: " .. #g.entries .. " generated file(s) from the build pipeline")
+        local names = {}
+        for _, e in ipairs(g.entries) do names[#names + 1] = e.name end
+        print("hull build: " .. #g.entries .. " generated file(s) from the build pipeline: "
+              .. esc(table.concat(names, ", ")))
     end
     return g
+end
+
+-- The generated files under templates/, static/, migrations/, compute/ and
+-- shaders/ get the gates a committed file of the same name gets (audit 49:
+-- they were embedded and signed unchecked): only the kinds the directory
+-- walks take, top-level migrations only, compute modules under the module
+-- name rule and the committed-AOT rule (audit 19). Returns the entries to
+-- embed (an excluded AOT file dropped) and the generated shaders, for
+-- tool.gpu_shaders_check; exits on a refusal.
+local function admit_generated_assets(generated, opts, tmpdir, prebuilt_aot)
+    local cbuild = require("hull.compute_build")
+    local function refuse(msg)
+        tool.stderr("hull build: " .. msg .. "\n")
+        tool.rmdir(tmpdir)
+        tool.exit(1)
+    end
+    local out, shaders, skipped_aot, skipped_sql = {}, {}, {}, {}
+    for _, e in ipairs(generated) do
+        local keep = true
+        local top, rest = e.name:match("^([^/]+)/(.+)$")
+        local unembedded = "the pipeline generated " .. esc(e.name) .. ", which hull build "
+            .. "does not embed (a committed file of that name is not embedded either)"
+        if top == "templates" then
+            if not rest:match("%.html$") then refuse(unembedded) end
+        elseif top == "migrations" then
+            if not rest:match("%.sql$") then refuse(unembedded) end
+            if rest:find("[/\\]") then
+                skipped_sql[#skipped_sql + 1] = e.name
+                keep = false
+            end
+        elseif top == "shaders" then
+            if not rest:match("%.wgsl$") then refuse(unembedded) end
+            shaders[#shaders + 1] = { name = e.name, data = e.bytes }
+        elseif top == "compute" then
+            local stem = rest:match("^(.+)%.wasm$")
+            local aot_stem = rest:match("^(.+)%.aot%.[^/.]+$")
+            local m = stem or aot_stem
+            if not m then refuse(unembedded) end
+            if not cbuild.valid_module_name(m) then
+                refuse(esc(e.name) .. ": " .. cbuild.invalid_name_message(m))
+            end
+            if aot_stem then
+                if not opts.trust_prebuilt_aot then
+                    skipped_aot[#skipped_aot + 1] = e.name
+                    keep = false
+                else
+                    local why = aot_stamp_status_data(e.bytes)
+                    if why then
+                        print("hull build: warning: " .. esc(e.name) .. " is unusable (" ..
+                              why .. "): the runtime refuses it and runs the " ..
+                              "module's .wasm in the interpreter.")
+                    end
+                    prebuilt_aot[e.name] = true
+                end
+            elseif has_aot_magic_data(e.bytes) then
+                if not opts.trust_prebuilt_aot then
+                    refuse(esc(e.name) .. " (generated) holds AOT code, not WebAssembly "
+                           .. "bytecode. A build embeds only the AOT it compiles itself: "
+                           .. "generate the module's bytecode as .wasm, or pass "
+                           .. "--trust-prebuilt-aot to embed AOT code.")
+                end
+                local why = aot_stamp_status_data(e.bytes)
+                if why then
+                    refuse(esc(e.name) .. " (generated) holds AOT code, not WebAssembly "
+                           .. "bytecode (" .. why .. "); the runtime refuses it.")
+                end
+            end
+        end
+        if keep then out[#out + 1] = e end
+    end
+    if #skipped_aot > 0 then
+        print("hull build: not embedding " .. #skipped_aot .. " generated AOT file(s) ("
+              .. esc(table.concat(skipped_aot, ", ")) .. "): a build embeds only the "
+              .. "AOT it compiles itself. Pass --trust-prebuilt-aot to embed them.")
+    end
+    if #skipped_sql > 0 then
+        print("hull build: warning: skipping " .. #skipped_sql .. " generated .sql file(s) "
+              .. "in subdirectories of migrations/ (only top-level migrations run): "
+              .. esc(table.concat(skipped_sql, ", ")))
+    end
+    return out, shaders
 end
 
 -- `files` without the paths a generated entry shadows (its name, under
@@ -2230,6 +2318,9 @@ typedef struct {
         print("hull build: " .. #compute_files .. " compute module(s) from " .. compute_dir)
     end
 
+    local gen_shaders
+    generated, gen_shaders = admit_generated_assets(generated, opts, tmpdir, prebuilt_aot)
+
     local shaders_dir = opts.app_dir .. "/shaders"
     local shader_files = {}
     check_asset_root(shaders_dir, tmpdir)
@@ -2238,11 +2329,17 @@ typedef struct {
     end
     if #shader_files > 0 then
         print("hull build: " .. #shader_files .. " shader(s) from " .. shaders_dir)
+    end
+    -- The embedded set: the files no generated shader shadows, plus those.
+    local check_shaders = without_shadowed(shader_files, opts.app_dir, generated)
+    for _, g in ipairs(gen_shaders) do check_shaders[#check_shaders + 1] = g end
+    if #check_shaders > 0 then
         -- A built binary compiles only these shaders (unless the manifest
         -- sets gpu.dynamic_shaders), so they are checked here: the size cap
         -- and the WGSL pre-check, plus a test compile when this hull has a
-        -- GPU backend and the host an adapter (audit convergence §7.3).
-        local compiled, err = tool.gpu_shaders_check(shader_files)
+        -- GPU backend and the host an adapter (audit convergence §7.3). A
+        -- generated one is checked from its bytes (audit 49).
+        local compiled, err = tool.gpu_shaders_check(check_shaders)
         if compiled == nil then
             print("hull build: shader check failed: " .. tostring(err))
             tool.rmdir(tmpdir)
