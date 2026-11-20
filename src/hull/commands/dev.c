@@ -917,9 +917,13 @@ static void dev_types_drain(DevTypes *t)
     for (;;) {
         ssize_t r = read(t->fd, buf, sizeof buf);
         if (r <= 0) return;
-        size_t room = t->len < DEV_TYPES_OUT_MAX ? DEV_TYPES_OUT_MAX - t->len : 0;
-        size_t take = (size_t)r < room ? (size_t)r : room;
-        if (take < (size_t)r) t->truncated = 1;
+        /* Past the cap the rest is read and dropped, so the compiler never
+         * blocks on a full pipe. */
+        size_t take = (size_t)r;
+        if (take > DEV_TYPES_OUT_MAX - t->len) {
+            take = DEV_TYPES_OUT_MAX - t->len;
+            t->truncated = 1;
+        }
         if (take == 0) continue;
         char *grown = realloc(t->out, t->len + take + 1);
         if (!grown) { t->truncated = 1; continue; }
