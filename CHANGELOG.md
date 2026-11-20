@@ -10,6 +10,33 @@ release-artifact layout).
 
 ### Security
 
+- Files a build plugin generates now get the checks a committed file of the same name gets
+  (audit 49): `hull build` embedded a generated `compute/*.aot.*`, AOT bytes under a generated
+  `compute/*.wasm` name and a generated `shaders/*.wgsl` without the committed-AOT rule, the
+  compute module name rule or the shader check, so a cloned tree's plugin could have native
+  AOT code embedded and signed by a plain `hull build`. A generated `compute/*.aot.*` is now
+  left out and AOT bytes under a `.wasm` name fail the build unless `--trust-prebuilt-aot`,
+  generated shaders go through the same shader check, a nested generated migration is skipped
+  as a committed one is, and only the file kinds the asset directory walks take are embedded.
+  The build names every generated file it embeds.
+- A Lua app's manifest is now read with the pipeline generation, as a JavaScript app's is
+  (audit 49): a plugin-generated `app.lua` or module ran, while `hull manifest`, `hull modules
+  list`, `hull check`, `hull deploy`, the build's composition and the manifest `hull build
+  --sign` signs were read from the shadowed source.
+- **Build plugin channel (audit 49).** A transform error longer than 64 KiB is now cut to 4
+  KiB on a UTF-8 boundary and reported (`plugin_failed`); before, the DONE frame was never
+  sent and the host waited out `action_ms` (120 s) and reported `plugin_timeout`. A plugin
+  value is bounded by item count (2^18 values, containers included) in both the encoder and
+  the frame check, so a small DAG of shared tables can no longer decode into millions of
+  tables and exhaust the tool VM; a frame whose decode still raises fails that plugin
+  (`plugin_protocol`) instead of aborting `hull plugins run`, and the Lua decode frees the
+  frame before the error propagates. `hull plugins run` escapes a plugin's error, diagnostic
+  and output text, so a newline in it can no longer forge output lines. An argument one level
+  past the host's depth limit is refused in the plugin as `too_deep` instead of killing it as
+  `plugin_protocol`. `hull.buildctx._fs.open` and `_store.open` check their root against the
+  tool sandbox allowlist. A Lua transform that raises `nil` or `false` now fails its action
+  (it was committed as a success), and a JavaScript transform that throws a value whose
+  `toString` or `message` getter throws still reports the failure.
 - `hull dev` no longer runs the app's own `node_modules/.bin/tsgo` or `tsc` unless asked
   (audit 49, High, A2). The type check added in this release looked there first, by default,
   so `hull dev` on a cloned repository with a `tsconfig.json` ran whatever executable the
@@ -250,6 +277,31 @@ release-artifact layout).
 
 ### Fixed
 
+- Templates: a loop variable bound to a function now renders nothing, as a dot path has since
+  audit 26. `{% for it in list %}{{ it }}` and the value of `{% for k, v in obj %}` printed
+  `function: 0x...` (a heap address) in Lua and the function's whole source text in JS; the
+  same holds for a filter's input and `{% if %}` (audit 49).
+- `hull/search`: snippet / highlight markers are drawn per query (a random token from
+  `randomblob`), not the fixed U+E000-U+E002 sentinels, so indexed text holding those code
+  points no longer gets the app's `before` / `after` / `ellipsis` markup where its author
+  placed them (audit 49).
+- TypeScript erasure ran different JavaScript from what tsc emits for an arrow function with a
+  return type and untyped parameters inside a conditional's consequent within a `case` test
+  (`case c ? (x = 0): number => 1 : w:`, and the `async (x): T => 1` form). Hull read `(x =
+  0)` as the consequent and ended the clause at the leftover `:`, making `w` a label. It now
+  reads the arrow the way TypeScript does: as an arrow when its list is a parameter list and a
+  `:` follows it. An arrow that reaches that `:` with a diagnostic on the way is refused with
+  `ts.unsupported` (audit 49).
+- A statement starting with a regular expression right after an erased declaration (`type`,
+  `interface`, `declare`, `import type`) that ended without `;` is no longer refused as
+  `js.syntax`. An `import type` ended by automatic semicolon insertion no longer makes the
+  statement before it count as ended that way (audit 49).
+- `gpu.async.compile` / `gpu.async.load`: a finisher that reached its deadline just as the
+  compile thread finished could abandon the job (without the device mutex) while the first
+  holder of the device mutex was installing its pipeline, so the device cache kept a released
+  pipeline (used by the next dispatch, released again at teardown). The settle now claims the
+  job under its lock before it installs, and the abandon leaves a claimed job alone (audit
+  49).
 - Log timestamps no longer switch to UTC part-way through a process. libc reads the time
   zone file on the first `localtime()`, and the sandbox grants no zone file, so a process
   whose first log line came after the sandbox applied - an `app.main` program, a TypeScript
