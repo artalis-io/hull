@@ -8,6 +8,20 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- A host `manifest.hosts` does not admit is now refused with a code (platform gap 3, found by
+  hscli). `http.fetch` / `http.async.*`, the synchronous `http.*` calls and `ws.connect` failed
+  with `http.fetch: failed to start request` / `http.get failed: ...` / `host not in
+  allowlist`, the first two the text a refused connection or a DNS failure gives, so an app
+  could not tell "the manifest said no" from "the network said no". They now raise (Lua)
+  `"[hull:denied] <call>: host '<host>' is not in manifest.hosts"` and throw (JS) an `Error`
+  with an own `code` `"denied"` and an own `host`; when an allowlist entry is a `"$VAR"` whose
+  variable is unset or empty the message names it. `denied` is not an admission refusal: Lua's
+  internal `hull._refusal` now reports only `wait_refused` / `busy`, as the JS one did, so
+  `outbox.flush` counts a denied delivery as a failed attempt in both runtimes. Covered by
+  `tests/e2e_host_denied.sh` (`make e2e-host-denied`, in CI) and `test_http`'s `host.url_denied`.
+
 ## [0.23.0] - 2026-11-20
 
 TypeScript apps and build plugins. An app's entry and modules may be `.ts` (types erased by the

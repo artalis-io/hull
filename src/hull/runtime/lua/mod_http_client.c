@@ -14,6 +14,7 @@
 #include <keel/http_server.h>
 
 #include <sh_arena.h>
+#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -263,6 +264,22 @@ static void lua_http_charge_request(lua_State *L)
     lua_hlwork(L, (size_t)HL_WORK_HTTP_REQUEST_UNITS, 0);
 }
 
+/* Gap 3: a host manifest.hosts does not admit raises "[hull:denied] ",
+ * naming the host (and an allowlist "$VAR" whose variable is unset), not the
+ * network failure's message. Returns only when the URL was not denied. */
+static void lua_http_raise_if_denied(lua_State *L, const HlLua *lua,
+                                     const char *what, const char *url)
+{
+    HlHttpDenial d;
+    if (!hl_http_url_denied(lua->base.http_cfg, url, &d)) return;
+    if (d.unset_ref[0])
+        hl_lua_refuse(L, HL_LUA_REFUSAL_DENIED "%s: host '%s' is not in "
+                      "manifest.hosts (its entry %s names an unset variable)",
+                      what, d.host, d.unset_ref);
+    hl_lua_refuse(L, HL_LUA_REFUSAL_DENIED "%s: host '%s' is not in "
+                  "manifest.hosts", what, d.host);
+}
+
 /* http.request(method, url, opts?) */
 static int lua_http_request(lua_State *L)
 {
@@ -311,9 +328,11 @@ static int lua_http_request(lua_State *L)
     int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, method, url,
                                     headers, num_headers, body, body_len, &resp);
     lua_http_scratch_release(lua, headers);
-    if (rc != 0)
+    if (rc != 0) {
+        lua_http_raise_if_denied(L, lua, "http request", url);
         return luaL_error(L, "http request failed: %s",
                           kl_strerror(resp.error));
+    }
 
     lua_push_http_response_charged(L, &resp);
     return 1;
@@ -349,8 +368,10 @@ static int lua_http_get(lua_State *L)
     int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, "GET", url,
                                     headers, num_headers, NULL, 0, &resp);
     lua_http_scratch_release(lua, headers);
-    if (rc != 0)
+    if (rc != 0) {
+        lua_http_raise_if_denied(L, lua, "http.get", url);
         return luaL_error(L, "http.get failed: %s", kl_strerror(resp.error));
+    }
 
     lua_push_http_response_charged(L, &resp);
     return 1;
@@ -407,9 +428,14 @@ static int lua_http_body_method(lua_State *L, const char *method)
     int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, method, url,
                                     headers, num_headers, body, body_len, &resp);
     lua_http_scratch_release(lua, headers);
-    if (rc != 0)
+    if (rc != 0) {
+        char what[32];
+        snprintf(what, sizeof what, "http.%s", method);
+        for (char *c = what; *c; c++) *c = (char)tolower((unsigned char)*c);
+        lua_http_raise_if_denied(L, lua, what, url);
         return luaL_error(L, "http.%s failed: %s", method,
                           kl_strerror(resp.error));
+    }
 
     lua_push_http_response_charged(L, &resp);
     return 1;
@@ -449,9 +475,11 @@ static int lua_http_delete(lua_State *L)
     int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, "DELETE", url,
                                     headers, num_headers, NULL, 0, &resp);
     lua_http_scratch_release(lua, headers);
-    if (rc != 0)
+    if (rc != 0) {
+        lua_http_raise_if_denied(L, lua, "http.delete", url);
         return luaL_error(L, "http.delete failed: %s",
                           kl_strerror(resp.error));
+    }
 
     lua_push_http_response_charged(L, &resp);
     return 1;
@@ -598,6 +626,7 @@ static int lua_http_fetch(lua_State *L)
     if (!ctx) {
         hl_offheap_drop(&body_hold);
         cont->destroy(cont);
+        lua_http_raise_if_denied(L, lua, "http.fetch", url);
         return luaL_error(L, "http.fetch: failed to start request");
     }
     ctx->cont = cont;

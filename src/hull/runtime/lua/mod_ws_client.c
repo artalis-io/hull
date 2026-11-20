@@ -589,8 +589,18 @@ static int lua_ws_connect(lua_State *L)
      * used to skip the check, so ws.connect reached any host. */
     if (!lua->base.http_cfg ||
         hl_http_check_host(lua->base.http_cfg, parsed.host,
-                           parsed.host_len) != 0)
-        return luaL_error(L, "host not in allowlist");
+                           parsed.host_len) != 0) {
+        /* Coded, naming the host (gap 3), as http.fetch's. */
+        HlHttpDenial d;
+        if (!hl_http_url_denied(lua->base.http_cfg, url, &d))
+            return luaL_error(L, "host not in allowlist");
+        if (d.unset_ref[0])
+            return hl_lua_refuse(L, HL_LUA_REFUSAL_DENIED "ws.connect: host "
+                                 "'%s' is not in manifest.hosts (its entry %s "
+                                 "names an unset variable)", d.host, d.unset_ref);
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_DENIED "ws.connect: host '%s' "
+                             "is not in manifest.hosts", d.host);
+    }
     /* wss:// takes the client TLS config http.fetch uses (audit 24: Keel
      * needs cfg->tls for it and NULL was passed, so every wss:// failed). */
     if (parsed.is_https && !lua->base.http_cfg->tls)

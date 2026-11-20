@@ -17,6 +17,15 @@
  *                    connection cap) - transient and local: nothing was
  *                    sent, a later call may be admitted.
  *
+ * A third code is not an admission refusal and _refusal.code() does not
+ * report it:
+ *
+ *   HL_REFUSAL_DENIED "denied"       manifest.hosts does not admit the host
+ *                    (http.*, http.fetch, ws.connect; gap 3). Nothing was
+ *                    sent, and the same call will be denied again, so a
+ *                    caller counts it as a failure rather than handing it
+ *                    back. The JS Error also carries an own `host`.
+ *
  * JS: the thrown Error gets an own `code` property (hl_js_refusal_tag,
  * runtime/js/refusal.h). Lua: the error string starts with
  * "[hull:<code>] " (the HL_LUA_REFUSAL_* literals, concatenated into the
@@ -28,8 +37,10 @@
 
 #define HL_REFUSAL_WAIT "wait_refused"
 #define HL_REFUSAL_BUSY "busy"
+#define HL_REFUSAL_DENIED "denied"
 
 #define HL_LUA_REFUSAL_WAIT "[hull:wait_refused] "
 #define HL_LUA_REFUSAL_BUSY "[hull:busy] "
+#define HL_LUA_REFUSAL_DENIED "[hull:denied] "
 
 #endif /* HULL_SHARED_REFUSAL_H */
