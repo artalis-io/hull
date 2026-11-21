@@ -537,8 +537,12 @@ UTEST(generation, a_typescript_entry_runs_the_pipeline)
  * so no pipeline child can be spawned (a cosmo APE: hl_chan_self_exe). */
 static int pipeline_app(char *app)
 {
+#ifdef HL_CHAN_SUPPORTED
     char exe[4096];
     if (hl_chan_self_exe(exe, sizeof exe) != 0) return -2;
+#else
+    return -2;
+#endif
     const char *dir = hl_test_tmpdir();
     if (!dir) return -1;
     snprintf(app, HL_TEST_PATH_MAX, "%s/hull-gen-pipe-XXXXXX", dir);
