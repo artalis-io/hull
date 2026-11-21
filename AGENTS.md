@@ -696,7 +696,7 @@ Undeclared capabilities are blocked. An empty manifest `{}` means no filesystem,
 - A declared module's dependencies come with it: declaring `hull/web/middleware/session` admits `hull/db`, `hull/crypto` and the rest of its dependencies, so importing them needs no declaration of their own (`hull modules list` shows the declarations; the resolver adds the dependencies).
 - Capability bits piggy-back: declaring `hull/fs` doesn't grant filesystem access. You still need `fs_read`/`fs_write`. The module declaration only opens the import; the capability declaration grants the data path.
 - `hull modules analyze [app_dir]` static-scans your code (Lua, JavaScript or TypeScript) and reports the modules you use but didn't declare - an import, or an `app` method a module adds (`app.get` needs `hull/http-server`, `app.every` `hull/timers`, `app.sse` `hull/web/sse`, `app.ws` `hull/web/ws-server`) - against what the resolver admits (your declarations, their dependencies, `hull/app`). Run it before `hull build`.
-- `hull check` includes the same analysis as a pre-test gate.
+- `hull check` includes the same analysis as a pre-test gate. Its last step, `hull verify`, is skipped (and says so) for an unsigned app (no `package.sig` / `hull.sig`); `hull check --require-signature` fails an unsigned app instead.
 - `hull check --types` first type-checks the app (and `tests/`) with the TypeScript compiler installed in the app's `node_modules/.bin` or on PATH (`tsgo`, else `tsc`), over the `tsconfig.json` `hull types` writes; a type error fails the check. Hull ships no compiler.
 
 ## Available Standard Library

@@ -154,6 +154,7 @@ end
 # `hull compute build [name]`
 # `hull compute test  <name>`
 complete -c hull -n '__hull_subcommand check' -l types -d 'Type-check with the installed TypeScript compiler first'
+complete -c hull -n '__hull_subcommand check' -l require-signature -d 'Fail an unsigned app instead of skipping verify'
 
 # `hull compute check <name>`
 

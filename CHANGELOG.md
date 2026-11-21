@@ -14,6 +14,14 @@ release-artifact layout).
   (`package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `tsconfig*.json`, `jsconfig.json`,
   `hull.build.json`); it lists what it left out and refuses an app that requires / imports one
   (hsctl gap 11).
+- `hull check` passes an unsigned app. With no `package.sig` or `hull.sig` in the app
+  directory, its verify step is skipped and says so (`verify skipped: <app> is unsigned`).
+  Before, an app built without `--sign` could never pass `hull check`, whatever its types,
+  manifest and tests said. `hull check --require-signature` is the explicit way to require a signature: an
+  unsigned app then fails (`verify failed: <app> is unsigned and --require-signature was
+  given`). An option for verify (`--developer-key`, `--platform-key`, `--gethull-key`,
+  `--binary`, `--no-verify-platform`) also still runs it. Any `package.sig` / `hull.sig`
+  entry, a dangling link included, is verified as before.
 
 ### Fixed
 

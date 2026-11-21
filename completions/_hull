@@ -158,6 +158,7 @@ _hull() {
                 check)
                     _arguments \
                         '--types[Type-check with the installed TypeScript compiler first]' \
+                        '--require-signature[Fail an unsigned app instead of skipping verify]' \
                         '--json[Machine-readable JSON output]' \
                         '--developer-key[Developer public key]:file:_files' \
                         '*:app dir:_files -/'
