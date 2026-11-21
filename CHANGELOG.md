@@ -6,7 +6,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
-## [Unreleased]
+## [0.23.2] - 2026-11-21
+
+Audit round 51 and the round 50 leftovers, all Low, plus hsctl's platform gaps 10 and 11.
+`hull check` now passes an unsigned app, reporting verify as skipped (`--require-signature`
+keeps it strict), and `hull build` leaves the app's `tests/` directory and its root tooling
+configs out of the binary. The fixes: a Lua manifest extraction that could abort the process
+or leak on out of memory, JS buffers and images that left a stale error pending after
+`close()`, `read_secret` dropping a signal in a narrow window, and small tooling items. Read
+the upgrade notes: both gap changes alter what an existing command does.
+
+### Upgrade notes
+
+- **`hull check` no longer fails an unsigned app.** With no `package.sig` or `hull.sig` in the
+  app directory its verify step is skipped and says so. A pipeline that relied on bare
+  `hull check` failing an unsigned app passes `--require-signature` (or any verify option,
+  such as `--developer-key`). A signed app is verified exactly as before.
+- **`hull build` leaves out `tests/` and the app root's `package.json`, `package-lock.json`,
+  `npm-shrinkwrap.json`, `tsconfig*.json`, `jsconfig.json` and `hull.build.json`.** An app
+  that requires or imports one of them at run time now fails the build, naming the file; move
+  that code out of `tests/` (e.g. into `lib/`). Files with those names deeper in the tree still
+  ship.
 
 ### Changed
 
@@ -47,6 +67,8 @@ release-artifact layout).
 
 ### Tests
 
+- `jobs.cleanup`'s "before rounds up" case takes its cutoff from the row's own
+  `updated_at`, so it no longer fails when a second ticks mid-test (both runtimes).
 - Audit 50 coverage: Lua `ctx.stdin:read_secret` scrubs its buffer when the line's string
   cannot be allocated (`lua_cli_audit50.read_secret_scrub_on_oom`), and a raising
   `P.preset_check` extraction frees the partial manifest and leaves the registry, the stack
