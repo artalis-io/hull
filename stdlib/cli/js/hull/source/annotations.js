@@ -87,7 +87,7 @@ export function parseTag(parts, start1, stop1, bytes) {
     const m = body.match(/^@([A-Za-z_][A-Za-z0-9_]*)/);
     if (!m) return null;
     const name = m[1];
-    let rest = body.slice(m[0].length).replace(/^\s+/, "");
+    let rest = body.slice(m[0].length).trimStart();   // trim*: linear (a `\s+$` regex backtracks per start; audit 50)
     let args, text;
     if (rest.charCodeAt(0) === 0x28) {                     // '('
         let depth = 0, end = -1;
@@ -97,9 +97,9 @@ export function parseTag(parts, start1, stop1, bytes) {
             else if (ch === 0x29) { depth--; if (depth === 0) { end = i; break; } }
         }
         if (end < 0) { text = rest; }                     // unmatched ( -> whole remainder is text
-        else { args = rest.slice(1, end); text = rest.slice(end + 1).replace(/^\s+|\s+$/g, ""); }
+        else { args = rest.slice(1, end); text = rest.slice(end + 1).trim(); }
     } else {
-        text = rest.replace(/\s+$/, "");
+        text = rest.trimEnd();
     }
     if (text === "") text = undefined;
     return { name: name, args: args, text: text, raw: raw, range: { start: start1, stop: stop1 } };

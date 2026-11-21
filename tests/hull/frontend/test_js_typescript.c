@@ -672,4 +672,130 @@ UTEST(parser_audit49, regex_after_erased_declaration)
     hl_js_session_destroy(s);
 }
 
+/* ---- audit 50 ---- */
+
+/* `src` is refused in TS mode, with a diagnostic holding `needle`. */
+static int refused_with(HlJsSession *s, const char *src, const char *needle)
+{
+    char *o = ts(s, src);
+    int ok = has(o, "\"valid\":false") && has(o, needle);
+    if (!ok) fprintf(stderr, "[audit50] %s\n  %s\n", src, o ? o : "(null)");
+    free(o);
+    return ok;
+}
+
+/* `as` / `satisfies` groups the expression before it; erasing the type removed the grouping, so
+ * `price + tax as number * qty` (tsc: `(price + tax) * qty`) ran as `price + tax * qty`. */
+UTEST(js_typescript_audit50, as_precedence_barrier)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    static const char *const BAD[] = {
+        "x = price + tax as number * qty;\n",
+        "x = a < b as any + c;\n",
+        "x = a - b as any ** 2;\n",
+        "x = a in b as any + c;\n",
+        "x = a ** b as any ** c;\n",
+        "x = a + b satisfies number * c;\n",
+        "x = -a as any ** 2;\n",                    /* `-a ** 2` is a SyntaxError */
+        "x = a << b as any + 1;\n",
+    };
+    for (size_t i = 0; i < sizeof(BAD) / sizeof(BAD[0]); i++)
+        EXPECT_TRUE(refused_with(s, BAD[i], "parenthesize the expression before"));
+    /* `??` mixed with `||` / `&&` (TypeScript reads `(a ?? b) || c`): a JS syntax error. */
+    EXPECT_TRUE(refused_with(s, "x = a ?? b as any || c;\n", "cannot be mixed with"));
+    EXPECT_TRUE(refused_with(s, "x = a || b as any ?? c;\n", "cannot be mixed with"));
+    EXPECT_TRUE(refused_with(s, "x = a ?? b || c;\n", "cannot be mixed with"));
+    /* Same grouping once erased: kept. */
+    EXPECT_TRUE(erases_clean_to(s, "x = a * b as any + c;\n", "x = a * b        + c;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = (a + b) as any * c;\n", "x = (a + b)        * c;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = a + b as any > c;\n", "x = a + b        > c;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = (-a) as any ** 2;\n", "x = (-a)        ** 2;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = a ?? (b || c) as any;\n", "x = a ?? (b || c)       ;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = (a || b) as any ?? c;\n", "x = (a || b)        ?? c;\n"));
+    hl_js_session_destroy(s);
+}
+
+/* After the closing `>` of a type argument list, TypeScript rescans a following `>` / `=` with
+ * it: `a < b >>> c` is a comparison. Hull split `>>>`, read `a<b>` as an instantiation and ran
+ * `a >> c`. */
+UTEST(js_typescript_audit50, unsigned_shift_after_lt)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    EXPECT_TRUE(erases_clean_to(s, "x = a < b >>> c;\n", "x = a < b >>> c;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = (a<b, c>>>d);\n", "x = (a<b, c>>>d);\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = a<b<c>>>d;\n", "x = a<b<c>>>d;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = f<T>>>(1);\n", "x = f<T>>>(1);\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = a < b >> c;\n", "x = a < b >> c;\n"));
+    /* `a<b>==c` / `a<b>>=c` / `f<T> >> 1`: comparisons (TypeScript rejects them too). */
+    char *o = ts(s, "x = a<b>==c;\n");
+    EXPECT_TRUE(has(o, "\"valid\":false"));
+    free(o);
+    o = ts(s, "x = a<b>>=c;\n");
+    EXPECT_TRUE(has(o, "\"valid\":false"));
+    free(o);
+    o = ts(s, "x = f<T> >> 1;\n");
+    EXPECT_TRUE(has(o, "\"valid\":false"));
+    free(o);
+    /* Still type arguments. */
+    EXPECT_TRUE(erases_clean_to(s, "x = f<A<B>>(c);\n", "x = f      (c);\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = f<T> == 1;\n", "x = f    == 1;\n"));
+    hl_js_session_destroy(s);
+}
+
+/* An ambient body was skipped with the operator slash goal, so a regex holding `}` ended
+ * `declare module "m" { ... }` early and what followed ran as JavaScript. */
+UTEST(js_typescript_audit50, ambient_block_regex_brace)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    EXPECT_TRUE(refused_with(s, "declare module \"m\" { const r = /}/.source; const s = \"/; console.log(1); //\"; }\nexport {};\n",
+                             "inside an ambient declaration body"));
+    EXPECT_TRUE(refused_with(s, "declare namespace N { const r = /}/.source; const s = \"/; console.log(1); //\"; }\nexport {};\n",
+                             "inside an ambient declaration body"));
+    EXPECT_TRUE(refused_with(s, "declare namespace N { const r = /{/; }\nconsole.log(1);\n", "inside an ambient declaration body"));
+    EXPECT_TRUE(refused_with(s, "declare enum E { A = typeof /}/ }\n", "inside an ambient declaration body"));
+    /* An enum initializer's division stays. */
+    EXPECT_TRUE(erases_clean_to(s, "declare const enum F { A = 8 / 2, B = (A) / 2 }\nx;\n",
+                                   "                                               \nx;\n"));
+    hl_js_session_destroy(s);
+}
+
+/* The type grammar skipped `[ ... ]` / `( ... )` groups with the operator slash goal; TypeScript
+ * reads a computed key there as an expression, so `{ [/]: 1 }; console.log(1); ... /.source]`
+ * is one regex to tsc, and Hull ran the `console.log(1)` inside it. */
+UTEST(js_typescript_audit50, type_bracket_skip_regex)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    EXPECT_TRUE(refused_with(s, "let f: { [/]: 1 }; console.log(1); declare namespace Q { /.source]: 1 };\nexport {};\n",
+                             "a '/' inside a type is not supported"));
+    EXPECT_TRUE(refused_with(s, "let f: { [/]/.source]: 1 };\n", "a '/' inside a type is not supported"));
+    char *o = ts(s, "let g: ({ a = /)/ }) => void;\nconsole.log(1);\n");
+    EXPECT_TRUE(has(o, "\"valid\":false"));
+    free(o);
+    EXPECT_TRUE(erases_clean_to(s, "let k: { [Symbol.iterator]: number };\n", "let k                               ;\n"));
+    hl_js_session_destroy(s);
+}
+
+/* `a as const | 0` is a union type to TypeScript (it emits `a`); erased it was `a | 0`. And an
+ * assignment after an assertion, which TypeScript rejects, erased to a chained assignment. */
+UTEST(js_typescript_audit50, as_const_union)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    EXPECT_TRUE(refused_with(s, "x = a as const | 0;\n", "after 'as const'"));
+    EXPECT_TRUE(refused_with(s, "x = a as const & 0;\n", "after 'as const'"));
+    EXPECT_TRUE(refused_with(s, "x = a as const\n| 0;\n", "after 'as const'"));
+    EXPECT_TRUE(refused_with(s, "x = y as T\n= 3;\n", "an assignment after the type"));
+    EXPECT_TRUE(refused_with(s, "x = y as any = 3;\n", "an assignment after the type"));
+    EXPECT_TRUE(refused_with(s, "y as any += 3;\n", "an assignment after the type"));
+    EXPECT_TRUE(erases_clean_to(s, "x = a as const;\n", "x = a         ;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = a as T | 0;\n", "x = a         ;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "(y as any) = 3;\n", "(y       ) = 3;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = a as const || b;\n", "x = a          || b;\n"));
+    hl_js_session_destroy(s);
+}
+
 UTEST_MAIN()

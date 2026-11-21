@@ -9,7 +9,7 @@
 //   createTypeGrammar(p) -> { parseType(opts?), parseReturnType(), parseTypeParameters(),
 //                             parseTypeArguments(), parseParameters(), parseObjectType(), startsType() }
 //   p: { cur(), advance(goal), peek(k), isP(v), isKw(v), nl(), splitGreater(), synErr(msg, tok),
-//        guard(), unguard() }
+//        guard(), unguard(), refuse(msg, tok) }
 //
 // Every token inside a type is read with the operator slash goal (no type holds a regex), and
 // so is the first token after it: everywhere a type ends, JavaScript would read the next token
@@ -66,13 +66,20 @@ export function createTypeGrammar(p) {
         return true;
     }
 
+    // A `/` (or a regex) inside a bracket group the type grammar skips: every token there is
+    // lexed with the operator slash goal, where TypeScript reads an expression (a computed key
+    // `[/]/.source]`) and so a regular expression - the skip would end at a bracket inside it,
+    // and run what TypeScript erases. No type holds a `/`, so it is refused (audit 50).
+    function isSlash(t) { return t.type === "regex" || (t.type === "punctuator" && (t.value === "/" || t.value === "/=")); }
+
     // Skip one balanced bracket group starting at the current `(`, `[` or `{` (a destructuring
-    // pattern standing for a parameter name in a function type).
+    // pattern standing for a parameter name in a function type, or a computed property name).
     function skipBalanced() {
         let depth = 0;
         do {
             const t = cur();
             if (t.type === "eof") return;
+            if (isSlash(t)) { p.refuse("a '/' inside a type is not supported", t); return; }
             if (t.type === "punctuator") {
                 if (t.value === "(" || t.value === "[" || t.value === "{") depth++;
                 else if (t.value === ")" || t.value === "]" || t.value === "}") depth--;
@@ -87,7 +94,7 @@ export function createTypeGrammar(p) {
         let depth = 0;
         for (;;) {
             const t = p.peek(k);
-            if (t.type === "eof") return 0;
+            if (t.type === "eof" || isSlash(t)) return 0;
             if (t.type === "punctuator") {
                 if (t.value === "(" || t.value === "[" || t.value === "{") depth++;
                 else if (t.value === ")" || t.value === "]" || t.value === "}") { depth--; if (depth === 0) return k + 1; }

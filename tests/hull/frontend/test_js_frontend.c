@@ -449,4 +449,76 @@ UTEST(js_frontend, corpus_regression)
     hl_js_session_destroy(s);
 }
 
+/* ---- audit 50 ---- */
+
+static char *repeat_src(const char *head, const char *rep, int n, const char *tail)
+{
+    size_t hl = strlen(head), rl = strlen(rep), tl = strlen(tail);
+    char *b = (char *)malloc(hl + rl * (size_t)n + tl + 1);
+    if (!b) return NULL;
+    size_t k = 0;
+    memcpy(b, head, hl); k = hl;
+    for (int i = 0; i < n; i++) { memcpy(b + k, rep, rl); k += rl; }
+    memcpy(b + k, tail, tl); k += tl;
+    b[k] = '\0';
+    return b;
+}
+
+/* A whitespace run inside a JSDoc tag: the trim was a `\s+$` regex, retried from every start
+ * (40k spaces took 5.7 s). 200k spaces now take one linear pass, inside the session's budget. */
+UTEST(js_frontend_audit50, jsdoc_trim_linear)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    static const char *const HEADS[] = { "/** @route a", "/** @route (x) a", "/** @route (x)" };
+    for (size_t h = 0; h < sizeof(HEADS) / sizeof(HEADS[0]); h++) {
+        char *src = repeat_src(HEADS[h], " ", 200000, "b */\nexport const r = 1;\n");
+        ASSERT_TRUE(src != NULL);
+        char *o = fe_analyze(s, src);
+        if (!has(o, "\"status\":\"analyzed\"")) fprintf(stderr, "[audit50] %.300s\n", o ? o : "(null)");
+        EXPECT_TRUE(has(o, "\"status\":\"analyzed\""));
+        EXPECT_TRUE(has(o, "\"name\":\"route\""));
+        EXPECT_FALSE(has(o, "js.limit"));
+        free(o); free(src);
+    }
+    hl_js_session_destroy(s);
+}
+
+/* A flat `y + y + ...` chain is parsed without recursion, but every walk after the parse
+ * recurses per node: 1000 terms overflowed the stack and the verdict read "[unsupported type]".
+ * The chain counts against the nesting limit, and a stack verdict says what happened. */
+UTEST(js_frontend_audit50, flat_binary_chain_depth)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    static const int NS[] = { 1000, 5000, 50000 };
+    for (size_t i = 0; i < sizeof(NS) / sizeof(NS[0]); i++) {
+        char *src = repeat_src("export const x = y", " + y", NS[i], ";\n");
+        ASSERT_TRUE(src != NULL);
+        char *o = fe_analyze(s, src);
+        int fails_closed = has(o, "\"code\":\"js.limit.depth\"") || has(o, "\"code\":\"js.limit.stack\"");
+        if (!fails_closed || has(o, "[unsupported type]")) fprintf(stderr, "[audit50] n=%d %.300s\n", NS[i], o ? o : "(null)");
+        EXPECT_TRUE(fails_closed);
+        EXPECT_FALSE(has(o, "\"status\":\"analyzed\""));
+        EXPECT_FALSE(has(o, "[unsupported type]"));
+        EXPECT_TRUE(has(o, "nest"));                       /* "nesting depth" / "nests too deeply" */
+        free(o); free(src);
+    }
+    /* A short chain still analyzes. */
+    char *src = repeat_src("export const x = y", " + y", 100, ";\n");
+    ASSERT_TRUE(src != NULL);
+    char *o = fe_analyze(s, src);
+    EXPECT_TRUE(has(o, "\"status\":\"analyzed\""));
+    free(o); free(src);
+    /* Deep nesting hits the stack: the verdict is readable. */
+    src = repeat_src("export const x = ", "[", 2000, "");
+    char *src2 = src ? repeat_src(src, "]", 2000, ";\n") : NULL;
+    ASSERT_TRUE(src2 != NULL);
+    o = fe_analyze(s, src2);
+    EXPECT_TRUE(has(o, "js.limit."));
+    EXPECT_FALSE(has(o, "[unsupported type]"));
+    free(o); free(src); free(src2);
+    hl_js_session_destroy(s);
+}
+
 UTEST_MAIN()

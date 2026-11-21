@@ -231,6 +231,14 @@ Implemented, seven rules (the first two in slice 1):
   that would continue the expression (`(`, `[`, `.`, `?.` or a template): `x as T` /
   `[1].f()` reads `x[1].f()` (`refuse/asi_as_bracket.ts`,
   `asi_as_template.ts`, `asi_satisfies_call.ts`).
+- **`as` and `satisfies` as a grouping.** The assertion groups the expression before it:
+  `price + tax as number * qty` is `(price + tax) * qty` to TypeScript, and erased it reads
+  `price + tax * qty`. Erasure blanks bytes and cannot add parentheses, so an operator after
+  the type that binds tighter than the expression before it (or `**` after `**` or after a
+  unary operand) is refused with a hint to parenthesize; so is `??` mixed with `||` / `&&`
+  without parentheses (a JavaScript syntax error, which TypeScript reads left to right), an
+  assignment after the type (TypeScript rejects it; erased it assigns), and `|` / `&` after
+  `as const` (TypeScript reads a union type). Audit 50; `js_typescript_audit50.*`.
 - **Async arrow type parameters.** `async <T>` followed by a line break and `(x) => x` is an
   async arrow in TypeScript; erased, `async` / `(x) => x` is a call of `async` and then a
   plain arrow, so a line break after the type parameters of an async arrow is refused
@@ -308,7 +316,11 @@ yet, and no extension selects it.
   rejects it and Hull refuses it.
 - `declare class` / `abstract class` / `enum` / `const enum` / `namespace` / `module "m"`
   (with or without a body) / `global`, also after `export`: the header is read and the
-  body, ambient declarations only, is skipped as one balanced `{ ... }` group. `declare
+  body, ambient declarations only, is skipped as one balanced `{ ... }` group (lexed with
+  the regex goal after a punctuator; a regex or a `/` there is refused, but for an enum
+  initializer's division, since a wrong slash goal could end the skip inside a regex and run
+  what TypeScript erases - audit 50; the type grammar's own bracket skips, a computed key or
+  a parameter pattern, refuse a `/` the same way). `declare
   interface` / `declare type`, and `import type X = require("m")` (or `= A.B`).
 - The §3.4 rules for generic arrows, overloads, a following `;` and class members.
 
@@ -348,16 +360,20 @@ tells them apart. The parser reads it as type arguments under speculation: the l
 stack copied), and the parser saves its own. The reading is kept only when the list parses
 with no diagnostic and the token after its `>` can follow one by TypeScript's rule
 (`canFollowTypeArgumentsInExpression`): `(` or a template make a call or a tagged
-template; `<`, `>`, `+` and `-` make a comparison; otherwise a line break, a binary
+template; `<`, any `>`-led operator, `+` and `-` make a comparison, and so does a `=`-led
+one right after the closing `>` (TypeScript rescans `>` with it: `a < b >>> c`, `f<T>>>(1)`
+and `a<b>>=c` have no list - audit 50); otherwise a line break, a binary
 operator or a token that cannot start an expression make an instantiation expression, and
 anything that can start one a comparison. `.`, `?.` and an assignment after the list,
 which TypeScript rejects, are read as a comparison so that JS mode reports them. Otherwise
 everything is rewound, and every token is lexed again under its real slash goal (`a <
 /re/` stays a regular expression).
 
-So `i < n`, `a < b > c`, `a < b >= c` and `a < b && c > d` stay comparisons, and `a < b >
-(c)` is a call, as it is to tsc and Node: the one place where valid JavaScript parses
-differently in TS mode. A `<` at an operand position is a generic arrow when a type
+So `i < n`, `a < b > c`, `a < b >= c`, `a < b >>> c` and `a < b && c > d` stay
+comparisons, and `a < b > (c)` is a call and ``a < b > `t` `` a tagged template, as they are
+to tsc and Node; `a < b >` before a line break is an instantiation expression, the next
+line a new statement. Those are the places where valid JavaScript parses differently in TS
+mode. A `<` at an operand position is a generic arrow when a type
 parameter list followed by `(` reads and an arrow follows, else an angle-bracket assertion
 (refused).
 
