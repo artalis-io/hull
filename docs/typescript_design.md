@@ -239,6 +239,11 @@ Implemented, seven rules (the first two in slice 1):
   without parentheses (a JavaScript syntax error, which TypeScript reads left to right), an
   assignment after the type (TypeScript rejects it; erased it assigns), and `|` / `&` after
   `as const` (TypeScript reads a union type). Audit 50; `js_typescript_audit50.*`.
+- **`global` before a line.** At statement start, `global` followed on the next line by
+  `{`, `export` or a name that is not a TypeScript keyword is a global augmentation to tsc
+  (5.9 emits a namespace for it, 7.0 drops the word), and an expression statement to
+  JavaScript: refused. `namespace` and `module` before a line break are expressions to tsc
+  as well, and stay so. Audit 50.
 - **Async arrow type parameters.** `async <T>` followed by a line break and `(x) => x` is an
   async arrow in TypeScript; erased, `async` / `(x) => x` is a call of `async` and then a
   plain arrow, so a line break after the type parameters of an async arrow is refused

@@ -798,4 +798,30 @@ UTEST(js_typescript_audit50, as_const_union)
     hl_js_session_destroy(s);
 }
 
+/* `global` at statement start, then a line break and a name or `{`: tsc reads a global
+ * augmentation (5.9 emits a namespace for it, 7.0 drops the word and keeps what follows), Hull
+ * read the expression statement `global` and ran it. Refused; `namespace` / `module` before a
+ * line break are expressions to tsc too, and stay so. */
+UTEST(js_typescript_audit50, global_newline_declaration)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    static const char *const BAD[] = {
+        "global \n f;\n", "global \n T;\n", "global\n{ }\n", "global\nf();\n", "global\nexport const a = 1;\n",
+        "function g() { global\n{} }\n", "{ global\nf }\n", "x: global\n{}\n", "if (1) global\n{}\n",
+        "global\n\\u0066;\n", "\\u0067lobal\n{}\n", "declare\nglobal\n{}\n",
+    };
+    for (size_t i = 0; i < sizeof(BAD) / sizeof(BAD[0]); i++)
+        EXPECT_TRUE(refused_with(s, BAD[i], "TypeScript global declarations are not supported"));
+    /* A TypeScript keyword after the line break: an expression statement to tsc as well. */
+    EXPECT_TRUE(erases_clean_to(s, "global\nlet x = 1;\n", "global\nlet x = 1;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "global\nundefined;\n", "global\nundefined;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "global\nasync function f() {}\n", "global\nasync function f() {}\n"));
+    EXPECT_TRUE(erases_clean_to(s, "global.x = 1;\nglobal = 2;\nglobal\n(f);\n", "global.x = 1;\nglobal = 2;\nglobal\n(f);\n"));
+    EXPECT_TRUE(erases_clean_to(s, "namespace\nX\n{ }\n", "namespace\nX\n{ }\n"));
+    EXPECT_TRUE(erases_clean_to(s, "module\nX\n{ }\n", "module\nX\n{ }\n"));
+    EXPECT_TRUE(erases_clean_to(s, "x = global\nf;\n", "x = global\nf;\n"));
+    hl_js_session_destroy(s);
+}
+
 UTEST_MAIN()

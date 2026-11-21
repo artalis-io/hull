@@ -281,6 +281,7 @@ function parseInternal(bytes, opts, inject) {
     // name ON THE SAME LINE is a JS syntax error (two identifiers with no ASI between them), and
     // `enum` is reserved; with a line break between, JS reads two statements and so does this.
     function tsDeclarationStart() {
+        if (cur.type === "identifier" && cur.value === "global" && tsGlobalDeclarationAhead()) return "global declarations";
         if (!isIdTok(cur)) return null;
         const v = cur.value;
         if (v !== "interface" && v !== "type" && v !== "enum" && v !== "namespace" && v !== "module" && v !== "declare" && v !== "abstract") return null;
@@ -294,6 +295,24 @@ function parseInternal(bytes, opts, inject) {
         if (v === "type") return "type aliases";
         if (v === "enum") return "enums";
         return "namespaces";
+    }
+    // `global` at statement start (escaped or not) followed, on any line, by `{`, `export` or a
+    // name that is not a TypeScript keyword: tsc reads a global augmentation (5.x emits a
+    // namespace for it, 7.x drops the word), JavaScript an expression statement `global` and
+    // what follows. Refused (audit 50). An escaped name is a name to tsc.
+    const TS_KEYWORDS = new Set(["abstract", "accessor", "any", "as", "asserts", "assert", "async", "await", "bigint",
+        "boolean", "break", "case", "catch", "class", "const", "constructor", "continue", "debugger", "declare", "default",
+        "defer", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "from", "function", "get",
+        "global", "if", "implements", "import", "in", "infer", "instanceof", "interface", "is", "keyof", "let", "module",
+        "namespace", "never", "new", "null", "number", "object", "of", "out", "override", "package", "private",
+        "protected", "public", "readonly", "require", "return", "satisfies", "set", "static", "string", "super",
+        "switch", "symbol", "this", "throw", "true", "try", "type", "typeof", "undefined", "unique", "unknown",
+        "using", "var", "void", "while", "with", "yield"]);
+    function tsGlobalDeclarationAhead() {
+        const nx = tsPeek();
+        if (nx.type === "punctuator") return nx.value === "{";
+        if (nx.type !== "identifier") return false;
+        return nx.escaped || nx.value === "export" || !TS_KEYWORDS.has(nx.value);
     }
     // A class member / parameter modifier followed by more of the member on the same line.
     const TS_MODIFIERS = new Set(["public", "private", "protected", "readonly", "abstract", "override", "declare"]);
@@ -904,6 +923,9 @@ function parseInternal(bytes, opts, inject) {
                     st = parseExpressionStatement();
                 }
             }
+        } else if (ts && cur.type === "identifier" && cur.value === "global" && tsGlobalDeclarationAhead()) {
+            tsRefuse("global declarations");        // `\u0067lobal` is the keyword to tsc too
+            st = parseExpressionStatement();
         } else {
             st = parseExpressionStatement();
         }
