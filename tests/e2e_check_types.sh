@@ -2,6 +2,8 @@
 # e2e_check_types.sh - `hull check --types`: the TypeScript compiler the app
 # or the user installed, run over the app's tsconfig.json and then
 # tests/tsconfig.json with --noEmit, before hull check's other steps.
+# Every run also gets the options that keep the config from writing files
+# (audit 50, HL_TYPE_CHECK_ARGS).
 #   - the lookup order: the app's node_modules/.bin (tsgo, then tsc), then
 #     PATH (tsgo, then tsc), with stand-in compilers that record their call;
 #   - a compiler's failure fails hull check before its next step, and its
@@ -50,8 +52,9 @@ fake "$bin" tsgo
 fake "$app/node_modules/.bin" tsc
 fake "$app/node_modules/.bin" tsgo
 run_check "$bin"
-if [ "$(head -n 1 "$LOG")" = "tsgo --noEmit -p $app" ] &&
-   [ "$(sed -n 2p "$LOG")" = "tsgo --noEmit -p $app/tests" ] &&
+NW="--noEmit --incremental false --composite false --tsBuildInfoFile null --generateTrace null"
+if [ "$(head -n 1 "$LOG")" = "tsgo $NW -p $app" ] &&
+   [ "$(sed -n 2p "$LOG")" = "tsgo $NW -p $app/tests" ] &&
    has "$WORK/out.txt" "type-checking with $app/node_modules/.bin/tsgo" &&
    has "$WORK/out.txt" "[hull:check] validating manifest..."; then
     ok "the app's tsgo first, over the app then tests/, then the next step"
@@ -60,14 +63,14 @@ else
 fi
 mv "$app/node_modules/.bin/tsgo" "$WORK/tsgo.off"
 run_check "$bin"
-[ "$(head -n 1 "$LOG")" = "tsc --noEmit -p $app" ] && ok "then the app's tsc" || { bad "app tsc"; cat "$LOG"; }
+[ "$(head -n 1 "$LOG")" = "tsc $NW -p $app" ] && ok "then the app's tsc" || { bad "app tsc"; cat "$LOG"; }
 mv "$app/node_modules" "$WORK/node_modules.off"
 run_check "$bin"
-[ "$(head -n 1 "$LOG")" = "tsgo --noEmit -p $app" ] && has "$WORK/out.txt" "type-checking with $bin/tsgo" &&
+[ "$(head -n 1 "$LOG")" = "tsgo $NW -p $app" ] && has "$WORK/out.txt" "type-checking with $bin/tsgo" &&
     ok "then tsgo on PATH" || { bad "PATH tsgo"; cat "$LOG" "$WORK/out.txt"; }
 mv "$bin/tsgo" "$WORK/bin_tsgo.off"
 run_check "$bin"
-[ "$(head -n 1 "$LOG")" = "tsc --noEmit -p $app" ] && ok "then tsc on PATH" || { bad "PATH tsc"; cat "$LOG"; }
+[ "$(head -n 1 "$LOG")" = "tsc $NW -p $app" ] && ok "then tsc on PATH" || { bad "PATH tsc"; cat "$LOG"; }
 
 echo "== hull check --types: failures"
 fake "$bin" tsc 2
@@ -109,6 +112,26 @@ else
     rc=0; PATH="$real:$tdir:$PATH" "$HULL" check --types "$app" > "$WORK/out.txt" 2>&1 || rc=$?
     [ "$rc" -ne 0 ] && has "$WORK/out.txt" "TS2322" && has "$WORK/out.txt" "type check failed" &&
         ok "a type error fails hull check" || { bad "type error (rc $rc)"; cat "$WORK/out.txt"; }
+    rm -f "$app/lib/bad.ts"
+
+    # check_types_audit50.no_write_outside: the app's tsconfig is the
+    # repository's. `incremental` / `composite` + `tsBuildInfoFile`, and
+    # `generateTrace`, wrote files anywhere despite --noEmit (a cloned repo's
+    # config wrote over a shell startup file). The compiler is told not to.
+    w="$WORK/w50"
+    mkdir -p "$w/app" "$w/out"
+    printf 'export const x: number = 1;\n' > "$w/app/a.ts"
+    cat > "$w/app/tsconfig.json" <<JSON
+{ "compilerOptions": { "noEmit": true, "incremental": true, "composite": true,
+    "tsBuildInfoFile": "$w/out/x.tsbuildinfo", "generateTrace": "$w/out/trace" },
+  "include": ["a.ts"] }
+JSON
+    rc=0; PATH="$real:$tdir:$PATH" "$HULL" check --types "$w/app" > "$WORK/out.txt" 2>&1 || rc=$?
+    if has "$WORK/out.txt" "type-checking with" && [ -z "$(ls -A "$w/out")" ]; then
+        ok "check_types_audit50.no_write_outside"
+    else
+        bad "check_types_audit50.no_write_outside (rc $rc)"; ls -la "$w/out"; cat "$WORK/out.txt"
+    fi
 fi
 
 [ "$fail" -eq 0 ] && echo "e2e_check_types: OK" || { echo "e2e_check_types: FAILED"; exit 1; }

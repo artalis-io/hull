@@ -609,7 +609,7 @@ conversion and the declarations install are one module both share
    checking is the real TypeScript checker, which Hull runs rather than reimplements.
    - **As built:** `hull check --types [app_dir]` runs, before its other steps, the
      compiler over the app's `tsconfig.json` and then `tests/tsconfig.json` (both from
-     `hull types`, §2.2) with `--noEmit`; a diagnostic fails the check. The compiler is the
+     `hull types`, §2.2) with `--noEmit`; a diagnostic fails the check. Every run also passes `--incremental false --composite false --tsBuildInfoFile null --generateTrace null` (`HL_TYPE_CHECK_ARGS`, audit 50): the config is the repository's, and those options made the compiler write a `.tsbuildinfo` or a trace anywhere, `--noEmit` or not. The compiler is the
      app's own - `node_modules/.bin/tsgo`, then `node_modules/.bin/tsc` - else `tsgo`, then
      `tsc`, on PATH. With none it says how to install one (`npm install --save-dev
      typescript`); with no `tsconfig.json` it names `hull types`. It runs through

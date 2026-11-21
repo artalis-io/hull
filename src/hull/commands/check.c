@@ -43,7 +43,7 @@ static int check_types(const char *app_dir)
         return 1;
     }
     hl_eprintf_line("[hull:check] type-checking with %s", checker);
-    const char *argv[] = { checker, "--noEmit", "-p", app_dir, NULL };
+    const char *argv[] = { checker, HL_TYPE_CHECK_ARGS, "-p", app_dir, NULL };
     int rc = hl_tool_spawn(argv);
     if (rc != 0) return rc < 0 ? 1 : rc;
 
@@ -51,7 +51,7 @@ static int check_types(const char *app_dir)
     int n = snprintf(tests, sizeof tests, "%s/tests", app_dir);
     if (n < 0 || (size_t)n >= sizeof tests) return 1;
     if (hl_type_check_configured(tests)) {
-        const char *targv[] = { checker, "--noEmit", "-p", tests, NULL };
+        const char *targv[] = { checker, HL_TYPE_CHECK_ARGS, "-p", tests, NULL };
         rc = hl_tool_spawn(targv);
         if (rc != 0) return rc < 0 ? 1 : rc;
     }

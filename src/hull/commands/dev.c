@@ -904,7 +904,7 @@ static int dev_self_exe(const char *argv0, char *out, size_t out_sz)
 /*
  * When the app has a tsconfig.json and a TypeScript compiler is installed
  * (shared/type_check.h), each successful (re)spawn starts one
- * `--noEmit --pretty false -p <app>` in the background; an edit before it
+ * `HL_TYPE_CHECK_ARGS --pretty false -p <app>` in the background; an edit before it
  * ends stops it. It never holds up or decides a reload: when it ends its
  * diagnostics are summarised on stderr and, under --agent, written to
  * .hull/types.json for `hull agent errors`. `--no-types` turns it off. The
@@ -979,7 +979,8 @@ static void dev_types_start(DevTypes *t, const char *app_dir)
         dup2(p[1], STDERR_FILENO);
         close(p[0]);
         close(p[1]);
-        const char *argv[] = { t->checker, "--noEmit", "--pretty", "false", "-p", app_dir, NULL };
+        const char *argv[] = { t->checker, HL_TYPE_CHECK_ARGS, "--pretty", "false",
+                               "-p", app_dir, NULL };
         int rc = hl_tool_spawn(argv);
         _exit(rc < 0 ? 127 : rc);
     }
