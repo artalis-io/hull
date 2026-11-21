@@ -3,7 +3,9 @@
  *
  * Runs each step sequentially, stopping on first failure. Intended for
  * CI validation and a single command before pushing. `--types` adds a
- * type check first, with a TypeScript compiler already installed.
+ * type check first, with a TypeScript compiler already installed. An app
+ * that was never signed has nothing to verify: that step is skipped and
+ * says so, unless an option asked for verification (app_is_unsigned).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -18,10 +20,12 @@
 #include "hull/shared/type_check.h"
 #include "hull/shared/term_escape.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* `--types`: the compiler over the app's tsconfig.json (`hull types`
@@ -56,6 +60,23 @@ static int check_types(const char *app_dir)
         if (rc != 0) return rc < 0 ? 1 : rc;
     }
     return 0;
+}
+
+/* Whether `app_dir` holds no signature at all: neither package.sig nor
+ * hull.sig exists as any kind of entry. Anything there - a file, a broken
+ * symbolic link, an entry that cannot be examined - counts as signed, so
+ * verify runs and reports it; only a clean absence is unsigned. */
+static int app_is_unsigned(const char *app_dir)
+{
+    static const char *const names[] = { "package.sig", "hull.sig", NULL };
+    for (int k = 0; names[k]; k++) {
+        char path[PATH_MAX];
+        int n = snprintf(path, sizeof path, "%s/%s", app_dir, names[k]);
+        if (n < 0 || (size_t)n >= sizeof path) return 0;
+        struct stat st;
+        if (lstat(path, &st) == 0 || errno != ENOENT) return 0;
+    }
+    return 1;
 }
 
 int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
@@ -167,6 +188,19 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
     int rc = 0;
     fprintf(stderr, "[hull:check] (test runner unavailable on HTTP=0 builds)\n");
 #endif
+
+    /* An unsigned app has no signature to verify: `hull verify` would fail
+     * it for that alone, so `hull check` could never pass an app built
+     * without --sign. Skipped only when nothing asked for verification:
+     * any option forwarded to verify (a key, --binary, --no-verify-platform)
+     * runs it, so a gate that requires a signature keeps failing without
+     * one. vc counts "verify" and the app directory besides the options. */
+    if (vc == 2 && app_is_unsigned(app_dir)) {
+        hl_eprintf_line("[hull:check] verify skipped: %s is unsigned (no package.sig "
+                        "or hull.sig; `hull build --sign` signs it)", app_dir);
+        fprintf(stderr, "[hull:check] all checks passed\n");
+        return 0;
+    }
 
     fprintf(stderr, "[hull:check] running verify...\n");
     rc = hl_cmd_verify(vc, verify_argv, env);

@@ -8,6 +8,16 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Changed
+
+- `hull check` passes an unsigned app. With no `package.sig` or `hull.sig` in the app
+  directory, its verify step is skipped and says so (`verify skipped: <app> is unsigned`).
+  Before, an app built without `--sign` could never pass `hull check`, whatever its types,
+  manifest and tests said. An option for verify (`--developer-key`, `--platform-key`,
+  `--gethull-key`, `--binary`, `--no-verify-platform`) still runs it, so a gate that requires
+  a signature keeps failing without one. Any `package.sig` / `hull.sig` entry, a dangling
+  link included, is verified as before.
+
 ### Fixed
 
 - JS `WasmBuffer`, `WasmInstance` and `HlImage` (the twins of audit 50's MappedBuffer): a second
