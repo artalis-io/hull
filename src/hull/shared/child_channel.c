@@ -51,6 +51,17 @@ void hl_chan_frame_reset(HlChanFrame *r)
 #if defined(__linux__)
 #include <sys/syscall.h>
 #endif
+/* MSan does not see what a raw syscall writes: close_fds_proc's getdents64
+ * buffer read as uninitialised, and the report aborted the spawned child. */
+#if defined(__has_feature)
+#  if __has_feature(memory_sanitizer)
+#    include <sanitizer/msan_interface.h>
+#    define HL_CHAN_UNPOISON(p, n) __msan_unpoison((p), (n))
+#  endif
+#endif
+#ifndef HL_CHAN_UNPOISON
+#  define HL_CHAN_UNPOISON(p, n) ((void)0)
+#endif
 
 extern char **environ;
 
@@ -402,6 +413,7 @@ static int close_fds_proc(unsigned lo)
             long n = syscall(SYS_getdents64, dfd, buf, sizeof buf);
             if (n < 0) { close(dfd); return -1; }
             if (n == 0) break;
+            HL_CHAN_UNPOISON(buf, (size_t)n);
             for (long off = 0; off < n; ) {
                 unsigned short reclen;
                 memcpy(&reclen, buf + off + 16, sizeof reclen);
