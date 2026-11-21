@@ -10,6 +10,9 @@ release-artifact layout).
 
 ### Fixed
 
+- JS `WasmBuffer`, `WasmInstance` and `HlImage` (the twins of audit 50's MappedBuffer): a second
+  `close()` or a getter after `close()` no longer leaves a TypeError pending that the next binding
+  reported as its own error; new lint INV-15 (audit 51).
 - Lua out-of-memory paths (audit 50 residual): the manifest extractor counts each copied string as it stores it, so a raise part-way through an array no longer leaks the copies (and a half-copied named database is freed); `db.udf.register` keeps its functions before allocating its context and gives the first back when the second cannot be kept; a UDF raising a number no longer converts it outside a protected call.
 - Lua `app.main` parked on a wait no longer leaves its coroutine active: a
   middleware dispatched during the wait passed `ctx.stdin:read()`'s "app.main's

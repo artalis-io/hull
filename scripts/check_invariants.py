@@ -1063,6 +1063,62 @@ def inv14(tree, ctx):
             for p, fn in loaders_missing(tree, "hl_vfs_overlay_find")]
 
 
+# INV-15 ------------------------------------------------------------------
+# How it decides (audit 51): a JS class is CLEARABLE when a function in
+# src/hull/runtime/js/ sets an object's opaque to NULL
+# (`JS_SetOpaque(x, NULL)`, a close()) and names that class's id in a
+# JS_GetOpaque / JS_GetOpaque2 / JS_GetClassID comparison in the same body.
+# Then any `JS_GetOpaque2(ctx, this_val, <id>)` of a clearable class, in any
+# file of that directory, is a finding: JS_GetOpaque2 THROWS on a NULL
+# opaque, and a method that then returned normally (a second close(), a
+# getter after close()) left that TypeError pending - the next binding that
+# tested JS_HasException reported "X object expected" for its own call
+# (audit 50 MappedBuffer, audit 51 WasmBuffer / WasmInstance / HlImage). Read
+# `this` with a JS_GetClassID check and JS_GetOpaque (NULL = closed), as
+# js_mmap_this does.
+
+INV15_CLEAR = re.compile(r"\bJS_SetOpaque\s*\(\s*[^,()]+,\s*NULL\s*\)")
+INV15_IDS = [
+    re.compile(r"\bJS_GetOpaque2?\s*\((?:[^,()]+,\s*)?[^,()]+,\s*(\w+)\s*\)"),
+    re.compile(r"\bJS_GetClassID\s*\([^()]*\)\s*[!=]=\s*(\w+)"),
+]
+INV15_THIS = re.compile(
+    r"\bJS_GetOpaque2\s*\(\s*\w+\s*,\s*this_val\s*,\s*(\w+)\s*\)")
+
+
+@rule("INV-15", "a JS class whose opaque is cleared does not read `this` with JS_GetOpaque2")
+def inv15(tree, ctx):
+    files = tree.files("src/hull/runtime/js")
+    clearable = set()
+    for p in files:
+        cf = tree.cfile(p)
+        for fn in cf.funcs:
+            if not INV15_CLEAR.search(fn.body_code):
+                continue
+            # The body, and the same-file helpers it calls (a `this`
+            # reader such as js_mmap_this).
+            bodies = [fn.body_code] + [cf.by_name[c].body_code
+                                       for c in fn.calls if c in cf.by_name]
+            for body in bodies:
+                for pat in INV15_IDS:
+                    clearable.update(m.group(1) for m in pat.finditer(body))
+    findings, seen = [], set()
+    for p in files:
+        cf = tree.cfile(p)
+        for m in INV15_THIS.finditer(cf.code):
+            if m.group(1) not in clearable:
+                continue
+            sid = f"{p}:{cf.symbol_at(m.start())}"
+            if sid not in seen:
+                seen.add(sid)
+                findings.append((sid, f"JS_GetOpaque2 of `this` ({m.group(1)}, "
+                                 f"line {cf.line_of(m.start())}) for a class "
+                                 "whose close() clears the opaque - check "
+                                 "JS_GetClassID and use JS_GetOpaque (NULL = "
+                                 "closed)"))
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------

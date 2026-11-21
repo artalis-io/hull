@@ -216,6 +216,10 @@ static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
  * only when a thread pool exists at init. Consumed (cleared) there. */
 static HlAsyncBackendCtx  *pending_async_ctx;
 static HlAsyncBackendPool *pending_thread_pool;
+/* A WASM cache + app VFS for the NEXT init_js_with_caps: hull:compute
+ * registers only when a WASM cache exists at init. Consumed there. */
+static HlWasmCache *pending_wasm_cache;
+static HlVfs       *pending_app_vfs;
 
 static void init_js_with_caps(void)
 {
@@ -251,6 +255,10 @@ static void init_js_with_caps(void)
     js.base.thread_pool = pending_thread_pool;
     pending_async_ctx   = NULL;
     pending_thread_pool = NULL;
+    js.base.wasm_cache = pending_wasm_cache;
+    js.base.app_vfs    = pending_app_vfs;
+    pending_wasm_cache = NULL;
+    pending_app_vfs    = NULL;
     int rc = hl_js_init(&js, &cfg);
     js_initialized = (rc == 0);
     if (js_initialized) expose_internals(&js);
@@ -16735,6 +16743,134 @@ UTEST(js_fs_audit50, mmap_double_close_no_pending_exception)
     EXPECT_FALSE(JS_HasException(js.ctx));
     cleanup_js_caps();
     a15_fs_close(&f);
+}
+
+/* Audit 51: the twins of audit 50's MappedBuffer. WasmBuffer, WasmInstance
+ * and HlImage clear their opaque on close(), and their methods / getters
+ * read `this` with JS_GetOpaque2, which THROWS on NULL: a second close(), or
+ * a getter after close(), returned normally with a TypeError pending, and
+ * the next binding that tests JS_HasException (conn.upsert's array check)
+ * reported "X object expected" instead of its own error. `A51_UPSERT` is
+ * that following call; it must report its own message. */
+#define A51_UPSERT \
+    "var m51 = 'no throw';" \
+    "try { db.upsert('t51', 5, ['a'], ['x']); } catch (e) { m51 = String(e.message); }"
+#define A51_OWN "m51.includes('conflictCols') ? 1 : 0"
+
+static int a51_upsert_reports_own_error(const char *prefix)
+{
+    char code[1024];
+    snprintf(code, sizeof code, "%s;" A51_UPSERT A51_OWN, prefix);
+    int r = eval_int(code);
+    if (r != 1) {
+        char *m = eval_str("m51");
+        printf("  upsert after [%s] reported: %s\n", prefix, m ? m : "(null)");
+        free(m);
+    }
+    return r;
+}
+
+static void a51_init_compute(HlWasmCache *cache, HlVfs *vfs)
+{
+    hl_vfs_init(vfs, a9_wasm_entries, NULL);
+    pending_wasm_cache = cache;
+    pending_app_vfs = vfs;
+    init_js_with_caps();
+}
+
+UTEST(js_compute_audit51, wasm_buffer_double_close_no_pending_exception)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    a51_init_compute(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int(
+        "globalThis.b51 = compute.buffer(new Uint8Array(4));"
+        "const before = b51.length;"
+        "b51.close(); b51.close();"
+        "(before === 4 && b51.length === 0 && b51.bytes() === null) ? 1 : 0"), 1);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_EQ(a51_upsert_reports_own_error("b51.close(); b51.close()"), 1);
+    EXPECT_EQ(a51_upsert_reports_own_error("b51.length"), 1);
+    EXPECT_EQ(a51_upsert_reports_own_error("b51.bytes()"), 1);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    /* `this` of another class still throws. */
+    EXPECT_EQ(eval_int(
+        "const c51 = compute.buffer(new Uint8Array(2)); let t = 0;"
+        "try { c51.close.call({}); } catch (e) { t += e instanceof TypeError ? 1 : 100; }"
+        "try { c51.bytes.call({}); } catch (e) { t += e instanceof TypeError ? 1 : 100; }"
+        "try { Object.getOwnPropertyDescriptor(Object.getPrototypeOf(c51), 'length')"
+        "      .get.call({}); } catch (e) { t += e instanceof TypeError ? 1 : 100; }"
+        "c51.close(); t"), 3);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    cleanup_js_caps();
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(js_compute_audit51, instance_closed_getter_no_pending_exception)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    a51_init_compute(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int(
+        "globalThis.i51 = compute.instance('echo');"
+        "const n = i51.name;"
+        "i51.close();"
+        "(n === 'echo' && i51.closed === true && i51.name === null) ? 1 : 0"), 1);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_EQ(a51_upsert_reports_own_error("i51.closed"), 1);
+    EXPECT_EQ(a51_upsert_reports_own_error("i51.name"), 1);
+    EXPECT_EQ(a51_upsert_reports_own_error("i51.close()"), 1);
+    /* A call on a closed instance throws its own error. */
+    EXPECT_EQ(eval_int(
+        "let m = ''; try { i51.call(new Uint8Array(1)); } catch (e) { m = String(e.message); }"
+        "m.includes('WasmInstance') && !m.includes('object expected') ? 1 : 0"), 1);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    /* `this` of another class still throws. */
+    EXPECT_EQ(eval_int(
+        "const j51 = compute.instance('echo'); let t = 0;"
+        "const P = Object.getPrototypeOf(j51);"
+        "try { j51.close.call({}); } catch (e) { t += e instanceof TypeError ? 1 : 100; }"
+        "try { Object.getOwnPropertyDescriptor(P, 'closed').get.call({}); }"
+        "catch (e) { t += e instanceof TypeError ? 1 : 100; }"
+        "try { Object.getOwnPropertyDescriptor(P, 'name').get.call({}); }"
+        "catch (e) { t += e instanceof TypeError ? 1 : 100; }"
+        "j51.close(); t"), 3);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    cleanup_js_caps();
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(js_image_audit51, double_close_no_pending_exception)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    if (eval_int("typeof image === 'object' && image !== null ? 1 : 0") != 1) {
+        cleanup_js_caps();   /* image compiled out */
+        return;
+    }
+    EXPECT_EQ(eval_int(
+        "globalThis.im51 = image.new(1, 1, 'rgba8', new Uint8Array(4));"
+        "im51.close(); im51.close(); 1"), 1);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_EQ(a51_upsert_reports_own_error("im51.close()"), 1);
+    /* The getters on a closed image throw their own error. */
+    EXPECT_EQ(eval_int(
+        "let m = ''; try { im51.width; } catch (e) { m = String(e.message); }"
+        "m === 'image already closed' ? 1 : 0"), 1);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    /* `this` of another class still throws. */
+    EXPECT_EQ(eval_int(
+        "const k51 = image.new(1, 1, 'rgba8', new Uint8Array(4)); let t = 0;"
+        "try { k51.close.call({}); } catch (e) { t += e instanceof TypeError ? 1 : 100; }"
+        "try { Object.getOwnPropertyDescriptor(Object.getPrototypeOf(k51), 'width')"
+        "      .get.call({}); } catch (e) { t += e instanceof TypeError ? 1 : 100; }"
+        "k51.close(); t"), 2);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    cleanup_js_caps();
 }
 
 UTEST(js_audit37, small_blob_calls_have_a_floor)
