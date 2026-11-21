@@ -1692,7 +1692,15 @@ static int lua_db_internal_conn_impl(lua_State *L, int app_table)
         memset(&m, 0, sizeof m);
         char ref_err[256] = {0};
         int ref_bad = 0;
-        if (hl_manifest_extract_lua(L, &m, lua->base.alloc) == 0) {
+        /* Protected: a raise part-way through the extraction (out of memory)
+         * skipped the hl_manifest_free below, and every string copied so far
+         * leaked on the base allocator, off the VM heap limit - once per
+         * call of a stdlib init() in a pcall loop (audit 51). */
+        int xrc = hl_manifest_extract_lua_protected(L, &m, lua->base.alloc);
+        if (xrc == -2)
+            return luaL_error(L, "hull internal database: cannot read the "
+                                 "app's manifest (out of memory)");
+        if (xrc == 0) {
             /* A "$VAR" here is read from the environment by the registry, so
              * it must be declared (env / secrets) BEFORE it is used: the
              * load-time hl_manifest_check_env_refs runs only after the top

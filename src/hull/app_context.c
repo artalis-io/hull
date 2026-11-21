@@ -806,7 +806,15 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         if (load_rc == 0 && opts->gate_modules) {
             HlManifest m = {0};
             int manifest_tui = 0;   /* m is freed before the TUI gate opens */
-            if (ctx->rt->vt->extract_manifest(ctx->rt, &m) == 0) {
+            int xrc = ctx->rt->vt->extract_manifest(ctx->rt, &m);
+            if (xrc == -2) {
+                /* Failed part-way (logged, m zeroed): not run under the
+                 * intrinsics-only floor (audit 51). */
+                hl_eprintf_line("[app-context] cannot read the app's manifest");
+                hl_app_context_free(ctx);
+                return -1;
+            }
+            if (xrc == 0) {
                 manifest_tui = m.tui;
                 /* The app's run deadlines (cap/run_watchdog.h). */
                 hl_run_watchdog_set_app_limits(m.limits_request_ms,

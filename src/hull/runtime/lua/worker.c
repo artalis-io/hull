@@ -389,9 +389,12 @@ static void lua_dispatch_run(lua_State *L, HlLuaWorkerDispatchOp *op)
     lua_pushlightuserdata(L, op);
     if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
         op->error = 1;
-        const char *msg = lua_tostring(L, -1);
-        snprintf(op->error_msg, sizeof(op->error_msg),
-                 "dispatch: %s", msg ? msg : "(unknown)");
+        /* Not lua_tostring: a number error (error(42)) is converted in
+         * place, an allocation outside any protected call on a VM with no
+         * panic handler (audit 51). */
+        char ebuf[256];
+        const char *msg = hl_lua_error_text(NULL, L, -1, ebuf, sizeof ebuf);
+        snprintf(op->error_msg, sizeof(op->error_msg), "dispatch: %s", msg);
         lua_pop(L, 1);
     }
 }
