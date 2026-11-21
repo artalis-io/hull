@@ -91,7 +91,11 @@ await test("jobs.cleanup: fractional before / olderThan are accepted", async () 
     jobs.enqueue("a27clean", {}, { queue: "a27later" });
     assertEq(jobs.cleanup({ queue: "a27clean", olderThan: 0.5 }), 0, "young row kept");
     assertEq(jobs.cleanup({ queue: "a27clean", olderThan: 0 }), 0, "olderThan 0 accepted");
-    assertEq(jobs.cleanup({ queue: "a27clean", before: time.now() - 0.5 }), 0,
+    // Relative to the row's own updated_at (whole seconds): against time.now()
+    // the row was deleted whenever a second ticked between the job finishing
+    // and this line, so the case failed now and then.
+    const at = jobs.get(id).updatedAt;
+    assertEq(jobs.cleanup({ queue: "a27clean", before: at - 0.5 }), 0,
              "before rounds up, row kept");
     assertEq(jobs.cleanup({ queue: "a27clean", before: time.now() + 1.5 }), 1,
              "before in the future deletes");

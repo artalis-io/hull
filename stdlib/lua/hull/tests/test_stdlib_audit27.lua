@@ -95,7 +95,11 @@ test("jobs.cleanup: fractional before / older_than are accepted", function()
     -- A later job: cleanup keeps the newest row as a high-water mark (audit 44).
     jobs.enqueue("a27clean", {}, { queue = "a27later" })
     assert_eq(jobs.cleanup({ queue = "a27clean", older_than = 0.5 }), 0, "young row kept")
-    assert_eq(jobs.cleanup({ queue = "a27clean", before = time.now() - 0.5 }), 0,
+    -- Relative to the row's own updated_at (whole seconds): against time.now()
+    -- the row was deleted whenever a second ticked between the job finishing
+    -- and this line, so the case failed now and then.
+    local at = jobs.get(id).updated_at
+    assert_eq(jobs.cleanup({ queue = "a27clean", before = at - 0.5 }), 0,
               "before rounds up, row kept")
     assert_eq(jobs.cleanup({ queue = "a27clean", before = time.now() + 1.5 }), 1,
               "before in the future deletes")
