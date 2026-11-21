@@ -135,6 +135,23 @@ static int error_text_k(lua_State *L)
     return 1;
 }
 
+void hl_lua_number_text(lua_State *L, int idx, char *buf, size_t size)
+{
+    if (!buf || size == 0) return;
+    if (lua_isinteger(L, idx)) {
+        snprintf(buf, size, "%lld", (long long)lua_tointeger(L, idx));
+        return;
+    }
+    snprintf(buf, size, "%.14g", (double)lua_tonumber(L, idx));
+    /* A float that looks like an integer reads "2.0", as Lua writes it. */
+    size_t n = strlen(buf);
+    if (buf[strspn(buf, "-0123456789")] == '\0' && n + 2 < size) {
+        buf[n] = '.';
+        buf[n + 1] = '0';
+        buf[n + 2] = '\0';
+    }
+}
+
 const char *hl_lua_error_text(HlLua *lua, lua_State *from, int idx,
                               char *buf, size_t size)
 {
@@ -145,8 +162,15 @@ const char *hl_lua_error_text(HlLua *lua, lua_State *from, int idx,
     }
     idx = lua_absindex(from, idx);
     int t = lua_type(from, idx);
-    if (t == LUA_TSTRING || t == LUA_TNUMBER) {
+    if (t == LUA_TSTRING) {
         snprintf(buf, size, "%s", lua_tostring(from, idx));
+        return buf;
+    }
+    if (t == LUA_TNUMBER) {
+        /* Formatted here, as Lua's tostring would: lua_tostring converts a
+         * number in place, an allocation that can raise LUA_ERRMEM, and most
+         * callers read the error outside any protected call (audit 51). */
+        hl_lua_number_text(from, idx, buf, size);
         return buf;
     }
     /* Anything else goes through tostring, so an error object with
@@ -808,21 +832,35 @@ void hl_lua_free(HlLua *lua)
     lua->scratch = NULL;
 }
 
+/* lua_pcall body: the state's traceback under the message at arg 1. */
+static int dump_traceback_k(lua_State *L)
+{
+    const char *msg = lua_touserdata(L, 1);
+    luaL_traceback(L, L, msg, 1);
+    return 1;
+}
+
 void hl_lua_dump_error(HlLua *lua)
 {
     if (!lua || !lua->L)
         return;
 
-    const char *msg = lua_tostring(lua->L, -1);
-    if (msg)
-        log_error("[hull:c] lua error: %s", msg);
+    /* Read without converting in place, and the traceback built under
+     * lua_pcall: this runs outside any protected call, and an app top level
+     * that raised error(42) aborted the process when the conversion or the
+     * traceback's buffer ran out of memory (audit 51). */
+    char ebuf[512];
+    const char *msg = hl_lua_error_text(lua, lua->L, -1, ebuf, sizeof ebuf);
+    log_error("[hull:c] lua error: %s", msg);
 
-    /* Try to get traceback */
-    luaL_traceback(lua->L, lua->L, msg, 1);
-    const char *tb = lua_tostring(lua->L, -1);
-    if (tb && tb != msg)
-        log_error("[hull:c] %s", tb);
-    lua_pop(lua->L, 1); /* pop traceback */
+    if (lua_checkstack(lua->L, 3)) {
+        lua_pushcfunction(lua->L, dump_traceback_k);
+        lua_pushlightuserdata(lua->L, ebuf);
+        if (lua_pcall(lua->L, 1, 1, 0) == LUA_OK &&
+            lua_type(lua->L, -1) == LUA_TSTRING)
+            log_error("[hull:c] %s", lua_tostring(lua->L, -1));
+        lua_pop(lua->L, 1); /* pop traceback (or the error building it) */
+    }
     lua_pop(lua->L, 1); /* pop original error message */
 }
 
@@ -857,7 +895,10 @@ static int vt_lua_wire_routes_server(HlRuntime *rt, KlHttpServer *server,
 static int vt_lua_extract_manifest(HlRuntime *rt, HlManifest *out)
 {
     HlLua *lua = (HlLua *)rt;
-    return hl_manifest_extract_lua(lua->L, out, lua->base.alloc);
+    /* Protected: this runs on the main state with no protected frame and no
+     * panic handler, so an out-of-memory raise part-way aborted the process
+     * (audit 51). -2: the extraction raised (logged, `out` zeroed). */
+    return hl_manifest_extract_lua_protected(lua->L, out, lua->base.alloc);
 }
 
 /* The declared manifest as JSON - for --verify-sig's policy check - made in
@@ -986,8 +1027,12 @@ static int vt_lua_run_test_file(HlRuntime *rt, const char *file_path,
     }
     if (luaL_loadfilex(lua->L, load_name, "t") != LUA_OK ||   /* text only */
         lua_pcall(lua->L, 0, LUA_MULTRET, 0) != LUA_OK) {
-        const char *err = lua_tostring(lua->L, -1);
-        if (load_err) *load_err = err ? err : "unknown";
+        /* Copied out, never converted in place: a test file's top level
+         * that raised error(42) is read outside any protected call (audit
+         * 51), and the popped string is not ours to hand out. */
+        static _Thread_local char lerr[1024];
+        const char *err = hl_lua_error_text(lua, lua->L, -1, lerr, sizeof lerr);
+        if (load_err) *load_err = err;
         lua_pop(lua->L, 1);
         return -1;
     }

@@ -729,4 +729,53 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     return 0;
 }
 
+/* hl_manifest_extract_lua under lua_pcall. The extraction can raise part-way
+ * (lua_tolstring of a number element converts it in place, an allocation;
+ * lua_getfield interns its key), and two callers ran it with no protected
+ * frame: a binding (hull.db._internal_conn, every call until the manifest is
+ * wired) leaked every string copied before the raise on the base allocator,
+ * and the runtime's extract_manifest - on the main state, with no panic
+ * handler - aborted the process at startup (audit 51). */
+typedef struct {
+    HlManifest  *m;
+    HlAllocator *a;
+    int          rc;
+} ManifestExtractCall;
+
+static int manifest_extract_k(lua_State *L)
+{
+    ManifestExtractCall *c = lua_touserdata(L, 1);
+    c->rc = hl_manifest_extract_lua(L, c->m, c->a);
+    return 0;
+}
+
+int hl_manifest_extract_lua_protected(lua_State *L, HlManifest *out,
+                                      HlAllocator *alloc)
+{
+    if (!L || !out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+    if (!lua_checkstack(L, 2)) {
+        log_error("[hull:c] manifest extraction failed: not enough memory");
+        return -2;
+    }
+    ManifestExtractCall c = { out, alloc, -1 };
+    lua_pushcfunction(L, manifest_extract_k);
+    lua_pushlightuserdata(L, &c);
+    int st = lua_pcall(L, 1, 0, 0);
+    if (st == LUA_OK)
+        return c.rc;
+    /* Read as a string only: lua_tostring would convert a number in place. */
+    const char *e = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+    log_error("[hull:c] manifest extraction failed: %s",
+              e ? e : st == LUA_ERRMEM ? "not enough memory" : "error");
+    lua_pop(L, 1);
+    /* What the extraction recorded before it raised (the fields after the
+     * raise are still zero). */
+    if (out->alloc)
+        hl_manifest_free(out);
+    memset(out, 0, sizeof(*out));
+    return -2;
+}
+
 #endif /* HL_ENABLE_LUA */
