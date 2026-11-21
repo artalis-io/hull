@@ -47,6 +47,16 @@ void hl_stdin_secret_restore_terminal(void)
     }
 }
 
+#ifdef HL_STDIN_SECRET_TEST_HOOKS
+/* Test builds only (stdin_secret_th.o): run at fixed points of the read so a
+ * signal can be raised in a window no timing reaches (audit 51). */
+static int (*g_test_hook)(int point);
+void hl_stdin_secret_test_set_hook(int (*fn)(int point)) { g_test_hook = fn; }
+#  define TEST_HOOK(pt) (g_test_hook ? g_test_hook(pt) : 0)
+#else
+#  define TEST_HOOK(pt) 0
+#endif
+
 static void restore_at_exit(void)
 {
     hl_stdin_secret_restore_terminal();
@@ -234,7 +244,8 @@ int hl_stdin_read_secret(const char *prompt, char *buf, size_t cap, size_t *len,
             fflush(stderr);
         }
         struct termios old, quiet;
-        if (tcgetattr(STDIN_FILENO, &old) != 0) { rc = HL_STDIN_SECRET_ERROR; break; }
+        if (TEST_HOOK(HL_STDIN_SECRET_HOOK_TCGETATTR) ||
+            tcgetattr(STDIN_FILENO, &old) != 0) { rc = HL_STDIN_SECRET_ERROR; break; }
         quiet = old;
         quiet.c_lflag &= ~(tcflag_t)ECHO;
         quiet.c_lflag |= ECHONL;
@@ -257,6 +268,7 @@ int hl_stdin_read_secret(const char *prompt, char *buf, size_t cap, size_t *len,
         hook_signals();
         mode = TCSANOW;
     }
+    (void)TEST_HOOK(HL_STDIN_SECRET_HOOK_BEFORE_UNHOOK);
     unhook_signals();
     *len = ln.n;
     /* ECHONL moved the cursor for an answered line; a stop or a Ctrl-D did
