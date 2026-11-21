@@ -42,11 +42,30 @@ static const JSClassDef js_wasm_buf_class = {
     .finalizer = js_wasm_buf_finalizer,
 };
 
+/* A WasmBuffer `this`: close() sets the opaque to NULL, a normal state, so
+ * it is read with JS_GetOpaque. JS_GetOpaque2 throws on NULL, and close() /
+ * bytes() / length then returned normally with that TypeError pending - the
+ * next binding that tested JS_HasException reported "WasmBuffer object
+ * expected" for its own call (audit 51, the twin of audit 50's
+ * MappedBuffer). A `this` of another class still throws. Returns 0 with
+ * *out set (NULL when closed), or -1 with a TypeError pending. */
+static int js_wasm_buf_this(JSContext *ctx, JSValueConst this_val,
+                            HlWasmBuffer **out)
+{
+    if (JS_GetClassID(this_val) != js_wasm_buf_class_id) {
+        JS_ThrowTypeError(ctx, "not a WasmBuffer");
+        return -1;
+    }
+    *out = JS_GetOpaque(this_val, js_wasm_buf_class_id);
+    return 0;
+}
+
 static JSValue js_wasm_buf_close(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlWasmBuffer *buf = JS_GetOpaque2(ctx, this_val, js_wasm_buf_class_id);
+    HlWasmBuffer *buf;
+    if (js_wasm_buf_this(ctx, this_val, &buf) < 0) return JS_EXCEPTION;
     if (buf) {
         hl_wasm_buffer_close(buf); /* defers if still borrowed by an image */
         JS_SetOpaque(this_val, NULL);
@@ -58,7 +77,8 @@ static JSValue js_wasm_buf_bytes(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlWasmBuffer *buf = JS_GetOpaque2(ctx, this_val, js_wasm_buf_class_id);
+    HlWasmBuffer *buf;
+    if (js_wasm_buf_this(ctx, this_val, &buf) < 0) return JS_EXCEPTION;
     if (!buf || buf->closed)
         return JS_NULL;
     const void *data = hl_wasm_buffer_data(buf);
@@ -72,7 +92,8 @@ static JSValue js_wasm_buf_get_length(JSContext *ctx, JSValueConst this_val,
                                        int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlWasmBuffer *buf = JS_GetOpaque2(ctx, this_val, js_wasm_buf_class_id);
+    HlWasmBuffer *buf;
+    if (js_wasm_buf_this(ctx, this_val, &buf) < 0) return JS_EXCEPTION;
     if (!buf || buf->closed) return JS_NewInt32(ctx, 0);
     return JS_NewInt64(ctx, (int64_t)hl_wasm_buffer_len(buf));
 }
@@ -878,10 +899,25 @@ static const JSClassDef js_wasm_inst_class = {
     .finalizer = js_wasm_inst_finalizer,
 };
 
+/* A WasmInstance `this`: close() sets the opaque to NULL, so it is read with
+ * JS_GetOpaque, as js_wasm_buf_this (audit 51). Returns 0 with *out set
+ * (NULL when closed), or -1 with a TypeError pending for another class. */
+static int js_wasm_inst_this(JSContext *ctx, JSValueConst this_val,
+                             HlWasmInstance **out)
+{
+    if (JS_GetClassID(this_val) != js_wasm_inst_class_id) {
+        JS_ThrowTypeError(ctx, "not a WasmInstance");
+        return -1;
+    }
+    *out = JS_GetOpaque(this_val, js_wasm_inst_class_id);
+    return 0;
+}
+
 static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
 {
-    HlWasmInstance *pi = JS_GetOpaque2(ctx, this_val, js_wasm_inst_class_id);
+    HlWasmInstance *pi;
+    if (js_wasm_inst_this(ctx, this_val, &pi) < 0) return JS_EXCEPTION;
     if (!pi)
         return JS_ThrowInternalError(ctx, "WasmInstance.call: invalid instance");
 
@@ -1008,7 +1044,8 @@ static JSValue js_wasm_inst_close(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlWasmInstance *pi = JS_GetOpaque2(ctx, this_val, js_wasm_inst_class_id);
+    HlWasmInstance *pi;
+    if (js_wasm_inst_this(ctx, this_val, &pi) < 0) return JS_EXCEPTION;
     if (pi) {
         hl_cap_wasm_instance_destroy(pi);
         JS_SetOpaque(this_val, NULL);
@@ -1020,7 +1057,8 @@ static JSValue js_wasm_inst_get_name(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlWasmInstance *pi = JS_GetOpaque2(ctx, this_val, js_wasm_inst_class_id);
+    HlWasmInstance *pi;
+    if (js_wasm_inst_this(ctx, this_val, &pi) < 0) return JS_EXCEPTION;
     if (!pi || pi->closed) return JS_NULL;
     return JS_NewString(ctx, pi->name);
 }
@@ -1029,7 +1067,8 @@ static JSValue js_wasm_inst_get_closed(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlWasmInstance *pi = JS_GetOpaque2(ctx, this_val, js_wasm_inst_class_id);
+    HlWasmInstance *pi;
+    if (js_wasm_inst_this(ctx, this_val, &pi) < 0) return JS_EXCEPTION;
     return JS_NewBool(ctx, !pi || pi->closed);
 }
 
@@ -1077,7 +1116,8 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     if (hl_js_db_refuse_wait(ctx, "instance.asyncCall()")) return JS_EXCEPTION;
 
-    HlWasmInstance *pi = JS_GetOpaque2(ctx, this_val, js_wasm_inst_class_id);
+    HlWasmInstance *pi;
+    if (js_wasm_inst_this(ctx, this_val, &pi) < 0) return JS_EXCEPTION;
     if (!pi || pi->closed)
         return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: instance closed");
     if (atomic_load(&pi->busy))

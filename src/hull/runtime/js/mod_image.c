@@ -34,32 +34,52 @@ static const JSClassDef js_image_class = {
     .finalizer = js_image_finalizer,
 };
 
+/* An HlImage `this`: close() sets the opaque to NULL, so it is read with
+ * JS_GetOpaque - JS_GetOpaque2 throws on NULL, and a second close() returned
+ * normally with that TypeError pending, reported by the next binding that
+ * tested JS_HasException (audit 51). A `this` of another class still
+ * throws. Returns 0 with *out set (NULL when closed), or -1 with a
+ * TypeError pending. */
+static int js_image_this(JSContext *ctx, JSValueConst this_val, HlImage **out)
+{
+    if (JS_GetClassID(this_val) != js_image_class_id) {
+        JS_ThrowTypeError(ctx, "not an Image");
+        return -1;
+    }
+    *out = JS_GetOpaque(this_val, js_image_class_id);
+    return 0;
+}
+
 /* ── Property getters ──────────────────────────────────────────────── */
 
 static JSValue js_image_get_width(JSContext *ctx, JSValueConst this_val)
 {
-    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    HlImage *img;
+    if (js_image_this(ctx, this_val, &img) < 0) return JS_EXCEPTION;
     if (!img) return JS_ThrowInternalError(ctx, "image already closed");
     return JS_NewUint32(ctx, img->width);
 }
 
 static JSValue js_image_get_height(JSContext *ctx, JSValueConst this_val)
 {
-    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    HlImage *img;
+    if (js_image_this(ctx, this_val, &img) < 0) return JS_EXCEPTION;
     if (!img) return JS_ThrowInternalError(ctx, "image already closed");
     return JS_NewUint32(ctx, img->height);
 }
 
 static JSValue js_image_get_format(JSContext *ctx, JSValueConst this_val)
 {
-    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    HlImage *img;
+    if (js_image_this(ctx, this_val, &img) < 0) return JS_EXCEPTION;
     if (!img) return JS_ThrowInternalError(ctx, "image already closed");
     return JS_NewString(ctx, hl_image_format_name(img->format));
 }
 
 static JSValue js_image_get_size(JSContext *ctx, JSValueConst this_val)
 {
-    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    HlImage *img;
+    if (js_image_this(ctx, this_val, &img) < 0) return JS_EXCEPTION;
     if (!img) return JS_ThrowInternalError(ctx, "image already closed");
     return JS_NewInt64(ctx, (int64_t)img->pixel_len);
 }
@@ -70,7 +90,8 @@ static JSValue js_image_pixels(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    HlImage *img;
+    if (js_image_this(ctx, this_val, &img) < 0) return JS_EXCEPTION;
     if (!img) return JS_ThrowInternalError(ctx, "image already closed");
 
     /* Return a copy as ArrayBuffer: refused past the heap limit and charged
@@ -89,7 +110,8 @@ static JSValue js_image_close(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    HlImage *img;
+    if (js_image_this(ctx, this_val, &img) < 0) return JS_EXCEPTION;
     if (img) {
         hl_image_free(img);
         JS_SetOpaque(this_val, NULL);
