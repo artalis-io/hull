@@ -8,9 +8,15 @@
  * (ECHONL kept on, so the Enter still moves the cursor), one line is read,
  * and the terminal's settings are put back on every return - a stop the
  * caller's @p stopped reports (a SIGINT / SIGTERM) included, checked between
- * 100 ms waits. A process that exits with echo still off (it cannot happen
- * through this call; an exit from a signal handler could) is restored by an
- * atexit handler. The wait is excluded from the binding meter.
+ * 100 ms waits. While echo is off, the signals that would end or stop the
+ * process at their default action (SIGHUP, SIGINT, SIGQUIT, SIGTERM,
+ * SIGALRM, SIGPIPE, SIGTSTP, SIGTTIN, SIGTTOU) are caught: echo is put back
+ * and the signal raised again at its default action, and a stopped read that
+ * is resumed turns echo off again and reads on (audit 50). A signal with a
+ * handler of its own is left to it; main_signal's calls
+ * hl_stdin_secret_restore_terminal before it dies. A process that exits with
+ * echo still off is restored by an atexit handler. The wait is excluded from
+ * the binding meter.
  *
  * Not a terminal (a pipe, a file): no prompt, no terminal calls; one line is
  * read through stdio exactly as ctx.stdin:read() reads one, so
@@ -41,5 +47,11 @@ enum {
  */
 int hl_stdin_read_secret(const char *prompt, char *buf, size_t cap, size_t *len,
                          int (*stopped)(void *ud), void *ud);
+
+/**
+ * Put the terminal's settings back if a read has echo off. Async-signal-safe:
+ * a signal handler about to end the process calls it.
+ */
+void hl_stdin_secret_restore_terminal(void);
 
 #endif /* HL_SHARED_STDIN_SECRET_H */

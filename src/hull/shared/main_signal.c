@@ -6,6 +6,7 @@
  */
 #include "hull/shared/main_signal.h"
 #include "hull/shared/async_backend.h"
+#include "hull/shared/stdin_secret.h"   /* echo back on before a default death */
 #include "hull/runtime.h"
 
 #include <errno.h>
@@ -73,6 +74,7 @@ static void chain_prev(const struct sigaction *prev, int sig, int dfl_action)
     if (prev->sa_handler == SIG_IGN) return;
     if (prev->sa_handler == SIG_DFL) {
         if (!dfl_action) return;
+        hl_stdin_secret_restore_terminal();
         struct sigaction dfl;
         memset(&dfl, 0, sizeof dfl);
         dfl.sa_handler = SIG_DFL;
@@ -99,7 +101,9 @@ static void on_signal(int sig)
     if (n >= 2 && !g_delivered) {
         /* Twice before the loop ever got to deliver the first: main is in a
          * synchronous stretch and nothing we schedule will run. Die as
-         * before this module existed. */
+         * before this module existed, with echo back on if a read_secret
+         * had it off (audit 50). */
+        hl_stdin_secret_restore_terminal();
         struct sigaction dfl;
         memset(&dfl, 0, sizeof dfl);
         dfl.sa_handler = SIG_DFL;

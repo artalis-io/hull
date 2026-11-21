@@ -18242,6 +18242,41 @@ UTEST(js_audit41, ctx_output_is_charged_and_stdin_is_mains)
     cleanup_js_caps();
 }
 
+/* ctx.stdin.readSecret charged a floor for its prompt whatever its length,
+ * where ctx.stdout.write charges the bytes it writes (audit 50). stdin is
+ * /dev/null, so every read is an end of input. */
+UTEST(js_cli_audit50, read_secret_prompt_is_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.main((ctx) => {\n"
+        "  const big = 'x'.repeat(1048576);\n"
+        "  for (let i = 0; i < 200; i++) ctx.stdin.readSecret(big);\n"
+        "  return 0;\n"
+        "});\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    int saved0 = dup(0);
+    int nul = open("/dev/null", O_RDONLY);
+    ASSERT_GE(nul, 0);
+    dup2(nul, 0);
+    close(nul);
+    int64_t saved_limit = js.max_instructions;
+    js.max_instructions = 10000000;
+    int exit_code = 99;
+    int rc = hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code);
+    js.max_instructions = saved_limit;
+    dup2(saved0, 0);
+    close(saved0);
+    clearerr(stdin);
+    /* Tripped (main failed); 0 / 0 was 200 MiB of prompt for 200 floors. */
+    EXPECT_TRUE(rc != 0 || exit_code != 0);
+    cleanup_js_caps();
+}
+
 /* Read a pipe's read end to EOF (the write end is closed) into got[]. */
 static size_t gap6_drain(int fd, unsigned char *got, size_t cap)
 {

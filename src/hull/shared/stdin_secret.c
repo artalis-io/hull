@@ -13,6 +13,8 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,15 +32,111 @@ __attribute__((weak)) int hl_sandbox_std_tty(int fd)
 }
 
 /* The settings to put back if the process exits mid-read. Loop thread only
- * (app.main's own code); the atexit handler reads them at exit. */
-static struct termios g_saved;
-static int            g_echo_off;
-static int            g_atexit_done;
+ * (app.main's own code); the atexit handler and the signal path
+ * (hl_stdin_secret_restore_terminal) read them. g_saved is written before
+ * g_echo_off is set. */
+static struct termios         g_saved;
+static volatile sig_atomic_t  g_echo_off;
+static int                    g_atexit_done;
+
+void hl_stdin_secret_restore_terminal(void)
+{
+    if (g_echo_off) {
+        (void)tcsetattr(STDIN_FILENO, TCSANOW, &g_saved);
+        g_echo_off = 0;
+    }
+}
 
 static void restore_at_exit(void)
 {
-    if (g_echo_off)
-        (void)tcsetattr(STDIN_FILENO, TCSANOW, &g_saved);
+    hl_stdin_secret_restore_terminal();
+}
+
+/* The signals that end or stop the process while echo is off, caught for the
+ * read as OpenBSD's readpassphrase catches them: the handler only records
+ * the signal; the read ends, echo is put back, and the signal is raised
+ * again with its default action. A stop (Ctrl-Z, a background read) is
+ * resumed by turning echo off again (audit 50: killed or stopped, the
+ * process left the terminal with echo off). Only a signal at its default
+ * action is caught: an ignored one stays ignored, and one with a handler of
+ * its own (main_signal's SIGINT / SIGTERM, which ends the read through
+ * @p stopped and restores the terminal before it dies) is left to it. */
+static const int g_sigs[] = {
+    SIGALRM, SIGHUP, SIGINT, SIGPIPE, SIGQUIT, SIGTERM, SIGTSTP, SIGTTIN, SIGTTOU,
+};
+#define N_SIGS ((int)(sizeof g_sigs / sizeof g_sigs[0]))
+static struct sigaction       g_prev[N_SIGS];
+static int                    g_hooked[N_SIGS];
+static volatile sig_atomic_t  g_caught[N_SIGS];
+
+static void on_caught(int sig)
+{
+    for (int i = 0; i < N_SIGS; i++)
+        if (g_sigs[i] == sig) g_caught[i] = 1;
+}
+
+static int any_caught(void)
+{
+    for (int i = 0; i < N_SIGS; i++)
+        if (g_caught[i]) return 1;
+    return 0;
+}
+
+static void hook_signals(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_caught;
+    sigemptyset(&sa.sa_mask);
+    for (int i = 0; i < N_SIGS; i++) sigaddset(&sa.sa_mask, g_sigs[i]);
+    sa.sa_flags = 0;   /* no SA_RESTART: the wait sees EINTR */
+    for (int i = 0; i < N_SIGS; i++) {
+        g_caught[i] = 0;
+        g_hooked[i] = 0;
+        struct sigaction cur;
+        if (sigaction(g_sigs[i], NULL, &cur) != 0) continue;
+        if ((cur.sa_flags & SA_SIGINFO) || cur.sa_handler != SIG_DFL) continue;
+        if (sigaction(g_sigs[i], &sa, &g_prev[i]) == 0) g_hooked[i] = 1;
+    }
+}
+
+static void unhook_signals(void)
+{
+    for (int i = 0; i < N_SIGS; i++)
+        if (g_hooked[i]) {
+            (void)sigaction(g_sigs[i], &g_prev[i], NULL);
+            g_hooked[i] = 0;
+        }
+}
+
+/* Echo back on, with the caught signals blocked on this thread: a blocked
+ * SIGTTOU lets a background process set the terminal, and nothing here is
+ * interrupted. Another thread still records a signal through the handler. */
+static void restore_echo(void)
+{
+    sigset_t block, prev;
+    sigemptyset(&block);
+    for (int i = 0; i < N_SIGS; i++) sigaddset(&block, g_sigs[i]);
+    pthread_sigmask(SIG_BLOCK, &block, &prev);
+    while (tcsetattr(STDIN_FILENO, TCSANOW, &g_saved) != 0 && errno == EINTR) { }
+    g_echo_off = 0;
+    pthread_sigmask(SIG_SETMASK, &prev, NULL);
+}
+
+/* Raise every caught signal again at its default action (the handlers are
+ * gone). 1 when one of them stopped the process and it has been resumed, so
+ * the read goes on; 0 when none was a stop. */
+static int replay_caught(void)
+{
+    int resumed = 0;
+    for (int i = 0; i < N_SIGS; i++) {
+        if (!g_caught[i]) continue;
+        g_caught[i] = 0;
+        (void)raise(g_sigs[i]);
+        if (g_sigs[i] == SIGTSTP || g_sigs[i] == SIGTTIN || g_sigs[i] == SIGTTOU)
+            resumed = 1;
+    }
+    return resumed;
 }
 
 /* One line through stdio, as ctx.stdin:read() reads one. */
@@ -61,14 +159,21 @@ static int read_line_stdio(char *buf, size_t cap, size_t *len)
     return too_long ? HL_STDIN_SECRET_TOO_LONG : HL_STDIN_SECRET_OK;
 }
 
+/* The line so far: kept across a stop and resume. */
+typedef struct {
+    size_t n;
+    int    got, too_long;
+} SecretLine;
+
 /* One line from the terminal in canonical mode, waiting in 100 ms slices so
- * a stop is seen while the user has not answered. */
-static int read_line_tty(char *buf, size_t cap, size_t *len,
+ * a stop is seen while the user has not answered. HL_STDIN_SECRET_ERROR with
+ * a signal caught (any_caught) ends the read for the caller to replay it. */
+static int read_line_tty(char *buf, size_t cap, SecretLine *ln,
                          int (*stopped)(void *), void *ud)
 {
-    size_t n = 0;
-    int got = 0, too_long = 0, rc = HL_STDIN_SECRET_OK;
+    int rc = HL_STDIN_SECRET_OK;
     for (;;) {
+        if (any_caught()) { rc = HL_STDIN_SECRET_ERROR; break; }
         if (stopped && stopped(ud)) { rc = HL_STDIN_SECRET_INTERRUPTED; break; }
         struct pollfd p = { .fd = STDIN_FILENO, .events = POLLIN };
         uint64_t mx = hl_meter_exclude_begin();
@@ -89,19 +194,18 @@ static int read_line_tty(char *buf, size_t cap, size_t *len,
             rc = HL_STDIN_SECRET_ERROR;
             break;
         }
-        if (r == 0) { if (!got) rc = HL_STDIN_SECRET_EOF; break; }   /* Ctrl-D */
-        got = 1;
+        if (r == 0) { if (!ln->got) rc = HL_STDIN_SECRET_EOF; break; }   /* Ctrl-D */
+        ln->got = 1;
         int eol = 0;
         for (ssize_t i = 0; i < r; i++) {
             if (chunk[i] == '\n') { eol = 1; break; }
-            if (n < cap) buf[n++] = chunk[i];
-            else too_long = 1;
+            if (ln->n < cap) buf[ln->n++] = chunk[i];
+            else ln->too_long = 1;
         }
         hl_secure_zero(chunk, sizeof chunk);
         if (eol) break;
     }
-    *len = n;
-    if (rc == HL_STDIN_SECRET_OK && too_long) rc = HL_STDIN_SECRET_TOO_LONG;
+    if (rc == HL_STDIN_SECRET_OK && ln->too_long) rc = HL_STDIN_SECRET_TOO_LONG;
     return rc;
 }
 
@@ -119,27 +223,42 @@ int hl_stdin_read_secret(const char *prompt, char *buf, size_t cap, size_t *len,
     if (!tty)
         return read_line_stdio(buf, cap, len);
 
-    if (prompt && prompt[0]) {
-        /* App text: escaped, so a prompt cannot rewrite the terminal. */
-        hl_term_fwrite_escaped(stderr, prompt, strlen(prompt));
-        fflush(stderr);
-    }
-    struct termios old, quiet;
-    if (tcgetattr(STDIN_FILENO, &old) != 0)
-        return HL_STDIN_SECRET_ERROR;
-    quiet = old;
-    quiet.c_lflag &= ~(tcflag_t)ECHO;
-    quiet.c_lflag |= ECHONL;
-    g_saved = old;
     if (!g_atexit_done) { g_atexit_done = 1; (void)atexit(restore_at_exit); }
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &quiet) != 0)
-        return HL_STDIN_SECRET_ERROR;
-    g_echo_off = 1;
-
-    int rc = read_line_tty(buf, cap, len, stopped, ud);
-
-    (void)tcsetattr(STDIN_FILENO, TCSANOW, &old);
-    g_echo_off = 0;
+    SecretLine ln = { 0, 0, 0 };
+    int rc, mode = TCSAFLUSH;
+    hook_signals();
+    for (;;) {
+        if (prompt && prompt[0]) {
+            /* App text: escaped, so a prompt cannot rewrite the terminal. */
+            hl_term_fwrite_escaped(stderr, prompt, strlen(prompt));
+            fflush(stderr);
+        }
+        struct termios old, quiet;
+        if (tcgetattr(STDIN_FILENO, &old) != 0) { rc = HL_STDIN_SECRET_ERROR; break; }
+        quiet = old;
+        quiet.c_lflag &= ~(tcflag_t)ECHO;
+        quiet.c_lflag |= ECHONL;
+        g_saved = old;
+        if (tcsetattr(STDIN_FILENO, mode, &quiet) == 0) {
+            g_echo_off = 1;
+            rc = read_line_tty(buf, cap, &ln, stopped, ud);
+            restore_echo();
+        } else {
+            rc = HL_STDIN_SECRET_ERROR;   /* a background job: SIGTTOU caught */
+        }
+        if (!any_caught()) break;
+        /* Echo is on: the signal takes its default action now. A read the
+         * signal cut short (ERROR) and that a stop paused reads on once
+         * resumed, echo off again; a finished one keeps its result. */
+        unhook_signals();
+        int resumed = replay_caught();
+        if (rc != HL_STDIN_SECRET_ERROR) break;
+        if (!resumed) { rc = HL_STDIN_SECRET_INTERRUPTED; break; }
+        hook_signals();
+        mode = TCSANOW;
+    }
+    unhook_signals();
+    *len = ln.n;
     /* ECHONL moved the cursor for an answered line; a stop or a Ctrl-D did
      * not, so the next output would join the prompt's line. */
     if (rc != HL_STDIN_SECRET_OK && rc != HL_STDIN_SECRET_TOO_LONG) {
