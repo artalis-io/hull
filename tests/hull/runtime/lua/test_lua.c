@@ -66,6 +66,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <time.h>
 #include "hull/shared/async_backend.h"
 #include "log.h"                /* log_add_callback (lua_task tests) */
@@ -135,6 +136,9 @@ static void install_test_globals(lua_State *L)
  * thread pool exists at init. Consumed (cleared) by init_lua. */
 static HlAsyncBackendCtx  *pending_async_ctx;
 static HlAsyncBackendPool *pending_thread_pool;
+/* The base allocator for the NEXT init_lua_with_caps (NULL: untracked).
+ * Consumed (cleared) by it. */
+static HlAllocator *pending_base_alloc;
 
 static void init_lua(void)
 {
@@ -236,6 +240,8 @@ static void init_lua_with_caps(void)
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     memset(&lua_rt, 0, sizeof(lua_rt));
     lua_rt.base.db_registry = test_db_registry;
+    lua_rt.base.alloc = pending_base_alloc;
+    pending_base_alloc = NULL;
     lua_rt.base.env_cfg = &env_cfg;
     lua_rt.base.platform_vfs = &platform_vfs;
     lua_rt.base.async_ctx   = pending_async_ctx;
@@ -17151,8 +17157,8 @@ UTEST(lua_cli_audit50, read_secret_prompt_is_charged)
 #endif
 #define A50_SECRET_TOKEN "hull-a50-secret-token!"
 #define A50_SECRET_LEN 40000
-static lua_Alloc a50_orig_alloc;
-static void *a50_orig_ud;
+static lua_Alloc a50s_orig_alloc;
+static void *a50s_orig_ud;
 static int a50_armed, a50_failed, a50_leaked;
 
 static int a50_scan(const char *s, size_t n)
@@ -17181,7 +17187,7 @@ static int a50_holds_token(const void *p, size_t n)
 #endif
 }
 
-static void *a50_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
+static void *a50s_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 {
     (void)ud;
     if (ptr && nsize < osize && a50_holds_token(ptr, osize)) a50_leaked = 1;
@@ -17190,7 +17196,7 @@ static void *a50_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
         a50_failed++;
         return NULL;
     }
-    return a50_orig_alloc(a50_orig_ud, ptr, osize, nsize);
+    return a50s_orig_alloc(a50s_orig_ud, ptr, osize, nsize);
 }
 
 UTEST(lua_cli_audit50, read_secret_scrub_on_oom)
@@ -17216,8 +17222,8 @@ UTEST(lua_cli_audit50, read_secret_scrub_on_oom)
     int saved0 = dup(0);
     dup2(fileno(tf), 0);
     clearerr(stdin);
-    a50_orig_alloc = lua_getallocf(lua_rt.L, &a50_orig_ud);
-    lua_setallocf(lua_rt.L, a50_alloc, NULL);
+    a50s_orig_alloc = lua_getallocf(lua_rt.L, &a50s_orig_ud);
+    lua_setallocf(lua_rt.L, a50s_alloc, NULL);
     a50_failed = a50_leaked = 0;
     a50_armed = 1;
     int exit_code = 99;
@@ -17225,7 +17231,7 @@ UTEST(lua_cli_audit50, read_secret_scrub_on_oom)
     a50_armed = 0;
     lua_gc(lua_rt.L, LUA_GCCOLLECT, 0);   /* frees the box */
     lua_gc(lua_rt.L, LUA_GCCOLLECT, 0);
-    lua_setallocf(lua_rt.L, a50_orig_alloc, a50_orig_ud);
+    lua_setallocf(lua_rt.L, a50s_orig_alloc, a50s_orig_ud);
     dup2(saved0, 0);
     close(saved0);
     fclose(tf);
@@ -19344,5 +19350,210 @@ UTEST(lua_db_udf_audit50, number_error_out_of_memory_stays_inside_the_udf)
     cleanup_lua_caps();
 }
 #endif /* HL_ENABLE_DB && HL_ENABLE_SQLITE */
+
+/* ── Unprotected manifest extraction / error reads (audit 51) ───────── */
+
+/* A manifest whose fs.read list copies 16 strings of 1000 bytes before a
+ * number element, whose conversion (in place, an allocation) is the first to
+ * fail with every growth refused. Stored as __hull_manifest. */
+static int a51_set_manifest(lua_State *L)
+{
+    if (luaL_dostring(L,
+        "local t = {} "
+        "for i = 1, 16 do t[i] = string.rep(string.char(96 + i), 1000) end "
+        "t[17] = 98765.4321 "
+        "return { fs = { read = t } }") != LUA_OK)
+        return -1;
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    return 0;
+}
+
+#if defined(HL_ENABLE_DB) && defined(HL_ENABLE_SQLITE)
+/* pcall body: the function at arg 1, called with every growing allocation
+ * refused when arg 2 is true. The stack is grown first, so the call itself
+ * needs nothing new. */
+static int a51_call_refused_k(lua_State *L)
+{
+    int refuse = lua_toboolean(L, 2);
+    luaL_checkstack(L, 64, NULL);
+    lua_pushvalue(L, 1);
+    if (refuse) a50_countdown = -1;
+    lua_call(L, 0, 0);
+    a50_countdown = 0;
+    return 0;
+}
+
+/* A fresh number as the manifest's 17th fs.read entry, so its conversion
+ * makes a string not interned yet - an allocation. */
+static void a51_fresh_number(lua_State *L, double v)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    lua_getfield(L, -1, "fs");
+    lua_getfield(L, -1, "read");
+    lua_pushnumber(L, v);
+    lua_rawseti(L, -2, 17);
+    lua_pop(L, 3);
+}
+
+/* hull.db._internal_conn.connection() read the manifest with the extraction
+ * unprotected, until the manifest is wired (a stdlib init() at app top level).
+ * Out of memory part-way, the raise skipped its hl_manifest_free: every string
+ * copied so far leaked on the base allocator - off the VM heap limit - once
+ * per call of an init() in a pcall loop. */
+UTEST(lua_manifest_audit51, internal_conn_oom_no_leak)
+{
+    static HlAllocator a;
+    hl_alloc_init(&a, 0);
+    pending_base_alloc = &a;
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_TRUE(lua_rt.base.alloc == &a);
+    ASSERT_FALSE(hl_db_registry_manifest_wired(test_db_registry));
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(a51_set_manifest(L), 0);
+    lua_pushcfunction(L, hl_lua_require_trusted);
+    lua_pushliteral(L, "hull.db._internal_conn");
+    ASSERT_EQ(lua_pcall(L, 1, 1, 0), LUA_OK);
+    lua_getfield(L, -1, "connection");
+    int fn = lua_gettop(L);
+    a50_install(L);
+    /* Each round: a full collection, a call that succeeds (it grows back the
+     * call info the collection shrank, which the refused call cannot grow),
+     * the refused call (a fresh number, so its conversion allocates), and a
+     * full collection again. Between the two collections the VM keeps
+     * nothing, so the base allocator's count moves only by what the
+     * extraction copied and nobody freed. */
+    int raised = 0;
+    long long leaked = 0;
+    for (int i = 0; i < 20; i++) {
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        size_t before = atomic_load(&a.used);
+        a51_fresh_number(L, 0.5 + i);
+        lua_pushcfunction(L, a51_call_refused_k);
+        lua_pushvalue(L, fn);
+        lua_pushboolean(L, 0);
+        ASSERT_EQ_MSG(lua_pcall(L, 2, 0, 0), LUA_OK, lua_tostring(L, -1));
+        lua_settop(L, fn);
+        a51_fresh_number(L, 1000.25 + i);
+        lua_pushcfunction(L, a51_call_refused_k);
+        lua_pushvalue(L, fn);
+        lua_pushboolean(L, 1);
+        if (lua_pcall(L, 2, 0, 0) != LUA_OK) raised++;
+        a50_countdown = 0;
+        lua_settop(L, fn);
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        if (i > 0)   /* the first round settles the VM's own caches */
+            leaked += (long long)atomic_load(&a.used) - (long long)before;
+    }
+    a50_uninstall(L);
+    EXPECT_EQ(raised, 20);
+    /* A leak is the 16 strings copied before the raise: 16000 bytes a call. */
+    EXPECT_EQ(leaked, (long long)0);
+    lua_settop(L, 0);
+    lua_pushnil(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    cleanup_lua_caps();
+}
+
+/* The runtime's extract_manifest ran on the main state with no protected
+ * frame and no panic handler: an out-of-memory raise part-way through the
+ * extraction aborted the process at startup. It now fails with -2 and a
+ * zeroed manifest. Run in a child, so an abort fails the test. */
+UTEST(lua_manifest_audit51, extract_oom_no_abort)
+{
+    fflush(NULL);
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        static HlAllocator a;
+        hl_alloc_init(&a, 0);
+        pending_base_alloc = &a;
+        init_lua_with_caps();
+        if (!lua_initialized) _exit(10);
+        lua_State *L = lua_rt.L;
+        if (a51_set_manifest(L) != 0) _exit(18);
+        HlManifest m;
+        memset(&m, 0, sizeof m);
+        /* Warm-up, then the extraction with every growth refused. */
+        if (hl_lua_vtable.extract_manifest(&lua_rt.base, &m) != 0) _exit(11);
+        hl_manifest_free(&m);
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        size_t before = atomic_load(&a.used);
+        int top = lua_gettop(L);
+        a50_install(L);
+        a50_countdown = -1;
+        int rc = hl_lua_vtable.extract_manifest(&lua_rt.base, &m);
+        a50_countdown = 0;
+        a50_uninstall(L);
+        if (rc != -2) _exit(12);
+        if (m.fs_read_count != 0 || m.alloc != NULL || m.present) _exit(13);
+        if (lua_gettop(L) != top) _exit(14);
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        if (atomic_load(&a.used) > before + 1000) _exit(15);
+        /* The state is still usable, and the manifest reads again. */
+        memset(&m, 0, sizeof m);
+        if (hl_lua_vtable.extract_manifest(&lua_rt.base, &m) != 0) _exit(16);
+        if (m.fs_read_count != 17) _exit(17);   /* the number too */
+        hl_manifest_free(&m);
+        _exit(0);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status));
+    if (WIFEXITED(status))
+        EXPECT_EQ(WEXITSTATUS(status), 0);
+    else
+        EXPECT_EQ(WTERMSIG(status), 0);   /* SIGABRT pre-fix */
+}
+#endif /* HL_ENABLE_DB && HL_ENABLE_SQLITE */
+
+/* A failed worker.dispatch fn's error was read with lua_tostring, which
+ * converts a number error (error(42)) in place - an allocation, outside any
+ * protected call, on a worker VM with no panic handler. A worker VM cannot be
+ * given a refusing allocator from here, so this checks the reader it now
+ * uses, hl_lua_error_text (also the dump of a failed app top level and the
+ * read of a failed test case's error), the same way: unprotected, every
+ * growth refused, in a child so an abort fails the test. */
+UTEST(lua_worker_audit51, number_error_no_tostring)
+{
+    fflush(NULL);
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        init_lua();
+        if (!lua_initialized) _exit(10);
+        lua_State *L = lua_rt.L;
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        lua_pushinteger(L, 4242424242LL);
+        lua_pushnumber(L, 98765.4321);
+        lua_pushnumber(L, 2.0);
+        char b1[64], b2[64], b3[64];
+        a50_install(L);
+        a50_countdown = -1;
+        const char *t1 = hl_lua_error_text(NULL, L, -3, b1, sizeof b1);
+        const char *t2 = hl_lua_error_text(&lua_rt, L, -2, b2, sizeof b2);
+        const char *t3 = hl_lua_error_text(NULL, L, -1, b3, sizeof b3);
+        a50_countdown = 0;
+        a50_uninstall(L);
+        if (strcmp(t1, "4242424242") != 0) _exit(11);
+        if (strcmp(t2, "98765.4321") != 0) _exit(12);
+        if (strcmp(t3, "2.0") != 0) _exit(13);   /* as Lua's tostring */
+        /* Not converted in place. */
+        if (lua_type(L, -1) != LUA_TNUMBER || lua_type(L, -2) != LUA_TNUMBER ||
+            lua_type(L, -3) != LUA_TNUMBER) _exit(14);
+        _exit(0);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status));
+    if (WIFEXITED(status))
+        EXPECT_EQ(WEXITSTATUS(status), 0);
+    else
+        EXPECT_EQ(WTERMSIG(status), 0);   /* SIGABRT pre-fix */
+}
 
 UTEST_MAIN();

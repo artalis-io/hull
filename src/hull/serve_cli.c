@@ -681,7 +681,14 @@ int hull_serve(int argc, char **argv)
     /* Sandbox: extract manifest + apply policy. The runtime gates were
      * already applied via gate_modules; this is the OS-level sandbox. */
     HlManifest manifest = {0};
-    int manifest_ok = rt->vt->extract_manifest(rt, &manifest) == 0;
+    int xrc = rt->vt->extract_manifest(rt, &manifest);
+    int manifest_ok = xrc == 0;
+    if (xrc == -2) {
+        /* Failed part-way (logged): not run under the no-policy floor
+         * (audit 51). */
+        log_error("[hull:cli] cannot read the app's manifest; refusing to start");
+        return cli_fail(ctx, rt, be, async_ctx, pool, NULL, NULL, NULL);
+    }
     if (!manifest_ok)
         log_warn("[hull:cli] manifest extraction failed; running without policy");
     /* A build plugin runs under its preset: no capability section and only
