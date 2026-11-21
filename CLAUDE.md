@@ -2674,8 +2674,11 @@ C0 and DEL as `\xNN`, UTF-8 unchanged but for the C1 controls U+0080-U+009F and 
 a cloned tree cannot rewrite the terminal or set the clipboard through any command (audit 33:
 `hull verify` / `inspect` / `deploy` / `modules` / `check` / `analyze` / `compute build` / `eject`
 printed them raw; audit 32 had escaped call sites one by one). `tool.stderr_raw` /
-`tool.stdout_raw` write verbatim, only for text the plugin encoded itself (json.encode output,
-which escapes C0 but keeps DEL raw, legal in JSON). `tool.escape` still puts app text on one line
+`tool.stdout_raw` write verbatim; the tools use them only for the generation bundle (binary).
+JSON (json.encode output, which escapes C0 but keeps DEL and the C1 controls raw) goes out through
+`tool.stdout_json` / `tool.stderr_json`, the agent / MCP rewrite (`hl_json_fwrite_terminal_safe`:
+DEL and U+0080-U+009F as `\u00NN`, the same JSON value; audit 50 - `hull manifest` wrote a
+manifest string's U+009B as a raw CSI). `tool.escape` still puts app text on one line
 (LF as `\n`); its output holds no control byte, so the writers leave it unchanged. Nothing a build or eject executes or links is
 taken from the working directory (`./build/wamrc`, `./build/libhull_platform*.a`,
 `./build/platform.sig`); `hull build --platform-sig PATH` names a platform.sig explicitly.

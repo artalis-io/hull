@@ -11,6 +11,7 @@
 #include "hull/entry.h"
 #include "hull/shared/build_plugin.h"   /* hl_build_plugin_fd */
 #include "hull/shared/child_channel.h"  /* hl_chan_self_exe */
+#include "hull/shared/dev_session.h"    /* HL_DEV_SESSION_ENV */
 #include "hull/shared/term_escape.h"   /* hl_utf8_valid */
 #include "../utils/hex.h"
 #include "hull/vfs.h"
@@ -419,6 +420,27 @@ int hl_generation_has_pipeline(const char *app_dir)
            app_file(app_dir, "app.ts") || app_file(app_dir, "app.mts");
 }
 
+#ifdef HL_CHAN_SUPPORTED
+/* environ without the `hull dev` session key: the pipeline child runs
+ * plugin and app top-level code, and the key is the supervisor's (dev.c
+ * keeps it from the type checker the same way; audit 50). malloc'd array of
+ * environ's own strings, or NULL. */
+static char **env_without_session(void)
+{
+    static const char key[] = HL_DEV_SESSION_ENV "=";
+    size_t n = 0;
+    while (environ[n]) n++;
+    char **env = malloc((n + 1) * sizeof *env);
+    if (!env) return NULL;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++)
+        if (strncmp(environ[i], key, sizeof key - 1) != 0)
+            env[k++] = environ[i];
+    env[k] = NULL;
+    return env;
+}
+#endif
+
 int hl_generation_produce(const char *app_dir, uint8_t **out, size_t *len)
 {
 #ifdef HL_CHAN_SUPPORTED
@@ -457,7 +479,9 @@ int hl_generation_produce(const char *app_dir, uint8_t **out, size_t *len)
     snprintf(dir, sizeof dir, "%s", app_dir);
     argv[3] = dir;
     pid_t pid = -1;
-    int err = ok ? posix_spawn(&pid, exe, &fa, &at, argv, environ) : ENOMEM;
+    char **env = ok ? env_without_session() : NULL;
+    int err = ok && env ? posix_spawn(&pid, exe, &fa, &at, argv, env) : ENOMEM;
+    free(env);
     if (at_ok) posix_spawnattr_destroy(&at);
     posix_spawn_file_actions_destroy(&fa);
     close(p[1]);
@@ -495,13 +519,16 @@ int hl_generation_produce(const char *app_dir, uint8_t **out, size_t *len)
 #endif
 }
 
-int hl_generation_take(int embedded, const char *app_dir)
+int hl_generation_take_ex(int embedded, const char *app_dir, int verify_sig)
 {
     int rc = hl_generation_take_env(embedded);
     if (rc != 0 || g_taken)
         return rc;
     g_taken = 1;
-    if (embedded || hl_build_plugin_fd() >= 0 ||
+    /* --verify-sig refuses any generation (hl_generation_apply), so running
+     * the pipeline first only ran a cloned tree's plugins and top level
+     * before the refusal (audit 50). */
+    if (embedded || verify_sig || hl_build_plugin_fd() >= 0 ||
         !hl_generation_has_pipeline(app_dir))
         return 0;
     uint8_t *b = NULL;
@@ -547,4 +574,9 @@ int hl_generation_inputs(const uint8_t *buf, size_t len,
     }
     if (arena) sh_arena_free(arena);
     return rc;
+}
+
+int hl_generation_take(int embedded, const char *app_dir)
+{
+    return hl_generation_take_ex(embedded, app_dir, 0);
 }

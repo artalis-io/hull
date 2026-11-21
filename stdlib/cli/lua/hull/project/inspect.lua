@@ -55,7 +55,7 @@ local function main()
     -- consumer reads `valid` / `complete` from the JSON.
     local disc = analyze.analyze(app_dir, { source_kind = "standalone" })
     -- Encoded JSON: raw (projection.encode escapes C0, DEL and C1 controls).
-    tool.stdout_raw(projection.encode(projection.project(disc)) .. "\n")
+    tool.stdout_json(projection.encode(projection.project(disc)) .. "\n")
     tool.exit(0)
 end
 

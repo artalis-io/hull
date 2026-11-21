@@ -68,7 +68,7 @@ local function list(root, o)
                        descriptor = p.descriptor, config = p.config,
                        claims = p.claims, bundled = p.bundled ~= nil or nil }
         end
-        tool.stdout_raw(json.encode({ plugins = out, config_sha256 = reg.config_sha256 }) .. "\n")
+        tool.stdout_json(json.encode({ plugins = out, config_sha256 = reg.config_sha256 }) .. "\n")
         return 0
     end
     if #reg.plugins == 0 then
@@ -92,7 +92,7 @@ local function run(root, o)
         if r.status == "failed" then failed = true end
     end
     if o.json then
-        tool.stdout_raw(json.encode({ results = results }) .. "\n")
+        tool.stdout_json(json.encode({ results = results }) .. "\n")
         return failed and 1 or 0
     end
     -- A Hull route with nothing to do (no TypeScript in the app) is not news.

@@ -735,6 +735,23 @@ if command -v timeout >/dev/null 2>&1 && command -v mkfifo >/dev/null 2>&1; then
     timeout 60 $HULL agent inspect "$JS_APP" >/dev/null 2>&1
     RC=$?
     if [ "$RC" = 124 ]; then fail "inspect: blocked on a FIFO sidecar"; else pass "inspect: a FIFO sidecar does not block"; fi
+    # agent_audit50.validate_fifo: the files `agent validate` / `template`
+    # / `compute-call` (and MCP hull_validate / hull_compute_call) read
+    # were opened with a plain fopen, so a planted FIFO hung them.
+    mkfifo "$JS_APP/fifo_in.lua" "$JS_APP/fifo_data.json"
+    RC=0
+    timeout 20 $HULL agent validate "$JS_APP/fifo_in.lua" >/dev/null 2>&1 || RC=$?
+    if [ "$RC" = 124 ]; then fail "agent_audit50.validate_fifo: validate blocked on a FIFO"; else pass "agent_audit50.validate_fifo: validate"; fi
+    RC=0
+    timeout 20 $HULL agent template base.html "$JS_APP/fifo_data.json" "$JS_APP" >/dev/null 2>&1 || RC=$?
+    if [ "$RC" = 124 ]; then fail "agent_audit50.validate_fifo: template blocked on a FIFO"; else pass "agent_audit50.validate_fifo: template data"; fi
+    RC=0
+    timeout 20 $HULL agent compute-call m "$JS_APP/fifo_data.json" "$JS_APP" >/dev/null 2>&1 || RC=$?
+    if [ "$RC" = 124 ]; then fail "agent_audit50.validate_fifo: compute-call blocked on a FIFO"; else pass "agent_audit50.validate_fifo: compute-call input"; fi
+    RC=0
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hull_validate","arguments":{"file":"'"$JS_APP/fifo_in.lua"'"}}}' |
+        timeout 20 $HULL mcp "$JS_APP" >/dev/null 2>&1 || RC=$?
+    if [ "$RC" = 124 ]; then fail "agent_audit50.validate_fifo: MCP hull_validate blocked on a FIFO"; else pass "agent_audit50.validate_fifo: MCP hull_validate"; fi
 else
     echo "  SKIP: no timeout / mkfifo"
 fi

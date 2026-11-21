@@ -157,6 +157,36 @@ else
     bad "plugins_audit49.text_escaped"; cat "$WORK/esc.txt"
 fi
 
+# plugins_audit50.compose_text_escaped: the same text reached the terminal
+# raw through every other command that runs the pipeline (hull manifest,
+# hull build, hull deploy): a newline in it started a forged line.
+: > "$WORK/esc50.txt"
+"$HULL" manifest "$d" >> "$WORK/esc50.txt" 2>&1 || true
+"$HULL" build "$d" -o "$d/out/app" >> "$WORK/esc50.txt" 2>&1 || true
+"$HULL" deploy dockerfile "$d" >> "$WORK/esc50.txt" 2>&1 || true
+if has "$WORK/esc50.txt" 'm\nFAKE PASS' && has "$WORK/esc50.txt" 'e\nfake line' &&
+   ! grep -q '^FAKE PASS\|^fake line' "$WORK/esc50.txt"; then
+    ok "plugins_audit50.compose_text_escaped"
+else
+    bad "plugins_audit50.compose_text_escaped"; cat "$WORK/esc50.txt"
+fi
+
+echo "== plugins: --verify-sig runs no build pipeline (audit 50)"
+# generation_audit50.verify_sig_no_pipeline: an app run from source with a
+# hull.build.json ran its pipeline - a cloned tree's plugins - before
+# --verify-sig refused the generation it made. The pipeline's diagnostic
+# shows whether it ran.
+d=$(make_app lua lua)
+(cd "$d" && "$HULL" app.lua) > "$WORK/vs-plain.txt" 2>&1 || true
+(cd "$d" && "$HULL" --verify-sig "$d/nokey.pub" app.lua) > "$WORK/vs-sig.txt" 2>&1 || true
+if has "$WORK/vs-plain.txt" "info inventory.count: 2 declarations" &&
+   has "$WORK/vs-sig.txt" "signature verification failed" &&
+   ! has "$WORK/vs-sig.txt" "inventory.count"; then
+    ok "generation_audit50.verify_sig_no_pipeline"
+else
+    bad "generation_audit50.verify_sig_no_pipeline"; cat "$WORK/vs-plain.txt" "$WORK/vs-sig.txt"
+fi
+
 echo "== plugins: generated files get a committed file's checks (audit 49)"
 # gen_app NAME OUTPUTS - an app whose plugin generates OUTPUTS, Lua table
 # entries { "name", "bytes" }.

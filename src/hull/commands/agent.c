@@ -611,7 +611,7 @@ static int cmd_template(int argc, char **argv)
 
     char *data_json = NULL;
     if (data_path) {
-        FILE *f = fopen(data_path, "rb");
+        FILE *f = hl_agent_open_sidecar(data_path);   /* no FIFO (audit 50) */
         if (!f) { fprintf(stderr, "hull agent template: cannot open data file\n"); return 1; }
         if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }
         long n = ftell(f);

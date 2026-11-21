@@ -40,6 +40,7 @@
 #include "hull/shared/host.h"
 #include "hull/shared/cli_log.h"
 #include "hull/shared/term_escape.h"   /* tool.stderr / stdout (audit 33) */
+#include "hull/shared/json_term_safe.h" /* tool.stdout_json / stderr_json (audit 50) */
 #include "hull/shared/dev_session.h"   /* tool.dev_sidecar_mac (audit 37) */
 #include "hull/tool.h"                 /* hl_tool_set_dev_session */
 #include "hull/cap/crypto.h"
@@ -874,6 +875,26 @@ static int l_tool_stdout_raw(lua_State *L)
     fflush(stdout);
     return 0;
 }
+
+/* tool.stdout_json(json) / tool.stderr_json(json): write JSON text with DEL
+ * and the C1 controls escaped as the same JSON value
+ * (hl_json_fwrite_terminal_safe, the rewrite agent / MCP output gets).
+ * json.encode escapes only C0, so a manifest string or a plugin result
+ * holding U+009B reached the terminal as a raw CSI through `hull manifest`,
+ * `hull modules list --json`, `hull plugins --json` and `hull analyze --json`
+ * (audit 50). Every json.encode result a tool writes goes through these;
+ * the _raw writers are for bytes that are not JSON (a generation bundle). */
+static int tool_write_json(lua_State *L, FILE *f)
+{
+    size_t len = 0;
+    const char *msg = luaL_checklstring(L, 1, &len);
+    hl_json_fwrite_terminal_safe(f, msg, len);
+    fflush(f);
+    return 0;
+}
+
+static int l_tool_stdout_json(lua_State *L) { return tool_write_json(L, stdout); }
+static int l_tool_stderr_json(lua_State *L) { return tool_write_json(L, stderr); }
 
 /* ── tool.extract_manifest_js(path) → JSON string | nil ────────────── *
  *
@@ -2532,6 +2553,8 @@ static const luaL_Reg tool_funcs[] = {
     { "escape",                 l_tool_escape },
     { "stdout",                 l_tool_stdout },
     { "stdout_raw",             l_tool_stdout_raw },
+    { "stdout_json",            l_tool_stdout_json },
+    { "stderr_json",            l_tool_stderr_json },
     { "dev_sidecar_mac",        l_tool_dev_sidecar_mac },
     { "extract_manifest_js",    l_tool_extract_manifest_js },
     { "extract_manifest_lua",   l_tool_extract_manifest_lua },

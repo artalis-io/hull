@@ -74,10 +74,15 @@ int hl_generation_fd(const uint8_t *b, size_t len);
  * its diagnostics on this process's stderr) when `app_dir` holds a
  * hull.build.json, and keep its generation for hl_generation_apply
  * (docs/dev_pipeline_generations_design.md §4.3). Nothing for a built binary,
- * for a build plugin (a process with a plugin channel) or once per process.
+ * for a build plugin (a process with a plugin channel), under --verify-sig
+ * (`verify_sig` non-zero: a generation is refused there, so the pipeline -
+ * a cloned tree's plugins - is never run; audit 50) or once per process.
  * Call before any sandbox forbids spawning. 0 = nothing, 1 = taken, -1 =
  * failed (hl_generation_error() says why; the entry point refuses to start -
  * never a fallback to the sources the generation would shadow). */
+int hl_generation_take_ex(int embedded, const char *app_dir, int verify_sig);
+
+/* hl_generation_take_ex for a process not under --verify-sig. */
 int hl_generation_take(int embedded, const char *app_dir);
 
 /* Why the last hl_generation_take / _take_env failed. */

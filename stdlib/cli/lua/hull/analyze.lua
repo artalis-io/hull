@@ -377,7 +377,7 @@ local function main()
     if want_json then
         -- Encoded JSON: written raw (json.encode escapes every C0 control
         -- itself; the escaping print would turn a raw DEL into \x7f).
-        tool.stderr_raw(json.encode({
+        tool.stderr_json(json.encode({
             app_dir    = app_dir,
             declared   = (function()
                 local t = {}; for k, _ in pairs(declared) do t[#t+1] = k end

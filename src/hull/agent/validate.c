@@ -195,8 +195,10 @@ int hl_agent_validate(const char *file_path, ShJsonBuf *out)
     if (!file_path)
         return hl_agent_write_error(out, "file path required");
 
-    /* Read file */
-    FILE *f = fopen(file_path, "rb");
+    /* Read file: a regular file only, opened without blocking - a planted
+     * FIFO hung `hull agent validate` and the single-threaded MCP server
+     * (audit 50). */
+    FILE *f = hl_agent_open_sidecar(file_path);
     if (!f) return hl_agent_write_error(out, "cannot open file");
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return hl_agent_write_error(out, "seek failed"); }
     long n = ftell(f);

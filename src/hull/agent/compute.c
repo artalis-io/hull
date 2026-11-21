@@ -333,7 +333,7 @@ int hl_agent_compute_call_ctx(HlAppContext *ctx, const char *module_name,
 
     /* Read input file (cap-validated implicitly: this is a CLI tool in
      * dev mode; the agent is trusted). */
-    FILE *f = fopen(input_path, "rb");
+    FILE *f = hl_agent_open_sidecar(input_path);   /* no FIFO (audit 50) */
     if (!f) return hl_agent_write_error(out, "cannot open input file");
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return hl_agent_write_error(out, "seek failed"); }
     long n = ftell(f);

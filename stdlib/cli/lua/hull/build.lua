@@ -2012,7 +2012,7 @@ local function pipeline_generation(app_dir)
     local g, err = fcompose.prepare_generation(app_dir, "hull build")
     if not g then
         if err then
-            tool.stderr("hull build: " .. err .. "\n")
+            tool.stderr("hull build: " .. tool.escape(err) .. "\n")
             tool.exit(1)
         end
         return nil
