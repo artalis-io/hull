@@ -69,13 +69,17 @@ function check(buckets, key, limit, window, now, saturated) {
             // Drop expired entries; if every entry is live (an attacker
             // spending `limit` requests per key), drop the ones
             // closest to expiry down to 90% of the cap, so the map has a
-            // hard bound and each new key does not pay a full sweep.
+            // hard bound and each new key does not pay a full sweep. Shed
+            // whenever the sweep leaves more than 90%, not only when every
+            // entry is live: with a few expired among ~MAX live ones, each
+            // sweep freed a handful and the next few keys paid another full
+            // O(MAX) sweep each (audit 50).
             const live = [];
             saturated.forEach((b, k) => {
                 if ((now - b.windowStart) >= window) saturated.delete(k);
                 else live.push(k);
             });
-            if (live.length > MAX_BUCKETS) {
+            if (live.length > Math.floor(MAX_BUCKETS * 0.9)) {
                 live.sort((a, b) => saturated.get(a).windowStart - saturated.get(b).windowStart);
                 const drop = live.length - Math.floor(MAX_BUCKETS * 0.9);
                 for (let n = 0; n < drop; n++) saturated.delete(live[n]);

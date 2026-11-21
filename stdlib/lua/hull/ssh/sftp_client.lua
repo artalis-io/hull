@@ -348,17 +348,42 @@ end
 --- The most entries Sftp:list returns; a larger directory is `too_large`.
 M.MAX_LIST_ENTRIES = 100000
 
+--- The default bound on the bytes a listing holds (its names, plus a little
+--- per entry); opts.max_bytes overrides it. A larger listing is `too_large`.
+M.MAX_LIST_BYTES = 16 * 1024 * 1024
+
+-- What one entry costs the byte bound beyond its two names: the table and
+-- its attributes.
+local LIST_ENTRY_BYTES = 64
+
 --- List a directory. Returns the entries SAFE to use as local names, plus the
 --- ones refused and why - refused rather than dropped, because a name
 --- rejected for traversal is something an operator should hear about.
-function Sftp:list(path)
+--- opts.max_bytes (default 16 MiB, as read) bounds the bytes the listing
+--- holds: the entry cap alone let a server send 100000 names of ~256 KiB
+--- each, far past the VM heap (audit 50).
+function Sftp:list(path, opts)
+    local max_bytes = M.MAX_LIST_BYTES
+    if opts ~= nil then
+        if type(opts) ~= "table" then
+            return nil, { code = "bad_argument", detail = "opts must be a table" }
+        end
+        local mb = rawget(opts, "max_bytes")
+        if mb ~= nil then
+            if math.type(mb) ~= "integer" or mb < 0 or mb > 9007199254740991 then
+                return nil, { code = "bad_argument",
+                              detail = "max_bytes must be a non-negative integer" }
+            end
+            max_bytes = mb
+        end
+    end
     local h = self:request(sftp.build_opendir, path)
     if h.type ~= "handle" then return nil, sftp_error(h) end
 
-    -- Bounded by entry count, not by READDIR round trips: a server may send
-    -- any number of names per reply, and stopping silently at a round-trip
-    -- limit would return a truncated listing as if it were whole.
-    local all = {}
+    -- Bounded by entry count and bytes, not by READDIR round trips: a server
+    -- may send any number of names per reply, and stopping silently at a
+    -- round-trip limit would return a truncated listing as if it were whole.
+    local all, bytes = {}, 0
     while true do
         if #all > M.MAX_LIST_ENTRIES then
             self:close_handle(h.handle)
@@ -388,7 +413,16 @@ function Sftp:list(path)
             return nil, { code = "bad_reply",
                           detail = "READDIR returned no names and no EOF" }
         end
-        for _, e in ipairs(r.names) do all[#all + 1] = e end
+        for _, e in ipairs(r.names) do
+            bytes = bytes + #e.filename + #e.longname + LIST_ENTRY_BYTES
+            if bytes > max_bytes then
+                self:close_handle(h.handle)
+                return nil, { code = "too_large", limit = max_bytes,
+                              detail = "directory listing exceeds the "
+                                  .. tostring(max_bytes) .. " byte limit" }
+            end
+            all[#all + 1] = e
+        end
     end
     self:close_handle(h.handle)
     return sftp.safe_names(all)
@@ -653,5 +687,9 @@ function Sftp:abandon()
     end
     error(self.broken, 0)
 end
+
+-- Test seam (audit 50): the session class, so a suite can drive list()
+-- against a scripted request() without a connection.
+require("hull._test_hooks").register("hull.ssh.sftp_client", { Sftp = Sftp })
 
 return M

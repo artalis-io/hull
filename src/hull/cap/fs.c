@@ -126,6 +126,28 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
         p = slash + 1;
     }
 
+    /* The root's reserved `.hull` (Hull's dev sidecars, its internal
+     * database): refused as the first real component in any letter case, as
+     * the fs policy refuses it (`reserved_path`). The callers select through
+     * the policy too; this is defence in depth for one that does not
+     * (audit 50). "." and empty components are skipped to reach it. */
+    {
+        const char *q = path;
+        for (;;) {
+            size_t n = strcspn(q, "/");
+            if (n == 0 || (n == 1 && q[0] == '.')) {
+                if (q[n] == '\0') break;
+                q += n + 1;
+                continue;
+            }
+            if (hl_fs_reserved_name(q, n)) {
+                if (err_msg) *err_msg = "reserved_path";
+                return -1;
+            }
+            break;
+        }
+    }
+
     /* Each realpath below walks its whole path, a lookup per component:
      * charged to the thread's charge scope before it runs (audit 39 - a
      * deep blob.init / db.open path was O(depth^2) lookups a call, and a

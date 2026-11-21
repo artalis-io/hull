@@ -699,20 +699,51 @@ static int pl_bytes(lua_State *L)
     return 1;
 }
 
+/* The extraction, run under lua_pcall: hl_manifest_extract_lua reads the
+ * table through lua_getfield (a metamethod can raise, an allocation can fail),
+ * and a raise straight out of pl_preset_check left the registry naming the
+ * plugin's table and leaked what the extraction had copied (audit 50). */
+typedef struct {
+    HlManifest  *m;
+    HlAllocator *a;
+    int          rc;
+} PlPresetExtract;
+
+static int pl_preset_extract(lua_State *L)
+{
+    PlPresetExtract *x = lua_touserdata(L, 1);
+    lua_pushvalue(L, 2);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    x->rc = hl_manifest_extract_lua(L, x->m, x->a);
+    return 0;
+}
+
 /* P.preset_check(manifest): the manifest (a table, as the extraction child's
  * JSON decodes) against the plugin preset - the runner's own check
  * (hl_build_plugin_preset_check), run before the plugin is registered. */
 static int pl_preset_check(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
-    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");   /* saved */
-    lua_pushvalue(L, 1);
-    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    lua_settop(L, 1);
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");   /* 2: saved */
     HlAllocator a;
     hl_alloc_init(&a, 0);
     HlManifest m;
-    int rc = hl_manifest_extract_lua(L, &m, &a);
+    memset(&m, 0, sizeof m);
+    PlPresetExtract x = { &m, &a, -1 };
+    lua_pushcfunction(L, pl_preset_extract);
+    lua_pushlightuserdata(L, &x);
+    lua_pushvalue(L, 1);
+    int st = lua_pcall(L, 2, 0, 0);                            /* 3: error, if any */
+    lua_pushvalue(L, 2);
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");   /* restored */
+    if (st != LUA_OK) {
+        /* What the extraction recorded before it raised; the fields after
+         * the raise are still zero. */
+        if (m.alloc) hl_manifest_free(&m);
+        return lua_error(L);
+    }
+    int rc = x.rc;
     char err[256] = "a build plugin must declare a manifest";
     int ok = rc == 0 && hl_build_plugin_preset_check(&m, err, sizeof err) == 0;
     if (rc == 0) hl_manifest_free(&m);

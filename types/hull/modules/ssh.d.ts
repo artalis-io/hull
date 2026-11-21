@@ -317,8 +317,8 @@ declare module "hull:ssh" {
     export interface SftpSession {
         /** The canonical absolute form of a path. */
         realpath(path: SshBytes): Promise<string | null>;
-        /** List a directory. */
-        list(path: SshBytes): Promise<SftpListing>;
+        /** List a directory (at most `opts.maxBytes` of names, default 16 MiB). */
+        list(path: SshBytes, opts?: { maxBytes?: number }): Promise<SftpListing>;
         /** Read a whole file (at most `max` bytes, default 16 MiB). */
         read(path: SshBytes, max?: number): Promise<string>;
         /** Write a whole file, creating or truncating it -> true. */

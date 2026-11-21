@@ -17,6 +17,8 @@
  *      fetch (`e.code` "busy" - 64 fetches already in flight on this
  *      VM - or "wait_refused"): check() rethrows it, and the request
  *      fails rather than accepting an unchecked password (audit 35).
+ *      A host the runtime denies (`e.code` "denied") throws too
+ *      (audit 50).
  *
  * @license AGPL-3.0-or-later
  */
@@ -126,6 +128,17 @@ async function check(password, opts) {
         // Re-thrown, by code (hull:_refusal), so the request fails instead of
         // accepting the password.
         if (_refusal.code(e)) throw e;
+        // Nor is the runtime denying the host (`e.code` "denied", gap 3): the
+        // manifest does not admit the endpoint, every lookup is denied the
+        // same way, and failing open turned the check off behind one warning.
+        // Read before hostsMayAdmit, which takes a "$VAR", a CIDR or a glob
+        // entry for "may admit" and so failed open on an unset variable or a
+        // CIDR that matches no DNS name (audit 50).
+        if (_refusal.isDenied(e)) {
+            throw new Error("pwned: manifest.hosts does not admit the HIBP endpoint "
+                + endpoint + " - add its host to manifest.hosts ("
+                + String(e.message) + ")");
+        }
         // Neither is a host the manifest does not admit: failing open on it
         // turned the check off for the life of the process, behind one warning.
         if (!hostsMayAdmit(endpoint)) {

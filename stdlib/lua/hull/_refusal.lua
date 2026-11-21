@@ -37,4 +37,15 @@ function M.is_wait(err) return M.code(err) == M.WAIT end
 --- True when err is an admission cap of this VM refusing the op.
 function M.is_busy(err) return M.code(err) == M.BUSY end
 
+M.DENIED = "denied"
+
+--- True when err is the runtime refusing a host manifest.hosts does not
+-- admit ("[hull:denied] ", gap 3). Not a code() answer: the same call is
+-- denied again, so a caller that hands refusals back must count it. A caller
+-- that fails closed on a misconfiguration (pwned) or must not repeat a
+-- deterministic failure (retry.run) tests it here (audit 50).
+function M.is_denied(err)
+    return type(err) == "string" and string.sub(err, 1, 14) == "[hull:denied] "
+end
+
 return M

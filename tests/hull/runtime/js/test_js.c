@@ -6780,6 +6780,75 @@ UTEST(js_stdlib_audit44, proto_lookups)
 }
 #endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* Stdlib regressions from audit 50 (stdlib/js/hull/tests/test_stdlib_audit50.js):
+ * pwned fails closed on a denied host, retry.run does not retry one, sftp
+ * list() bounds its bytes, ratelimit's sweep at the cap sheds to 90%. Each
+ * case runs the script in a fresh context, named in
+ * globalThis.__audit50_case. One UTEST per case, written out, so
+ * scripts/check_regression_test.sh sees each. */
+static int run_audit50_case(const char *name, int *pass, int *fail)
+{
+    init_js_with_caps();
+    if (!js_initialized) return -1;
+    char set[160];
+    snprintf(set, sizeof set, "globalThis.__audit50_case = '%s';", name);
+    JSValue v = JS_Eval(js.ctx, set, strlen(set), "<audit50-case>", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, v);
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit50.js", pass, fail);
+    cleanup_js_caps();
+    return rc;
+}
+
+UTEST(pwned_audit50, denied_unset_var_throws)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("pwned_audit50.denied_unset_var_throws", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_EQ(pass, 1);
+}
+
+UTEST(pwned_audit50, denied_cidr_throws)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("pwned_audit50.denied_cidr_throws", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_EQ(pass, 1);
+}
+
+UTEST(pwned_audit50, outage_still_fails_open)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("pwned_audit50.outage_still_fails_open", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_EQ(pass, 1);
+}
+
+UTEST(retry_audit50, denied_not_retried)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("retry_audit50.denied_not_retried", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_EQ(pass, 1);
+}
+
+UTEST(ssh_audit50, list_byte_cap)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("ssh_audit50.list_byte_cap", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_EQ(pass, 1);
+}
+
+UTEST(ratelimit_audit50, sweep_amortised_at_cap)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit50_case("ratelimit_audit50.sweep_amortised_at_cap", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_EQ(pass, 1);
+}
+#endif
+
 UTEST(js_stdlib, toast_suite)
 {
     init_js_with_caps();
@@ -16637,6 +16706,33 @@ UTEST(js_audit37, small_fs_calls_have_a_floor)
         "if (fs.stat('e.txt').size !== 0) throw new Error('size');"
         "globalThis.__a37_ok = 1;", A10_FITS_LIMIT), 0);
     EXPECT_EQ(eval_int("globalThis.__a37_ok|0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+/* A closed MappedBuffer has a NULL opaque. close() and the length getter
+ * read it with JS_GetOpaque2, which THROWS on NULL, and then returned
+ * undefined / 0 normally: a second close() or a length after close() left a
+ * TypeError pending for whatever checked next (audit 50). */
+UTEST(js_fs_audit50, mmap_double_close_no_pending_exception)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a37_fs_open(&f, "."), 0);
+    EXPECT_EQ(eval_int(
+        "fs.write('m50.bin', 'abcd');"
+        "const m50 = fs.mmap('m50.bin');"
+        "const before = m50.length;"
+        "m50.close(); m50.close();"
+        "(before === 4 && m50.length === 0) ? 1 : 0"), 1);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    /* `this` of another class still throws, and the call reports it. */
+    EXPECT_EQ(eval_int(
+        "const c50 = fs.mmap('m50.bin');"
+        "let threw = 0; try { c50.close.call({}); } catch (e) { threw = e instanceof TypeError ? 1 : 2; }"
+        "c50.close(); threw"), 1);
+    EXPECT_FALSE(JS_HasException(js.ctx));
     cleanup_js_caps();
     a15_fs_close(&f);
 }

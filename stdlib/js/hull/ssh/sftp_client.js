@@ -17,6 +17,7 @@
 import { channel } from "hull:ssh:channel";
 import { wire } from "hull:ssh:wire";
 import { sftp } from "hull:ssh:sftp";
+import { _test_hooks } from "hull:_test_hooks";
 
 function sshError(code, detail, extra) {
     const e = new Error(detail === undefined || detail === null ? code : String(detail));
@@ -248,10 +249,29 @@ class Sftp {
     }
 
     // List a directory -> [safe entries, refused] | [null, reason].
-    async list(path) {
+    // opts.maxBytes (default 16 MiB, as read) bounds the bytes the listing
+    // holds: the entry cap alone let a server send 100000 names of ~256 KiB
+    // each, far past the VM heap (audit 50).
+    async list(path, opts) {
+        let maxBytes = MAX_LIST_BYTES;
+        if (opts !== undefined && opts !== null) {
+            if (typeof opts !== "object") {
+                return [null, { code: "bad_argument", detail: "opts must be an object" }];
+            }
+            const mb = Object.prototype.hasOwnProperty.call(opts, "maxBytes")
+                ? opts.maxBytes : undefined;
+            if (mb !== undefined && mb !== null) {
+                if (!Number.isSafeInteger(mb) || mb < 0) {
+                    return [null, { code: "bad_argument",
+                                    detail: "maxBytes must be a non-negative integer" }];
+                }
+                maxBytes = mb;
+            }
+        }
         const h = await this.request(sftp.buildOpendir, path);
         if (h.type !== "handle") return [null, sftpError(h)];
         const all = [];
+        let bytes = 0;
         for (;;) {
             if (all.length > MAX_LIST_ENTRIES) {
                 await this.closeHandle(h.handle);
@@ -275,7 +295,16 @@ class Sftp {
                 return [null, { code: "bad_reply",
                     detail: "READDIR returned no names and no EOF" }];
             }
-            for (const e of r.names) all.push(e);
+            for (const e of r.names) {
+                bytes += e.filename.length + e.longname.length + LIST_ENTRY_BYTES;
+                if (bytes > maxBytes) {
+                    await this.closeHandle(h.handle);
+                    return [null, { code: "too_large", limit: maxBytes,
+                        detail: "directory listing exceeds the " + String(maxBytes)
+                            + " byte limit" }];
+                }
+                all.push(e);
+            }
         }
         await this.closeHandle(h.handle);
         return sftp.safeNames(all);
@@ -386,6 +415,11 @@ function modeArg(mode) {
 }
 
 const MAX_LIST_ENTRIES = 100000;
+// The default bound on the bytes a listing holds (its names, plus a little
+// per entry); opts.maxBytes overrides it. A larger listing is too_large.
+const MAX_LIST_BYTES = 16 * 1024 * 1024;
+// What one entry costs the byte bound beyond its two names.
+const LIST_ENTRY_BYTES = 64;
 
 // One read or write request; requests in flight at once; Sftp.read's piece.
 const IO_CHUNK = 32768;
@@ -577,5 +611,9 @@ async function open(t, opts) {
     return [s];
 }
 
-export const sftpClient = { open, REPLY_TIMEOUT_MS, MAX_LIST_ENTRIES };
+export const sftpClient = { open, REPLY_TIMEOUT_MS, MAX_LIST_ENTRIES, MAX_LIST_BYTES };
+
+// Test seam (audit 50): the session class, so a suite can drive list()
+// against a scripted request() without a connection.
+_test_hooks.register("hull:ssh:sftp_client", { Sftp });
 export default sftpClient;

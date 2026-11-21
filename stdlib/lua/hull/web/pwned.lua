@@ -27,7 +27,8 @@
 -- check() raises (never fails open) when the runtime itself refuses the
 -- fetch - a "[hull:busy]" refusal (64 fetches already in flight on this VM,
 -- the off-heap copy total) or a "[hull:wait_refused]" one: the request then
--- fails rather than accepting an unchecked password (audit 35).
+-- fails rather than accepting an unchecked password (audit 35). So does a
+-- "[hull:denied]" one, a host manifest.hosts does not admit (audit 50).
 --
 -- Apps consuming this module MUST add the HIBP host (or their
 -- override) to manifest.hosts - check() raises when the hosts list
@@ -47,6 +48,11 @@ local blocklist   = require("hull.web._pwned_blocklist")
 local refusal     = require("hull._refusal")
 
 local DEFAULT_ENDPOINT = "https://api.pwnedpasswords.com/range/"
+
+-- The HIBP fetch; the suite stands in for it through the test hooks
+-- (set_get), as the JS twin's setGet.
+local function real_get(url, o) return http_client.async.get(url, o) end
+local get = real_get
 
 local M = {}
 
@@ -134,7 +140,7 @@ function M.check(password, opts)
     local prefix = hash:sub(1, 5)
     local suffix = hash:sub(6)
 
-    local ok, resp = pcall(http_client.async.get, endpoint .. prefix, {
+    local ok, resp = pcall(get, endpoint .. prefix, {
         headers = { ["User-Agent"] = "hull-pwned-check/1" },
     })
     -- The runtime refusing the fetch is not an HIBP outage: a refusal to
@@ -145,6 +151,16 @@ function M.check(password, opts)
     -- hold 64 slow fetches open (audit 35). Re-raised, by code (hull._refusal),
     -- so the request fails instead of accepting the password.
     if not ok and refusal.code(resp) then error(resp, 0) end
+    -- Nor is the runtime denying the host ("[hull:denied] ", gap 3): the
+    -- manifest does not admit the endpoint, every lookup is denied the same
+    -- way, and failing open turned the check off behind one warning. Read
+    -- before hosts_may_admit, which takes a "$VAR", a CIDR or a glob entry
+    -- for "may admit" and so failed open on an unset variable or a CIDR that
+    -- matches no DNS name (audit 50).
+    if not ok and refusal.is_denied(resp) then
+        error("pwned: manifest.hosts does not admit the HIBP endpoint " .. endpoint
+            .. " - add its host to manifest.hosts (" .. resp .. ")", 0)
+    end
     -- Neither is a host the manifest does not admit: failing open on it
     -- turned the check off for the life of the process, behind one warning.
     if not ok and not hosts_may_admit(endpoint) then
@@ -199,6 +215,7 @@ end
 require("hull._test_hooks").register("hull.web.pwned", {
     sha1_hex = sha1_hex,
     in_local_blocklist = in_local_blocklist,
+    set_get = function(fn) get = fn or real_get end,
 })
 
 return M
