@@ -148,7 +148,11 @@ HOST_TH_OBJ := $(BUILDDIR)/host_th.o
 # -DHL_GPU_TEST_HOOKS (hl_gpu_test_set_async_race_hook, so the
 # gpu.async.compile settle / abandon race is interleaved - audit 49).
 GPU_TH_OBJ := $(BUILDDIR)/cap_gpu_th.o
-TEST_CAP_OBJS := $(filter-out $(BUILDDIR)/cap_gpu_helper.o $(BUILDDIR)/cap_gpu.o $(HOST_OBJ),$(CAP_OBJS)) $(GPU_HELPER_TH_OBJ) $(GPU_TH_OBJ) $(HOST_TH_OBJ)
+# shared/stdin_secret.c likewise: the tests link stdin_secret_th.o, built with
+# -DHL_STDIN_SECRET_TEST_HOOKS (hl_stdin_secret_test_set_hook, so a signal is
+# raised where read_secret's last check has run - audit 51).
+STDIN_SECRET_TH_OBJ := $(BUILDDIR)/stdin_secret_th.o
+TEST_CAP_OBJS := $(filter-out $(BUILDDIR)/cap_gpu_helper.o $(BUILDDIR)/cap_gpu.o $(HOST_OBJ) $(STDIN_SECRET_OBJ),$(CAP_OBJS)) $(GPU_HELPER_TH_OBJ) $(GPU_TH_OBJ) $(HOST_TH_OBJ) $(STDIN_SECRET_TH_OBJ)
 # cap/db_duckdb.c likewise (DuckDB builds only): the tests link
 # cap_db_duckdb_th.o, built with -DHL_DUCKDB_TEST_HOOKS
 # (hl_db_duckdb_test_set_abandon_ceiling_ms, so the abandoned-statement exit
@@ -165,6 +169,8 @@ $(GPU_TH_OBJ): $(SRCDIR)/hull/cap/gpu.c $(INCDIR)/hull/cap/gpu.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_GPU_TEST_HOOKS $(INCLUDES) -c -o $@ $<
 $(HOST_TH_OBJ): $(SRCDIR)/hull/shared/host.c $(INCDIR)/hull/shared/host.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_HOST_TEST_HOOKS $(INCLUDES) -c -o $@ $<
+$(STDIN_SECRET_TH_OBJ): $(SRCDIR)/hull/shared/stdin_secret.c $(INCDIR)/hull/shared/stdin_secret.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_STDIN_SECRET_TEST_HOOKS $(INCLUDES) -c -o $@ $<
 
 # `hull doctor --fix` calls hl_cmd_tools (commands/tools.c) to run the
 # ordinary `hull tools install` path.  The base filters that source out of

@@ -26,6 +26,9 @@ release-artifact layout).
   plugin output bytes raw); the JavaScript frontend's heap and instruction-limit verdicts say
   which limit was reached instead of "[unsupported type]"; `global` followed by `intrinsic` on
   the next line is no longer refused as a global declaration.
+- `read_secret` / `readSecret` on a terminal no longer drops a caught signal (SIGHUP, SIGQUIT, ...)
+  that arrived after its last check, or with a failed `tcgetattr` after a hangup: it is
+  raised once echo is back on (audit 51).
 
 ### Tests
 

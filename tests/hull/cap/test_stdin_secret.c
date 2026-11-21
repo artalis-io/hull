@@ -13,6 +13,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #include "utest.h"
+#define HL_STDIN_SECRET_TEST_HOOKS 1   /* linked with stdin_secret_th.o */
 #include "hull/shared/stdin_secret.h"
 #include "hull/shared/main_signal.h"
 #include "hull/shared/async_backend.h"
@@ -78,6 +79,22 @@ static int read_full(int fd, void *out, size_t n)
     return got == n;
 }
 
+/* The signal the reader raises from a test hook (audit 51), and where: 0 =
+ * none, HL_STDIN_SECRET_HOOK_TCGETATTR = at the first tcgetattr, which then
+ * fails, HL_STDIN_SECRET_HOOK_BEFORE_UNHOOK = once the read loop is over.
+ * Set by the parent before pty_start; the children inherit it. */
+static int g_hook_point;
+static int g_hook_sig;
+
+static int raise_at_hook(int point)
+{
+    if (point != g_hook_point || g_hook_sig == 0) return 0;
+    int sig = g_hook_sig;
+    g_hook_sig = 0;   /* once */
+    (void)raise(sig);
+    return 1;
+}
+
 /* The reader: one secret; exits 0 when it is "abc", 2 otherwise. With
  * @p main_signal, main_signal is installed first (and the read has no stop
  * callback, as a synchronous stretch would not see one). */
@@ -92,6 +109,7 @@ static void child_read(int main_signal)
             hl_main_signal_install(loop, &rt, 1000) != 0)
             _exit(9);
     }
+    if (g_hook_point) hl_stdin_secret_test_set_hook(raise_at_hook);
     char buf[64];
     size_t n = 0;
     int rc = hl_stdin_read_secret("Key: ", buf, sizeof buf, &n, NULL, NULL);
@@ -252,6 +270,45 @@ UTEST(stdin_secret_audit50, main_signal_second_sigint_restores_echo)
     int st = 0;
     EXPECT_EQ('E', pty_report(&p, &st));
     EXPECT_TRUE(WIFSIGNALED(st) && WTERMSIG(st) == SIGINT);
+    EXPECT_EQ(1, echo_on(p.slave));
+    pty_end(&p);
+}
+
+/* A signal caught after the read loop's last any_caught() check, before the
+ * handlers went back to SIG_DFL, was recorded and never raised: the read
+ * returned the line and the process went on as if no SIGQUIT had come. */
+UTEST(stdin_secret_audit51, signal_caught_after_last_check_is_replayed)
+{
+    g_hook_point = HL_STDIN_SECRET_HOOK_BEFORE_UNHOOK;
+    g_hook_sig = SIGQUIT;
+    Pty p;
+    int started = pty_start(&p, 0);
+    g_hook_point = 0;
+    g_hook_sig = 0;
+    ASSERT_EQ(0, started);
+    ASSERT_TRUE(pty_wait_echo(&p, 0));
+    ASSERT_EQ(4, (int)write(p.master, "abc\n", 4));
+    int st = 0;
+    EXPECT_EQ('E', pty_report(&p, &st));
+    EXPECT_TRUE(WIFSIGNALED(st) && WTERMSIG(st) == SIGQUIT);
+    EXPECT_EQ(1, echo_on(p.slave));
+    pty_end(&p);
+}
+
+/* A failed tcgetattr (EIO after a hangup) left the loop before the caught
+ * signal was replayed, so the SIGHUP that caused it was dropped. */
+UTEST(stdin_secret_audit51, signal_caught_before_failed_tcgetattr_is_replayed)
+{
+    g_hook_point = HL_STDIN_SECRET_HOOK_TCGETATTR;
+    g_hook_sig = SIGHUP;
+    Pty p;
+    int started = pty_start(&p, 0);
+    g_hook_point = 0;
+    g_hook_sig = 0;
+    ASSERT_EQ(0, started);
+    int st = 0;
+    EXPECT_EQ('E', pty_report(&p, &st));
+    EXPECT_TRUE(WIFSIGNALED(st) && WTERMSIG(st) == SIGHUP);
     EXPECT_EQ(1, echo_on(p.slave));
     pty_end(&p);
 }

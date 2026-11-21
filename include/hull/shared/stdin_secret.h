@@ -54,4 +54,14 @@ int hl_stdin_read_secret(const char *prompt, char *buf, size_t cap, size_t *len,
  */
 void hl_stdin_secret_restore_terminal(void);
 
+#ifdef HL_STDIN_SECRET_TEST_HOOKS
+/* Test builds only (stdin_secret_th.o). The hook runs at each point; a
+ * non-zero return at HL_STDIN_SECRET_HOOK_TCGETATTR fails that tcgetattr. */
+enum {
+    HL_STDIN_SECRET_HOOK_TCGETATTR     = 1,  /**< before each tcgetattr */
+    HL_STDIN_SECRET_HOOK_BEFORE_UNHOOK = 2,  /**< after the loop, before the final unhook */
+};
+void hl_stdin_secret_test_set_hook(int (*fn)(int point));
+#endif
+
 #endif /* HL_SHARED_STDIN_SECRET_H */
