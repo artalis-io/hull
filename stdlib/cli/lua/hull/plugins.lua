@@ -136,6 +136,13 @@ end
 
 -- stdout carries only the bundle: everything else goes to stderr.
 local function generation(root)
+    -- The bundle holds plugin outputs' raw bytes: on a terminal a cloned
+    -- tree's plugin could write escape sequences to it (audit 51).
+    if tool.stdout_is_tty() then
+        tool.stderr("hull plugins: refusing to write the generation bundle to a terminal; " ..
+                    "redirect stdout to a file or a pipe\n")
+        return 2
+    end
     local _, bundle, err, stage = require("hull.buildctx.generation").produce(root, {
         sha256_hex = sha256_hex,
         report = function(r, d)

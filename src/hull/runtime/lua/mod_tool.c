@@ -867,6 +867,16 @@ static int l_tool_dev_sidecar_mac(lua_State *L)
     return 1;
 }
 
+/* tool.stdout_is_tty() -> bool: whether stdout is a terminal. `hull plugins
+ * generation` refuses one: its bundle carries plugin output bytes raw, and a
+ * cloned tree's plugin could write ESC / OSC 52 to the user's terminal
+ * (audit 51). */
+static int l_tool_stdout_is_tty(lua_State *L)
+{
+    lua_pushboolean(L, isatty(STDOUT_FILENO) == 1);
+    return 1;
+}
+
 static int l_tool_stdout_raw(lua_State *L)
 {
     size_t len = 0;
@@ -2553,6 +2563,7 @@ static const luaL_Reg tool_funcs[] = {
     { "escape",                 l_tool_escape },
     { "stdout",                 l_tool_stdout },
     { "stdout_raw",             l_tool_stdout_raw },
+    { "stdout_is_tty",          l_tool_stdout_is_tty },
     { "stdout_json",            l_tool_stdout_json },
     { "stderr_json",            l_tool_stderr_json },
     { "dev_sidecar_mac",        l_tool_dev_sidecar_mac },

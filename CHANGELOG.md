@@ -19,6 +19,10 @@ release-artifact layout).
   the copied strings and startup fails cleanly instead of aborting. Error
   objects read outside a protected call (worker.dispatch, a failed top level or
   test case) format numbers without converting them in place.
+- Tooling (audit 51): `hull plugins generation` refuses a terminal stdout (the bundle carries
+  plugin output bytes raw); the JavaScript frontend's heap and instruction-limit verdicts say
+  which limit was reached instead of "[unsupported type]"; `global` followed by `intrinsic` on
+  the next line is no longer refused as a global declaration.
 
 ### Tests
 
