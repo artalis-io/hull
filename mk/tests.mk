@@ -1848,6 +1848,13 @@ e2e-state-dir: $(BUILDDIR)/hull
 e2e-state-dir-built: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 	HULL_BIN=$(BUILDDIR)/hull sh tests/e2e_state_dir_built.sh
 
+# hull build leaves tests/ and the root tooling configs out of the binary,
+# lists them, and refuses an app that loads one (hsctl gap 11): a Lua and a
+# TypeScript app, a signed build verified. Needs the platform library.
+.PHONY: e2e-build-excludes
+e2e-build-excludes: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
+	HULL=$(BUILDDIR)/hull sh tests/e2e_build_excludes.sh
+
 e2e-migrate: $(BUILDDIR)/hull
 	sh tests/e2e_migrate.sh
 
