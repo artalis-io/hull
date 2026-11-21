@@ -516,7 +516,8 @@ APP
     cat > "${TYPES_TMP}/node_modules/.bin/tsc" <<'SH'
 #!/bin/sh
 echo "$*" >> "$(dirname "$0")/../../calls.log"
-if grep -q BADTYPE "$5/app.ts"; then
+for a in "$@"; do dir=$a; done   # -p DIR comes last
+if grep -q BADTYPE "$dir/app.ts"; then
     echo "app.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'."
     exit 2
 fi
@@ -536,7 +537,7 @@ SH
             ;;
     esac
     case "$(cat "${TYPES_TMP}/calls.log" 2>/dev/null)" in
-        *"--noEmit --pretty false -p "*)
+        *"--noEmit --incremental false --composite false --tsBuildInfoFile null --generateTrace null --pretty false -p "*)
             pass "hull dev --tui runs the compiler as hull dev does"
             ;;
         *)
