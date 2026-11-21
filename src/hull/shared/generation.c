@@ -519,7 +519,7 @@ int hl_generation_produce(const char *app_dir, uint8_t **out, size_t *len)
 #endif
 }
 
-int hl_generation_take(int embedded, const char *app_dir, int verify_sig)
+int hl_generation_take_ex(int embedded, const char *app_dir, int verify_sig)
 {
     int rc = hl_generation_take_env(embedded);
     if (rc != 0 || g_taken)
@@ -574,4 +574,9 @@ int hl_generation_inputs(const uint8_t *buf, size_t len,
     }
     if (arena) sh_arena_free(arena);
     return rc;
+}
+
+int hl_generation_take(int embedded, const char *app_dir)
+{
+    return hl_generation_take_ex(embedded, app_dir, 0);
 }

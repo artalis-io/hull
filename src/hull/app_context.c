@@ -586,8 +586,8 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
      * --verify-sig, whose disk gate the runner armed before this. A refused
      * or invalid generation stops the app: it never runs the sources the
      * generation would have shadowed. */
-    int gen_taken = hl_generation_take(hl_vfs_embedded(&probe), ctx->app_dir_copy,
-                                      hl_vfs_disk_gate_armed());
+    int gen_taken = hl_generation_take_ex(hl_vfs_embedded(&probe), ctx->app_dir_copy,
+                                         hl_vfs_disk_gate_armed());
     if (gen_taken < 0)
         log_error("[hull:c] %s", hl_generation_error());
     if (gen_taken < 0 || hl_generation_apply(hl_vfs_disk_gate_armed()) != 0) {

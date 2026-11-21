@@ -14,6 +14,7 @@
 #include "hull/shared/generation.h"
 #include "hull/shared/app_entry.h"
 #include "hull/shared/dev_session.h"   /* HL_DEV_SESSION_ENV */
+#include "hull/shared/child_channel.h" /* hl_chan_self_exe */
 #include "hull/vfs.h"
 #include "../../src/hull/utils/hex.h"
 #include "test_tmpdir.h"
@@ -444,7 +445,7 @@ UTEST(generation, a_pipeline_needs_a_build_config)
     /* No config: hl_generation_take runs nothing. */
     hl_generation_reset();
     unsetenv(HL_GENERATION_ENV);
-    ASSERT_EQ(0, hl_generation_take(0, app, 0));
+    ASSERT_EQ(0, hl_generation_take(0, app));
     ASSERT_EQ(0, hl_generation_apply(0));
     snprintf(cfg, sizeof cfg, "%s/hull.build.json", app);
     /* A link is not a config. */
@@ -458,7 +459,7 @@ UTEST(generation, a_pipeline_needs_a_build_config)
     ASSERT_TRUE(hl_generation_has_pipeline(app));
     /* A built binary runs no pipeline, whatever the tree holds. */
     hl_generation_reset();
-    ASSERT_EQ(0, hl_generation_take(1, app, 0));
+    ASSERT_EQ(0, hl_generation_take(1, app));
     unlink(cfg);
     rmdir(app);
     hl_generation_reset();
@@ -532,9 +533,12 @@ UTEST(generation, a_typescript_entry_runs_the_pipeline)
 }
 
 /* An app directory holding a hull.build.json (into app, which must hold
- * HL_TEST_PATH_MAX bytes). */
+ * HL_TEST_PATH_MAX bytes); -2 when this binary cannot find its own path,
+ * so no pipeline child can be spawned (a cosmo APE: hl_chan_self_exe). */
 static int pipeline_app(char *app)
 {
+    char exe[4096];
+    if (hl_chan_self_exe(exe, sizeof exe) != 0) return -2;
     const char *dir = hl_test_tmpdir();
     if (!dir) return -1;
     snprintf(app, HL_TEST_PATH_MAX, "%s/hull-gen-pipe-XXXXXX", dir);
@@ -550,7 +554,9 @@ static int pipeline_app(char *app)
 UTEST(dev_audit50, pipeline_env_no_session)
 {
     char app[HL_TEST_PATH_MAX];
-    ASSERT_EQ(0, pipeline_app(app));
+    int prc = pipeline_app(app);
+    if (prc == -2) { UTEST_SKIP("no path to this binary on this host (the pipeline child cannot be spawned)"); }
+    ASSERT_EQ(0, prc);
     ASSERT_EQ(0, setenv(HL_DEV_SESSION_ENV,
                         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 1));
     uint8_t *b = NULL;
@@ -571,14 +577,16 @@ UTEST(dev_audit50, pipeline_env_no_session)
 UTEST(generation_audit50, verify_sig_take_runs_nothing)
 {
     char app[HL_TEST_PATH_MAX];
-    ASSERT_EQ(0, pipeline_app(app));
+    int prc = pipeline_app(app);
+    if (prc == -2) { UTEST_SKIP("no path to this binary on this host (the pipeline child cannot be spawned)"); }
+    ASSERT_EQ(0, prc);
     unsetenv(HL_GENERATION_ENV);
     hl_generation_reset();
-    ASSERT_EQ(0, hl_generation_take(0, app, 1));
+    ASSERT_EQ(0, hl_generation_take_ex(0, app, 1));
     ASSERT_EQ(0, hl_generation_apply(1));
     /* Without it the pipeline (this binary) runs, and its output is kept. */
     hl_generation_reset();
-    ASSERT_EQ(1, hl_generation_take(0, app, 0));
+    ASSERT_EQ(1, hl_generation_take(0, app));
     hl_generation_reset();
     unlink_in(app, "hull.build.json");
     rmdir(app);
