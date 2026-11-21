@@ -5,7 +5,8 @@
  * CI validation and a single command before pushing. `--types` adds a
  * type check first, with a TypeScript compiler already installed. An app
  * that was never signed has nothing to verify: that step is skipped and
- * says so, unless an option asked for verification (app_is_unsigned).
+ * says so, unless an option asked for verification (app_is_unsigned);
+ * `--require-signature` fails it instead.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -89,6 +90,7 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
     const char *app_dir = env->app_dir;
     int positional = 0;
     int types = 0;
+    int require_sig = 0;   /* --require-signature: an unsigned app fails */
     /* The options hull check forwards to verify that take a value, which
      * is not the app directory (`hull check --developer-key k.pub api`). */
     static const char *const value_flags[] = {
@@ -119,6 +121,7 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
         }
         if (strcmp(a, "--app-dir") == 0) { i++; continue; }  /* env has it */
         if (strcmp(a, "--types") == 0) { types = 1; continue; }
+        if (strcmp(a, "--require-signature") == 0) { require_sig = 1; continue; }
         if (strcmp(a, "--verbose") == 0 || strcmp(a, "--json") == 0 ||
             strncmp(a, "--app-dir=", 10) == 0)
             continue;   /* global flags, read by the dispatcher */
@@ -194,7 +197,14 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
      * without --sign. Skipped only when nothing asked for verification:
      * any option forwarded to verify (a key, --binary, --no-verify-platform)
      * runs it, so a gate that requires a signature keeps failing without
-     * one. vc counts "verify" and the app directory besides the options. */
+     * one. vc counts "verify" and the app directory besides the options.
+     * --require-signature says so outright: an unsigned app fails here,
+     * and a signed one is verified as usual. */
+    if (require_sig && app_is_unsigned(app_dir)) {
+        hl_eprintf_line("[hull:check] verify failed: %s is unsigned and "
+                        "--require-signature was given", app_dir);
+        return 1;
+    }
     if (vc == 2 && app_is_unsigned(app_dir)) {
         hl_eprintf_line("[hull:check] verify skipped: %s is unsigned (no package.sig "
                         "or hull.sig; `hull build --sign` signs it)", app_dir);

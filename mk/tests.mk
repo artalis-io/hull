@@ -2317,6 +2317,17 @@ e2e-types: $(BUILDDIR)/hull
 e2e-check-types: $(BUILDDIR)/hull
 	HULL=$(BUILDDIR)/hull sh tests/e2e_check_types.sh
 
+# hull check and the app's signature (tests/e2e_check_signed.sh, hsctl gap 10):
+# unsigned, --require-signature, signed and tampered apps in both runtimes. The
+# signed cases need the platform lib + runtime archives `make e2e-build` leaves
+# in build/ (HULL_REQUIRE_BUILD=1 fails instead of skipping; CI job
+# build-pipeline runs the script directly after e2e-build). Run it with the
+# flags build/ was made with (make EMBED_PLATFORM=1 e2e-check-signed), or a
+# config change purges the platform lib first.
+.PHONY: e2e-check-signed
+e2e-check-signed: $(BUILDDIR)/hull
+	HULL=$(BUILDDIR)/hull sh tests/e2e_check_signed.sh
+
 # A pipeline generation handed to an app run from source (shared/
 # generation.c) and the loaders' overlay it installs (vfs.c).
 $(BUILDDIR)/test_generation: $(TESTDIR)/hull/test_generation.c $(TEST_COMMON_DEPS) | $(BUILDDIR)

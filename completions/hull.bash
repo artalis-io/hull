@@ -97,7 +97,7 @@ _hull() {
 
         check)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--types --json --developer-key" -- "$cur"))
+                COMPREPLY=($(compgen -W "--types --require-signature --json --developer-key" -- "$cur"))
             else
                 COMPREPLY=($(compgen -d -- "$cur"))
             fi

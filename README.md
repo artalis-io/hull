@@ -150,7 +150,7 @@ Hull ships 30+ subcommands for the full development lifecycle:
 | <code>hull modules list [app_dir]</code> | Print modules declared by an app's manifest |
 | <code>hull modules explain &lt;NAME&gt;</code> | Print spec for one module (deps, required caps, intrinsic flag) |
 | <code>hull modules analyze [app_dir]</code> | Static scan of source. Flag `require`/`import` of undeclared modules; warn on unused declarations |
-| `hull check [app_dir]` | Validate manifest + import declarations, then run tests + verify |
+| `hull check [app_dir]` | Validate manifest + import declarations, then run tests + verify (skipped for an unsigned app; `--require-signature` fails one) |
 | `hull version [--json]` | Print version string (`--json` for machine-readable output) |
 | `hull doctor [--json\|--tui]` | Check environment: compiler, platform embed, module subsystems (DB/WASM/GPU), build readiness. [`--tui`](#terminal-ui) opens a live, color-coded interactive readiness pane with `r` to reprobe and `c` to copy JSON to the clipboard |
 | `hull update [--check] [--force] [--channel=beta]` | Self-update from GitHub releases (verifies SHA-256, atomic replace) |

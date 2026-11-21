@@ -13,10 +13,11 @@ release-artifact layout).
 - `hull check` passes an unsigned app. With no `package.sig` or `hull.sig` in the app
   directory, its verify step is skipped and says so (`verify skipped: <app> is unsigned`).
   Before, an app built without `--sign` could never pass `hull check`, whatever its types,
-  manifest and tests said. An option for verify (`--developer-key`, `--platform-key`,
-  `--gethull-key`, `--binary`, `--no-verify-platform`) still runs it, so a gate that requires
-  a signature keeps failing without one. Any `package.sig` / `hull.sig` entry, a dangling
-  link included, is verified as before.
+  manifest and tests said. `hull check --require-signature` is the explicit way to require a signature: an
+  unsigned app then fails (`verify failed: <app> is unsigned and --require-signature was
+  given`). An option for verify (`--developer-key`, `--platform-key`, `--gethull-key`,
+  `--binary`, `--no-verify-platform`) also still runs it. Any `package.sig` / `hull.sig`
+  entry, a dangling link included, is verified as before.
 
 ### Fixed
 
