@@ -1137,6 +1137,14 @@ static int cli_secret_stopped(void *ud)
     return hl_main_signal_count() != *(const int *)ud;
 }
 
+/* lua_pcall body: the line as a string (its allocation may raise). */
+static int cli_secret_push_k(lua_State *L)
+{
+    const char *buf = lua_touserdata(L, 1);
+    lua_pushlstring(L, buf, (size_t)lua_tointeger(L, 2));
+    return 1;
+}
+
 static int cli_stdin_read_secret(lua_State *L)
 {
     HlLua *lua = get_hl_lua_from_L(L);
@@ -1144,16 +1152,28 @@ static int cli_stdin_read_secret(lua_State *L)
         return luaL_error(L, "ctx.stdin:read_secret() is only available in "
                              "app.main's own code (it blocks the event loop)");
     const char *prompt = luaL_optstring(L, 2, NULL);
-    lua_hlwork(L, HL_WORK_CLI_FLUSH_UNITS, 0);
+    /* The prompt is written as cli_writer_write writes (audit 50: a floor
+     * only, whatever its length). */
+    uint64_t u = HL_WORK_CLI_FLUSH_UNITS +
+                 (prompt ? hl_work_bytes_units((uint64_t)strlen(prompt)) : 0);
+    lua_hlwork(L, u > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)u, 0);
     /* A VM box, so a raise below frees it with the VM (malloc leaked it). */
     char *buf = lua_newuserdatauv(L, HL_STDIN_SECRET_MAX, 0);
     int start = hl_main_signal_count();
     size_t n = 0;
     int rc = hl_stdin_read_secret(prompt, buf, HL_STDIN_SECRET_MAX, &n,
                                   cli_secret_stopped, &start);
-    if (rc == HL_STDIN_SECRET_OK)
-        lua_pushlstring(L, buf, n);
+    /* The string is made under a pcall, so the buffer is scrubbed before an
+     * out-of-memory raise leaves it to the collector (audit 50). */
+    int prc = LUA_OK;
+    if (rc == HL_STDIN_SECRET_OK) {
+        lua_pushcfunction(L, cli_secret_push_k);
+        lua_pushlightuserdata(L, buf);
+        lua_pushinteger(L, (lua_Integer)n);
+        prc = lua_pcall(L, 2, 1, 0);
+    }
     hl_secure_zero(buf, HL_STDIN_SECRET_MAX);
+    if (prc != LUA_OK) return lua_error(L);
     switch (rc) {
     case HL_STDIN_SECRET_OK:          return 1;
     case HL_STDIN_SECRET_EOF:         lua_pushnil(L); return 1;

@@ -17109,6 +17109,38 @@ UTEST(lua_audit41, ctx_output_is_charged_and_stdin_is_mains)
     cleanup_lua_caps();
 }
 
+/* ctx.stdin:read_secret charged a floor for its prompt whatever its length,
+ * where ctx.stdout:write charges the bytes it writes: 200 calls with a 1 MiB
+ * prompt cost 200 floors. Now each pays the prompt's bytes (audit 50).
+ * stdin is /dev/null, so every read is an end of input. */
+UTEST(lua_cli_audit50, read_secret_prompt_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(luaL_dostring(lua_rt.L,
+        "app.main(function(ctx)\n"
+        "  local big = string.rep('x', 1048576)\n"
+        "  for i = 1, 200 do ctx.stdin:read_secret(big) end\n"
+        "  return 0\n"
+        "end)\n"), LUA_OK);
+    fflush(stdin);
+    int saved0 = dup(0);
+    int nul = open("/dev/null", O_RDONLY);
+    ASSERT_GE(nul, 0);
+    dup2(nul, 0);
+    close(nul);
+    lua_rt.max_instructions = 10000000;
+    int exit_code = 99;
+    int rc = hl_lua_vtable.run_main(&lua_rt.base, NULL, 0, NULL, NULL, &exit_code);
+    lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    dup2(saved0, 0);
+    close(saved0);
+    clearerr(stdin);
+    /* Tripped (main failed); 0 / 0 was 200 MiB of prompt for 200 floors. */
+    EXPECT_TRUE(rc != 0 || exit_code != 0);
+    cleanup_lua_caps();
+}
+
 #ifdef HL_ENABLE_HTTP_CLIENT
 UTEST(lua_audit41, sync_smtp_send_has_a_floor)
 {

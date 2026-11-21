@@ -314,18 +314,45 @@ static void ws_client_call(HlLuaWsClientUD *ud, HlWscCall *c, const char *what)
         log_error("[hull:ws:client] %s: out of memory", what);
         return;
     }
+    /* A run of its own, as a task's fire is: nothing of the run that is
+     * active (app.main parked on a wait leaves active_co = cli_main_co) is
+     * the callback's, or its ctx.stdin read passed the "app.main's own
+     * code" gate and held the loop (audit 50); an op it starts would have
+     * captured the parked run's state. Put back after. */
+    HlLua         *lua        = ud->lua;
+    lua_State     *saved_co   = lua->active_co;
+    int            saved_ref  = lua->active_thread_ref;
+    KlHttpConn    *saved_conn = lua->active_conn;
+    KlHttpRequest *saved_req  = lua->active_req;
+    void          *saved_tmr  = lua->active_timer;
+    void         (*saved_oc)(struct HlLua *, void *) = lua->active_on_complete;
+    void          *saved_oc_ctx = lua->active_on_complete_ctx;
+    lua->active_co              = NULL;
+    lua->active_thread_ref      = LUA_NOREF;
+    lua->active_conn            = NULL;
+    lua->active_req             = NULL;
+    lua->active_timer           = NULL;
+    lua->active_on_complete     = NULL;
+    lua->active_on_complete_ctx = NULL;
     /* An entry like a ws-server callback: it neither joins nor leaves a
      * stale transaction (audit 6 M1). */
-    hl_db_registry_guard_stale_txns(ud->lua->base.db_registry);
-    HL_LUA_ARM_KIND(ud->lua, L, HL_RUN_CALLBACK);
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);
+    HL_LUA_ARM_KIND(lua, L, HL_RUN_CALLBACK);
     lua_pushcfunction(L, ws_client_call_k);
     lua_pushlightuserdata(L, c);
     int prc = lua_pcall(L, 1, 0, 0);
-    hl_db_registry_guard_stale_txns(ud->lua->base.db_registry);
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);
+    lua->active_co              = saved_co;
+    lua->active_thread_ref      = saved_ref;
+    lua->active_conn            = saved_conn;
+    lua->active_req             = saved_req;
+    lua->active_timer           = saved_tmr;
+    lua->active_on_complete     = saved_oc;
+    lua->active_on_complete_ctx = saved_oc_ctx;
     if (prc != LUA_OK) {
         char ebuf[512];
         log_error("[hull:ws:client] %s error: %s", what,
-                  hl_lua_error_text(ud->lua, L, -1, ebuf, sizeof ebuf));
+                  hl_lua_error_text(lua, L, -1, ebuf, sizeof ebuf));
         lua_pop(L, 1);
     }
 }

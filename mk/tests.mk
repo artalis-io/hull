@@ -476,9 +476,15 @@ $(BUILDDIR)/test_buildctx: $(TESTDIR)/hull/buildctx/test_buildctx.c $(BUILDCTX_T
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDCTX_TEST_OBJS) $(RUNTIME_CACHE_COMMON_OBJ) $(LUA_OBJS) $(TEST_COMMON_LIBS) $(LDFLAGS)
 
 # A helper process on one inherited socket (shared/child_channel.c): frames,
-# deadlines, a spawned child on fd 3 with a filtered environment.
-$(BUILDDIR)/test_child_channel: $(TESTDIR)/hull/test_child_channel.c $(CHILD_CHANNEL_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CHILD_CHANNEL_OBJ) $(LDFLAGS)
+# deadlines, a spawned child on fd 3 with a filtered environment. Linked with
+# child_channel_th.o, built with -DHL_CHAN_TEST_HOOKS
+# (hl_chan_test_force_close_fallback, so the descriptor-closing fallbacks run
+# on a kernel with close_range - audit 50).
+CHILD_CHANNEL_TH_OBJ := $(BUILDDIR)/child_channel_th.o
+$(CHILD_CHANNEL_TH_OBJ): $(SRCDIR)/hull/shared/child_channel.c $(INCDIR)/hull/shared/child_channel.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_CHAN_TEST_HOOKS $(INCLUDES) -c -o $@ $<
+$(BUILDDIR)/test_child_channel: $(TESTDIR)/hull/test_child_channel.c $(CHILD_CHANNEL_TH_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_CHAN_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CHILD_CHANNEL_TH_OBJ) $(LDFLAGS)
 
 # The plugin side of a build plugin's channel (shared/build_plugin.c): the
 # manifest preset and the inherited descriptor.

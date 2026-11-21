@@ -2496,7 +2496,11 @@ static JSValue js_cli_read_secret(JSContext *ctx, JSValueConst this_val,
         prompt = JS_ToCString(ctx, argv[0]);
         if (!prompt) return JS_EXCEPTION;
     }
-    if (hl_js_budget_charge(ctx, HL_WORK_CLI_FLUSH_UNITS) < 0) {
+    /* The prompt is written as js_cli_write writes (audit 50: a floor only,
+     * whatever its length). */
+    if (hl_js_budget_charge(ctx, HL_WORK_CLI_FLUSH_UNITS +
+                                 (prompt ? hl_work_bytes_units((uint64_t)strlen(prompt))
+                                         : 0)) < 0) {
         JS_FreeCString(ctx, prompt);
         return JS_EXCEPTION;
     }

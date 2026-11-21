@@ -12,7 +12,10 @@
 
 #ifdef HL_CHAN_SUPPORTED
 
+#include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
+#include <sys/resource.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -190,6 +193,98 @@ UTEST(child_channel_audit49, spawn_closes_inherited_fds)
     ASSERT_TRUE(WIFEXITED(st));
     EXPECT_EQ(0, WEXITSTATUS(st));            /* 3: the descriptor was there */
     close(leak); close(p[0]); close(p[1]); close(sv[0]);
+}
+
+/* Spawn /bin/sh -c @p script with @p chan as fd 3; its exit status, or -1. */
+static int run_sh(const char *script, int chan)
+{
+    char a0[] = "/bin/sh", a1[] = "-c";
+    char *argv[] = { a0, a1, (char *)(uintptr_t)script, NULL };
+    pid_t pid = hl_chan_spawn("/bin/sh", argv, chan, NULL);
+    if (pid <= 0) return -1;
+    int st = -1;
+    if (hl_chan_reap(pid, &st, 5000, NULL) != 1 || !WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
+/* A descriptor above 4096 does not reach the child when close_range is not
+ * there (a kernel before 5.9, a filter answering ENOSYS): the fallback loop
+ * stopped at 4096 under a soft limit of 65536 or more, and the descriptors
+ * past it were inherited (audit 50). Both fallbacks: /proc/self/fd, and the
+ * loop to the limit. */
+UTEST(child_channel_audit50, high_fd_closed_without_close_range)
+{
+    struct rlimit rl, saved;
+    ASSERT_EQ(0, getrlimit(RLIMIT_NOFILE, &saved));
+    rl = saved;
+    rlim_t want = 70000;
+    if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max < want) want = rl.rlim_max;
+    if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur < want) {
+        rl.rlim_cur = want;
+        (void)setrlimit(RLIMIT_NOFILE, &rl);
+    }
+    ASSERT_EQ(0, getrlimit(RLIMIT_NOFILE, &rl));
+    if (rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur <= 5000) {
+        printf("  (descriptor limit %llu: no descriptor above 4096, skipped)\n",
+               (unsigned long long)rl.rlim_cur);
+        return;
+    }
+    int sv[2];
+    child_pair(sv);
+    int p[2];
+    ASSERT_EQ(0, pipe(p));
+    int high = 5000;
+    ASSERT_EQ(high, dup2(p[1], high));        /* inheritable: dup2 clears CLOEXEC */
+    char script[96];
+    snprintf(script, sizeof script, "if [ -e /dev/fd/%d ]; then exit 3; fi; exit 0", high);
+    for (int mode = 1; mode <= 2; mode++) {
+        hl_chan_test_force_close_fallback(mode);
+        EXPECT_EQ(0, run_sh(script, sv[1]));  /* 3: the descriptor was there */
+    }
+    hl_chan_test_force_close_fallback(0);
+    close(high); close(p[0]); close(p[1]); close(sv[0]); close(sv[1]);
+    (void)setrlimit(RLIMIT_NOFILE, &saved);
+}
+
+/* A binary that cannot be executed is reported as posix_spawn reports it:
+ * -1 with errno set (audit 50: the fork path returned the pid of a child that
+ * only _exit(127)ed). */
+UTEST(child_channel_audit50, exec_failure_reported)
+{
+    int sv[2];
+    child_pair(sv);
+    char a0[] = "/nonexistent/hull-audit50";
+    char *argv[] = { a0, NULL };
+    errno = 0;
+    pid_t pid = hl_chan_spawn("/nonexistent/hull-audit50", argv, sv[1], NULL);
+    int err = errno;
+    if (pid > 0) { int st; (void)hl_chan_reap(pid, &st, 5000, NULL); }
+    EXPECT_EQ(-1, (int)pid);
+    EXPECT_EQ(ENOENT, err);
+    close(sv[0]); close(sv[1]);
+}
+
+/* A process started with stdin closed gets its socketpair on fd 0: the
+ * /dev/null set-up of 0-2 replaced the channel before it was moved to fd 3,
+ * and the child talked to /dev/null (audit 50). */
+UTEST(child_channel_audit50, low_fd_channel_survives)
+{
+    int saved0 = fcntl(0, F_DUPFD_CLOEXEC, 10);
+    ASSERT_GE(saved0, 10);
+    close(0);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    int child_end = sv[0] == 0 ? sv[0] : sv[1];
+    int our_end = child_end == sv[0] ? sv[1] : sv[0];
+    int st = (child_end == 0) ? run_sh("printf ok >&3", child_end) : -2;
+    char buf[4] = { 0 };
+    ssize_t n = st == 0 ? recv(our_end, buf, 2, MSG_DONTWAIT) : -1;
+    close(sv[0]); close(sv[1]);
+    ASSERT_EQ(0, dup2(saved0, 0));
+    close(saved0);
+    ASSERT_EQ(0, st);
+    EXPECT_EQ(2, (int)n);
+    EXPECT_STREQ("ok", buf);
 }
 
 #endif /* HL_CHAN_SUPPORTED */
