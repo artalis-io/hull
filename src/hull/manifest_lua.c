@@ -32,34 +32,38 @@ static const char *mstr(lua_State *L, int idx)
 }
 
 /* Read a string array from a Lua table field into a C array.
- * Strings are copied via hl_manifest_strdup.
- * Returns number of strings read (capped at max). */
-static int read_string_array(lua_State *L, int table_idx,
+ * Strings are copied via hl_manifest_strdup; *count (the field's count in the
+ * manifest, set to 0 first) is raised as each copy is stored, capped at max.
+ * Counted as it goes because the copy can raise part-way: lua_tolstring of a
+ * number element allocates (LUA_ERRMEM), and the callers that run the
+ * extraction under lua_pcall free what the manifest records. A count returned
+ * at the end was never written, so every string copied before the raise
+ * leaked (audit 50). A failed copy is skipped, as before. */
+static void read_string_array(lua_State *L, int table_idx,
                               const char *field,
-                              const char **out, int max,
+                              const char **out, int *count, int max,
                               HlAllocator *alloc)
 {
-    int count = 0;
+    *count = 0;
     lua_getfield(L, table_idx, field);
     if (!lua_istable(L, -1)) {
         lua_pop(L, 1);
-        return 0;
+        return;
     }
 
     int arr_idx = lua_gettop(L);
     lua_Integer len = luaL_len(L, arr_idx);
-    for (lua_Integer i = 1; i <= len && count < max; i++) {
+    for (lua_Integer i = 1; i <= len && *count < max; i++) {
         lua_rawgeti(L, arr_idx, i);
         if (lua_isstring(L, -1)) {
             const char *copy = hl_manifest_strdup(alloc, mstr(L, -1));
             if (copy)
-                out[count++] = copy;
+                out[(*count)++] = copy;
         }
         lua_pop(L, 1);
     }
 
     lua_pop(L, 1); /* pop array table */
-    return count;
 }
 
 /* Read a `ports = { ... }` array into a C int array. Returns how many were
@@ -127,29 +131,24 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     lua_getfield(L, manifest_idx, "fs");
     if (lua_istable(L, -1)) {
         int fs_idx = lua_gettop(L);
-        out->fs_read_count = read_string_array(L, fs_idx, "read",
-                                                 out->fs_read,
-                                                 HL_MANIFEST_MAX_PATHS, alloc);
-        out->fs_write_count = read_string_array(L, fs_idx, "write",
-                                                  out->fs_write,
-                                                  HL_MANIFEST_MAX_PATHS, alloc);
+        read_string_array(L, fs_idx, "read", out->fs_read,
+                      &out->fs_read_count, HL_MANIFEST_MAX_PATHS, alloc);
+        read_string_array(L, fs_idx, "write", out->fs_write,
+                      &out->fs_write_count, HL_MANIFEST_MAX_PATHS, alloc);
     }
     lua_pop(L, 1); /* pop fs */
 
     /* env = {"PORT", "DATABASE_URL", ...} */
-    out->env_count = read_string_array(L, manifest_idx, "env",
-                                         out->env,
-                                         HL_MANIFEST_MAX_ENVS, alloc);
+    read_string_array(L, manifest_idx, "env", out->env,
+                      &out->env_count, HL_MANIFEST_MAX_ENVS, alloc);
 
     /* secrets = {"DATABASE_URL", ...}: names a "$VAR" may read, not env.get */
-    out->secrets_count = read_string_array(L, manifest_idx, "secrets",
-                                             out->secrets,
-                                             HL_MANIFEST_MAX_SECRETS, alloc);
+    read_string_array(L, manifest_idx, "secrets", out->secrets,
+                      &out->secrets_count, HL_MANIFEST_MAX_SECRETS, alloc);
 
     /* hosts = {"api.stripe.com", ...} */
-    out->hosts_count = read_string_array(L, manifest_idx, "hosts",
-                                           out->hosts,
-                                           HL_MANIFEST_MAX_HOSTS, alloc);
+    read_string_array(L, manifest_idx, "hosts", out->hosts,
+                      &out->hosts_count, HL_MANIFEST_MAX_HOSTS, alloc);
 
     /* csp = "policy-string" or false */
     lua_getfield(L, manifest_idx, "csp");
@@ -174,10 +173,8 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     if (lua_istable(L, -1)) {
         int cors_idx = lua_gettop(L);
         out->cors_set = 1;
-        out->cors_origin_count = read_string_array(L, cors_idx, "origins",
-                                                     out->cors_origins,
-                                                     HL_MANIFEST_MAX_CORS_ORIGINS,
-                                                     alloc);
+        read_string_array(L, cors_idx, "origins", out->cors_origins,
+                      &out->cors_origin_count, HL_MANIFEST_MAX_CORS_ORIGINS, alloc);
         lua_getfield(L, cors_idx, "methods");
         if (lua_isstring(L, -1))
             out->cors_methods = hl_manifest_strdup(alloc, mstr(L, -1));
@@ -277,9 +274,10 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                                                  ? (lua_Integer)HL_REQ_PER_IP_CEIL : v);
         }
         lua_pop(L, 1);
-        out->limits.trusted_proxy_count = read_string_array(L, lim_idx,
-            "trusted_proxies", out->limits.trusted_proxies,
-            HL_MANIFEST_MAX_TRUSTED_PROXIES, alloc);
+        read_string_array(L, lim_idx, "trusted_proxies",
+                          out->limits.trusted_proxies,
+                          &out->limits.trusted_proxy_count,
+                          HL_MANIFEST_MAX_TRUSTED_PROXIES, alloc);
         lua_getfield(L, lim_idx, "route_concurrency");
         if (lua_istable(L, -1)) {
             int rc_idx = lua_gettop(L);
@@ -607,6 +605,10 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                         out->databases.named[out->databases.named_count].session_control =
                             session_control;
                         out->databases.named_count++;
+                    } else {
+                        /* One copy failed: the other is in no count. */
+                        hl_manifest_str_free(alloc, &ncopy);
+                        hl_manifest_str_free(alloc, &dcopy);
                     }
                 } else {
                     log_warn("[manifest] databases.named.%s: expected a DSN "
@@ -621,14 +623,10 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
         if (lua_istable(L, -1)) {
             int dyn_idx = lua_gettop(L);
             out->databases.dynamic.declared = 1;
-            out->databases.dynamic.host_count =
-                read_string_array(L, dyn_idx, "hosts",
-                                  out->databases.dynamic.hosts,
-                                  HL_MANIFEST_MAX_DB_HOSTS, alloc);
-            out->databases.dynamic.scheme_count =
-                read_string_array(L, dyn_idx, "schemes",
-                                  out->databases.dynamic.schemes,
-                                  HL_MANIFEST_MAX_DB_SCHEMES, alloc);
+            read_string_array(L, dyn_idx, "hosts", out->databases.dynamic.hosts,
+                      &out->databases.dynamic.host_count, HL_MANIFEST_MAX_DB_HOSTS, alloc);
+            read_string_array(L, dyn_idx, "schemes", out->databases.dynamic.schemes,
+                      &out->databases.dynamic.scheme_count, HL_MANIFEST_MAX_DB_SCHEMES, alloc);
         }
         lua_pop(L, 1); /* pop dynamic */
 
@@ -657,14 +655,10 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
         if (lua_istable(L, -1)) {
             int dyn_idx = lua_gettop(L);
             out->kv.dynamic.declared = 1;
-            out->kv.dynamic.host_count =
-                read_string_array(L, dyn_idx, "hosts",
-                                  out->kv.dynamic.hosts,
-                                  HL_MANIFEST_MAX_DB_HOSTS, alloc);
-            out->kv.dynamic.scheme_count =
-                read_string_array(L, dyn_idx, "schemes",
-                                  out->kv.dynamic.schemes,
-                                  HL_MANIFEST_MAX_DB_SCHEMES, alloc);
+            read_string_array(L, dyn_idx, "hosts", out->kv.dynamic.hosts,
+                      &out->kv.dynamic.host_count, HL_MANIFEST_MAX_DB_HOSTS, alloc);
+            read_string_array(L, dyn_idx, "schemes", out->kv.dynamic.schemes,
+                      &out->kv.dynamic.scheme_count, HL_MANIFEST_MAX_DB_SCHEMES, alloc);
         }
         lua_pop(L, 1); /* pop dynamic */
     }
@@ -684,14 +678,10 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
         if (lua_istable(L, -1)) {
             int c_idx = lua_gettop(L);
             out->ssh.connect.declared = 1;
-            out->ssh.connect.host_count =
-                read_string_array(L, c_idx, "hosts",
-                                  out->ssh.connect.hosts,
-                                  HL_MANIFEST_MAX_NET_HOSTS, out->alloc);
-            out->ssh.user_count =
-                read_string_array(L, c_idx, "users",
-                                  out->ssh.users,
-                                  HL_MANIFEST_MAX_SSH_USERS, out->alloc);
+            read_string_array(L, c_idx, "hosts", out->ssh.connect.hosts,
+                      &out->ssh.connect.host_count, HL_MANIFEST_MAX_NET_HOSTS, out->alloc);
+            read_string_array(L, c_idx, "users", out->ssh.users,
+                      &out->ssh.user_count, HL_MANIFEST_MAX_SSH_USERS, out->alloc);
             out->ssh.connect.port_count =
                 read_port_array(L, c_idx, out->ssh.connect.ports);
         }
@@ -708,10 +698,8 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
         if (lua_istable(L, -1)) {
             int t_idx = lua_gettop(L);
             out->ssh.tunnel.declared = 1;
-            out->ssh.tunnel.host_count =
-                read_string_array(L, t_idx, "hosts",
-                                  out->ssh.tunnel.hosts,
-                                  HL_MANIFEST_MAX_NET_HOSTS, out->alloc);
+            read_string_array(L, t_idx, "hosts", out->ssh.tunnel.hosts,
+                      &out->ssh.tunnel.host_count, HL_MANIFEST_MAX_NET_HOSTS, out->alloc);
             out->ssh.tunnel.port_count =
                 read_port_array(L, t_idx, out->ssh.tunnel.ports);
         }
