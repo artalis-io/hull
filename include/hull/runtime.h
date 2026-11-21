@@ -87,6 +87,9 @@ typedef struct HlRuntimeVtable {
     int   (*load_app)(HlRuntime *rt, const char *filename);
     int   (*wire_routes_server)(HlRuntime *rt, KlHttpServer *server,
                                 void *(*alloc_fn)(size_t));
+    /* 0: extracted; -1: none declared; -2: the extraction failed (out of
+     * memory part-way - logged, `out` zeroed), which a runner refuses to
+     * start on. */
     int   (*extract_manifest)(HlRuntime *rt, HlManifest *out);
 
     /* The declared manifest as JSON (malloc'd into *out, NULL when none is

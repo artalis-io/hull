@@ -551,7 +551,11 @@ void hl_lua_test_run(lua_State *L, int *total, int *passed, int *failed,
             }
             (*passed)++;
         } else {
-            const char *err = lua_tostring(L, -1);
+            /* Not lua_tostring: a case that raised error(42) is read here,
+             * outside any protected call, and the conversion in place can
+             * raise out of memory (audit 51). */
+            char ebuf[1024];
+            const char *err = hl_lua_error_text(lua, L, -1, ebuf, sizeof ebuf);
             test_print_line(out, 0, desc, err);
             if (results && idx < max_results) {
                 snprintf(results[idx].name, sizeof(results[idx].name),

@@ -17,6 +17,11 @@ release-artifact layout).
 - Lua `app.main` parked on a wait no longer leaves its coroutine active: a
   middleware dispatched during the wait passed `ctx.stdin:read()`'s "app.main's
   own code" gate and could block the loop (audit 50).
+- Lua manifest extraction runs under `lua_pcall` where no caller protects it
+  (audit 51): out of memory part-way, `hull.db._internal_conn` no longer leaks
+  the copied strings and startup fails cleanly instead of aborting. Error
+  objects read outside a protected call (worker.dispatch, a failed top level or
+  test case) format numbers without converting them in place.
 
 ### Tests
 
