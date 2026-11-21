@@ -21,6 +21,41 @@ release-artifact layout).
   `shared/type_check.h`), which the command line holds over the config, on TypeScript 5 and 7.
   Covered by `tests/e2e_check_types.sh` (`check_types_audit50.no_write_outside`, with the real
   compiler) and `tests/e2e_dev_types.sh`.
+- TypeScript erasure no longer changes what code means (audit 50, #1166). Hull erases types by
+  blanking them, and a few constructs then read differently from what tsc emits; they are now
+  refused (`ts.unsupported`) instead: an `as` / `satisfies` whose removal would regroup the
+  expression (`price + tax as number * qty` became `price + tax * qty`), an operator starting
+  with `>` after type arguments (`a < b >>> c` became a shift; tsc reads a comparison), a regex
+  or `/` inside an ambient body or a bracketed type (a regex holding `}` ended a `declare module`
+  early, and the code after it ran), `as const |` / `&` and an assignment after an asserted
+  type, and `global` followed by a declaration on the next line. `??` mixed with `||` / `&&`
+  without parentheses is a syntax error, as in JS. JSDoc tag trimming is linear, left-deep
+  binary chains count against the parser's depth limit, and a stack-limit failure says the
+  source nests too deeply.
+- Stdlib (audit 50, #1164): `hull/pwned` raises when `manifest.hosts` refuses the HIBP endpoint
+  (it failed open when the allowlist denied it through an unset `$VAR`, a CIDR or a glob);
+  `retry.run` re-raises a `denied` error at once instead of retrying it; sftp `list()` takes a
+  byte cap, `max_bytes` / `maxBytes` (default 16 MiB; past it the handle is closed and
+  `too_large` returned); a ratelimit sweep at the cap sheds down to 90% of the cap; a closed
+  JS MappedBuffer's `close()` / `length` leave no pending exception; `hl_cap_fs_validate`
+  refuses a `.hull` first component; a raise inside the build context's preset check restores
+  the manifest it swapped. `hull._refusal` / `hull:_refusal` gain `is_denied` / `isDenied`.
+- Tooling (audit 50, #1165): build-plugin text is printed on one line by every command that
+  runs the pipeline; the tool VM's JSON output escapes DEL and C1 controls; `hull agent
+  validate` / `template` / `compute-call` and MCP `hull_validate` / `hull_compute_call` open
+  app files without following a symlink and without blocking on a FIFO (a planted FIFO hung
+  them; a file reached through a symlink is now refused); `--verify-sig` runs no build pipeline
+  (a planted `hull.build.json` ran a cloned tree's plugins before the generation was refused);
+  the pipeline child is not handed the `hull dev` session key.
+- `ctx.stdin:read_secret` / `readSecret` and the plugin spawn (audit 50, #1167): echo is put
+  back on when a signal kills or stops the process while it is off (SIGINT, SIGTERM, SIGHUP,
+  SIGQUIT, SIGPIPE, SIGALRM, and SIGTSTP / SIGTTIN / SIGTTOU, after which echo goes off again
+  and the read goes on), the prompt is charged to the run's budget, and the Lua line buffer is
+  scrubbed before an out-of-memory raise. A Lua ws-client callback is a run of its own, so it
+  cannot read app.main's stdin while main is parked. On Linux without `close_range` the
+  spawned plugin child closes every inherited descriptor (the fallback stopped at fd 4096), a
+  failed `execve` is reported as an error again, and a channel on fd 0-2 survives the child's
+  stdio setup.
 
 ### Added
 
