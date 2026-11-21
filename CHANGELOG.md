@@ -8,6 +8,12 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- Lua `app.main` parked on a wait no longer leaves its coroutine active: a
+  middleware dispatched during the wait passed `ctx.stdin:read()`'s "app.main's
+  own code" gate and could block the loop (audit 50).
+
 ## [0.23.1] - 2026-11-21
 
 Audit round 50's fixes, mostly in the TypeScript tooling 0.23.0 added. The High: the type check
