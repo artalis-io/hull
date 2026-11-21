@@ -1867,7 +1867,15 @@ static int lua_main_run(HlLua *lua, HlLuaMainRun *r, int *exit_code_out)
     if (status == LUA_YIELD) {
         /* Main yielded - async op in flight. cli_main_co (set above) tells
          * hl_lua_async_resume to stop the loop when it eventually
-         * completes; enter the event loop. */
+         * completes; enter the event loop. Its continuation captured the
+         * coroutine and its ref, and hl_lua_async_resume makes it active
+         * again for each resume: while it waits, nothing of main's run is
+         * active, as for every other parked entry (audit 50: a middleware
+         * dispatched during the wait saw active_co == cli_main_co, passed
+         * ctx.stdin:read()'s "app.main's own code" gate and held the loop). */
+        lua->active_co         = NULL;
+        lua->active_conn       = NULL;
+        lua->active_thread_ref = LUA_NOREF;
         if (!lua->base.async_ctx) {
             main_report(r, "[hull:main] ", "internal: no event loop available");
             if (r->test) {

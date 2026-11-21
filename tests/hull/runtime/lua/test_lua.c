@@ -17222,6 +17222,81 @@ UTEST(lua_cli_audit50, read_secret_scrub_on_oom)
     EXPECT_EQ_MSG(a50_leaked, 0, "the secret reached the collector unscrubbed");
     cleanup_lua_caps();
 }
+#ifdef HL_ENABLE_HTTP_SERVER
+/* While app.main was parked on a wait, active_co still named its coroutine,
+ * so a loop-level entry that does not set active_co itself - a middleware
+ * dispatched for a request that arrived during the park - passed the
+ * "app.main's own code" gate of ctx.stdin:read() and could block the loop
+ * (audit 50). main's own code after the wait still reads. */
+static int a50_mw_id;
+
+static void a50_dispatch_mw(void *user)
+{
+    (void)user;
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    (void)hl_lua_dispatch_middleware(&lua_rt, a50_mw_id, &req, &res);
+    free_lua_req_ctx(&req);
+}
+
+UTEST(lua_cli_audit50, parked_main_is_not_active)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *loop = NULL;
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    pending_async_ctx = loop;
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(luaL_dostring(lua_rt.L,
+        "app.manifest({ modules = { 'hull/http-server@1' } })\n"
+        "app.use('*', '/*', function(req, res)\n"
+        "  local ok, e = pcall(SAVED.stdin.read, SAVED.stdin, 1)\n"
+        "  MW = tostring(ok) .. '|' .. tostring(e)\n"
+        "  return 0\n"
+        "end)\n"
+        "app.main(function(ctx)\n"
+        "  SAVED = ctx\n"
+        "  hull.sleep(40)\n"
+        "  local ok, e = pcall(ctx.stdin.read, ctx.stdin, 1)\n"
+        "  MAIN = tostring(ok) .. '|' .. tostring(e)\n"
+        "  return 0\n"
+        "end)\n"), LUA_OK);
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "handler_id");
+    a50_mw_id = (int)lua_tointeger(lua_rt.L, -1);
+    lua_pop(lua_rt.L, 3);
+
+    fflush(stdin);
+    int saved0 = dup(0);
+    int nul = open("/dev/null", O_RDONLY);
+    ASSERT_GE(nul, 0);
+    dup2(nul, 0);
+    close(nul);
+    /* A request's middleware, dispatched while main waits. */
+    uint64_t t = be->timer_add(loop, 5, a50_dispatch_mw, NULL);
+    EXPECT_NE(t, (uint64_t)0);
+    int exit_code = 99;
+    int rc = hl_lua_vtable.run_main(&lua_rt.base, NULL, 0, NULL, NULL, &exit_code);
+    dup2(saved0, 0);
+    close(saved0);
+    clearerr(stdin);
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(exit_code, 0);
+
+    lua_getglobal(lua_rt.L, "MW");
+    const char *mw = lua_tostring(lua_rt.L, -1);
+    EXPECT_NE_MSG(mw ? strstr(mw, "false|") : NULL, NULL, mw ? mw : "(middleware did not run)");
+    EXPECT_NE_MSG(mw ? strstr(mw, "only available in app.main") : NULL, NULL, mw ? mw : "(nil)");
+    lua_getglobal(lua_rt.L, "MAIN");
+    const char *mn = lua_tostring(lua_rt.L, -1);
+    EXPECT_NE_MSG(mn ? strstr(mn, "true|") : NULL, NULL, mn ? mn : "(main did not resume)");
+    lua_pop(lua_rt.L, 2);
+    hl_lua_vtable.stop_async(&lua_rt.base);
+    cleanup_lua_caps();
+    be->free(loop);
+}
+#endif
 
 #ifdef HL_ENABLE_HTTP_CLIENT
 UTEST(lua_audit41, sync_smtp_send_has_a_floor)

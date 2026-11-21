@@ -8,6 +8,12 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- Lua `app.main` parked on a wait no longer leaves its coroutine active: a
+  middleware dispatched during the wait passed `ctx.stdin:read()`'s "app.main's
+  own code" gate and could block the loop (audit 50).
+
 ### Tests
 
 - Audit 50 coverage: Lua `ctx.stdin:read_secret` scrubs its buffer when the line's string
