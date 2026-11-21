@@ -14,6 +14,9 @@ release-artifact layout).
 - Lua `app.main` parked on a wait no longer leaves its coroutine active: a
   middleware dispatched during the wait passed `ctx.stdin:read()`'s "app.main's
   own code" gate and could block the loop (audit 50).
+- `read_secret` / `readSecret` on a terminal no longer drops a caught signal (SIGHUP, SIGQUIT, ...)
+  that arrived after its last check, or with a failed `tcgetattr` after a hangup: it is
+  raised once echo is back on (audit 51).
 
 ### Tests
 

@@ -245,17 +245,23 @@ int hl_stdin_read_secret(const char *prompt, char *buf, size_t cap, size_t *len,
         }
         struct termios old, quiet;
         if (TEST_HOOK(HL_STDIN_SECRET_HOOK_TCGETATTR) ||
-            tcgetattr(STDIN_FILENO, &old) != 0) { rc = HL_STDIN_SECRET_ERROR; break; }
-        quiet = old;
-        quiet.c_lflag &= ~(tcflag_t)ECHO;
-        quiet.c_lflag |= ECHONL;
-        g_saved = old;
-        if (tcsetattr(STDIN_FILENO, mode, &quiet) == 0) {
-            g_echo_off = 1;
-            rc = read_line_tty(buf, cap, &ln, stopped, ud);
-            restore_echo();
+            tcgetattr(STDIN_FILENO, &old) != 0) {
+            /* Echo was not turned off. A failure after a hangup (EIO) comes
+             * with the SIGHUP caught for it, replayed below rather than
+             * dropped when the handlers go (audit 51). */
+            rc = HL_STDIN_SECRET_ERROR;
         } else {
-            rc = HL_STDIN_SECRET_ERROR;   /* a background job: SIGTTOU caught */
+            quiet = old;
+            quiet.c_lflag &= ~(tcflag_t)ECHO;
+            quiet.c_lflag |= ECHONL;
+            g_saved = old;
+            if (tcsetattr(STDIN_FILENO, mode, &quiet) == 0) {
+                g_echo_off = 1;
+                rc = read_line_tty(buf, cap, &ln, stopped, ud);
+                restore_echo();
+            } else {
+                rc = HL_STDIN_SECRET_ERROR;   /* a background job: SIGTTOU caught */
+            }
         }
         if (!any_caught()) break;
         /* Echo is on: the signal takes its default action now. A read the
@@ -270,6 +276,11 @@ int hl_stdin_read_secret(const char *prompt, char *buf, size_t cap, size_t *len,
     }
     (void)TEST_HOOK(HL_STDIN_SECRET_HOOK_BEFORE_UNHOOK);
     unhook_signals();
+    /* A signal caught after the last check, before the handlers went, is
+     * raised now at its default action (echo is on; the handlers are gone,
+     * so nothing records it again). A stop here pauses and resumes the
+     * process; the read keeps its result (audit 51). */
+    if (any_caught()) (void)replay_caught();
     *len = ln.n;
     /* ECHONL moved the cursor for an answered line; a stop or a Ctrl-D did
      * not, so the next output would join the prompt's line. */
