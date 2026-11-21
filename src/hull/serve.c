@@ -2065,7 +2065,15 @@ static int hl_serve_wire_caps(HlServerState *s)
 
     /* Extract manifest and configure capabilities */
     memset(&s->manifest, 0, sizeof(s->manifest));
-    if (rt->vt->extract_manifest(rt, &s->manifest) == 0) {
+    int xrc = rt->vt->extract_manifest(rt, &s->manifest);
+    if (xrc == -2) {
+        /* The extraction failed part-way (logged): the app declared a
+         * manifest this process could not read, so it does not start under
+         * the no-manifest floor instead (audit 51). */
+        log_error("[hull:c] cannot read the app's manifest; refusing to start");
+        return -1;
+    }
+    if (xrc == 0) {
         s->manifest_extracted = 1;
         log_debug("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d modules=%d",
                  s->manifest.fs_read_count, s->manifest.fs_write_count,

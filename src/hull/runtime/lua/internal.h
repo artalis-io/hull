@@ -265,9 +265,16 @@ lua_State *hl_lua_entry_prepare(HlLua *lua, const char *table, int handler_id,
  * returned, always terminated). A string or number as is; anything else
  * through a protected tostring on the main state, so an error object with
  * __tostring reads as its message. lua_tostring returns NULL for those, which
- * printed "(unknown)" or reached a "%s" as NULL. Defined in runtime.c. */
+ * printed "(unknown)" or reached a "%s" as NULL. Never lua_tostring of a
+ * number: that converts it in place, an allocation that can raise outside a
+ * protected call (audit 51). `lua` may be NULL (a worker VM): a value that is
+ * neither then reads "(<type> error value)". Defined in runtime.c. */
 const char *hl_lua_error_text(HlLua *lua, lua_State *from, int idx,
                               char *buf, size_t size);
+
+/* The number at `idx` as Lua's tostring writes it, into `buf`, without
+ * touching the stack. Defined in runtime.c. */
+void hl_lua_number_text(lua_State *L, int idx, char *buf, size_t size);
 
 /* hull.async(fn): spawn a detached coroutine on the event loop (async.c).
  * Shared by the `hull` global and hull.tui's `tui.async` alias. */

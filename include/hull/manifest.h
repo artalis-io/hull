@@ -362,6 +362,15 @@ typedef struct HlManifest {
 int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc);
 
 /*
+ * hl_manifest_extract_lua under lua_pcall, for a caller with no protected
+ * frame of its own: a raise part-way (out of memory) frees what the
+ * extraction had copied, leaves `out` zeroed, logs the error and returns -2.
+ * Otherwise as hl_manifest_extract_lua (0, or -1 when none was declared).
+ */
+int hl_manifest_extract_lua_protected(lua_State *L, HlManifest *out,
+                                      HlAllocator *alloc);
+
+/*
  * Free all owned strings in the manifest.
  * Safe to call on a zeroed or partially-populated manifest.
  */
