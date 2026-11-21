@@ -15,6 +15,7 @@
 #include "quickjs.h"
 #include "hull/entry.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -254,6 +255,24 @@ static char *take_exception_message(JSContext *ctx)
     return out;
 }
 
+/* Replace *msg with a readable verdict for a host limit (the limit's exception carries no
+ * readable text). Keeps *msg when the new text cannot be made. */
+__attribute__((format(printf, 2, 3)))
+static void limit_message(char **msg, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char *m = NULL;
+    if (k <= 0 || (m = (char *)malloc((size_t)k + 1)) == NULL) return;
+    va_start(ap, fmt);
+    vsnprintf(m, (size_t)k + 1, fmt, ap);
+    va_end(ap);
+    free(*msg);
+    *msg = m;
+}
+
 /* Consume the pending QuickJS exception and fail the invocation with the correctly
  * classified code. Used at EVERY phase (options parse, argument construction, module-job
  * draining, JS_Call, JS_JSONStringify, JS_ToCStringLen) so a resource breach is reported
@@ -270,22 +289,27 @@ static int fail_from_exception(HlJsSession *s, JSContext *ctx,
 {
     char *msg = take_exception_message(ctx);   /* reads + clears the pending exception */
     const char *code;
-    /* The stack guard's exception carries no readable text (it surfaced as "[unsupported
-     * type]"), so the stack verdict says what happened (audit 50). */
+    /* A host limit's exception carries no readable text (it surfaced as "[unsupported
+     * type]"), so each limit's verdict says which limit was reached (stack: audit 50; heap,
+     * instructions: audit 51). */
     if (s->stack_hit) {
-        char *m = NULL;
-        size_t kib = s->stack_limit / 1024;
-        int k = snprintf(NULL, 0, "the source nests too deeply for the JavaScript frontend (its %zu KiB stack limit was reached): reduce the nesting or split the expression", kib);
-        if (k > 0 && (m = (char *)malloc((size_t)k + 1)) != NULL) {
-            snprintf(m, (size_t)k + 1, "the source nests too deeply for the JavaScript frontend (its %zu KiB stack limit was reached): reduce the nesting or split the expression", kib);
-            free(msg);
-            msg = m;
-        }
+        code = "js.limit.stack";
+        limit_message(&msg, "the source nests too deeply for the JavaScript frontend (its %zu KiB stack limit was reached): reduce the nesting or split the expression",
+                      s->stack_limit / 1024);
+    } else if (s->instr_limit > 0 && s->instr_count > s->instr_limit) {
+        code = "js.limit.instructions";
+        limit_message(&msg, "the JavaScript frontend used up its work budget on this source (its instruction limit of %zu was reached): split the file or simplify it",
+                      (size_t)s->instr_limit);
+    } else if (s->oom_hit) {
+        code = "js.limit.heap";
+        if (s->heap_limit)
+            limit_message(&msg, "the JavaScript frontend ran out of memory on this source (its %zu KiB heap limit was reached): split the file or simplify it",
+                          s->heap_limit / 1024);
+        else
+            limit_message(&msg, "%s", "the JavaScript frontend ran out of memory on this source (an allocation failed): split the file or simplify it");
+    } else {
+        code = fallback;
     }
-    if (s->stack_hit)                                              code = "js.limit.stack";
-    else if (s->instr_limit > 0 && s->instr_count > s->instr_limit) code = "js.limit.instructions";
-    else if (s->oom_hit)                                           code = "js.limit.heap";
-    else                                                           code = fallback;
     int rc = fail_indeterminate(out_json, out_len, code, msg);
     free(msg);
     return rc;

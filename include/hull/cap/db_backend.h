@@ -237,7 +237,11 @@ typedef struct HlDbBackend {
      * the connection must not be closed under it: SQLite while a statement
      * is stepping (a UDF's callback is app code inside that step). The
      * caller-owned close (db.open's conn.close()) refuses then. No I/O.
-     * NULL = never (treated as 0). */
+     * NULL = never (treated as 0). The other backends (Postgres, MySQL,
+     * DuckDB) leave it NULL: no app code runs while one of their statements
+     * does (no UDFs; Lua row loops are guarded by g_db_row_loops; JS row
+     * conversion defines own properties only). A backend that calls app
+     * code during a statement implements it. */
     int    (*in_use)(HlDbHandle *h);
 } HlDbBackend;
 

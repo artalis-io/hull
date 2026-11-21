@@ -2321,3 +2321,7 @@ e2e-check-types: $(BUILDDIR)/hull
 # generation.c) and the loaders' overlay it installs (vfs.c).
 $(BUILDDIR)/test_generation: $(TESTDIR)/hull/test_generation.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS) $(LDFLAGS)
+
+# e2e_plugins' terminal case (plugins_audit51.generation_tty_refused) runs
+# under the PTY driver where it is built; E2E_TUI_DEPS is defined above.
+e2e-plugins: $(E2E_TUI_DEPS)

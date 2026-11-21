@@ -824,4 +824,18 @@ UTEST(js_typescript_audit50, global_newline_declaration)
     hl_js_session_destroy(s);
 }
 
+/* `intrinsic` is a TypeScript keyword (the `type T = intrinsic` marker) that the audit 50 list
+ * left out, so `global` and then `intrinsic...` on the next line was refused, though tsc reads an
+ * expression statement there as it does for every other keyword. */
+UTEST(js_typescript_audit51, global_intrinsic_expression)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    EXPECT_TRUE(erases_clean_to(s, "global\nintrinsic;\n", "global\nintrinsic;\n"));
+    EXPECT_TRUE(erases_clean_to(s, "global\nintrinsic = 1;\n", "global\nintrinsic = 1;\n"));
+    /* Any other name still refuses. */
+    EXPECT_TRUE(refused_with(s, "global\nintrinsics;\n", "TypeScript global declarations are not supported"));
+    hl_js_session_destroy(s);
+}
+
 UTEST_MAIN()
