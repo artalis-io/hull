@@ -8,6 +8,10 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- Lua out-of-memory paths (audit 50 residual): the manifest extractor counts each copied string as it stores it, so a raise part-way through an array no longer leaks the copies (and a half-copied named database is freed); `db.udf.register` keeps its functions before allocating its context and gives the first back when the second cannot be kept; a UDF raising a number no longer converts it outside a protected call.
+
 ## [0.23.1] - 2026-11-21
 
 Audit round 50's fixes, mostly in the TypeScript tooling 0.23.0 added. The High: the type check

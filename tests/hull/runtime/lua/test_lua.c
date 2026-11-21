@@ -18977,4 +18977,195 @@ UTEST(lua_test_harness, empty_body_responses_are_not_freed)
 }
 #endif
 
+/* ── Out-of-memory paths (audit 50) ───────────────────────────────────
+ * A wrapper over the state's allocator that refuses every growing
+ * allocation from the Nth one after it is armed (a50_fail_at) - or from the
+ * first (N = -1) - so each allocation point of a call can be made to fail
+ * in turn. */
+static lua_Alloc a50_orig_alloc;
+static void     *a50_orig_ud;
+static int       a50_countdown;   /* 0 = off, -1 = refuse every growth */
+
+static void *a50_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
+{
+    size_t eff = ptr ? osize : 0;
+    if (nsize > eff && a50_countdown != 0) {
+        if (a50_countdown < 0) return NULL;
+        /* Sticky: Lua retries a refused allocation after an emergency
+         * collection, so refusing only one would never surface. */
+        if (--a50_countdown == 0) { a50_countdown = -1; return NULL; }
+    }
+    return a50_orig_alloc(ud, ptr, osize, nsize);
+}
+
+static void a50_install(lua_State *L)
+{
+    a50_orig_alloc = lua_getallocf(L, &a50_orig_ud);
+    a50_countdown = 0;
+    lua_setallocf(L, a50_alloc, a50_orig_ud);
+}
+
+static void a50_uninstall(lua_State *L)
+{
+    a50_countdown = 0;
+    lua_setallocf(L, a50_orig_alloc, a50_orig_ud);
+}
+
+static int a50_extract_k(lua_State *L)
+{
+    HlManifest *m = lua_touserdata(L, 1);
+    HlAllocator *a = lua_touserdata(L, 2);
+    a50_countdown = -1;
+    (void)hl_manifest_extract_lua(L, m, a);
+    a50_countdown = 0;
+    return 0;
+}
+
+/* read_string_array returned its count only at the end, so a raise part-way
+ * through an array (lua_tolstring of a number element runs out of memory)
+ * left the strings it had copied in no count: the caller's hl_manifest_free
+ * - pl_preset_check's, after its lua_pcall - freed nothing of them. */
+UTEST(manifest_lua_audit50, raise_midway_through_an_array_frees_the_copies)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    /* The warm-up manifest interns the field names and grows the call info
+     * the protected extraction below uses, so with every growth refused the
+     * first allocation that fails is the number's conversion. */
+    ASSERT_EQ(luaL_dostring(L,
+        "return { fs = { read = { 'aaa', 'bbb', 'ccc' } } }, "
+        "       { fs = { read = { 'aaa', 'bbb', 98765.4321 } } }"), LUA_OK);
+    lua_pushvalue(L, -2);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    HlAllocator a;
+    hl_alloc_init(&a, 0);
+    HlManifest m;
+    memset(&m, 0, sizeof m);
+    ASSERT_EQ(hl_manifest_extract_lua(L, &m, &a), 0);
+    EXPECT_EQ(m.fs_read_count, 3);
+    hl_manifest_free(&m);
+    EXPECT_EQ((size_t)a.used, (size_t)0);
+
+    lua_pushvalue(L, -1);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    hl_alloc_init(&a, 0);
+    memset(&m, 0, sizeof m);
+    a50_install(L);
+    lua_pushcfunction(L, a50_extract_k);
+    lua_pushlightuserdata(L, &m);
+    lua_pushlightuserdata(L, &a);
+    int st = lua_pcall(L, 2, 0, 0);
+    a50_uninstall(L);
+    EXPECT_EQ(st, LUA_ERRMEM);
+    /* Both strings were copied before the raise... */
+    EXPECT_GE((size_t)a.peak, (size_t)8);
+    /* ...and the manifest says so: the caller's free reaches them. */
+    EXPECT_EQ(m.fs_read_count, 2);
+    if (m.alloc) hl_manifest_free(&m);
+    EXPECT_EQ((size_t)a.used, (size_t)0);
+    lua_settop(L, 0);
+    lua_pushnil(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    cleanup_lua();
+}
+
+#if defined(HL_ENABLE_DB) && defined(HL_ENABLE_SQLITE)
+/* __a50_fail_at(n): refuse the nth growing allocation from now (0 = off). */
+static int a50_fail_at(lua_State *L)
+{
+    a50_countdown = (int)luaL_checkinteger(L, 1);
+    return 0;
+}
+
+/* An aggregate on a db.open() connection keeps step, then finalize, in the
+ * connection's box. Keeping finalize can run out of memory (the holder table
+ * grows); the raise left step held, a function kept alive by nothing but a
+ * registration that never happened - until the connection is closed. Every
+ * allocation point of the call is made to fail in turn; after each failure
+ * step must be collectable. */
+UTEST(lua_db_udf_audit50, failed_aggregate_register_releases_step)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    lua_State *L = lua_rt.L;
+    lua_pushcfunction(L, a50_fail_at);
+    lua_setglobal(L, "__a50_fail_at");
+    a50_install(L);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "local failed, succeeded, leaked = 0, 0, 0 "
+        "for n = 1, 40 do "
+        "  local c = dbm.open(':memory:') "
+        "  local weak = setmetatable({}, { __mode = 'v' }) "
+        "  local name = 'hull_agg' .. n "
+        "  local ok = (function() "
+        "    local agg = { step = function(s, v) end, finalize = function(s) end } "
+        "    weak[1] = agg.step "
+        "    __a50_fail_at(n) "
+        "    local r = pcall(c.udf.register, name, agg) "
+        "    __a50_fail_at(0) "
+        "    return r "
+        "  end)() "
+        "  if ok then succeeded = succeeded + 1 else "
+        "    failed = failed + 1 "
+        "    collectgarbage() collectgarbage() "
+        "    if weak[1] ~= nil then leaked = leaked + 1 end "
+        "  end "
+        "  c.close() "
+        "end "
+        "assert(failed > 0 and succeeded > 0, 'failed ' .. failed .. ' ok ' .. succeeded) "
+        "assert(leaked == 0, leaked .. ' failed registrations kept step') "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    a50_uninstall(L);
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+}
+
+/* A UDF that raises a number: its message was read with lua_tostring, which
+ * converts the number in place - an allocation, outside any protected call.
+ * Out of memory there, the raise unwound through sqlite3_step, and the
+ * connection was left marked as stepping: every later statement on it was
+ * refused as reentrant. */
+UTEST(lua_db_udf_audit50, number_error_out_of_memory_stays_inside_the_udf)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifest m;
+    db_open_udf_manifest(&m);
+    lua_State *L = lua_rt.L;
+    lua_pushcfunction(L, a50_fail_at);
+    lua_setglobal(L, "__a50_fail_at");
+    a50_install(L);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "local dbm = require('hull.db') "
+        "local c = dbm.open(':memory:') "
+        "local k = 0 "
+        /* a fresh number each call, so its string is never interned yet */
+        "c.udf.register('hull_num_err', function() k = k + 1 error(k + 0.5) end) "
+        "local ok, e = pcall(c.query, 'SELECT hull_num_err() AS v') "
+        "assert(not ok and tostring(e):find('1.5', 1, true), tostring(e)) "
+        "for n = 1, 40 do "
+        "  __a50_fail_at(n) "
+        "  pcall(c.query, 'SELECT hull_num_err() AS v') "
+        "  __a50_fail_at(0) "
+        "  local ok2, e2 = pcall(c.query, 'SELECT 1 AS v') "
+        "  assert(ok2, 'after failing allocation ' .. n .. ': ' .. tostring(e2)) "
+        "end "
+        "c.close() "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    a50_uninstall(L);
+    EXPECT_EQ(hl_db_dynamic_open_count(), 0);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+}
+#endif /* HL_ENABLE_DB && HL_ENABLE_SQLITE */
+
 UTEST_MAIN();

@@ -26,6 +26,7 @@
 #endif
 
 #include <sqlite3.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -213,7 +214,20 @@ static void lua_udf_run(lua_State *L, LuaUdfCall *c, const char *what)
     lua_pushcfunction(L, lua_udf_call_k);
     lua_pushlightuserdata(L, c);
     if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-        const char *err = lua_tostring(L, -1);
+        /* Not lua_tostring: a number error object (error(42)) would be
+         * converted in place, an allocation that can raise LUA_ERRMEM here,
+         * outside any protected call, across SQLite's frames (audit 50). */
+        char num[64];
+        const char *err = NULL;
+        if (lua_type(L, -1) == LUA_TSTRING) {
+            err = lua_tostring(L, -1);
+        } else if (lua_isinteger(L, -1)) {
+            snprintf(num, sizeof num, "%lld", (long long)lua_tointeger(L, -1));
+            err = num;
+        } else if (lua_type(L, -1) == LUA_TNUMBER) {
+            snprintf(num, sizeof num, "%.14g", (double)lua_tonumber(L, -1));
+            err = num;
+        }
         sqlite3_result_error(c->ctx, err ? err : what, -1);
         lua_pop(L, 1);
     }
@@ -300,6 +314,60 @@ static void lua_agg_udf_destroy(void *data)
         }
     }
     free(udf);
+}
+
+/* Keeping a UDF's function: in the owner box for a db.open() connection
+ * (@p box non-NULL; the box is upvalue 1), else as a registry reference.
+ * Either can raise (LUA_ERRMEM growing the table), so each is taken under
+ * lua_pcall and reported by status: a raise straight out of
+ * lua_db_udf_register leaked what it held already - the C context, and for
+ * an aggregate the first function's reference, a GC root pinning it until
+ * the process ends (audit 50). */
+typedef struct {
+    void        *box;
+    lua_Integer  key;
+} UdfHold;
+
+/* (arg 1: UdfHold *, arg 2: the owner box or nil, arg 3: the function) */
+static int udf_hold_k(lua_State *L)
+{
+    UdfHold *h = (UdfHold *)lua_touserdata(L, 1);
+    if (h->box) {
+        h->key = hl_lua_db_udf_hold(L, 2, 3);
+    } else {
+        lua_pushvalue(L, 3);
+        h->key = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
+    return 0;
+}
+
+/* Release what udf_hold took. Allocates nothing. */
+static void udf_unhold(lua_State *L, void *box, lua_Integer key)
+{
+    if (box)
+        hl_lua_db_udf_release(L, box, key);
+    else
+        luaL_unref(L, LUA_REGISTRYINDEX, (int)key);
+}
+
+/* Keep the function at @p fn_idx; LUA_OK and *key, or the error status with
+ * the error object on the stack (nothing held). */
+static int udf_hold(lua_State *L, void *box, int fn_idx, lua_Integer *key)
+{
+    fn_idx = lua_absindex(L, fn_idx);
+    if (!lua_checkstack(L, 4)) {
+        lua_pushliteral(L, "db.udf.register: out of memory");
+        return LUA_ERRMEM;
+    }
+    UdfHold h = { box, 0 };
+    lua_pushcfunction(L, udf_hold_k);
+    lua_pushlightuserdata(L, &h);
+    if (box) lua_pushvalue(L, lua_upvalueindex(1));
+    else     lua_pushnil(L);
+    lua_pushvalue(L, fn_idx);
+    int st = lua_pcall(L, 3, 0, 0);
+    if (st == LUA_OK) *key = h.key;
+    return st;
 }
 
 /* Parse UDF options from Lua table at stack index `opts_idx`.
@@ -431,13 +499,14 @@ static int lua_db_udf_register(lua_State *L)
         lua_parse_udf_opts(L, 3, &deterministic, &nargs, &aggregate,
                            &gas, &heap, &stack_sz);
 
-        /* A db.open() connection keeps the function itself (raises on
-         * OOM, so before anything C-side is allocated). */
-        lua_Integer key = box ? hl_lua_db_udf_hold(L, lua_upvalueindex(1), 2)
-                              : 0;
+        /* The function is kept first, before anything C-side is allocated
+         * (udf_hold above). */
+        lua_Integer key = 0;
+        if (udf_hold(L, box, 2, &key) != LUA_OK)
+            return lua_error(L);
         LuaScalarUdfCtx *udf_ctx = calloc(1, sizeof(*udf_ctx));
         if (!udf_ctx) {
-            if (box) hl_lua_db_udf_release(L, box, key);
+            udf_unhold(L, box, key);
             return luaL_error(L, "db.udf.register: out of memory");
         }
 
@@ -447,12 +516,7 @@ static int lua_db_udf_register(lua_State *L)
         udf_ctx->L = lua->L;
         udf_ctx->alive = &lua->udf_runtime_alive;
         udf_ctx->box = box;
-        if (box) {
-            udf_ctx->func_ref = (int)key;
-        } else {
-            lua_pushvalue(L, 2);
-            udf_ctx->func_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        }
+        udf_ctx->func_ref = (int)key;
 
         int encoding = SQLITE_UTF8;
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
@@ -493,19 +557,20 @@ static int lua_db_udf_register(lua_State *L)
         lua_parse_udf_opts(L, 3, &deterministic, &nargs, &aggregate,
                            &gas, &heap, &stack_sz);
 
-        /* As the scalar case: a db.open() connection keeps both. */
+        /* As the scalar case, both functions kept first; a failure keeping
+         * finalize gives step back. */
         lua_Integer skey = 0, fkey = 0;
-        if (box) {
-            skey = hl_lua_db_udf_hold(L, lua_upvalueindex(1), -2);
-            fkey = hl_lua_db_udf_hold(L, lua_upvalueindex(1), -1);
+        if (udf_hold(L, box, -2, &skey) != LUA_OK)
+            return lua_error(L);
+        if (udf_hold(L, box, -1, &fkey) != LUA_OK) {   /* finalize */
+            udf_unhold(L, box, skey);
+            return lua_error(L);
         }
+        lua_pop(L, 2);   /* step, finalize */
         LuaAggUdfCtx *udf_ctx = calloc(1, sizeof(*udf_ctx));
         if (!udf_ctx) {
-            if (box) {
-                hl_lua_db_udf_release(L, box, skey);
-                hl_lua_db_udf_release(L, box, fkey);
-            }
-            lua_pop(L, 2);
+            udf_unhold(L, box, skey);
+            udf_unhold(L, box, fkey);
             return luaL_error(L, "db.udf.register: out of memory");
         }
 
@@ -515,15 +580,8 @@ static int lua_db_udf_register(lua_State *L)
         udf_ctx->L = lua->L;
         udf_ctx->alive = &lua->udf_runtime_alive;
         udf_ctx->box = box;
-        if (box) {
-            udf_ctx->step_ref = (int)skey;
-            udf_ctx->finalize_ref = (int)fkey;
-            lua_pop(L, 2);
-        } else {
-            /* finalize is on top of stack, step below it */
-            udf_ctx->finalize_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-            udf_ctx->step_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        }
+        udf_ctx->step_ref = (int)skey;
+        udf_ctx->finalize_ref = (int)fkey;
 
         int encoding = SQLITE_UTF8;
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
