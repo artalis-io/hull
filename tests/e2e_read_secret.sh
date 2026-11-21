@@ -10,7 +10,9 @@
 #     on (the app has an interrupt handler, so it goes on);
 #   - from a pipe, one line is returned and no prompt is written;
 #   - at end of input it returns nil / null;
-#   - test.run_main's / test.runMain's stdin gives it one line.
+#   - test.run_main's / test.runMain's stdin gives it one line;
+#   - a ws-client callback that runs while app.main waits cannot read stdin
+#     (audit 50, Lua: the callback passed the "app.main's own code" gate).
 # Before the fix there was no such method: the key showed as it was typed.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
@@ -50,6 +52,28 @@ app.main(function(ctx)
     if ctx.args[1] == "again" then
         ctx.stdout:write("then[" .. tostring(ctx.stdin:read()) .. "]\n")
     end
+    return 0
+end)
+EOF
+cat > "$TMPDIR/lua/wsc.lua" <<'EOF'
+local app = require("hull.app")
+local ws = require("hull.web.ws-client")
+app.manifest({ modules = { "hull/web/ws-client@1" }, hosts = { "127.0.0.1" } })
+app.main(function(ctx)
+    local done = false
+    local function try(name, fn)
+        local ok, e = pcall(fn)
+        ctx.stdout:write(name .. "[" .. (ok and "allowed" or
+            (tostring(e):match("only available") and "refused" or tostring(e))) .. "]\n")
+    end
+    ws.connect("ws://127.0.0.1:1/x", {
+        on_error = function()
+            try("read", function() return ctx.stdin:read() end)
+            try("secret", function() return ctx.stdin:read_secret() end)
+            done = true
+        end,
+    })
+    for _ = 1, 100 do if done then break end hull.sleep(20) end
     return 0
 end)
 EOF
@@ -133,6 +157,14 @@ run_runtime() {
 
 run_runtime lua app.lua
 run_runtime js app.js
+
+echo "-- lua_cli_audit50.ws_client_callback_stdin_refused --"
+out=$(cd "$TMPDIR/lua" && "$HULL" wsc.lua </dev/null 2>/dev/null)
+if [ "$out" = "$(printf 'read[refused]\nsecret[refused]')" ]; then
+    pass "lua: a ws-client callback while app.main waits cannot read stdin"
+else
+    fail "lua: ws-client callback stdin" "$out"
+fi
 
 echo ""
 echo "e2e_read_secret: $PASS passed, $FAIL failed"
