@@ -16844,6 +16844,7 @@ UTEST(js_compute_audit51, instance_closed_getter_no_pending_exception)
     hl_cap_wasm_destroy(&cache);
 }
 
+#ifdef HL_ENABLE_IMAGE   /* the image module is compiled out of some builds (MSan) */
 UTEST(js_image_audit51, double_close_no_pending_exception)
 {
     init_js_with_caps();
@@ -16872,6 +16873,7 @@ UTEST(js_image_audit51, double_close_no_pending_exception)
     EXPECT_FALSE(JS_HasException(js.ctx));
     cleanup_js_caps();
 }
+#endif /* HL_ENABLE_IMAGE */
 
 UTEST(js_audit37, small_blob_calls_have_a_floor)
 {
