@@ -533,8 +533,9 @@ UTEST(generation, a_typescript_entry_runs_the_pipeline)
 }
 
 /* An app directory holding a hull.build.json (into app, which must hold
- * HL_TEST_PATH_MAX bytes); -2 when this binary cannot find its own path,
- * so no pipeline child can be spawned (a cosmo APE: hl_chan_self_exe). */
+ * HL_TEST_PATH_MAX bytes); -2 on a build without the child channel (a
+ * cosmo APE or Windows: HL_CHAN_SUPPORTED is undefined), or when this
+ * binary cannot find its own path, so no pipeline child can be spawned. */
 static int pipeline_app(char *app)
 {
 #ifdef HL_CHAN_SUPPORTED

@@ -17141,6 +17141,107 @@ UTEST(lua_cli_audit50, read_secret_prompt_is_charged)
     cleanup_lua_caps();
 }
 
+/* ctx.stdin:read_secret pushed the line with lua_pushlstring straight from
+ * its buffer, and an out-of-memory raise there left the buffer (a Lua box)
+ * to the collector with the secret still in it. The string is now made under
+ * a pcall and the buffer scrubbed first (audit 50). An allocator wrapper fails
+ * the line's string and scans every block the VM frees for the secret. */
+#if __has_feature(memory_sanitizer)
+#  include <sanitizer/msan_interface.h>
+#endif
+#define A50_SECRET_TOKEN "hull-a50-secret-token!"
+#define A50_SECRET_LEN 40000
+static lua_Alloc a50_orig_alloc;
+static void *a50_orig_ud;
+static int a50_armed, a50_failed, a50_leaked;
+
+static int a50_scan(const char *s, size_t n)
+{
+    const size_t tl = sizeof(A50_SECRET_TOKEN) - 1;
+    for (size_t i = 0; n >= tl && i <= n - tl; i++)
+        if (s[i] == 'h' && memcmp(s + i, A50_SECRET_TOKEN, tl) == 0) return 1;
+    return 0;
+}
+
+/* A freed block may hold bytes Lua never wrote (a table's unused slots).
+ * Under MSan the scan reads a copy whose shadow is cleared, leaving the
+ * block's own shadow as it was. */
+static int a50_holds_token(const void *p, size_t n)
+{
+#if __has_feature(memory_sanitizer)
+    char *copy = malloc(n ? n : 1);
+    if (!copy) return 0;
+    memcpy(copy, p, n);
+    __msan_unpoison(copy, n);
+    int r = a50_scan(copy, n);
+    free(copy);
+    return r;
+#else
+    return a50_scan(p, n);
+#endif
+}
+
+static void *a50_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
+{
+    (void)ud;
+    if (ptr && nsize < osize && a50_holds_token(ptr, osize)) a50_leaked = 1;
+    if (!ptr && a50_armed && osize == LUA_TSTRING &&
+        nsize > A50_SECRET_LEN && nsize < A50_SECRET_LEN + 128) {
+        a50_failed++;
+        return NULL;
+    }
+    return a50_orig_alloc(a50_orig_ud, ptr, osize, nsize);
+}
+
+UTEST(lua_cli_audit50, read_secret_scrub_on_oom)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(luaL_dostring(lua_rt.L,
+        "app.main(function(ctx)\n"
+        "  local ok, e = pcall(function() return ctx.stdin:read_secret() end)\n"
+        "  A50_OK = ok\n"
+        "  A50_ERR = tostring(e)\n"
+        "  return 0\n"
+        "end)\n"), LUA_OK);
+    /* stdin is a file holding the secret line (not a terminal: the stdio path). */
+    FILE *tf = tmpfile();
+    ASSERT_TRUE(tf != NULL);
+    fputs(A50_SECRET_TOKEN, tf);
+    for (size_t i = sizeof(A50_SECRET_TOKEN) - 1; i < A50_SECRET_LEN; i++) fputc('q', tf);
+    fputc('\n', tf);
+    fflush(tf);
+    rewind(tf);
+    fflush(stdin);
+    int saved0 = dup(0);
+    dup2(fileno(tf), 0);
+    clearerr(stdin);
+    a50_orig_alloc = lua_getallocf(lua_rt.L, &a50_orig_ud);
+    lua_setallocf(lua_rt.L, a50_alloc, NULL);
+    a50_failed = a50_leaked = 0;
+    a50_armed = 1;
+    int exit_code = 99;
+    int rc = hl_lua_vtable.run_main(&lua_rt.base, NULL, 0, NULL, NULL, &exit_code);
+    a50_armed = 0;
+    lua_gc(lua_rt.L, LUA_GCCOLLECT, 0);   /* frees the box */
+    lua_gc(lua_rt.L, LUA_GCCOLLECT, 0);
+    lua_setallocf(lua_rt.L, a50_orig_alloc, a50_orig_ud);
+    dup2(saved0, 0);
+    close(saved0);
+    fclose(tf);
+    clearerr(stdin);
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(exit_code, 0);
+    EXPECT_GT(a50_failed, 0);   /* the line's string was refused */
+    lua_getglobal(lua_rt.L, "A50_OK");
+    EXPECT_TRUE(lua_isboolean(lua_rt.L, -1) && !lua_toboolean(lua_rt.L, -1));
+    lua_getglobal(lua_rt.L, "A50_ERR");
+    const char *e = lua_tostring(lua_rt.L, -1);
+    EXPECT_TRUE(e && strstr(e, "not enough memory"));
+    lua_pop(lua_rt.L, 2);
+    EXPECT_EQ_MSG(a50_leaked, 0, "the secret reached the collector unscrubbed");
+    cleanup_lua_caps();
+}
 #ifdef HL_ENABLE_HTTP_SERVER
 /* While app.main was parked on a wait, active_co still named its coroutine,
  * so a loop-level entry that does not set active_co itself - a middleware
