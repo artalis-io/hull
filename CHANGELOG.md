@@ -8,6 +8,13 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Tests
+
+- Audit 50 coverage: Lua `ctx.stdin:read_secret` scrubs its buffer when the line's string
+  cannot be allocated (`lua_cli_audit50.read_secret_scrub_on_oom`), and a raising
+  `P.preset_check` extraction frees the partial manifest and leaves the registry, the stack
+  and later extractions as they were (`buildctx_audit50.preset_check_raise_*`).
+
 ## [0.23.1] - 2026-11-21
 
 Audit round 50's fixes, mostly in the TypeScript tooling 0.23.0 added. The High: the type check
