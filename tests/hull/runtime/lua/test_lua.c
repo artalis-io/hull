@@ -17146,19 +17146,39 @@ UTEST(lua_cli_audit50, read_secret_prompt_is_charged)
  * to the collector with the secret still in it. The string is now made under
  * a pcall and the buffer scrubbed first (audit 50). An allocator wrapper fails
  * the line's string and scans every block the VM frees for the secret. */
+#if __has_feature(memory_sanitizer)
+#  include <sanitizer/msan_interface.h>
+#endif
 #define A50_SECRET_TOKEN "hull-a50-secret-token!"
 #define A50_SECRET_LEN 40000
 static lua_Alloc a50_orig_alloc;
 static void *a50_orig_ud;
 static int a50_armed, a50_failed, a50_leaked;
 
-static int a50_holds_token(const void *p, size_t n)
+static int a50_scan(const char *s, size_t n)
 {
     const size_t tl = sizeof(A50_SECRET_TOKEN) - 1;
-    const char *s = p;
     for (size_t i = 0; n >= tl && i <= n - tl; i++)
         if (s[i] == 'h' && memcmp(s + i, A50_SECRET_TOKEN, tl) == 0) return 1;
     return 0;
+}
+
+/* A freed block may hold bytes Lua never wrote (a table's unused slots).
+ * Under MSan the scan reads a copy whose shadow is cleared, leaving the
+ * block's own shadow as it was. */
+static int a50_holds_token(const void *p, size_t n)
+{
+#if __has_feature(memory_sanitizer)
+    char *copy = malloc(n ? n : 1);
+    if (!copy) return 0;
+    memcpy(copy, p, n);
+    __msan_unpoison(copy, n);
+    int r = a50_scan(copy, n);
+    free(copy);
+    return r;
+#else
+    return a50_scan(p, n);
+#endif
 }
 
 static void *a50_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
