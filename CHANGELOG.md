@@ -8,6 +8,16 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Changed
+
+- `hull check` passes an unsigned app. With no `package.sig` or `hull.sig` in the app
+  directory, its verify step is skipped and says so (`verify skipped: <app> is unsigned`).
+  Before, an app built without `--sign` could never pass `hull check`, whatever its types,
+  manifest and tests said. An option for verify (`--developer-key`, `--platform-key`,
+  `--gethull-key`, `--binary`, `--no-verify-platform`) still runs it, so a gate that requires
+  a signature keeps failing without one. Any `package.sig` / `hull.sig` entry, a dangling
+  link included, is verified as before.
+
 ### Fixed
 
 - Lua out-of-memory paths (audit 50 residual): the manifest extractor counts each copied string as it stores it, so a raise part-way through an array no longer leaks the copies (and a half-copied named database is freed); `db.udf.register` keeps its functions before allocating its context and gives the first back when the second cannot be kept; a UDF raising a number no longer converts it outside a protected call.

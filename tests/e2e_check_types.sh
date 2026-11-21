@@ -10,6 +10,8 @@
 #     status is hull check's;
 #   - no tsconfig.json names `hull types`; no compiler says how to get one;
 #   - without --types no compiler runs;
+#   - an unsigned app passes with verify skipped, and says so; a verify
+#     option, or any package.sig entry (a dangling link included), runs it;
 #   - with the real compiler (TSC=..., else tests/types/node_modules/.bin/tsc
 #     when `make check-types` installed it): examples/cli_modular_ts passes,
 #     and a type error in it fails.
@@ -94,6 +96,24 @@ PATH="$bin:/usr/bin:/bin" "$HULL" check "$app" > "$WORK/out.txt" 2>&1 || true
 [ ! -s "$LOG" ] && ! has "$WORK/out.txt" "checking types" && ok "without --types no compiler runs" ||
     { bad "ran without --types"; cat "$LOG"; }
 
+echo "== hull check: an unsigned app"
+fake "$bin" tsc
+run_check "$bin"
+[ "$rc" -eq 0 ] && has "$WORK/out.txt" "verify skipped: $app is unsigned" &&
+    has "$WORK/out.txt" "all checks passed" && ! has "$WORK/out.txt" "running verify" &&
+    ok "check_unsigned.skips_verify: an unsigned app passes, verify skipped and said so" ||
+    { bad "check_unsigned.skips_verify (rc $rc)"; cat "$WORK/out.txt"; }
+rc=0; PATH="$bin:/usr/bin:/bin" "$HULL" check --types --developer-key "$WORK/none.pub" "$app" > "$WORK/out.txt" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && has "$WORK/out.txt" "no package.sig or hull.sig" && ! has "$WORK/out.txt" "verify skipped" &&
+    ok "check_unsigned.option_verifies: a verify option still requires a signature" ||
+    { bad "check_unsigned.option_verifies (rc $rc)"; cat "$WORK/out.txt"; }
+ln -s "$WORK/nowhere.sig" "$app/package.sig"
+run_check "$bin"
+[ "$rc" -ne 0 ] && has "$WORK/out.txt" "running verify" && ! has "$WORK/out.txt" "verify skipped" &&
+    ok "check_unsigned.entry_verifies: a dangling package.sig is verified, not skipped" ||
+    { bad "check_unsigned.entry_verifies (rc $rc)"; cat "$WORK/out.txt"; }
+rm -f "$app/package.sig"
+
 echo "== hull check --types: the real compiler"
 TSC=${TSC:-$ROOT/tests/types/node_modules/.bin/tsc}
 if [ ! -x "$TSC" ] && [ "${HULL_REQUIRE_TSC:-0}" = "1" ]; then
@@ -106,8 +126,8 @@ else
     ln -s "$TSC" "$real/tsc"
     tdir=$(dirname "$TSC")
     rc=0; PATH="$real:$tdir:$PATH" "$HULL" check --types "$app" > "$WORK/out.txt" 2>&1 || rc=$?
-    has "$WORK/out.txt" "type-checking with" && has "$WORK/out.txt" "validating manifest" &&
-        ok "examples/cli_modular_ts type-checks" || { bad "real compiler"; cat "$WORK/out.txt"; }
+    [ "$rc" -eq 0 ] && has "$WORK/out.txt" "type-checking with" && has "$WORK/out.txt" "all checks passed" &&
+        ok "examples/cli_modular_ts passes hull check --types" || { bad "real compiler (rc $rc)"; cat "$WORK/out.txt"; }
     printf 'export const bad: number = "s";\n' > "$app/lib/bad.ts"
     rc=0; PATH="$real:$tdir:$PATH" "$HULL" check --types "$app" > "$WORK/out.txt" 2>&1 || rc=$?
     [ "$rc" -ne 0 ] && has "$WORK/out.txt" "TS2322" && has "$WORK/out.txt" "type check failed" &&

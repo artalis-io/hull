@@ -214,7 +214,8 @@ Other commands you'll lean on heavily during Phase 3:
   every change.
 - `hull check` - validate the manifest before tests fire; `hull check
   --types` type-checks a TypeScript (or typed JavaScript) app first,
-  with the compiler the project installed.
+  with the compiler the project installed. An unsigned app's verify
+  step is skipped; pass `--developer-key` to require a signature.
 - `hull migrate [status|new <name>]` - apply / inspect / create
   migrations.
 - `hull build` - ship a standalone binary with everything embedded.
