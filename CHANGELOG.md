@@ -14,6 +14,10 @@ release-artifact layout).
 - Lua `app.main` parked on a wait no longer leaves its coroutine active: a
   middleware dispatched during the wait passed `ctx.stdin:read()`'s "app.main's
   own code" gate and could block the loop (audit 50).
+- Tooling (audit 51): `hull plugins generation` refuses a terminal stdout (the bundle carries
+  plugin output bytes raw); the JavaScript frontend's heap and instruction-limit verdicts say
+  which limit was reached instead of "[unsupported type]"; `global` followed by `intrinsic` on
+  the next line is no longer refused as a global declaration.
 
 ### Tests
 

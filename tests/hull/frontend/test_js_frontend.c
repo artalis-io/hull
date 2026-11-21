@@ -521,4 +521,43 @@ UTEST(js_frontend_audit50, flat_binary_chain_depth)
     hl_js_session_destroy(s);
 }
 
+/* ---- audit 51 ---- */
+
+/* The heap and instruction verdicts said "[unsupported type]" like the stack one did before
+ * audit 50: the exception those limits raise carries no readable text. Each limit's verdict now
+ * says which limit was reached. */
+UTEST(js_session_audit51, heap_limit_message_readable)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *src = repeat_src("x = t", "`a`", 200000, ";\n");
+    ASSERT_TRUE(src != NULL);
+    char *o = fe_analyze(s, src);
+    if (!has(o, "\"code\":\"js.limit.heap\"") || has(o, "[unsupported type]"))
+        fprintf(stderr, "[audit51] %.300s\n", o ? o : "(null)");
+    EXPECT_TRUE(has(o, "\"code\":\"js.limit.heap\""));
+    EXPECT_FALSE(has(o, "[unsupported type]"));
+    EXPECT_TRUE(has(o, "heap limit"));
+    free(o); free(src);
+    hl_js_session_destroy(s);
+}
+
+UTEST(js_session_audit51, instruction_limit_message_readable)
+{
+    HlJsSessionLimits lim = HL_JS_SESSION_LIMITS_DEFAULT;
+    lim.max_instructions = 2000;
+    HlJsSession *s = hl_js_session_create(&lim);
+    ASSERT_TRUE(s != NULL);
+    char *src = repeat_src("export const x = [", "1, ", 20000, "1];\n");
+    ASSERT_TRUE(src != NULL);
+    char *o = fe_analyze(s, src);
+    if (!has(o, "\"code\":\"js.limit.instructions\"") || has(o, "[unsupported type]"))
+        fprintf(stderr, "[audit51] %.300s\n", o ? o : "(null)");
+    EXPECT_TRUE(has(o, "\"code\":\"js.limit.instructions\""));
+    EXPECT_FALSE(has(o, "[unsupported type]"));
+    EXPECT_TRUE(has(o, "instruction limit"));
+    free(o); free(src);
+    hl_js_session_destroy(s);
+}
+
 UTEST_MAIN()

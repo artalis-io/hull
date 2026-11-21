@@ -254,4 +254,26 @@ else
     bad "plugins_audit49.lua_manifest_generation"; cat "$WORK/g-manifest.txt" "$WORK/g-modules.txt"
 fi
 
+echo "== plugins: generation refuses a terminal stdout (audit 51)"
+# plugins_audit51.generation_tty_refused: `hull plugins generation` wrote the
+# bundle - a plugin's output bytes, raw - to stdout, so on a terminal a cloned
+# tree's plugin put ESC / OSC 52 sequences on it. On a terminal it now
+# refuses; through a pipe (how hull dev and an app run take it) it writes.
+DRIVE=${DRIVE:-build/e2e_tui_drive}
+case "$DRIVE" in /*) ;; *) DRIVE="$PWD/$DRIVE" ;; esac
+d=$(gen_app tty '{ "static/x.txt", "\27]52;c;cHduZWQ=\7\27[2J" }')
+if [ -x "$DRIVE" ]; then
+    "$DRIVE" "refusing to write the generation bundle to a terminal" "%s100" -- \
+        "$HULL" plugins generation "$d" > "$WORK/g-tty.txt" 2>&1 && rc=0 || rc=$?
+    "$HULL" plugins generation "$d" > "$WORK/g-pipe.bin" 2>/dev/null || true
+    if [ "$rc" -eq 0 ] && ! grep -q "$(printf '\033\\]52')" "$WORK/g-tty.txt" &&
+       grep -q "$(printf '\033\\]52')" "$WORK/g-pipe.bin"; then
+        ok "plugins_audit51.generation_tty_refused"
+    else
+        bad "plugins_audit51.generation_tty_refused (rc=$rc)"; od -c "$WORK/g-tty.txt" | head -20
+    fi
+else
+    echo "  SKIP: plugins_audit51.generation_tty_refused (no $DRIVE)"
+fi
+
 [ "$fail" -eq 0 ] && echo "e2e_plugins: OK" || { echo "e2e_plugins: FAILED"; exit 1; }
