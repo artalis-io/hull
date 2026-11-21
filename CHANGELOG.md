@@ -8,6 +8,16 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-11-21
+
+Audit round 50's fixes, mostly in the TypeScript tooling 0.23.0 added. The High: the type check
+ran the compiler with only `--noEmit`, so a cloned repository's `tsconfig.json` could write
+files anywhere through `tsBuildInfoFile` / `generateTrace`. TypeScript erasure that would
+change what code means is now refused, `ctx.stdin:read_secret` puts echo back on when a signal
+arrives, and stdlib and tooling Lows are fixed. New: `ctx.stdin:read_secret` / `readSecret` (platform
+gap 4) and a coded `denied` refusal for a host `manifest.hosts` does not admit (gap 3). No
+upgrade notes.
+
 ### Security
 
 - The TypeScript type check no longer lets the app's `tsconfig.json` write files (audit 50, High,
