@@ -270,6 +270,18 @@ static int fail_from_exception(HlJsSession *s, JSContext *ctx,
 {
     char *msg = take_exception_message(ctx);   /* reads + clears the pending exception */
     const char *code;
+    /* The stack guard's exception carries no readable text (it surfaced as "[unsupported
+     * type]"), so the stack verdict says what happened (audit 50). */
+    if (s->stack_hit) {
+        char *m = NULL;
+        size_t kib = s->stack_limit / 1024;
+        int k = snprintf(NULL, 0, "the source nests too deeply for the JavaScript frontend (its %zu KiB stack limit was reached): reduce the nesting or split the expression", kib);
+        if (k > 0 && (m = (char *)malloc((size_t)k + 1)) != NULL) {
+            snprintf(m, (size_t)k + 1, "the source nests too deeply for the JavaScript frontend (its %zu KiB stack limit was reached): reduce the nesting or split the expression", kib);
+            free(msg);
+            msg = m;
+        }
+    }
     if (s->stack_hit)                                              code = "js.limit.stack";
     else if (s->instr_limit > 0 && s->instr_count > s->instr_limit) code = "js.limit.instructions";
     else if (s->oom_hit)                                           code = "js.limit.heap";

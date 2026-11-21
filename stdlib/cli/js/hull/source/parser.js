@@ -281,6 +281,7 @@ function parseInternal(bytes, opts, inject) {
     // name ON THE SAME LINE is a JS syntax error (two identifiers with no ASI between them), and
     // `enum` is reserved; with a line break between, JS reads two statements and so does this.
     function tsDeclarationStart() {
+        if (cur.type === "identifier" && cur.value === "global" && tsGlobalDeclarationAhead()) return "global declarations";
         if (!isIdTok(cur)) return null;
         const v = cur.value;
         if (v !== "interface" && v !== "type" && v !== "enum" && v !== "namespace" && v !== "module" && v !== "declare" && v !== "abstract") return null;
@@ -294,6 +295,24 @@ function parseInternal(bytes, opts, inject) {
         if (v === "type") return "type aliases";
         if (v === "enum") return "enums";
         return "namespaces";
+    }
+    // `global` at statement start (escaped or not) followed, on any line, by `{`, `export` or a
+    // name that is not a TypeScript keyword: tsc reads a global augmentation (5.x emits a
+    // namespace for it, 7.x drops the word), JavaScript an expression statement `global` and
+    // what follows. Refused (audit 50). An escaped name is a name to tsc.
+    const TS_KEYWORDS = new Set(["abstract", "accessor", "any", "as", "asserts", "assert", "async", "await", "bigint",
+        "boolean", "break", "case", "catch", "class", "const", "constructor", "continue", "debugger", "declare", "default",
+        "defer", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "from", "function", "get",
+        "global", "if", "implements", "import", "in", "infer", "instanceof", "interface", "is", "keyof", "let", "module",
+        "namespace", "never", "new", "null", "number", "object", "of", "out", "override", "package", "private",
+        "protected", "public", "readonly", "require", "return", "satisfies", "set", "static", "string", "super",
+        "switch", "symbol", "this", "throw", "true", "try", "type", "typeof", "undefined", "unique", "unknown",
+        "using", "var", "void", "while", "with", "yield"]);
+    function tsGlobalDeclarationAhead() {
+        const nx = tsPeek();
+        if (nx.type === "punctuator") return nx.value === "{";
+        if (nx.type !== "identifier") return false;
+        return nx.escaped || nx.value === "export" || !TS_KEYWORDS.has(nx.value);
     }
     // A class member / parameter modifier followed by more of the member on the same line.
     const TS_MODIFIERS = new Set(["public", "private", "protected", "readonly", "abstract", "override", "declare"]);
@@ -316,6 +335,7 @@ function parseInternal(bytes, opts, inject) {
         cur: function () { return cur; }, advance: advance, peek: function (k) { return peekTok(k, false); },
         isP: isP, isKw: isKw, nl: nl, splitGreater: splitGreaterTok,
         synErr: function (m, t) { synErr(m, t); }, guard: guard, unguard: unguard,
+        refuse: function (m, t) { const k = t || cur; diag("error", "ts.unsupported", m, k.start, k.stop); },
     }) : null;
     // TS mode: consume type syntax with `body` (starting at cur) and record it as one span.
     function tsSpan(body) {
@@ -353,8 +373,9 @@ function parseInternal(bytes, opts, inject) {
     }
     // Can the token after a type argument list follow one (TypeScript's
     // canFollowTypeArgumentsInExpression)? `(` and a template make a call or a tagged template;
-    // `<` `>` `+` `-` make a comparison; otherwise a line break, a binary operator or a token
-    // that cannot start an expression make an instantiation expression (`f<T>;`), and anything
+    // `<`, a `>`-led operator, `+` `-` make a comparison; otherwise a line break, a binary
+    // operator or a token that cannot start an expression make an instantiation expression
+    // (`f<T>;`), and anything
     // else a comparison (`a < b > c`). Erasing an instantiation's `<...>` leaves exactly what
     // TypeScript goes on to parse, so it adds no ASI shape. `.` / `?.` after one, and an
     // assignment, are TypeScript errors: read as a comparison, JS mode reports them.
@@ -362,11 +383,18 @@ function parseInternal(bytes, opts, inject) {
         "*", "/", "%", "**", "instanceof", "in", "as", "satisfies"]);
     function tsTypeArgumentsCanFollow() {
         const t = cur;
+        // TypeScript scans every `>` alone, so any `>`-led operator after the list is a `>`
+        // (`a < b > >> c`), and a `=`-led one right after the closing `>` is rescanned with it
+        // into one operator (`a<b>==c` is `a < b >= =c`): no list either way. The `>>`, `>>>`,
+        // `>=` ... a closing `>` was split from is that case too (`a < b >>> c`, `f<T>>>(1)`
+        // and `a<b>>=c` are comparisons; audit 50).
+        if (t.type === "punctuator" && (t.value.charCodeAt(0) === 0x3e ||
+            (t.value.charCodeAt(0) === 0x3d && t.start === prev.stop))) return false;
         if (t.type === "template") return t.mode === "noSubstitution" || t.mode === "head";
         if (t.type === "punctuator") {
             const v = t.value;
             if (v === "(") return true;
-            if (v === "<" || v === ">" || v === "+" || v === "-" || v === "." || v === "?." || v === "=" ||
+            if (v === "<" || v === "+" || v === "-" || v === "." || v === "?." || v === "=" ||
                 (v.length >= 2 && v.charCodeAt(v.length - 1) === 0x3d && !TS_BINARY.has(v))) return false;
         }
         if (t.nlBefore || t.type === "eof") return true;
@@ -678,11 +706,14 @@ function parseInternal(bytes, opts, inject) {
     }
     // `declare class` / `abstract class` / `enum` / `const enum` / `namespace` / `module` /
     // `global` after `declare` (cur at that word): the header is read, then the body - ambient
-    // declarations only, all of it erased - is skipped as one balanced `{ ... }` group (its
-    // tokens lexed with the operator slash goal: ambient code holds no regex). `declare module
-    // "m";` has no body. `code` (a refused `enum` / `namespace` / `module`, whose body is code):
-    // each token is lexed with the regex goal after a punctuator other than `)` `]` `}`, so a
-    // regex literal holding a brace does not unbalance the skip.
+    // declarations only, all of it erased - is skipped as one balanced `{ ... }` group.
+    // `declare module "m";` has no body. Each token is lexed with the regex goal after a
+    // punctuator other than `)` `]` `}`, so a regex literal holding a brace does not unbalance
+    // the skip. Ambient declarations hold no regex, and no `/` but an enum initializer's
+    // division: in an ambient body (`code` false) any other `/` or regex is refused, since
+    // where the skip guessed the slash goal wrong it would end the body early and run what
+    // TypeScript erases (audit 50). `code` (a refused `enum` /
+    // `namespace` / `module`, whose body is code) is already refused.
     function tsDeclareBlock(code) {
         const w = cur.value;
         if (w === "abstract" || w === "const") advance(false);
@@ -704,12 +735,25 @@ function parseInternal(bytes, opts, inject) {
             while (kw === "namespace" && isP(".") && isIdTok(tsPeek())) { advance(false); advance(false); }
         }
         if (!isP("{")) { synErr("expected '{'"); return; }
-        let d = 0;
+        // A `declare enum` member's initializer may divide (`C = 8 / 2`): a `/` right after an
+        // operand that the regex goal above read as one (a number, a name, `)` or `]`; an
+        // initializer holds no statement, so nothing else can follow them) is a division.
+        function enumDivision() {
+            if (kw !== "enum" || cur.type === "regex") return false;
+            const pt = prev;
+            return pt.type === "number" || (pt.type === "identifier" && !pt.escaped && !RESERVED.has(pt.value) && pt.value !== "await" && pt.value !== "yield") ||
+                   (pt.type === "punctuator" && (pt.value === ")" || pt.value === "]"));
+        }
+        let d = 0, slashSeen = false;
         for (;;) {
             if (atEof()) { synErr("expected '}'"); return; }
             if (isP("{")) d++;
             else if (isP("}")) { d--; if (d === 0) { advance(true); return; } }
-            advance(code === true && cur.type === "punctuator" && cur.value !== ")" && cur.value !== "]" && cur.value !== "}");
+            else if (code !== true && !slashSeen && (cur.type === "regex" || isP("/") || isP("/=")) && !enumDivision()) {
+                slashSeen = true;
+                diag("error", "ts.unsupported", "a '/' inside an ambient declaration body is not supported", cur.start, cur.stop);
+            }
+            advance(cur.type === "punctuator" && cur.value !== ")" && cur.value !== "]" && cur.value !== "}");
         }
     }
     // A TypeScript declaration this mode refuses, at its first word: the refusal, then the whole
@@ -879,6 +923,9 @@ function parseInternal(bytes, opts, inject) {
                     st = parseExpressionStatement();
                 }
             }
+        } else if (ts && cur.type === "identifier" && cur.value === "global" && tsGlobalDeclarationAhead()) {
+            tsRefuse("global declarations");        // `\u0067lobal` is the keyword to tsc too
+            st = parseExpressionStatement();
         } else {
             st = parseExpressionStatement();
         }
@@ -1501,8 +1548,44 @@ function parseInternal(bytes, opts, inject) {
         return test;
     }
 
+    // TS mode, after the type of `as` / `satisfies` (cur is the token after it): the assertion
+    // groups the expression before it, and erasing the type removes the grouping, so refuse
+    // what JavaScript would read differently once it is gone (audit 50). `leftOp` is the
+    // operator of the binary node the left side is (null: an operand), `paren` whether the
+    // left side ends in a `)` of its own.
+    function tsAfterAssertion(op, kwTok, left, leftOp, paren, asConst) {
+        const why = "the expression before '" + op + "' would be regrouped once its type is erased: parenthesize the expression before '" + op + "'";
+        if (asConst && (isP("|") || isP("&"))) {           // `as const | T`: TypeScript reads a union type
+            diag("error", "ts.unsupported", "a '" + cur.value + "' after 'as const' is not supported: TypeScript reads it as part of the type", cur.start, cur.stop);
+            return;
+        }
+        if (cur.type === "punctuator" && ASSIGN.has(cur.value)) {   // TypeScript rejects it; erased it assigns
+            diag("error", "ts.unsupported", "an assignment after the type of '" + op + "' is not supported: parenthesize the assertion", cur.start, cur.stop);
+            return;
+        }
+        const nx = (cur.type === "punctuator" || isIdTok(cur)) ? cur.value : null;
+        const np = nx !== null ? BINPREC.get(nx) : undefined;
+        if (np === undefined || ((nx === "in" || nx === "instanceof") && cur.type !== "identifier")) return;
+        let bad = false;
+        if (leftOp !== null) {
+            const lp = BINPREC.get(leftOp);
+            bad = np > lp || (nx === "**" && leftOp === "**") ||
+                  (nx === "??" && (leftOp === "||" || leftOp === "&&"));
+        } else if (nx === "**" && !paren && (left.type === "UnaryExpression" || left.type === "AwaitExpression")) {
+            bad = true;                                    // `-a as T ** 2`: `-a ** 2` is a SyntaxError
+        }
+        if (bad) diag("error", "ts.unsupported", why, kwTok.start, kwTok.stop);
+    }
+
+    function mixesCoalesce(op, n) {
+        if (!n || n.type !== "LogicalExpression") return false;
+        return op === "??" ? n.operator !== "??" : n.operator === "??";
+    }
+
     function parseBinary(minPrec) {
         let left = parseUnary();
+        let leftOp = null;                          // the operator of the node this loop built last
+        let chain = 0;                              // nodes built here, counted against maxDepth
         for (;;) {
             const op = (cur.type === "punctuator" || cur.type === "identifier") ? cur.value : null;
             const prec = op !== null ? BINPREC.get(op) : undefined;
@@ -1511,7 +1594,10 @@ function parseInternal(bytes, opts, inject) {
             if (ts && prec === undefined && isIdTok(cur) && (op === "as" || op === "satisfies") && !nl()) {
                 if (8 <= minPrec) break;
                 const asConst = op === "as";
+                const kwTok = cur;
+                const paren = lastJs !== null && lastJs.stop > left.stop;
                 tsSpan(function () { advance(false); types.parseType({ asConst: asConst }); });
+                tsAfterAssertion(op, kwTok, left, leftOp, paren, asConst && prev.type === "identifier" && prev.value === "const" && prev.start > kwTok.stop);
                 // The type ends the expression, so TypeScript ends the statement at a line break
                 // before `(` `[` `.` `?.` or a template; once erased, JavaScript would continue it
                 // (`x as T` / `[1].f()` reads `x[1].f()`; docs/typescript_design.md 3.4).
@@ -1522,12 +1608,25 @@ function parseInternal(bytes, opts, inject) {
             }
             if (prec === undefined || prec <= minPrec) break;
             if ((op === "in" || op === "instanceof") && cur.type !== "identifier") break;
+            // A left-deep chain (`y + y + ...`) is built here without recursion, but every AST
+            // walk after the parse recurses once per node: count it as nesting (audit 50).
+            if (!guard()) { unguard(); break; }
+            chain++;
+            const leftBare = lastJs === null || lastJs.stop <= left.stop;   // not in its own parentheses
             const node = mk(op === "&&" || op === "||" || op === "??" ? "LogicalExpression" : "BinaryExpression", left.start);
             node.operator = op; node.left = left; advance(true);
             const nextMin = (op === "**") ? prec - 1 : prec;   // ** is right-associative
             node.right = parseBinary(nextMin);
+            // `??` mixed with `||` / `&&` needs parentheses (ShortCircuitExpression). TypeScript
+            // reads `a ?? b as T || c` as `(a ?? b) || c`; erased, it must not parse (audit 50).
+            const rightBare = lastJs === null || lastJs.stop <= node.right.stop;
+            const mixed = (op === "??" || op === "||" || op === "&&") &&
+                ((leftBare && mixesCoalesce(op, left)) || (rightBare && mixesCoalesce(op, node.right)));
             left = fin(node);
+            if (mixed) synErr("'??' cannot be mixed with '||' or '&&' without parentheses", left);
+            leftOp = op;
         }
+        depth -= chain;
         return left;
     }
 
