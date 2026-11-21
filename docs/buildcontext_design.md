@@ -958,7 +958,7 @@ first caller is `hull plugins run` (§13.5); the planner (checkpoint 6) is the n
   other dependencies shares, so `put_result` replaces a stored result (a stale one); payloads stay
   content-addressed.
 - **Plugin directories are not the app's**: `hull build` leaves every file under a directory
-  `hull.build.json` names out of the binary (`hull.build.json` itself is embedded and signed), and
+  `hull.build.json` names out of the binary (`hull.build.json` itself is left out too: a built binary never runs the pipeline), and
   the selection leaves them out of discovery's declarations; project discovery and `hull test`
   skip them too (§13.6).
 - **The demonstration** (`tests/fixtures/plugin_demo`): an inventory plugin - it lists the `@demo`

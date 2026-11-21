@@ -1962,7 +1962,13 @@ of the awaited assertions; the regression is covered by
 
 **`hull build`** walks subdirectories. `routes/`, `models/`, `lib/`,
 etc. are all picked up by `tool.find_files(dir, "*.lua")` and embedded
-in the produced binary. No build-config change needed. **`hull deploy`**
+in the produced binary. No build-config change needed. Left out: the
+app root's `tests/` directory and the root tooling configs
+(`package.json`, `package-lock.json`, `npm-shrinkwrap.json`,
+`tsconfig*.json`, `jsconfig.json`, `hull.build.json`); the build prints
+what it left out and fails when a kept file requires / imports one
+(`excluded_group` in `build.lua`, scanned with `hull.import_scan`).
+**`hull deploy`**
 treats the modular app as one bundle; same Dockerfile / systemd /
 fly.toml output regardless of layout.
 

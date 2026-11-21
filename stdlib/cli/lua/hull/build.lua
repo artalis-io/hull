@@ -1959,7 +1959,7 @@ end
 -- *_dir path locals stay private; only the 11 fields main uses downstream return.
 -- The build plugin directories hull.build.json names are not part of the app
 -- (docs/buildcontext_design.md §9.2): their sources are left out of the
--- binary. hull.build.json itself is embedded and signed with the app.
+-- binary. hull.build.json itself is left out too (excluded_group).
 local function plugin_dir_prefixes(app_dir)
     local root = tool.realpath(app_dir)
     if not root then return {} end
@@ -2132,16 +2132,150 @@ local function without_shadowed(files, app_dir, generated)
     return out
 end
 
+-- What hull build leaves out of the binary (hsctl gap 11): the app root's
+-- tests/ directory (test files, fixtures, its tsconfig - `hull test` reads
+-- them from the source tree, a built binary never does), and the tooling
+-- configs at the app root - npm's and TypeScript's, and hull.build.json (the
+-- build pipeline runs from source only; a built binary runs its embedded
+-- files and never reads it). A file of one of these names deeper in the tree
+-- (data/package.json) is the app's and ships. Returns the group a name is
+-- counted under ("tests/", or the file name), or nil when it is embedded.
+local ROOT_TOOLING = {
+    ["package.json"] = true, ["package-lock.json"] = true,
+    ["npm-shrinkwrap.json"] = true, ["tsconfig.json"] = true,
+    ["jsconfig.json"] = true, ["hull.build.json"] = true,
+}
+local function excluded_group(rel)
+    if rel:sub(1, 6) == "tests/" then return "tests/" end
+    if not rel:find("/", 1, true) and
+       (ROOT_TOOLING[rel] or rel:match("^tsconfig%..+%.json$")) then
+        return rel
+    end
+    return nil
+end
+
+-- `files` (paths under app_dir) without the excluded ones, each recorded in
+-- `left_out` (app-relative name -> group).
+local function without_excluded(files, app_dir, left_out)
+    local prefix = app_dir .. "/"
+    local out = {}
+    for _, f in ipairs(files) do
+        local rel = f:sub(1, #prefix) == prefix and f:sub(#prefix + 1) or f
+        local group = excluded_group(rel)
+        if group then left_out[rel] = group else out[#out + 1] = f end
+    end
+    return out
+end
+
+-- The app-relative file a relative require / import names, the way the
+-- runtimes resolve it (mod_fs.c resolve_module_path, js/runtime.c
+-- hl_js_module_normalize): joined to the importing file's directory, `.`
+-- and `..` collapsed; a Lua name gets ".lua" unless it ends in .lua or
+-- .json, a JS one is taken as written. nil when it escapes the app root
+-- (the runtime refuses it).
+local function resolve_relative(from_rel, spec, is_lua)
+    local dir = from_rel:match("^(.*)/[^/]*$")
+    local path = (dir and dir .. "/" or "") .. spec
+    if is_lua and not (path:match("%.lua$") or path:match("%.json$")) then
+        path = path .. ".lua"
+    end
+    local parts = {}
+    for seg in path:gmatch("[^/]+") do
+        if seg == ".." then
+            if #parts == 0 then return nil end
+            parts[#parts] = nil
+        elseif seg ~= "." then
+            parts[#parts + 1] = seg
+        end
+    end
+    return table.concat(parts, "/")
+end
+
+-- A kept source that requires / imports a left-out file would build and
+-- then fail at run time ("module not found"), so the build fails instead,
+-- naming both. `sources`: { rel = app-relative name, text = bytes,
+-- is_lua = bool }.
+local function check_excluded_imports(sources)
+    local scan = require("hull.import_scan")
+    local bad = {}
+    for _, src in ipairs(sources) do
+        local _, rel = (src.is_lua and scan.scan_lua or scan.scan_js)(src.text)
+        for _, spec in ipairs(rel) do
+            local target = resolve_relative(src.rel, spec, src.is_lua)
+            if target and excluded_group(target) then
+                bad[#bad + 1] = esc(src.rel) .. " " .. (src.is_lua and "requires" or "imports")
+                    .. " " .. esc(spec) .. " (" .. esc(target) .. ")"
+            end
+        end
+    end
+    if #bad == 0 then return end
+    tool.stderr("hull build: the app loads file(s) hull build leaves out of the binary "
+        .. "(tests/ and the app root's tooling configs are not embedded):\n")
+    for _, b in ipairs(bad) do tool.stderr("  " .. b .. "\n") end
+    tool.stderr("  move the code the app uses out of tests/ (e.g. into lib/), or read "
+        .. "the data some other way\n")
+    tool.exit(1)
+end
+
 local function discover(opts)
     local gen = pipeline_generation(opts.app_dir)
     local generated = gen and gen.entries or {}
     local plugin_dirs = plugin_dir_prefixes(opts.app_dir)
-    local lua_files = without_shadowed(without_plugin_dirs(find_lua_files(opts.app_dir), plugin_dirs),
-                                       opts.app_dir, generated)
-    local js_files = without_shadowed(without_plugin_dirs(find_js_files(opts.app_dir), plugin_dirs),
-                                      opts.app_dir, generated)
-    local json_files = without_shadowed(without_plugin_dirs(find_json_files(opts.app_dir), plugin_dirs),
-                                        opts.app_dir, generated)
+    local left_out = {}
+    local function kept(files)
+        return without_excluded(without_shadowed(without_plugin_dirs(files, plugin_dirs),
+                                                 opts.app_dir, generated),
+                                opts.app_dir, left_out)
+    end
+    local lua_files = kept(find_lua_files(opts.app_dir))
+    local js_files = kept(find_js_files(opts.app_dir))
+    local json_files = kept(find_json_files(opts.app_dir))
+    do
+        local gen_kept = {}
+        for _, e in ipairs(generated) do
+            local group = excluded_group(e.name)
+            if group then left_out[e.name] = group else gen_kept[#gen_kept + 1] = e end
+        end
+        generated = gen_kept
+    end
+    do
+        local n, n_tests, roots = 0, 0, {}
+        for _, group in pairs(left_out) do
+            n = n + 1
+            if group == "tests/" then n_tests = n_tests + 1 else roots[#roots + 1] = group end
+        end
+        if n > 0 then
+            table.sort(roots)
+            local parts = {}
+            if n_tests > 0 then parts[1] = "tests/ (" .. n_tests .. ")" end
+            for _, r in ipairs(roots) do parts[#parts + 1] = r end
+            print("hull build: excluded " .. n .. " tooling/test file(s): "
+                  .. esc(table.concat(parts, ", ")))
+        end
+    end
+    do
+        local sources = {}
+        local prefix = opts.app_dir .. "/"
+        local function add(files, is_lua)
+            for _, f in ipairs(files) do
+                local text = read_file(f)
+                if text then
+                    sources[#sources + 1] = {
+                        rel = f:sub(1, #prefix) == prefix and f:sub(#prefix + 1) or f,
+                        text = text, is_lua = is_lua }
+                end
+            end
+        end
+        add(lua_files, true)
+        add(js_files, false)
+        for _, e in ipairs(generated) do
+            local is_lua = e.name:match("%.lua$") ~= nil
+            if is_lua or e.name:match("%.[mc]?[jt]s$") then
+                sources[#sources + 1] = { rel = e.name, text = e.bytes, is_lua = is_lua }
+            end
+        end
+        check_excluded_imports(sources)
+    end
 
     if #lua_files == 0 and #js_files == 0 and #generated == 0 then
         tool.stderr("hull build: no .lua or .js files found in " .. opts.app_dir .. "\n")

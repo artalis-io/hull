@@ -288,6 +288,18 @@ UTEST(lua_source, compute_build_file_reads)
     EXPECT_GT(pass, 0LL);
 }
 
+/* hull.import_scan: the require / import scanners hull modules analyze and
+ * hull build share; hull build refuses an app that loads a left-out file
+ * through the relative specifiers they report (hsctl gap 11). */
+UTEST(lua_source, import_scan)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/cli/lua/hull/tests/test_import_scan.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
 /* hull verify reads a signed manifest as hl_release_io_find_checksum does:
  * exact lines, a duplicate name has no entry (audit 18). */
 UTEST(lua_source, release_manifest_reader)
