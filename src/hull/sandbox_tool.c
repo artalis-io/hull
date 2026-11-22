@@ -299,6 +299,27 @@ int hl_tool_sandbox_plan(HlToolSandboxPlan *plan,
     if (have_self_dir)
         plan_add(plan, self_dir, "rx", 1);
 
+#if defined(__COSMOPOLITAN__)
+    /* A Linux kernel cannot exec an APE, so cosmo's execve of hull itself (a
+     * build plugin, the pipeline child) runs it through the APE loader: the
+     * one this process was started by, which /proc/self/exe names. $TMPDIR's
+     * and /usr/bin/ape are under the grants above; ~/.ape-<ver> is not, and
+     * without it the plugin spawn failed with EACCES (#1173). Only a file
+     * named like a loader, never hull itself or anything else. */
+    {
+        char ld[PATH_MAX];
+        ssize_t n = readlink("/proc/self/exe", ld, sizeof(ld) - 1);
+        if (n > 0) {
+            ld[n] = '\0';
+            const char *base = strrchr(ld, '/');
+            base = base ? base + 1 : ld;
+            if (ld[0] == '/' && (strcmp(base, "ape") == 0 ||
+                                 strncmp(base, ".ape-", 5) == 0))
+                plan_add(plan, ld, "rx", 1);
+        }
+    }
+#endif
+
     /* Narrow subtrees of ~/.hull (never ~ itself):
      *   tools        - side-loaded tool binaries (wamrc, zig) and the
      *                  libc-musl floor bundles Tier B's ld.lld reads: rx

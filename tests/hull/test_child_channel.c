@@ -25,6 +25,10 @@
 
 #define MAGIC 0x54534554u   /* "TEST" */
 
+/* A cosmo APE running on Windows has no channel (hl_chan_host_ok). */
+#define NEED_HOST()                                                        \
+    do { if (!hl_chan_host_ok()) UTEST_SKIP("no channel child on Windows"); } while (0)
+
 static void pair(int sv[2])
 {
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) abort();
@@ -46,6 +50,7 @@ static void child_pair(int sv[2])
 
 UTEST(child_channel, frame_round_trip)
 {
+    NEED_HOST();
     int sv[2];
     pair(sv);
     uint64_t dl = hl_chan_mono_ms() + 2000;
@@ -69,6 +74,7 @@ UTEST(child_channel, frame_round_trip)
 
 UTEST(child_channel, frame_errors)
 {
+    NEED_HOST();
     int sv[2];
     uint64_t dl = hl_chan_mono_ms() + 2000;
     HlChanFrame r = { .magic = MAGIC, .max = 4 };
@@ -113,6 +119,7 @@ static int keep_only_kept(const char *kv)
 
 UTEST(child_channel, spawn_on_fd3)
 {
+    NEED_HOST();
     int sv[2];
     child_pair(sv);
     setenv("HULL_CHAN_KEPT", "yes", 1);
@@ -154,6 +161,7 @@ UTEST(child_channel, spawn_on_fd3)
 
 UTEST(child_channel, reap_a_running_child_times_out)
 {
+    NEED_HOST();
     int sv[2];
     child_pair(sv);
     char a0[] = "/bin/sh", a1[] = "-c", a2[] = "cat <&3";
@@ -174,6 +182,7 @@ UTEST(child_channel, reap_a_running_child_times_out)
  * use one the build host had open. */
 UTEST(child_channel_audit49, spawn_closes_inherited_fds)
 {
+    NEED_HOST();
     int sv[2];
     child_pair(sv);
     int p[2];
@@ -214,6 +223,7 @@ static int run_sh(const char *script, int chan)
  * loop to the limit. */
 UTEST(child_channel_audit50, high_fd_closed_without_close_range)
 {
+    NEED_HOST();
     struct rlimit rl, saved;
     ASSERT_EQ(0, getrlimit(RLIMIT_NOFILE, &saved));
     rl = saved;
@@ -251,6 +261,7 @@ UTEST(child_channel_audit50, high_fd_closed_without_close_range)
  * only _exit(127)ed). */
 UTEST(child_channel_audit50, exec_failure_reported)
 {
+    NEED_HOST();
     int sv[2];
     child_pair(sv);
     char a0[] = "/nonexistent/hull-audit50";
@@ -269,6 +280,7 @@ UTEST(child_channel_audit50, exec_failure_reported)
  * and the child talked to /dev/null (audit 50). */
 UTEST(child_channel_audit50, low_fd_channel_survives)
 {
+    NEED_HOST();
     int saved0 = fcntl(0, F_DUPFD_CLOEXEC, 10);
     ASSERT_GE(saved0, 10);
     close(0);

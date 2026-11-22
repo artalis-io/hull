@@ -382,6 +382,65 @@ static void test_pledge_allowed(void)
     }
 }
 
+/* ── sandbox_tty.termios2_allowed (native Linux) ────────────────────
+ *
+ * glibc 2.42 implements tcgetattr / tcsetattr with TCGETS2 / TCSETS2 /
+ * TCSETSW2 / TCSETSF2 (struct termios2), not TCGETS / TCSETS*. The "tty"
+ * promise allowed only the old numbers, so a dynamically linked Hull app on a
+ * glibc 2.42 system was killed reading a secret (ctx.stdin.readSecret) or
+ * starting a TUI. A pty slave opened before the pledge stands in for the
+ * terminal; TIOCSTI (input injection) stays refused.
+ */
+#if HAS_PLEDGE_MODE && defined(__linux__) && !defined(__COSMOPOLITAN__) && \
+    (defined(__x86_64__) || defined(__aarch64__))
+#include <sys/ioctl.h>
+#define HL_TCGETS2  0x802C542AUL  /* _IOR('T', 0x2A, struct termios2) */
+#define HL_TCSETS2  0x402C542BUL  /* _IOW('T', 0x2B, struct termios2) */
+#define HL_TCSETSW2 0x402C542CUL
+#define HL_TCSETSF2 0x402C542DUL
+
+static int test_tty_termios2_child(void)
+{
+    __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
+    int m = posix_openpt(O_RDWR | O_NOCTTY);
+    if (m < 0 || grantpt(m) != 0 || unlockpt(m) != 0) _exit(77);
+    const char *name = ptsname(m);
+    int fd = name ? open(name, O_RDWR | O_NOCTTY) : -1;
+    if (fd < 0) _exit(77);
+    if (pledge("stdio tty", NULL) != 0) _exit(errno == ENOSYS ? 77 : 2);
+
+    unsigned char t2[64];
+    memset(t2, 0, sizeof t2);
+    if (ioctl(fd, HL_TCGETS2, t2) != 0) { fprintf(stderr, "TCGETS2: %s\n", strerror(errno)); _exit(3); }
+    if (ioctl(fd, HL_TCSETS2, t2) != 0) { fprintf(stderr, "TCSETS2: %s\n", strerror(errno)); _exit(4); }
+    if (ioctl(fd, HL_TCSETSW2, t2) != 0) { fprintf(stderr, "TCSETSW2: %s\n", strerror(errno)); _exit(5); }
+    if (ioctl(fd, HL_TCSETSF2, t2) != 0) { fprintf(stderr, "TCSETSF2: %s\n", strerror(errno)); _exit(6); }
+    char c = 'x';
+    if (ioctl(fd, TIOCSTI, &c) == 0 || errno != EPERM) _exit(7); /* still refused */
+    _exit(0);
+}
+
+static void test_tty_termios2(void)
+{
+    printf("\n=== tty promise allows the termios2 ioctls (glibc 2.42) ===\n");
+    pid_t pid = fork();
+    if (pid < 0) { fail("fork failed"); return; }
+    if (pid == 0) test_tty_termios2_child();
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        pass("sandbox_tty.termios2_allowed");
+    else if (WIFEXITED(status) && WEXITSTATUS(status) == 77)
+        pass("sandbox_tty.termios2_allowed SKIPPED - no pty or seccomp");
+    else {
+        char buf[96];
+        snprintf(buf, sizeof buf, "sandbox_tty.termios2_allowed (status %d)", status);
+        fail(buf);
+    }
+}
+#define HL_HAVE_TTY_TERMIOS2_TEST 1
+#endif
+
 /* ── W^X tests (Linux + Cosmopolitan): no executable guest memory ──
  *
  * These tests prove that after pledge() with Hull's default phase-2
@@ -1060,6 +1119,9 @@ int main(void)
     test_wx_anon_rw();
 #if HAS_PLEDGE_MODE
     test_preexisting_threads();
+#endif
+#ifdef HL_HAVE_TTY_TERMIOS2_TEST
+    test_tty_termios2();
 #endif
 #endif
 

@@ -406,8 +406,10 @@ These interleave with BuildContext's (BuildContext §13); each stops for review.
   after the entry resolves, before any sandbox) and `hull test`, `hull agent`, `hull mcp` (the
   app context). A failed pipeline is a load error. Never in a built binary, never in a build
   plugin's own process (one with a plugin channel). The child is this binary
-  (`hl_chan_self_exe`), so build plugins need a native hull, as `hull plugins run` already
-  does. Results are reused from the build result store, so a repeat run spawns no plugin.
+  (`hl_chan_self_exe`): a native hull, or a cosmo APE on Linux or macOS (a BSD takes the same path, untested; #1173; on
+  Linux the APE loader it runs under is granted read + execute in the tool sandbox, so it can
+  exec itself). A cosmo APE on Windows has no channel yet (`hl_chan_host_ok`, #1188) and the
+  pipeline fails there, saying so. Results are reused from the build result store, so a repeat run spawns no plugin.
 - **`hull dev`.** Before every (re)spawn the supervisor runs the child
   (`hl_generation_produce`) while the old app keeps running. A good generation goes to the new
   child on an unlinked temporary file named by `HULL_GENERATION_FD`; then the old child is

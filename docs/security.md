@@ -689,6 +689,7 @@ What the plan grants:
 | the output directory (`-o`'s, else the named app dir, else the scaffold target) | rwc | refused outright when `/`, `$HOME` or above |
 | `/usr`, `/bin`, `/lib*`, `/opt`, `~/.cosmocc` (Linux/cosmo), `/opt`, `/Library` (macOS) | rx / r | system toolchains |
 | hull's own directory, the platform dir | rx | the manifest-extraction re-exec, platform archives |
+| the APE loader a cosmo hull runs under (`/proc/self/exe` when it is an `ape` / `.ape-*` file) | rx, that file only | a Linux kernel cannot exec an APE, so the hull's own plugin processes start through it (#1173) |
 | the runtime cache root | rwc | AOT cache |
 | `~/.hull/tools` | rx | side-loaded tools, the musl floors |
 | `~/.hull/feature`, `~/.hull/platform`, `~/.hull/blobs/tools` | r | signed `--with` archives + manifests, flavor libs, the tools store `bundle_verify` re-hashes |

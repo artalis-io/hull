@@ -545,6 +545,7 @@ static int pl_spawn(lua_State *L)
     lua_Integer n = lua_istable(L, 3) ? luaL_len(L, 3) : 0;
     if (n < 0 || n > 32) return fail(L, "invalid_args");
 #ifdef HL_CHAN_SUPPORTED
+    if (!hl_chan_host_ok()) return fail(L, "unsupported");
     const char *argv[32 + 3];
     int k = 0;
     argv[k++] = exe;

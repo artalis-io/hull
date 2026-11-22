@@ -1571,7 +1571,7 @@ All vendored. No external dependencies:
 | SQLite | `vendor/sqlite/` | Embedded database |
 | mbedTLS | `vendor/mbedtls/` | TLS client |
 | TweetNaCl | `vendor/tweetnacl/` | Ed25519 + NaCl crypto |
-| pledge/unveil | `vendor/pledge/` | Linux kernel sandbox polyfill. **Patched in tree** (four fixes, marked `HULL PATCH NNNN`: rseq allowed, TRUNCATE a file right, and seccomp filters + the Landlock domain applied to every thread - audit 42); see [docs/pledge_patches.md](docs/pledge_patches.md) |
+| pledge/unveil | `vendor/pledge/` | Linux kernel sandbox polyfill. **Patched in tree** (five fixes, marked `HULL PATCH NNNN`: rseq allowed, TRUNCATE a file right, seccomp filters + the Landlock domain applied to every thread - audit 42, and the termios2 ioctls glibc 2.42 uses under `tty`); see [docs/pledge_patches.md](docs/pledge_patches.md) |
 | log.c | `vendor/log.c/` | Logging |
 | sh_arena | `vendor/sh_arena/` | Arena allocator |
 | sh_json | `vendor/sh_json/` | Streaming JSON writer + arena-based parser |

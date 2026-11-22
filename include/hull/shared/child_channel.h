@@ -9,7 +9,9 @@
  * frame with another magic, or a payload longer than the reader's max, is a
  * protocol error.
  *
- * POSIX only (HL_CHAN_SUPPORTED): not on a cosmo APE or Windows.
+ * HL_CHAN_SUPPORTED: every POSIX build and a cosmo APE; not a native Windows
+ * build. A cosmo APE running on Windows reports no channel at run time
+ * (hl_chan_host_ok).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -19,7 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if !defined(__COSMOPOLITAN__) && !defined(_WIN32)
+#if defined(__COSMOPOLITAN__) || !defined(_WIN32)
 #define HL_CHAN_SUPPORTED 1
 #include <sys/types.h>
 #endif
@@ -71,6 +73,11 @@ void hl_chan_frame_reset(HlChanFrame *r);
 
 #ifdef HL_CHAN_SUPPORTED
 
+/* 1 when this host can run a channel child: always on a POSIX build; a
+ * cosmo APE on any host but Windows, where its socketpair is made of pipes
+ * that send() / recv() refuse and the spawn does not hold up (#1173). */
+int hl_chan_host_ok(void);
+
 /* Milliseconds left until @p deadline as a poll timeout (0 = no deadline:
  * -1, wait for ever). */
 int hl_chan_ms_left(uint64_t deadline);
@@ -109,12 +116,14 @@ pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
                         int (*env_ok)(const char *kv), const char *const *extra);
 
 /* This process's binary, as a path posix_spawn takes (Linux:
- * /proc/self/exe itself). 0 / -1. */
+ * /proc/self/exe itself; a cosmo APE: GetProgramExecutableName, on any
+ * host). 0 / -1. */
 int hl_chan_self_exe(char *out, size_t sz);
 
 /* In the child: close every descriptor above 3 (it inherits only 0-3).
- * Linux: close_range, else every entry of /proc/self/fd, else every number
- * up to the descriptor limit. Async-signal-safe. */
+ * Linux: close_range, else every entry of /proc/self/fd; a cosmo APE:
+ * closefrom; else every number up to the descriptor limit.
+ * Async-signal-safe. */
 void hl_chan_close_extra_fds(void);
 
 #ifdef HL_CHAN_TEST_HOOKS
