@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
+## [Unreleased]
+
+### Fixed
+
+- **`hull check` failed on Linux for apps a standalone `hull test` passed:** a TypeScript app
+  (or any app with a build pipeline) with `stdlib:ts-erase@1: store_failed`, and an app with a
+  state directory with `[app-context] fs policy: permission`. Its manifest and import steps
+  apply the tool sandbox to the process they run in, and the test step then ran inside it: under
+  Landlock the pipeline child could not read the result store's seal key
+  (`~/.hull/tool-cache.key`) and the app context could not make the state directory. Those
+  steps now run in a child, so the test step runs as `hull test` does. A `HOME` under `/tmp`,
+  which the sandbox grants, hid it; the e2e now also runs with `HOME` outside it. Found running
+  hsctl's `make check` on Linux.
+
 ## [0.23.2] - 2026-11-21
 
 Audit round 51 and the round 50 leftovers, all Low, plus hsctl's platform gaps 10 and 11.
