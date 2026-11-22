@@ -136,3 +136,19 @@ build on Linux refuses to start (unless `--allow-degraded-sandbox`) when
 `/proc/self/task` lists more than one thread as `hl_sandbox_apply` runs.
 `tests/e2e_sandbox.sh` Test 9 checks that a server and a CLI whose top level
 runs WASM reach phase 2 with `threads: single`.
+
+## Patch 0005 - the tty promise allows the termios2 ioctls
+
+glibc 2.42 implements `tcgetattr` / `tcsetattr` with `TCGETS2` / `TCSETS2` /
+`TCSETSW2` / `TCSETSF2` (`struct termios2`, for arbitrary baud rates) instead of
+`TCGETS` / `TCSETS*`. Upstream's `tty` promise (`AllowIoctlTty`) allowed only the
+old numbers, so a dynamically linked Hull binary - hull itself, or an app built
+with it - running on a glibc 2.42 system was killed (SIGSYS) at its first
+terminal-settings call: `ctx.stdin:read_secret` / `readSecret` on a terminal, and
+the TUI's raw mode. Reported against hscli's `login` on Arch.
+
+The patch adds the four numbers to the same fragment (`HULL_TCGETS2` and kin: the
+generic `_IOR` / `_IOW('T', 0x2a..0x2d, struct termios2)` encoding, identical on
+x86_64 and aarch64). They read and set exactly what the old four do, so the
+promise grants nothing new. Gate: `sandbox_tty.termios2_allowed` in
+`tests/sandbox_violation.c` (Test 6), which also checks TIOCSTI stays refused.
