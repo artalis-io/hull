@@ -12,6 +12,12 @@
 #   - without --types no compiler runs;
 #   - an unsigned app passes with verify skipped, and says so; a verify
 #     option, or any package.sig entry (a dangling link included), runs it;
+#   - a TypeScript app passes with HOME outside the temporary directory, and
+#     so does one with a state directory: the test step ran inside the tool
+#     sandbox the manifest step had applied, and on Linux its pipeline child
+#     could not read ~/.hull/tool-cache.key nor its app context make the
+#     state directory; the sandbox grants /tmp, so a HOME there hid it
+#     (check_sandbox.*);
 #   - with the real compiler (TSC=..., else tests/types/node_modules/.bin/tsc
 #     when `make check-types` installed it): examples/cli_modular_ts passes,
 #     and a type error in it fails.
@@ -21,7 +27,12 @@ HULL=${HULL:-build/hull}
 case "$HULL" in /*) ;; *) HULL="$PWD/$HULL" ;; esac
 ROOT=$PWD
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# A HOME outside the temporary directory, which the tool sandbox grants
+# (check_pipeline.home_outside_tmp below), and not below hull's own
+# directory, which the sandbox then would not grant.
+HOME2=$(mktemp -d "$ROOT/.e2e-check-home.XXXXXX")
+chmod 700 "$HOME2"
+trap 'rm -rf "$WORK" "$HOME2"' EXIT
 HOME="$WORK/home"
 mkdir -p "$HOME"
 export HOME
@@ -113,6 +124,28 @@ run_check "$bin"
     ok "check_unsigned.entry_verifies: a dangling package.sig is verified, not skipped" ||
     { bad "check_unsigned.entry_verifies (rc $rc)"; cat "$WORK/out.txt"; }
 rm -f "$app/package.sig"
+
+echo "== hull check: the test step outside the tool sandbox"
+# check_home NAME DIR: hull check DIR with HOME outside /tmp passes.
+check_home() {
+    rc=0
+    env -u XDG_STATE_HOME -u HULL_STATE_DIR HOME="$HOME2" PATH="/usr/bin:/bin" \
+        "$HULL" check "$2" > "$WORK/out.txt" 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] && has "$WORK/out.txt" "all checks passed" &&
+        ok "check_sandbox.$1" || { bad "check_sandbox.$1 (rc $rc)"; cat "$WORK/out.txt"; }
+}
+check_home pipeline_home_outside_tmp "$app"
+state_app="$WORK/state_app"
+cp -R "$ROOT/examples/cli_modular_ts" "$state_app"
+sed 's|    // env: \["HOME", "PATH"\],|    state: { name: "hull-e2e-check-state" },\
+    fs: { write: ["@state/out.txt"] },|' "$app/app.ts" > "$state_app/app.ts"
+if has "$state_app/app.ts" "@state/out.txt"; then
+    check_home state_dir "$state_app"
+    [ -d "$HOME2/.local/state/hull-e2e-check-state" ] && ok "check_sandbox.state_dir_made: under HOME" ||
+        bad "check_sandbox.state_dir_made: no state directory under $HOME2"
+else
+    bad "check_sandbox.state_dir: could not add state to the example's manifest"
+fi
 
 echo "== hull check --types: the real compiler"
 TSC=${TSC:-$ROOT/tests/types/node_modules/.bin/tsc}

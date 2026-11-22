@@ -27,13 +27,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* `--types`: the compiler over the app's tsconfig.json (`hull types`
  * writes it), then tests/tsconfig.json when there is one, with nothing
- * emitted. Run before every other step: the ones that load the app go
- * through the tool sandbox, which stays applied to this process, and a
- * compiler under ~/.nvm or the app's node_modules could not run there. */
+ * emitted. Run first, outside any sandbox: a compiler under ~/.nvm or the
+ * app's node_modules could not run under the tool sandbox. */
 static int check_types(const char *app_dir)
 {
     if (!hl_type_check_configured(app_dir)) {
@@ -78,6 +78,35 @@ static int app_is_unsigned(const char *app_dir)
         if (lstat(path, &st) == 0 || errno != ENOENT) return 0;
     }
     return 1;
+}
+
+/* Steps 1-2 run `hull modules` in a child. It loads the app through the
+ * tool VM, which applies the tool sandbox to the process it runs in for
+ * good; in this process that sandbox then held the test step, and on Linux
+ * (Landlock) the app context it builds could not make the app's state
+ * directory, nor the build pipeline child read the result store's seal key
+ * (~/.hull/tool-cache.key): `hull check` failed every TypeScript app where
+ * a standalone `hull test` passed. In a child the test step runs as `hull
+ * test` does. The child's status, or 1. */
+static int modules_step(const char *verb, const char *app_dir, const HlCommandEnv *env)
+{
+    const char *margv[3] = { "check", verb, app_dir };
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0) {
+        hl_eprintf_line("[hull:check] cannot run the %s step: %s", verb, strerror(errno));
+        return 1;
+    }
+    if (pid == 0) {
+        int rc = hl_cmd_modules(3, (char **)(uintptr_t)margv, env);  /* does not modify argv */
+        fflush(NULL);
+        _exit(rc < 0 ? 1 : rc & 0xff);   /* not exit(): the parent's atexit work is its own */
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return 1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
 int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
@@ -152,8 +181,7 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
      * entry point) before the test runner has to. */
     fprintf(stderr, "[hull:check] validating manifest...\n");
     {
-        const char *list_argv[3] = { "check", "list", app_dir };
-        int rc = hl_cmd_modules(3, (char **)(uintptr_t)list_argv, env);  /* hl_cmd_modules does not modify argv */
+        int rc = modules_step("list", app_dir, env);
         if (rc != 0) {
             fprintf(stderr, "[hull:check] manifest validation failed\n");
             return rc;
@@ -167,8 +195,7 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
      * executes); unused declarations are advisory only. */
     fprintf(stderr, "[hull:check] analyzing imports...\n");
     {
-        const char *analyze_argv[3] = { "check", "analyze", app_dir };
-        int rc = hl_cmd_modules(3, (char **)(uintptr_t)analyze_argv, env);  /* hl_cmd_modules does not modify argv */
+        int rc = modules_step("analyze", app_dir, env);
         if (rc != 0) {
             fprintf(stderr, "[hull:check] import analysis failed\n");
             return rc;
