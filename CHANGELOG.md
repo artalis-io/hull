@@ -6,7 +6,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
-## [Unreleased]
+## [0.23.4] - 2026-11-22
+
+One fix: a built CLI (an app with `app.main` and no handlers) no longer prints Hull's own INFO
+notes before its output. No upgrade notes; Hull's notes are still there at a debug level.
 
 ### Fixed
 
