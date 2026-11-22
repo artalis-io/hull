@@ -127,7 +127,8 @@
  *   fcntl(F_SETLKW).
  *
  * - "tty" allows ioctl(TIOCGWINSZ), ioctl(TCGETS), ioctl(TCSETS),
- *   ioctl(TCSETSW), ioctl(TCSETSF).
+ *   ioctl(TCSETSW), ioctl(TCSETSF), and (HULL PATCH 0005) their termios2
+ *   forms TCGETS2 / TCSETS2 / TCSETSW2 / TCSETSF2, which glibc 2.42 uses.
  *
  * - "recvfd" allows recvmsg and recvmmsg.
  *

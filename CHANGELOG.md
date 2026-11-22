@@ -6,6 +6,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
+## [Unreleased]
+
+### Fixed
+
+- A dynamically linked Hull binary on a system with glibc 2.42 or later (Arch, and
+  distributions following it) was killed by its own Linux sandbox at its first
+  terminal-settings call: `ctx.stdin:read_secret` / `readSecret` reading from a
+  terminal (hscli's `login`), and a TUI entering raw mode. glibc 2.42's
+  `tcgetattr` / `tcsetattr` use the termios2 ioctls (`TCGETS2`, `TCSETS2`,
+  `TCSETSW2`, `TCSETSF2`), which the `tty` promise did not allow; it does now
+  (vendor/pledge patch 0005). Until an app is rebuilt, piping the secret on stdin
+  avoids the terminal path.
+
 ## [0.23.4] - 2026-11-22
 
 One fix: a built CLI (an app with `app.main` and no handlers) no longer prints Hull's own INFO
