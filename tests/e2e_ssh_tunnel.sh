@@ -889,7 +889,9 @@ PY
         esac
 
         # 2. --ca-bundle makes it trust THAT CA, and the tunnel comes up.
-        OUT=$(run_app "$WORK/t1" --ca-bundle "$WORK/tls/ca.pem")
+        #    `-l debug`: an app.main app prints Hull's notes (the anchor in use)
+        #    only at a debug level.
+        OUT=$(run_app "$WORK/t1" -l debug --ca-bundle "$WORK/tls/ca.pem")
         case "$OUT" in
             *"first_code=denied"*|*"first_code=upgrade_"*|*"first_code=connect_failed"*)
                 fail "tls: --ca-bundle is honoured" "$OUT" ;;
