@@ -97,6 +97,62 @@ run_hello_cli() {
 run_hello_cli "lua" "lua"
 run_hello_cli "js"  "js"
 
+# run_quiet_hull_log
+# An app.main run prints the app's output and Hull's real warnings, not
+# Hull's own INFO notes: hscli printed "HH:MM:SS INFO [hull:c] using CA bundle:
+# ..." before every command, --version included. The app's own log.info
+# still shows; `hull --verbose` shows Hull's notes again.
+run_quiet_hull_log() {
+    echo "--- app.main: Hull's INFO notes only under --verbose ---"
+    d=$(mktemp -d "${TMPDIR:-/tmp}/hull_cli_quiet.XXXXXX")
+    mkdir -p "$d/lua" "$d/js"
+    cat > "$d/lua/app.lua" <<'APP'
+local log = require("hull.log")
+app.manifest({ modules = { "hull/http-client@1", "hull/log@1" }, hosts = { "example.test" } })
+app.main(function(ctx)
+    log.info("APP_INFO_RECORD")
+    ctx.stdout:write("APP_OUT\n")
+    return 0
+end)
+APP
+    cat > "$d/js/app.js" <<'APP'
+import { app } from "hull:app";
+import { log } from "hull:log";
+app.manifest({ modules: ["hull/http-client@1", "hull/log@1"], hosts: ["example.test"] });
+app.main((ctx) => {
+    log.info("APP_INFO_RECORD");
+    ctx.stdout.write("APP_OUT\n");
+    return 0;
+});
+APP
+    for rt in lua js; do
+        rc=$(hull_run "$HULL_RC_TMP" "${HULL_BIN}" run "$d/$rt/app.$rt")
+        out=$(cat "$HULL_RC_TMP")
+        expect_eq "$rt quiet log: exit 0" "0" "$rc"
+        case "$out" in
+            *"INFO  [hull"*) fail "$rt quiet log: a Hull INFO note printed (got '$out')" ;;
+            *) pass "$rt quiet log: no Hull INFO note" ;;
+        esac
+        case "$out" in
+            *"INFO  [app] APP_INFO_RECORD"*) pass "$rt quiet log: the app's log.info still shows" ;;
+            *) fail "$rt quiet log: the app's log.info is missing (got '$out')" ;;
+        esac
+        case "$out" in
+            *APP_OUT*) pass "$rt quiet log: the app's output" ;;
+            *) fail "$rt quiet log: the app's output is missing (got '$out')" ;;
+        esac
+        rc=$(hull_run "$HULL_RC_TMP" "${HULL_BIN}" --verbose run "$d/$rt/app.$rt")
+        out=$(cat "$HULL_RC_TMP")
+        case "$out" in
+            *"CA bundle"*) pass "$rt quiet log: --verbose shows Hull's notes" ;;
+            *) fail "$rt quiet log: --verbose shows no CA note (got '$out')" ;;
+        esac
+    done
+    rm -rf "$d"
+}
+
+run_quiet_hull_log
+
 if HULL_BIN="$HULL_BIN" sh tests/e2e_db_open_failure.sh; then
     pass "Lua/JS database-open failures exit cleanly"
 else

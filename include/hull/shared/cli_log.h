@@ -143,4 +143,17 @@ void hl_log_fputs_escaped(FILE *f, const char *s);
  * default callback, so an uncaught error's newline forged a record). */
 void hl_log_install_line_callback(int level);
 
+/* As hl_log_install_line_callback, and a Hull-internal record (a C
+ * `__FILE__`, hl_cli_log_is_native_source) prints only at @p native_min or
+ * above; an app's own records go by @p level alone. The app.main runner
+ * passes LOG_WARN unless --verbose: a built CLI prints its output and Hull's
+ * real warnings, not Hull's notes (hscli printed "INFO [hull:c] using CA
+ * bundle" before every command). */
+void hl_log_install_line_callback_ex(int level, int native_min);
+
+/* Change the installed line callback's least Hull-internal level (see
+ * hl_log_install_line_callback_ex). serve.c raises it to LOG_WARN once the
+ * app has loaded and is app.main only. Call before any worker thread logs. */
+void hl_log_line_native_min_set(int native_min);
+
 #endif /* HL_SHARED_CLI_LOG_H */

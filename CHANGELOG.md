@@ -6,6 +6,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
+## [Unreleased]
+
+### Fixed
+
+- **A built CLI printed Hull's own notes before its output:** every `app.main` program run
+  started with a line such as `12:25:03 INFO  [hull:c] using CA bundle: /etc/ssl/cert.pem`,
+  `--version` included (hscli), and a first run listed each migration applied (hsctl). An
+  app with `app.main` and no handlers now prints its output, its own `log.*` records and Hull's
+  warnings; Hull's notes need `--verbose` under hull (`hull --verbose app.lua`) or a debug log
+  level (`--hull-l debug` in a built binary). A web app's log is unchanged. Migrations that run
+  before the app loads (an implicit `data.db` or a `-d` database) still print their notes.
+
 ## [0.23.3] - 2026-11-22
 
 One fix: on Linux, `hull check` failed TypeScript apps (any app with a build pipeline) and apps

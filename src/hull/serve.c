@@ -1743,6 +1743,18 @@ static int hl_serve_load_app(HlServerState *s)
             unlink(err_path);
     }
 
+    /* A pure CLI (app.main, no handlers) prints its output and Hull's real
+     * warnings, as the app.main runner does (serve_cli.c): Hull's own notes
+     * - the CA bundle in use, ... - need --log-level debug / --verbose.
+     * hscli printed "INFO [hull:c] using CA bundle" before every command,
+     * --version included. A web app's log is unchanged. Set before any
+     * worker thread exists (the pool starts after phase 2). */
+    HlRuntime *lrt = hl_app_context_runtime(s->app);
+    if (s->cfg.log_level == LOG_INFO && lrt && lrt->vt
+        && lrt->vt->has_main && lrt->vt->has_main(lrt)
+        && (!lrt->vt->has_server_handlers || !lrt->vt->has_server_handlers(lrt)))
+        hl_log_line_native_min_set(LOG_WARN);
+
     return 0;
 }
 
