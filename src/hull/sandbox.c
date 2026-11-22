@@ -283,6 +283,11 @@ int hl_sandbox_resolve_grant(const char *app_dir, const char *relpath,
 /* Cosmopolitan libc provides pledge() and unveil() natively. */
 extern int pledge(const char *promises, const char *execpromises);
 extern int unveil(const char *path, const char *permissions);
+/* cosmo libc's live pthread count, the main thread included (its
+ * posixthread.internal.h; the thread check's fallback when /proc is not
+ * reachable). */
+#include <stdatomic.h>
+extern atomic_uint _pthread_count;
 
 /* ...but they only ENFORCE where the host gives them something to enforce
  * with: seccomp-bpf + Landlock on Linux, the native syscalls on OpenBSD.
@@ -1365,6 +1370,13 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      * short wait. */
     if (IsLinux()) {
         int nthreads = hl_host_wait_thread_count(1, 100);
+        /* A build plugin's process starts inside the Landlock domain of the
+         * tool process that spawned it, which grants no /proc (#1173): count
+         * the threads cosmo's own pthread_create made, live ones only, the
+         * main thread included. Every thread Hull and its vendored libraries
+         * start is one of those. */
+        if (nthreads < 0)
+            nthreads = (int)atomic_load(&_pthread_count);
         if (nthreads != 1) {
             char nthr[32];
             if (nthreads < 0)

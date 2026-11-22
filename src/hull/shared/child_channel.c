@@ -51,6 +51,9 @@ void hl_chan_frame_reset(HlChanFrame *r)
 #if defined(__linux__)
 #include <sys/syscall.h>
 #endif
+#if defined(__COSMOPOLITAN__)
+#include <cosmo.h>   /* GetProgramExecutableName */
+#endif
 /* MSan does not see what a raw syscall writes: close_fds_proc's getdents64
  * buffer read as uninitialised, and the report aborted the spawned child. */
 #if defined(__has_feature)
@@ -70,6 +73,15 @@ extern char **environ;
 #else
 #define CHAN_SEND_FLAGS 0
 #endif
+
+int hl_chan_host_ok(void)
+{
+#if defined(__COSMOPOLITAN__)
+    return !IsWindows();
+#else
+    return 1;
+#endif
+}
 
 void hl_chan_set_nonblock(int fd)
 {
@@ -222,9 +234,9 @@ static int chan_fd_above_stdio(int fd, int *owned)
     return hi;
 }
 
-#if defined(__linux__) && !defined(__COSMOPOLITAN__)
-/* Linux: posix_spawn has no close-by-default (Apple's spawn takes
- * POSIX_SPAWN_CLOEXEC_DEFAULT below), so a descriptor the parent holds
+#if defined(__linux__) || defined(__COSMOPOLITAN__)
+/* Linux and a cosmo APE: posix_spawn has no close-by-default (Apple's spawn
+ * takes POSIX_SPAWN_CLOEXEC_DEFAULT below), so a descriptor the parent holds
  * without close-on-exec - one a library or an earlier open left - reached
  * the child: a build plugin, a cloned repository's code under Landlock,
  * read or wrote through it (audit 49). Fork, and in the child set up the
@@ -234,7 +246,11 @@ static int chan_fd_above_stdio(int fd, int *owned)
  *
  * A failed set-up or execve is reported as posix_spawn reports it: the child
  * writes its errno to a close-on-exec socket, which reads EOF once the exec
- * succeeded (audit 50: the pid of a child that only _exit(127)ed). */
+ * succeeded (audit 50: the pid of a child that only _exit(127)ed).
+ *
+ * A cosmo APE takes this path wherever it has a channel (hl_chan_host_ok):
+ * its posix_spawn passes every descriptor without close-on-exec to the child
+ * too (#1173). */
 static void close_fds_from(unsigned lo);
 
 static void child_fail(int ew)
@@ -382,6 +398,14 @@ int hl_chan_self_exe(char *out, size_t sz)
     if (strlen(real) >= sz) return -1;
     memcpy(out, real, strlen(real) + 1);
     return 0;
+#elif defined(__COSMOPOLITAN__)
+    /* As hl_release_io_self_path's cosmo branch (release_io.c, which this
+     * object does not link): an APE knows its own path on any host. */
+    const char *p = GetProgramExecutableName();
+    size_t n = p ? strlen(p) : 0;
+    if (n == 0 || n >= sz) return -1;
+    memcpy(out, p, n + 1);
+    return 0;
 #else
     (void)out; (void)sz;
     return -1;
@@ -447,6 +471,11 @@ static void close_fds_from(unsigned lo)
      * loop below stopped at 4096 under a large limit, and the descriptors
      * past it reached the child). */
     if (g_close_fallback < 2 && close_fds_proc(lo) == 0)
+        return;
+#endif
+#if defined(__COSMOPOLITAN__)
+    /* cosmo's closefrom (close_range on Linux). */
+    if (g_close_fallback < 1 && closefrom((int)lo) == 0)
         return;
 #endif
     /* Up to the soft limit, or the hard one when that is finite and higher

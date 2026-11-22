@@ -30,6 +30,14 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+/* ".." anywhere in p[0..n) (memmem is not in C11; cosmocc hides it). */
+static int has_dotdot(const uint8_t *p, size_t n)
+{
+    for (size_t i = 0; i + 1 < n; i++)
+        if (p[i] == '.' && p[i + 1] == '.') return 1;
+    return 0;
+}
+
 static void hex(const uint8_t *p, size_t n)
 {
     for (size_t i = 0; i < n; i++) printf("%02x", p[i]);
@@ -206,7 +214,7 @@ static int serve_action(int fd)
         if (strcmp(name, "inputs.read") == 0) {
             size_t pn = 0;
             const uint8_t *p = get_str(f.buf, f.len, "args", "path", &pn);
-            if (p && memmem(p, pn, "..", 2)) reply_err(fd, f.id, "denied");
+            if (p && has_dotdot(p, pn)) reply_err(fd, f.id, "denied");
             else if (p && pn == 9 && memcmp(p, "src/a.txt", 9) == 0)
                 reply_ok_bytes(fd, f.id, "hello");
             else reply_err(fd, f.id, "absent");

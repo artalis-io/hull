@@ -104,7 +104,10 @@ cp build/platform_canary_hash "$k/" 2>/dev/null || true
 (cd "$k" && "$HULL" keygen > /dev/null 2>&1 && "$HULL" sign-platform --dir "$k/" "$k/developer" > /dev/null 2>&1) || true
 rc=0; "$HULL" build --no-verify-platform --sign "$k/developer.key" --platform-sig "$k/platform.sig" \
     "$cli" -o "$cli/app" > "$WORK/b_cli.txt" 2>&1 || rc=$?
-if [ "$rc" -ne 0 ] && has "$WORK/b_cli.txt" "libhull_platform.a"; then
+# A tree built without the platform library, or a hull with no bundled
+# app_main.o (a plain `make CC=cosmocc`), cannot link apps.
+if [ "$rc" -ne 0 ] && { has "$WORK/b_cli.txt" "libhull_platform.a" ||
+                        has "$WORK/b_cli.txt" "no bundled app_main.o"; }; then
     echo "  SKIP: hull build (no platform library in this tree)"
 else
     [ "$rc" -eq 0 ] && has "$WORK/b_cli.txt" "7 generated file(s) from the build pipeline" &&

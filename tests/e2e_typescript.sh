@@ -342,7 +342,10 @@ echo "== typescript: hull build"
 # Outputs go below $WORK: it is $HOME's parent, which a build may not write.
 mkdir -p "$WORK/out"
 rc=0; "$HULL" build --no-verify-platform "$d" -o "$WORK/out/bin_main" > "$WORK/b1.txt" 2>&1 || rc=$?
-if [ "$rc" -ne 0 ] && has "$WORK/b1.txt" "libhull_platform.a"; then
+# A tree built without the platform library, or a hull with no bundled
+# app_main.o (a plain `make CC=cosmocc`), cannot link apps.
+if [ "$rc" -ne 0 ] && { has "$WORK/b1.txt" "libhull_platform.a" ||
+                        has "$WORK/b1.txt" "no bundled app_main.o"; }; then
     echo "  SKIP: hull build (no platform library in this tree)"
 else
     mkdir -p "$WORK/run1"
