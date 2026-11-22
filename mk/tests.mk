@@ -1646,6 +1646,13 @@ e2e-refusal-codes: $(BUILDDIR)/hull
 e2e-host-denied: $(BUILDDIR)/hull
 	sh tests/e2e_host_denied.sh
 
+# http-client's async.stream + hull/sse-client, both runtimes: a response
+# handed over as it arrives, its timeouts, buffer and size caps, close, a
+# denied host, and a stream awaited inside a request handler.
+.PHONY: e2e-http-stream
+e2e-http-stream: $(BUILDDIR)/hull
+	sh tests/e2e_http_stream.sh
+
 e2e-timers: $(BUILDDIR)/hull
 	sh tests/e2e_timers.sh
 
@@ -1689,7 +1696,8 @@ e2e-vm-thread: $(BUILDDIR)/hull
 # The existing server suites again with every server's entries on the VM
 # thread (HULL_VM_THREAD=1 is --vm-thread for the whole environment).
 VM_THREAD_ALL_SUITES := e2e-examples e2e-http e2e-js-runs e2e-timers \
-	e2e-teardown e2e-cli e2e-multipart e2e-refusal-codes e2e-http-timeout
+	e2e-teardown e2e-cli e2e-multipart e2e-refusal-codes e2e-http-timeout \
+	e2e-http-stream
 e2e-vm-thread-all: $(BUILDDIR)/hull
 	HULL_VM_THREAD=1 $(MAKE) --no-print-directory $(VM_THREAD_ALL_SUITES)
 # Request concurrency caps (audit convergence §6.4): a client's 9th request in

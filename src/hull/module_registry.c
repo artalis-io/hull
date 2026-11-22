@@ -376,6 +376,15 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {0},
     },
     {
+        /* Server-Sent Events client: the event-stream parser of the HTML
+         * standard over a streamed response (http-client's async.stream).
+         * Pure stdlib; reach is http-client's (manifest.hosts). */
+        .name = "hull/sse-client",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_CLIENT | HL_MOD_CAP_HOSTS,
+        .deps = {"hull/http-client", 0},
+    },
+    {
         /* SSH client. The protocol is Lua (stdlib/lua/hull/ssh/) over the
          * private byte stream in cap/net_stream.c; this declaration admits the
          * module, and `ssh = { connect = {...} }` in the manifest is what

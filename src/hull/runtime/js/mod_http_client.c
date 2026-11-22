@@ -11,12 +11,19 @@
 #include "db_wait.h"   /* hl_js_db_refuse_wait */
 #include "refusal.h"   /* hl_js_refusal_tag (audit 35) */
 #include "hull/cap/http_async.h"
+#include "hull/cap/http_stream.h"
 #include "hull/shared/async.h"
+#include "hull/shared/async_backend.h"
+#include "hull/shared/refusal.h"
+#include "hull/net_backend.h"   /* hl_net_op_complete, HlSuspendOp */
 #include "hull/utils/alloc.h"
 
 #include <keel/http_server.h>
 
 #include <ctype.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -875,6 +882,658 @@ static JSValue js_http_async_delete(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
 { return js_http_async_no_body(ctx, this_val, "DELETE", argc, argv); }
 
+/* ── httpClient.async.stream - a streamed response ───────────────────── *
+ *
+ * stream(method, url, opts) resolves to the response as soon as its status
+ * and headers arrive: { status, headers } plus read() (an ArrayBuffer, null at
+ * the end), readText() (UTF-8 text, a character split across chunks carried
+ * to the next read), close(), and [Symbol.asyncIterator] over the byte chunks.
+ * The body arrives in cap/http_stream.c's bounded buffer; a read that finds
+ * it empty parks on the stream's op, and the continuation's push_result does
+ * the read once resumed (the cap completes the op only when the next read
+ * will not wait). The parking follows mod_ssh.c: the async gate, no wait
+ * inside a transaction, the request's connection suspended through
+ * hl_js_op_suspend, a detached wait tracked with an on_shutdown. An open
+ * stream holds a Keel client, so it is on the runtime's teardown list too
+ * (stopped while the loop is alive), counts as one of the VM's
+ * HL_HTTP_MAX_INFLIGHT requests, and holds its buffer on the VM's off-heap
+ * total until it is closed or collected. */
+
+static JSClassID hl_http_stream_class_id;
+
+enum { HS_PARK_HEAD = 1, HS_PARK_BYTES, HS_PARK_TEXT, HS_PARK_NEXT };
+
+typedef struct {
+    HlHttpStream      *s;        /* owned; NULL once released              */
+    HlAsyncCtx        *ctx;      /* live only while parked (or a wake pends) */
+    HlAsyncBackendCtx *loop;
+    int                kind;     /* HS_PARK_* of the parked call           */
+    JSValue            self;     /* the handle, held only while HEAD parks */
+    HlAsyncTeardown    track;    /* linked while s is open                 */
+    HlOffheapHold      hold;     /* the buffer, on the VM's off-heap total */
+    int               *inflight; /* the VM's http_inflight while open      */
+    uint8_t            carry[4]; /* readText: a split UTF-8 sequence       */
+    int                ncarry;
+} HlJsHttpStream;
+
+/* Give the stream's request back: Keel client, timers, the in-flight slot,
+ * the off-heap bytes. The handle stays (closed); idempotent. */
+static void hs_release(HlJsHttpStream *o)
+{
+    if (!o->s) return;
+    hl_async_teardown_unlink(&o->track);
+    hl_http_stream_set_user(o->s, NULL);
+    hl_http_stream_free(o->s);
+    o->s = NULL;
+    hl_offheap_drop(&o->hold);
+    if (o->inflight) { (*o->inflight)--; o->inflight = NULL; }
+}
+
+/* The runtime is going: stop the request while the loop is alive. */
+static void hs_teardown(HlAsyncTeardown *t, HlAsyncBackendCtx *loop)
+{
+    (void)loop;
+    HlJsHttpStream *o = (HlJsHttpStream *)(void *)((char *)t -
+                                                  offsetof(HlJsHttpStream, track));
+    hs_release(o);
+}
+
+static void hs_unpark(HlJsHttpStream *o)
+{
+    HlAsyncCtx *ctx = o->ctx;
+    if (!ctx) return;
+    o->ctx = NULL;
+    ctx->detached_timer = 0;
+    /* ctx->driver stays o: the continuation's push_result reads from it. */
+    if (ctx->detached)
+        hl_async_ctx_resume_detached(ctx);
+    else
+        hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
+}
+
+static void hs_on_resume(HlAsyncOp *op)
+{
+    HlHttpStream *s = hl_http_stream_from_op(op);
+    HlJsHttpStream *o = s ? hl_http_stream_user(s) : NULL;
+    if (o) hs_unpark(o);
+}
+
+/* The deferred wake of a close() made while a read was parked. */
+static void hs_wake_fire(void *user_data)
+{
+    HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
+    HlJsHttpStream *o = (HlJsHttpStream *)ctx->driver;
+    ctx->detached_timer = 0;
+    if (o && o->ctx == ctx) hs_unpark(o);
+}
+
+static void hs_cancel_wake(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
+{
+    if (ctx->detached_timer > 0 && loop)
+        hl_async_backend()->timer_cancel(loop, (uint64_t)ctx->detached_timer);
+    ctx->detached_timer = 0;
+}
+
+/* The request a waiter was attached to is going away: the stream stops
+ * pointing at the ctx and is released (nobody is left to read it). */
+static void hs_on_request_cancel(KlAsyncOp *kop, void *user_data)
+{
+    (void)kop;
+    HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
+    HlJsHttpStream *o = (HlJsHttpStream *)ctx->driver;
+    if (o && o->ctx == ctx) {
+        o->ctx = NULL;
+        hs_cancel_wake(ctx, o->loop);
+        hs_release(o);
+    }
+    ctx->driver = NULL;
+    hl_async_ctx_cancel(ctx);
+}
+
+static void hs_on_shutdown(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
+{
+    HlJsHttpStream *o = (HlJsHttpStream *)ctx->driver;
+    if (o && o->ctx == ctx) {
+        o->ctx = NULL;
+        hs_cancel_wake(ctx, loop);
+        hs_release(o);
+    }
+    ctx->driver = NULL;
+}
+
+/* An Error carrying an own `code` ("timeout", "idle", "overflow",
+ * "too_large", "closed", "io_error"). */
+static JSValue hs_throw(JSContext *ctx, const HlJsHttpStream *o, int rc)
+{
+    JS_ThrowInternalError(ctx, "httpClient stream: %s",
+                          hl_http_stream_strerror(o ? o->s : NULL, rc));
+    JSValue e = JS_GetException(ctx);
+    JSValue c = JS_NewString(ctx, hl_http_stream_code(rc));
+    if (!JS_IsException(c))
+        JS_DefinePropertyValueStr(ctx, e, "code", c, JS_PROP_C_W_E);
+    return JS_Throw(ctx, e);
+}
+
+/* Bytes of a complete UTF-8 prefix of buf[0..n): the length of a trailing
+ * sequence that is a valid start but not yet complete is held back. */
+static size_t hs_utf8_complete(const uint8_t *b, size_t n)
+{
+    size_t back = n < 3 ? n : 3;
+    for (size_t k = 1; k <= back; k++) {
+        uint8_t c = b[n - k];
+        if ((c & 0xC0) == 0x80) continue;            /* continuation */
+        size_t need = (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3
+                    : (c & 0xF8) == 0xF0 ? 4 : 1;
+        return need > k ? n - k : n;                 /* incomplete: hold it */
+    }
+    return n;
+}
+
+/* One read, done now: the value for the parked or immediate call, or
+ * JS_EXCEPTION. AGAIN is reported as rc through *again (caller parks). */
+static JSValue hs_read_now(JSContext *ctx, HlJsHttpStream *o, int kind, int *again)
+{
+    *again = 0;
+    if (!o->s) {
+        if (kind == HS_PARK_NEXT) goto done;
+        return hs_throw(ctx, o, HL_HTTP_STREAM_E_CLOSED);
+    }
+    size_t want = hl_http_stream_buffered(o->s);
+    if (want > 64u * 1024u) want = 64u * 1024u;
+    if (want == 0) want = 1;   /* asks the cap: AGAIN, the end or the error */
+    /* The copy into the VM, charged before the bytes leave the stream: a
+     * trip after would lose them. */
+    if (hl_js_budget_charge(ctx, 64 + hl_work_bytes_units(want)))
+        return JS_EXCEPTION;
+    uint8_t *p = js_malloc(ctx, 4 + want);
+    if (!p) return JS_EXCEPTION;
+    size_t off = 0;
+    if (kind == HS_PARK_TEXT && o->ncarry) {
+        memcpy(p, o->carry, (size_t)o->ncarry);
+        off = (size_t)o->ncarry;
+    }
+    long n = hl_http_stream_read(o->s, p + off, want);
+    if (n <= 0) js_free(ctx, p);
+    if (n == HL_HTTP_STREAM_E_AGAIN) { *again = 1; return JS_UNDEFINED; }
+    if (n < 0) {
+        /* The body ended with an error once its bytes were read. */
+        return hs_throw(ctx, o, (int)n);
+    }
+    if (n == 0) {
+        if (kind == HS_PARK_TEXT && o->ncarry) {   /* a truncated character */
+            o->ncarry = 0;
+            return JS_NewStringLen(ctx, (const char *)o->carry, off);
+        }
+        if (kind == HS_PARK_NEXT) goto done;
+        return JS_NULL;
+    }
+    size_t total = off + (size_t)n;
+    if (kind == HS_PARK_TEXT) {
+        size_t keep = hs_utf8_complete(p, total);
+        o->ncarry = (int)(total - keep);
+        memcpy(o->carry, p + keep, (size_t)o->ncarry);
+        JSValue t = JS_NewStringLen(ctx, (const char *)p, keep);
+        js_free(ctx, p);
+        return t;
+    }
+    JSValue ab = JS_NewArrayBufferCopy(ctx, p, total);
+    js_free(ctx, p);
+    if (kind != HS_PARK_NEXT || JS_IsException(ab)) return ab;
+    JSValue r = JS_NewObject(ctx);
+    if (JS_IsException(r)) { JS_FreeValue(ctx, ab); return r; }
+    if (JS_DefinePropertyValueStr(ctx, r, "value", ab, JS_PROP_C_W_E) < 0 ||
+        JS_DefinePropertyValueStr(ctx, r, "done", JS_FALSE, JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, r);
+        return JS_EXCEPTION;
+    }
+    return r;
+done: {
+        JSValue rd = JS_NewObject(ctx);
+        if (JS_IsException(rd)) return rd;
+        if (JS_DefinePropertyValueStr(ctx, rd, "value", JS_UNDEFINED, JS_PROP_C_W_E) < 0 ||
+            JS_DefinePropertyValueStr(ctx, rd, "done", JS_TRUE, JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(ctx, rd);
+            return JS_EXCEPTION;
+        }
+        return rd;
+    }
+}
+
+/* The handle with its status and headers defined on it, once they arrived. */
+static JSValue hs_head_now(JSContext *ctx, HlJsHttpStream *o, JSValueConst self,
+                           int *again)
+{
+    *again = 0;
+    if (!o->s) return hs_throw(ctx, o, HL_HTTP_STREAM_E_CLOSED);
+    int status = 0, n = 0;
+    const HlHttpHeader *h = NULL;
+    int rc = hl_http_stream_head(o->s, &status, &h, &n);
+    if (rc == HL_HTTP_STREAM_E_AGAIN) { *again = 1; return JS_UNDEFINED; }
+    if (rc != 0) return hs_throw(ctx, o, rc);
+    JSValue headers = JS_NewObject(ctx);
+    if (JS_IsException(headers)) return headers;
+    for (int i = 0; i < n; i++) {
+        size_t nlen = strlen(h[i].name);
+        char *lower = js_malloc(ctx, nlen + 1);
+        if (!lower) { JS_FreeValue(ctx, headers); return JS_EXCEPTION; }
+        for (size_t j = 0; j < nlen; j++) {
+            char c = h[i].name[j];
+            lower[j] = (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
+        }
+        lower[nlen] = '\0';
+        int drc = js_http_define(ctx, headers, lower, JS_NewString(ctx, h[i].value));
+        js_free(ctx, lower);
+        if (drc != 0) { JS_FreeValue(ctx, headers); return JS_EXCEPTION; }
+    }
+    JSValue obj = JS_DupValue(ctx, self);
+    if (js_http_define(ctx, obj, "status", JS_NewInt32(ctx, status)) != 0 ||
+        js_http_define(ctx, obj, "headers", headers) != 0) {
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
+    return obj;
+}
+
+static JSValue hs_push_result(JSContext *ctx, void *driver)
+{
+    HlJsHttpStream *o = (HlJsHttpStream *)driver;
+    int again = 0, kind = o->kind;
+    JSValue v;
+    o->kind = 0;
+    if (kind == HS_PARK_HEAD) {
+        /* o->self may be the handle's last reference (the app has not got
+         * it yet): when the head failed, freeing it runs the finalizer, which
+         * frees o - so nothing touches o after this free. */
+        JSValue self = o->self;
+        o->self = JS_UNDEFINED;
+        v = hs_head_now(ctx, o, self, &again);
+        JS_FreeValue(ctx, self);
+    } else {
+        v = hs_read_now(ctx, o, kind, &again);
+    }
+    if (again) {   /* the cap only wakes a waiter that will not wait again */
+        JS_FreeValue(ctx, v);
+        return JS_ThrowInternalError(ctx, "httpClient stream: woken with "
+                                     "nothing to read");
+    }
+    return v;
+}
+
+/* Park the call, returning the Promise its result settles; JS_EXCEPTION when
+ * the runtime refuses the wait or the park cannot be armed. */
+static JSValue hs_park(JSContext *ctx, HlJsHttpStream *o, int kind,
+                       JSValueConst self, const char *what)
+{
+    HlJS *js = get_hl_js(ctx);
+    if (hl_js_async_gate(ctx, js, what) != 0) return JS_EXCEPTION;
+    if (hl_js_db_refuse_wait(ctx, what)) return JS_EXCEPTION;
+    if (!js || !js->base.async_ctx || o->ctx)
+        return JS_ThrowInternalError(ctx, "%s: cannot wait", what);
+    HlAsyncOp *op = hl_http_stream_pending_op(o->s);
+    const HlAsyncBackend *be = hl_async_backend();
+    if (!op || !be || !be->op_suspend || !be->op_cancel)
+        return JS_ThrowInternalError(ctx, "%s: cannot wait", what);
+
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx,
+                                           js->base.alloc);
+    if (!actx) return JS_ThrowOutOfMemory(ctx);
+    JSValue rf[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, rf);
+    if (JS_IsException(promise)) { hl_async_ctx_free(actx); return promise; }
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *js, JSValue resolve,
+        JSValue reject, HlAllocator *alloc,
+        JSValue (*push_result)(JSContext *, void *));
+    HlAsyncCont *cont = hl_js_async_cont_create(js, rf[0], rf[1],
+                                                js->base.alloc, hs_push_result);
+    if (!cont) {
+        JS_FreeValue(ctx, rf[0]);
+        JS_FreeValue(ctx, rf[1]);
+        JS_FreeValue(ctx, promise);
+        hl_async_ctx_free(actx);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    actx->cont = cont;
+    actx->driver = o;
+    actx->op.on_cancel = hs_on_request_cancel;
+    actx->detached = (hl_js_cont_suspend_conn(cont) == NULL);
+
+    hl_http_stream_set_user(o->s, o);
+    op->on_resume = hs_on_resume;
+    op->on_cancel = hs_on_resume;
+
+    if (be->op_suspend(js->base.async_ctx, op) != 0) {
+        actx->cont = NULL;
+        cont->destroy(cont);
+        hl_async_ctx_free(actx);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "%s: cannot wait", what);
+    }
+    if (!actx->detached && hl_js_op_suspend(js, (HlSuspendOp *)&actx->op) < 0) {
+        be->op_cancel(js->base.async_ctx, op);
+        actx->cont = NULL;
+        cont->destroy(cont);
+        hl_async_ctx_free(actx);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "%s: cannot wait", what);
+    }
+    o->ctx = actx;
+    o->loop = js->base.async_ctx;
+    o->kind = kind;
+    if (kind == HS_PARK_HEAD) o->self = JS_DupValue(ctx, self);
+    if (actx->detached) {
+        actx->on_shutdown = hs_on_shutdown;
+        hl_async_ctx_track(actx, &js->base.async_live);
+    }
+    return promise;
+}
+
+/* A Promise already settled with @p v (taken), or rejected with the pending
+ * exception when v is JS_EXCEPTION. */
+static JSValue hs_settled(JSContext *ctx, JSValue v)
+{
+    JSValue rf[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, rf);
+    if (JS_IsException(promise)) { JS_FreeValue(ctx, v); return promise; }
+    JSValue arg = v, ret;
+    if (JS_IsException(v)) {
+        arg = JS_GetException(ctx);
+        ret = JS_Call(ctx, rf[1], JS_UNDEFINED, 1, &arg);
+    } else {
+        ret = JS_Call(ctx, rf[0], JS_UNDEFINED, 1, &arg);
+    }
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, arg);
+    JS_FreeValue(ctx, rf[0]);
+    JS_FreeValue(ctx, rf[1]);
+    return promise;
+}
+
+static HlJsHttpStream *hs_this(JSContext *ctx, JSValueConst this_val)
+{
+    HlJsHttpStream *o = JS_GetOpaque(this_val, hl_http_stream_class_id);
+    if (!o) JS_ThrowTypeError(ctx, "httpClient stream: not a stream response");
+    return o;
+}
+
+static JSValue hs_read_common(JSContext *ctx, JSValueConst this_val, int kind,
+                              const char *what)
+{
+    HlJsHttpStream *o = hs_this(ctx, this_val);
+    if (!o) return JS_EXCEPTION;
+    if (o->ctx && o->s) {
+        JS_ThrowTypeError(ctx, "%s: another read is waiting on this stream", what);
+        return hl_js_refusal_tag(ctx, HL_REFUSAL_BUSY);
+    }
+    int again = 0;
+    JSValue v = hs_read_now(ctx, o, kind, &again);
+    if (!again) return hs_settled(ctx, v);
+    return hs_park(ctx, o, kind, this_val, what);
+}
+
+static JSValue js_hs_read(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    return hs_read_common(ctx, this_val, HS_PARK_BYTES, "stream.read()");
+}
+
+static JSValue js_hs_read_text(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    return hs_read_common(ctx, this_val, HS_PARK_TEXT, "stream.readText()");
+}
+
+static JSValue js_hs_next(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    return hs_read_common(ctx, this_val, HS_PARK_NEXT, "stream iterator");
+}
+
+static JSValue js_hs_async_iterator(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    return JS_DupValue(ctx, this_val);
+}
+
+/* close(): stops the request. A read parked on the stream is handed back
+ * from the loop (never inside this caller's run) and finds it closed. */
+static JSValue js_hs_close(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    HlJsHttpStream *o = hs_this(ctx, this_val);
+    if (!o) return JS_EXCEPTION;
+    if (o->s && o->ctx && o->ctx->detached_timer == 0) {
+        uint64_t tid = o->loop
+            ? hl_async_backend()->timer_add(o->loop, 0, hs_wake_fire, o->ctx) : 0;
+        if (tid == 0)
+            return JS_ThrowInternalError(ctx, "stream.close(): cannot schedule");
+        o->ctx->detached_timer = (int64_t)tid;
+    }
+    hs_release(o);
+    return JS_UNDEFINED;
+}
+
+/* The iterator's return(): a for-await that breaks out closes the stream. */
+static JSValue js_hs_return(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{
+    JSValue r = js_hs_close(ctx, this_val, argc, argv);
+    if (JS_IsException(r)) return hs_settled(ctx, r);
+    int again = 0;
+    HlJsHttpStream *o = JS_GetOpaque(this_val, hl_http_stream_class_id);
+    return hs_settled(ctx, hs_read_now(ctx, o, HS_PARK_NEXT, &again));
+}
+
+static void js_hs_finalizer(JSRuntime *rt, JSValue val)
+{
+    HlJsHttpStream *o = JS_GetOpaque(val, hl_http_stream_class_id);
+    if (!o) return;
+    /* While a read is parked, its continuation's promise chain holds this
+     * handle; run then only as the runtime goes. Its ctx's owner still
+     * cancels it and must not reach this struct. */
+    if (o->ctx) o->ctx->driver = NULL;
+    JS_FreeValueRT(rt, o->self);
+    hs_release(o);
+    free(o);
+}
+
+static void js_hs_mark(JSRuntime *rt, JSValueConst val, JS_MarkFunc *mark_func)
+{
+    HlJsHttpStream *o = JS_GetOpaque(val, hl_http_stream_class_id);
+    if (o) JS_MarkValue(rt, o->self, mark_func);
+}
+
+static const JSClassDef js_hs_class = {
+    "HttpStream",
+    .finalizer = js_hs_finalizer,
+    .gc_mark = js_hs_mark,
+};
+
+static const JSCFunctionListEntry js_hs_methods[] = {
+    JS_CFUNC_DEF("read", 0, js_hs_read),
+    JS_CFUNC_DEF("readText", 0, js_hs_read_text),
+    JS_CFUNC_DEF("close", 0, js_hs_close),
+    JS_CFUNC_DEF("next", 0, js_hs_next),
+    JS_CFUNC_DEF("return", 0, js_hs_return),
+};
+
+/* A non-negative integer option, or the default; a value that is present
+ * and not a positive number throws. */
+static int hs_opt_num(JSContext *ctx, JSValueConst opts, const char *name,
+                      double lo, double hi, double *out)
+{
+    if (!JS_IsObject(opts)) return 0;
+    JSValue v = JS_GetPropertyStr(ctx, opts, name);
+    if (JS_IsException(v)) return -1;
+    if (JS_IsUndefined(v) || JS_IsNull(v)) return 0;
+    double d = 0;
+    if (!JS_IsNumber(v) || JS_ToFloat64(ctx, &d, v) < 0 || !(d >= lo)) {
+        JS_FreeValue(ctx, v);
+        JS_ThrowTypeError(ctx, "httpClient.async.stream: opts.%s must be a "
+                          "number of at least %.0f", name, lo);
+        return -1;
+    }
+    *out = d > hi ? hi : d;
+    return 0;
+}
+
+/* httpClient.async.stream(method, url, opts?) -> Promise<response> */
+static JSValue js_http_stream(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    const char *what = "httpClient.async.stream()";
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.http_cfg)
+        return JS_ThrowInternalError(ctx, "http not configured (no hosts in manifest)");
+    if (!js->base.async_ctx || !js->server)
+        return JS_ThrowInternalError(ctx, "%s requires an active event loop", what);
+    if (hl_js_async_gate(ctx, js, what) != 0) return JS_EXCEPTION;
+    if (hl_js_db_refuse_wait(ctx, what)) return JS_EXCEPTION;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "httpClient.async.stream requires (method, url, opts?)");
+
+    int timeout_ms = 0;
+    if (js_http_timeout_opt(ctx, argc, argv, 2, "httpClient.async.stream", &timeout_ms) != 0)
+        return JS_EXCEPTION;
+    JSValueConst opts = argc >= 3 ? argv[2] : JS_UNDEFINED;
+    double idle = 0, max_bytes = 0, buf_bytes = 0;
+    if (hs_opt_num(ctx, opts, "idleTimeoutMs", 1, HL_HTTP_STREAM_IDLE_MAX_MS, &idle) ||
+        hs_opt_num(ctx, opts, "maxBytes", 1, 9007199254740991.0, &max_bytes) ||
+        hs_opt_num(ctx, opts, "bufferBytes", HL_HTTP_STREAM_BUF_MIN,
+                   HL_HTTP_STREAM_BUF_MAX, &buf_bytes))
+        return JS_EXCEPTION;
+    JS_HTTP_CHARGE_REQUEST(ctx);
+
+    const char *method = JS_ToCString(ctx, argv[0]);
+    const char *url = method ? JS_ToCString(ctx, argv[1]) : NULL;
+    if (!method || !url) {
+        if (method) JS_FreeCString(ctx, method);
+        return JS_EXCEPTION;
+    }
+    JsHttpBody jbody = {0};
+    HlHttpHeader *headers = NULL;
+    int num_headers = 0;
+    if (JS_IsObject(opts)) {
+        JSValue bv = JS_GetPropertyStr(ctx, opts, "body");
+        int bad = JS_IsException(bv) || js_http_body_get(ctx, bv, &jbody, what) != 0;
+        JS_FreeValue(ctx, bv);
+        if (!bad) {
+            JSValue hv = JS_GetPropertyStr(ctx, opts, "headers");
+            bad = JS_IsException(hv) ||
+                  (JS_IsObject(hv) && js_parse_http_headers(ctx, hv, &headers,
+                                                            &num_headers) != 0);
+            JS_FreeValue(ctx, hv);
+        }
+        if (bad) {
+            JS_FreeCString(ctx, method);
+            JS_FreeCString(ctx, url);
+            js_http_body_free(ctx, &jbody);
+            return JS_EXCEPTION;
+        }
+    }
+    JSValue obj = JS_UNDEFINED;
+    HlJsHttpStream *o = NULL;
+    HlOffheapHold hold = {0};
+    /* App code ran (toString, getters): the wait rules again. */
+    if (hl_js_async_gate(ctx, js, what) != 0 || hl_js_db_refuse_wait(ctx, what))
+        goto fail;
+    size_t cap = buf_bytes > 0 ? (size_t)buf_bytes : HL_HTTP_STREAM_BUF_DEFAULT;
+    int admit = hl_http_fetch_admit(js->base.http_inflight, &hold,
+                                    &js->wasm_buf_bytes, js->max_heap_bytes,
+                                    jbody.len + cap);
+    if (admit != HL_HTTP_ADMIT_OK) {
+        if (admit == HL_HTTP_ADMIT_INFLIGHT)
+            JS_ThrowRangeError(ctx, "%s: too many requests in flight (at most "
+                               "%d per VM)", what, HL_HTTP_MAX_INFLIGHT);
+        else
+            JS_ThrowRangeError(ctx, "%s: the stream's buffer would take the "
+                               "VM's off-heap copies past its heap limit", what);
+        hl_js_refusal_tag(ctx, HL_REFUSAL_BUSY);
+        goto fail;
+    }
+    obj = JS_NewObjectClass(ctx, (int)hl_http_stream_class_id);
+    if (JS_IsException(obj)) goto fail;
+    o = calloc(1, sizeof *o);
+    if (!o) { JS_ThrowOutOfMemory(ctx); goto fail; }
+    o->self = JS_UNDEFINED;
+    JS_SetOpaque(obj, o);
+
+    HlHttpStreamConfig cfg = {
+        .server = js->server, .async = js->base.async_ctx,
+        .http_cfg = js->base.http_cfg, .timeout_ms = timeout_ms,
+        .idle_ms = (int)idle, .buf_cap = cap, .max_bytes = (size_t)max_bytes,
+        .method = method, .url = url, .headers = headers,
+        .num_headers = num_headers, .body = jbody.p, .body_len = jbody.len,
+    };
+    if (hl_http_stream_start(&o->s, &cfg) != 0) {
+        HlHttpDenial denial;
+        if (hl_http_url_denied(js->base.http_cfg, url, &denial))
+            js_http_throw_denied(ctx, "httpClient.async.stream", &denial);
+        else
+            JS_ThrowInternalError(ctx, "%s: failed to start the request", what);
+        goto fail;
+    }
+    o->hold = hold;
+    hold = (HlOffheapHold){0};
+    o->inflight = &js->base.http_inflight;
+    js->base.http_inflight++;
+    o->track.stop = hs_teardown;
+    hl_async_teardown_link(&js->base.async_live, &o->track);
+    JS_FreeCString(ctx, method);
+    JS_FreeCString(ctx, url);
+    js_http_body_free(ctx, &jbody);
+    js_free_http_headers(ctx, headers, num_headers);
+
+    int again = 0;
+    JSValue v = hs_head_now(ctx, o, obj, &again);
+    JSValue r = again ? hs_park(ctx, o, HS_PARK_HEAD, obj, what) : hs_settled(ctx, v);
+    if (JS_IsException(r)) hs_release(o);
+    JS_FreeValue(ctx, obj);
+    return r;
+
+fail:
+    hl_offheap_drop(&hold);
+    JS_FreeValue(ctx, obj);   /* the finalizer frees o */
+    JS_FreeCString(ctx, method);
+    JS_FreeCString(ctx, url);
+    js_http_body_free(ctx, &jbody);
+    js_free_http_headers(ctx, headers, num_headers);
+    return JS_EXCEPTION;
+}
+
+/* The class and its prototype, once per runtime (the id once per process). */
+static int hs_register_class(JSContext *ctx)
+{
+    JS_NewClassID(&hl_http_stream_class_id);
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    if (JS_IsRegisteredClass(rt, hl_http_stream_class_id)) return 0;
+    if (JS_NewClass(rt, hl_http_stream_class_id, &js_hs_class) < 0) return -1;
+    JSValue proto = JS_NewObject(ctx);
+    if (JS_IsException(proto)) return -1;
+    hl_js_set_function_list(ctx, proto, js_hs_methods,
+        (int)(sizeof js_hs_methods / sizeof js_hs_methods[0]));
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue sym = JS_GetPropertyStr(ctx, global, "Symbol");
+    JSValue ai = JS_GetPropertyStr(ctx, sym, "asyncIterator");
+    if (JS_IsSymbol(ai)) {
+        JSAtom atom = JS_ValueToAtom(ctx, ai);
+        JS_DefinePropertyValue(ctx, proto, atom,
+            JS_NewCFunction(ctx, js_hs_async_iterator, "[Symbol.asyncIterator]", 0),
+            JS_PROP_C_W_E);
+        JS_FreeAtom(ctx, atom);
+    }
+    JS_FreeValue(ctx, ai);
+    JS_FreeValue(ctx, sym);
+    JS_FreeValue(ctx, global);
+    hl_js_set_class_proto_frozen(ctx, hl_http_stream_class_id, proto);
+    return 0;
+}
+
 static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
 {
     if (hl_js_check_module_declared(ctx, "hull/http-client", "hull:http-client") != 0) return -1;
@@ -907,6 +1566,13 @@ static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_http_async_patch, "patch", 3));
     JS_SetPropertyStr(ctx, async_obj, "delete",
                       JS_NewCFunction(ctx, js_http_async_delete, "delete", 2));
+    if (hs_register_class(ctx) != 0) {
+        JS_FreeValue(ctx, async_obj);
+        JS_FreeValue(ctx, http);
+        return -1;
+    }
+    JS_SetPropertyStr(ctx, async_obj, "stream",
+                      JS_NewCFunction(ctx, js_http_stream, "stream", 3));
     JS_SetPropertyStr(ctx, http, "async", async_obj);
 
     hl_js_export_frozen(ctx, m, "httpClient", http);

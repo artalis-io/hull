@@ -6,6 +6,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
+## [Unreleased]
+
+### Added
+
+- `http.async.stream(method, url, opts?)` (JS `httpClient.async.stream`): a response
+  handed over as it arrives - status and headers as soon as they are in, then the body
+  chunk by chunk (Lua `res.read()`, JS `read()` / `readText()` / `for await`). Timeouts
+  up to the headers and between arrivals (`idle_timeout_ms`), a `max_bytes` cap, and a
+  bounded buffer for a slow reader (`buffer_bytes`, code `overflow` past it: Keel's
+  client cannot pause the server, a follow-up). No redirects. Both runtimes.
+- `hull/sse-client`: the HTML standard's Server-Sent Events parser over such a stream
+  (`sse.events(res)` / `sseClient.events(res)`, and the parser alone). Both runtimes.
+
 ## [0.23.4] - 2026-11-22
 
 One fix: a built CLI (an app with `app.main` and no handlers) no longer prints Hull's own INFO

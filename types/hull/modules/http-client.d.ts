@@ -25,6 +25,36 @@ declare module "hull:http-client" {
         /** Response headers by lowercased name. */
         headers: { [name: string]: string };
     }
+    /** Options of `async.stream`. */
+    export interface HttpStreamOptions extends HttpRequestOptions {
+        /** Deadline (ms, >= 1) up to the response headers (default manifest `http.timeoutMs`, else 30 s; clamped to 10 min). */
+        timeoutMs?: number | null;
+        /** Longest gap (ms, >= 1) between two body arrivals after the headers; default 60 000, at most 1 h. */
+        idleTimeoutMs?: number | null;
+        /** Ends the stream with code "too_large" once the body passes this many bytes; default no limit. */
+        maxBytes?: number | null;
+        /** Unread bytes held for a slow reader before the stream ends with code "overflow"; default 1 MiB, 16 KiB .. 16 MiB. */
+        bufferBytes?: number | null;
+    }
+    /** A streamed response: status and headers now, the body as it arrives. A read that ends the stream with an error throws an Error whose `code` is "timeout", "idle", "overflow", "too_large", "closed" or "io_error". */
+    export interface HttpStream {
+        /** The HTTP status code. */
+        readonly status: number;
+        /** Response headers by lowercased name. */
+        readonly headers: { [name: string]: string };
+        /** The next body bytes; null at the end of the body. */
+        read(): Promise<ArrayBuffer | null>;
+        /** The next body text (UTF-8; a character split across chunks waits for the rest); null at the end. */
+        readText(): Promise<string | null>;
+        /** Stop the request; a waiting read finds the stream closed. */
+        close(): void;
+        /** Async-iterator step over the byte chunks. */
+        next(): Promise<IteratorResult<ArrayBuffer, undefined>>;
+        /** Leaving a for-await early closes the stream. */
+        return(): Promise<IteratorResult<ArrayBuffer, undefined>>;
+        /** `for await (const chunk of res)`. */
+        [Symbol.asyncIterator](): HttpStream;
+    }
     /** Non-blocking variants: each parks the caller and resolves to the response. */
     export interface HttpClientAsync {
         /** Send `method` to `url`; resolves to the response. Refused (`busy`) past 64 fetches in flight. */
@@ -39,6 +69,8 @@ declare module "hull:http-client" {
         patch(url: string, body?: HttpBody, opts?: HttpOptions): Promise<HttpResponse>;
         /** DELETE `url`. */
         delete(url: string, opts?: HttpRequestOptions): Promise<HttpResponse>;
+        /** Send `method` to `url`; resolves to the response as soon as its headers arrive, the body read from it. No redirects. Counts as one of the 64 requests in flight while open. */
+        stream(method: string, url: string, opts?: HttpStreamOptions): Promise<HttpStream>;
     }
     /** The `hull:http-client` module object. The sync calls block the event loop; prefer `async`. */
     export interface HttpClient {

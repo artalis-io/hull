@@ -6450,6 +6450,15 @@ UTEST(lua_stdlib, ssh_tunnel_suite)
     EXPECT_GT(pass, 0LL);
 }
 
+UTEST(lua_stdlib, sse_client_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_sse_client.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
 UTEST(lua_stdlib, csv_suite)
 {
     long long pass = 0, fail = -1;
