@@ -90,7 +90,6 @@ static int app_is_unsigned(const char *app_dir)
  * test` does. The child's status, or 1. */
 static int modules_step(const char *verb, const char *app_dir, const HlCommandEnv *env)
 {
-    const char *margv[3] = { "check", verb, app_dir };
     fflush(NULL);
     pid_t pid = fork();
     if (pid < 0) {
@@ -98,6 +97,7 @@ static int modules_step(const char *verb, const char *app_dir, const HlCommandEn
         return 1;
     }
     if (pid == 0) {
+        const char *margv[3] = { "check", verb, app_dir };
         int rc = hl_cmd_modules(3, (char **)(uintptr_t)margv, env);  /* does not modify argv */
         fflush(NULL);
         _exit(rc < 0 ? 1 : rc & 0xff);   /* not exit(): the parent's atexit work is its own */
