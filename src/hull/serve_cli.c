@@ -562,12 +562,13 @@ int hull_serve(int argc, char **argv)
     /* One escaped line per record, as serve.c's: log.c's default callback
      * printed app text (an uncaught error's message) raw, so a newline in it
      * forged a record (audit 28). Sole owner, as in serve.c, if a subcommand
-     * reached this in-process with the CLI policy installed. INFO, serve.c's
-     * default: a built CLI's run prints only the app's output and real
-     * warnings - Hull's own step notes (sandbox applied, ...) are DEBUG,
-     * shown by `hull --verbose app.lua`. */
+     * reached this in-process with the CLI policy installed. A built CLI's
+     * run prints only the app's output and real warnings: the app's records
+     * at INFO, Hull's own (the CA bundle in use, the sandbox applied, ...)
+     * at WARN, all of them shown by `hull --verbose app.lua`. */
     hl_cli_log_suspend();
-    hl_log_install_line_callback(xo.verbose ? LOG_DEBUG : LOG_INFO);
+    hl_log_install_line_callback_ex(xo.verbose ? LOG_DEBUG : LOG_INFO,
+                                    xo.verbose ? LOG_DEBUG : LOG_WARN);
     hl_log_make_threadsafe();
     hl_event_loop_mark_current();
     HlAsyncBackendPool *pool = NULL;

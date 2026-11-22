@@ -188,10 +188,18 @@ void hl_cli_log_init(int verbose)
     log_add_callback(cli_log_callback, stderr, LOG_TRACE);
 }
 
+/* The least level of a Hull-internal (C) record the line callback prints;
+ * script records go by log.c's level alone. LOG_TRACE: no extra filter. Set
+ * once, by the installer, before any worker thread exists. */
+static int g_line_native_min = LOG_TRACE;
+
 /* The plain per-record line (serve.c's server log, and the app.main runner):
  * time, level, message - every message CR / LF escaped (audit 27/28). */
 static void line_callback(log_Event *ev)
 {
+    if (ev->level < g_line_native_min && hl_cli_log_is_native_source(ev->file))
+        return;
+
     char ts[16];
     ts[strftime(ts, sizeof(ts), "%H:%M:%S", ev->time)] = '\0';
 
@@ -215,6 +223,17 @@ static void line_callback(log_Event *ev)
 
 void hl_log_install_line_callback(int level)
 {
+    hl_log_install_line_callback_ex(level, LOG_TRACE);
+}
+
+void hl_log_line_native_min_set(int native_min)
+{
+    g_line_native_min = native_min;
+}
+
+void hl_log_install_line_callback_ex(int level, int native_min)
+{
+    g_line_native_min = native_min;
     log_set_level(level);
     log_set_quiet(true);   /* log.c's own stderr callback prints raw text */
     log_add_callback(line_callback, stderr, level);
