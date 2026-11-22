@@ -6,7 +6,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
-## [Unreleased]
+## [0.23.3] - 2026-11-22
+
+One fix: on Linux, `hull check` failed TypeScript apps (any app with a build pipeline) and apps
+with a state directory that a standalone `hull test` passed, because its test step ran inside
+the tool sandbox the manifest step had applied. No upgrade notes.
 
 ### Fixed
 
