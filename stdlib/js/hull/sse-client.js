@@ -130,21 +130,41 @@ function parser() {
     return newParser();
 }
 
-async function* events(res) {
+// An async iterator object rather than an async generator: the project
+// analyzer (stdlib/cli/js/hull/source) declines generators.
+function events(res) {
     if (res === null || typeof res !== "object" || typeof res.readText !== "function")
         throw new TypeError("sse-client: events takes a response from httpClient.async.stream");
     const p = newParser();
-    let finished = false;
-    try {
-        for (;;) {
-            const text = await res.readText();
-            const evs = text === null ? p.finish() : p.feed(text);
-            for (const ev of evs) yield ev;
-            if (text === null) { finished = true; return; }
-        }
-    } finally {
-        if (!finished) res.close();
-    }
+    let queue = [];
+    let qi = 0;
+    let done = false;
+    const it = {
+        async next() {
+            for (;;) {
+                if (qi < queue.length) return { value: queue[qi++], done: false };
+                if (done) return { value: undefined, done: true };
+                let text;
+                try {
+                    text = await res.readText();
+                } catch (e) {
+                    done = true;     // the stream ended with this error
+                    queue = [];
+                    throw e;
+                }
+                queue = text === null ? p.finish() : p.feed(text);
+                qi = 0;
+                if (text === null) done = true;
+            }
+        },
+        async return() {
+            if (!done) { done = true; res.close(); }
+            queue = [];
+            return { value: undefined, done: true };
+        },
+        [Symbol.asyncIterator]() { return it; },
+    };
+    return it;
 }
 
 export const sseClient = { events, parser };

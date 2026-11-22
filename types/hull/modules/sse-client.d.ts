@@ -22,7 +22,7 @@ declare module "hull:sse-client" {
     /** The `hull:sse-client` module object. */
     export interface SseClientModule {
         /** The events of a streamed response; throws the read's Error (its `code`) when the stream ends with one. Leaving the loop early closes the stream. */
-        events(res: HttpStream): AsyncGenerator<SseEvent, void, undefined>;
+        events(res: HttpStream): AsyncIterableIterator<SseEvent>;
         /** A fresh parser. */
         parser(): SseParser;
     }
