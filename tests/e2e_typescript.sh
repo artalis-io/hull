@@ -343,9 +343,10 @@ echo "== typescript: hull build"
 mkdir -p "$WORK/out"
 rc=0; "$HULL" build --no-verify-platform "$d" -o "$WORK/out/bin_main" > "$WORK/b1.txt" 2>&1 || rc=$?
 # A tree built without the platform library, or a hull with no bundled
-# app_main.o (a plain `make CC=cosmocc`), cannot link apps.
+# app_main.o or platform archives (a plain `make CC=cosmocc`), cannot link apps.
 if [ "$rc" -ne 0 ] && { has "$WORK/b1.txt" "libhull_platform.a" ||
-                        has "$WORK/b1.txt" "no bundled app_main.o"; }; then
+                        has "$WORK/b1.txt" "no bundled app_main.o" ||
+                        has "$WORK/b1.txt" "cannot find platform archives"; }; then
     echo "  SKIP: hull build (no platform library in this tree)"
 else
     mkdir -p "$WORK/run1"

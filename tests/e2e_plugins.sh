@@ -266,7 +266,10 @@ if [ -x "$DRIVE" ]; then
     "$DRIVE" "refusing to write the generation bundle to a terminal" "%s100" -- \
         "$HULL" plugins generation "$d" > "$WORK/g-tty.txt" 2>&1 && rc=0 || rc=$?
     "$HULL" plugins generation "$d" > "$WORK/g-pipe.bin" 2>/dev/null || true
-    if [ "$rc" -eq 0 ] && ! grep -q "$(printf '\033\\]52')" "$WORK/g-tty.txt" &&
+    if [ "$rc" -eq 77 ]; then
+        # The driver's skip status: a build without forkpty (cosmo).
+        echo "  SKIP: plugins_audit51.generation_tty_refused ($(cat "$WORK/g-tty.txt"))"
+    elif [ "$rc" -eq 0 ] && ! grep -q "$(printf '\033\\]52')" "$WORK/g-tty.txt" &&
        grep -q "$(printf '\033\\]52')" "$WORK/g-pipe.bin"; then
         ok "plugins_audit51.generation_tty_refused"
     else
