@@ -10,6 +10,16 @@ release-artifact layout).
 
 ### Fixed
 
+- **A cosmo hull could not run TypeScript or build plugins:** on the `hull-cosmo` binary
+  (what `install.sh` gives the BSDs and any host without a native build), `hull app.ts`,
+  `hull test` of a TypeScript app and every `hull.build.json` app failed with "build plugins
+  need a native hull" (#1173). The plugin channel now runs on a cosmo APE on Linux and macOS
+  (the BSDs take the same path but are not yet tested). On Linux, the APE loader a cosmo hull runs under is granted read + execute in the
+  tool sandbox so the hull can start its own plugin processes, and the sandbox's thread check
+  counts cosmo's own threads when `/proc` is out of reach (inside a plugin's inherited
+  Landlock domain). Windows is not covered yet: there the pipeline fails with "build plugins
+  and TypeScript entries do not run on Windows yet" (#1188).
+
 - A dynamically linked Hull binary on a system with glibc 2.42 or later (Arch, and
   distributions following it) was killed by its own Linux sandbox at its first
   terminal-settings call: `ctx.stdin:read_secret` / `readSecret` reading from a

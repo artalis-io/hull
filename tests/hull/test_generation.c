@@ -24,6 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#if defined(__COSMOPOLITAN__)
+#include <cosmo.h>   /* IsWindows */
+#endif
 
 typedef struct {
     const char *name;
@@ -533,14 +536,14 @@ UTEST(generation, a_typescript_entry_runs_the_pipeline)
 }
 
 /* An app directory holding a hull.build.json (into app, which must hold
- * HL_TEST_PATH_MAX bytes); -2 on a build without the child channel (a
- * cosmo APE or Windows: HL_CHAN_SUPPORTED is undefined), or when this
+ * HL_TEST_PATH_MAX bytes); -2 on a build or host without the child channel
+ * (a native Windows build, or a cosmo APE running on Windows), or when this
  * binary cannot find its own path, so no pipeline child can be spawned. */
 static int pipeline_app(char *app)
 {
 #ifdef HL_CHAN_SUPPORTED
     char exe[4096];
-    if (hl_chan_self_exe(exe, sizeof exe) != 0) return -2;
+    if (!hl_chan_host_ok() || hl_chan_self_exe(exe, sizeof exe) != 0) return -2;
 #else
     return -2;
 #endif
@@ -593,6 +596,38 @@ UTEST(generation_audit50, verify_sig_take_runs_nothing)
     hl_generation_reset();
     ASSERT_EQ(1, hl_generation_take(0, app));
     hl_generation_reset();
+    unlink_in(app, "hull.build.json");
+    rmdir(app);
+}
+
+/* generation_issue1173.cosmo_runs_the_pipeline: a cosmo APE refused every
+ * pipeline ("build plugins need a native hull"), so build plugins and every
+ * TypeScript entry failed on the hull install.sh gives the BSDs and any
+ * host without a native build. Written without HL_CHAN_SUPPORTED so it
+ * builds, and fails, on the code before the fix. A cosmo APE on Windows
+ * still has no channel and is skipped. */
+UTEST(generation_issue1173, cosmo_runs_the_pipeline)
+{
+#if defined(__COSMOPOLITAN__)
+    if (IsWindows()) { UTEST_SKIP("no channel child on Windows"); }
+#elif defined(_WIN32)
+    UTEST_SKIP("no channel child on a native Windows build");
+#endif
+    const char *dir = hl_test_tmpdir();
+    ASSERT_TRUE(dir != NULL);
+    char app[HL_TEST_PATH_MAX];
+    snprintf(app, sizeof app, "%s/hull-gen-1173-XXXXXX", dir);
+    ASSERT_TRUE(mkdtemp(app) != NULL);
+    ASSERT_EQ(0, touch_in(app, "hull.build.json"));
+    unsetenv(HL_DEV_SESSION_ENV);
+    uint8_t *b = NULL;
+    size_t len = 0;
+    int rc = hl_generation_produce(app, &b, &len);
+    if (rc != 0) fprintf(stderr, "produce: %s\n", hl_generation_error());
+    ASSERT_EQ(0, rc);
+    ASSERT_EQ((size_t)6, len);
+    ASSERT_EQ(0, memcmp(b, "absent", 6));
+    free(b);
     unlink_in(app, "hull.build.json");
     rmdir(app);
 }

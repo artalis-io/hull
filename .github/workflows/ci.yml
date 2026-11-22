@@ -2543,6 +2543,19 @@ jobs:
         timeout-minutes: 5
         run: HULL=build/hull sh tests/e2e_cache_cosmo.sh
 
+      # The build pipeline on a cosmo hull (#1173): build plugins and
+      # TypeScript entries spawn hull itself over a socketpair on fd 3, which
+      # a cosmo build could not do. The `hull build` legs skip here (a plain
+      # `make CC=cosmocc` bundles no app_main.o); everything else runs.
+      - name: Build pipeline E2E tests (cosmo)
+        timeout-minutes: 10
+        run: |
+          make e2e-generation CC=cosmocc
+          make e2e-plugins CC=cosmocc
+          make e2e-build-plugin CC=cosmocc
+          make e2e-typescript CC=cosmocc
+          make e2e-typescript-examples CC=cosmocc
+
       # Regression guard for the exit-256 class: a PRODUCED cosmo app must boot
       # with a populated runtime VFS (require "hull.json" resolves). The strong
       # hl_stdlib_feature_entries() override (build.lua emits it; the seam-

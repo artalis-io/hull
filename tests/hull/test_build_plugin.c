@@ -102,6 +102,7 @@ static int high(int fd)
 
 UTEST(build_plugin, take_env)
 {
+    if (!hl_chan_host_ok()) UTEST_SKIP("no channel child on Windows");
     unsetenv(HL_BUILD_PLUGIN_ENV);
     ASSERT_EQ(0, hl_build_plugin_take_env());            /* not a plugin */
     ASSERT_EQ(-1, hl_build_plugin_fd());
