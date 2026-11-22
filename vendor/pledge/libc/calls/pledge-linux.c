@@ -1329,26 +1329,43 @@ static void AllowIoctlInet(struct Filter *f) {
 //   - TCXONC     (0x540a)
 //   - TCSBRK     (0x5409)
 //   - TIOCSBRK   (0x5427)
+//   - TCGETS2    (0x802c542a)  HULL PATCH 0005
+//   - TCSETS2    (0x402c542b)  HULL PATCH 0005
+//   - TCSETSW2   (0x402c542c)  HULL PATCH 0005
+//   - TCSETSF2   (0x402c542d)  HULL PATCH 0005
 //
+// HULL PATCH 0005: glibc 2.42 implements tcgetattr / tcsetattr with the
+// termios2 ioctls, so without them a dynamically linked program was killed
+// at its first terminal-settings call on such a system. The numbers are the
+// generic _IOR / _IOW encoding of struct termios2 (44 bytes), the same on
+// x86_64 and aarch64.
+#define HULL_TCGETS2  0x802c542a
+#define HULL_TCSETS2  0x402c542b
+#define HULL_TCSETSW2 0x402c542c
+#define HULL_TCSETSF2 0x402c542d
 static void AllowIoctlTty(struct Filter *f) {
   static const struct sock_filter fragment[] = {
-      /* L0*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ioctl, 0, 15),
+      /* L0*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ioctl, 0, 19),
       /* L1*/ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, OFF(args[1])),
-      /* L2*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCGETS, 11, 0),
-      /* L3*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCSETS, 10, 0),
-      /* L4*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCSETSW, 9, 0),
-      /* L5*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCSETSF, 8, 0),
-      /* L6*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TIOCGWINSZ, 7, 0),
-      /* L7*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TIOCSPGRP, 6, 0),
-      /* L8*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TIOCGPGRP, 5, 0),
-      /* L9*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TIOCSWINSZ, 4, 0),
-      /*L10*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCFLSH, 3, 0),
-      /*L11*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCXONC, 2, 0),
-      /*L12*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCSBRK, 1, 0),
-      /*L13*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TIOCSBRK, 0, 1),
-      /*L14*/ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-      /*L15*/ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, OFF(nr)),
-      /*L16*/ /* next filter */
+      /* L2*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCGETS, 15, 0),
+      /* L3*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCSETS, 14, 0),
+      /* L4*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCSETSW, 13, 0),
+      /* L5*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCSETSF, 12, 0),
+      /* L6*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TIOCGWINSZ, 11, 0),
+      /* L7*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TIOCSPGRP, 10, 0),
+      /* L8*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TIOCGPGRP, 9, 0),
+      /* L9*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TIOCSWINSZ, 8, 0),
+      /*L10*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCFLSH, 7, 0),
+      /*L11*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCXONC, 6, 0),
+      /*L12*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TCSBRK, 5, 0),
+      /*L13*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, TIOCSBRK, 4, 0),
+      /*L14*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, HULL_TCGETS2, 3, 0),
+      /*L15*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, HULL_TCSETS2, 2, 0),
+      /*L16*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, HULL_TCSETSW2, 1, 0),
+      /*L17*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, HULL_TCSETSF2, 0, 1),
+      /*L18*/ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+      /*L19*/ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, OFF(nr)),
+      /*L20*/ /* next filter */
   };
   AppendFilter(f, PLEDGE(fragment));
 }
