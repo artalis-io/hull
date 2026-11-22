@@ -105,10 +105,12 @@ cp build/platform_canary_hash "$k/" 2>/dev/null || true
 rc=0; "$HULL" build --no-verify-platform --sign "$k/developer.key" --platform-sig "$k/platform.sig" \
     "$cli" -o "$cli/app" > "$WORK/b_cli.txt" 2>&1 || rc=$?
 # A tree built without the platform library, or a hull with no bundled
-# app_main.o or platform archives (a plain `make CC=cosmocc`), cannot link apps.
+# app_main.o or platform archives (a plain `make CC=cosmocc`), cannot link apps;
+# a cosmo tree has no libhull_platform.a to sign-platform for --sign.
 if [ "$rc" -ne 0 ] && { has "$WORK/b_cli.txt" "libhull_platform.a" ||
                         has "$WORK/b_cli.txt" "no bundled app_main.o" ||
-                        has "$WORK/b_cli.txt" "cannot find platform archives"; }; then
+                        has "$WORK/b_cli.txt" "cannot find platform archives" ||
+                        has "$WORK/b_cli.txt" "cannot read platform.sig"; }; then
     echo "  SKIP: hull build (no platform library in this tree)"
 else
     [ "$rc" -eq 0 ] && has "$WORK/b_cli.txt" "7 generated file(s) from the build pipeline" &&

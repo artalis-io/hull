@@ -376,6 +376,10 @@ else
     cp build/libhull_platform.a "$k/" 2>/dev/null || true
     cp build/platform_canary_hash "$k/" 2>/dev/null || true
     (cd "$k" && "$HULL" keygen > /dev/null 2>&1 && "$HULL" sign-platform --dir "$k/" "$k/developer" > /dev/null 2>&1) || true
+    if [ ! -f "$k/platform.sig" ]; then
+    # A cosmo tree has per-arch archives and no libhull_platform.a to sign.
+    echo "  SKIP: --sign / verify (no platform.sig: nothing to sign-platform in this tree)"
+    else
     rc=0; "$HULL" build --no-verify-platform --sign "$k/developer.key" --platform-sig "$k/platform.sig" \
         "$s" -o "$s/app" > "$WORK/b3.txt" 2>&1 || rc=$?
     if [ "$rc" -eq 0 ] && has "$s/package.sig" '"generated":{"app.ts":{"key":"' &&
@@ -399,6 +403,7 @@ else
     cp "$WORK/sa.good" "$s/lib/a.ts"
     [ "$rc" -ne 0 ] && has "$WORK/v2.txt" "lib/a.ts" && ok "an edited .ts source fails hull verify" ||
         { bad "verify tamper (rc $rc)"; cat "$WORK/v2.txt"; }
+    fi
 fi
 
 [ "$fail" -eq 0 ] && echo "e2e_typescript: OK" || { echo "e2e_typescript: FAILED"; exit 1; }
