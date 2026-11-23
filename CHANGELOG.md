@@ -13,11 +13,24 @@ release-artifact layout).
 - `http.async.stream(method, url, opts?)` (JS `httpClient.async.stream`): a response
   handed over as it arrives - status and headers as soon as they are in, then the body
   chunk by chunk (Lua `res.read()`, JS `read()` / `readText()` / `for await`). Timeouts
-  up to the headers and between arrivals (`idle_timeout_ms`), a `max_bytes` cap, and a
-  bounded buffer for a slow reader (`buffer_bytes`, code `overflow` past it: Keel's
-  client cannot pause the server, a follow-up). No redirects. Both runtimes.
+  up to the headers and between arrivals (`idle_timeout_ms`), a bound on the whole stream
+  (`life_ms` / `lifeMs`, 10 min by default, up to 24 h, code `life` past it), a `max_bytes`
+  cap, and a bounded buffer for a slow reader (`buffer_bytes`, code `overflow` past it:
+  Keel's client cannot pause the server, a follow-up). No redirects. Both runtimes.
+  An open stream holds one of the VM's 64 requests in flight; a stream whose read
+  returned the end or an error gives back its slot and its buffer at once (later reads
+  return the same, `close()` does nothing), and at the cap both runtimes collect garbage
+  once before refusing `busy`. A JS stream is never collected while a read on it waits,
+  and `readText()` returns whole characters only. The integer options take numbers only
+  (audit 52).
 - `hull/sse-client`: the HTML standard's Server-Sent Events parser over such a stream
   (`sse.events(res)` / `sseClient.events(res)`, and the parser alone). Both runtimes.
+  Parsing is linear in the input, one event is capped at `max_event_bytes` /
+  `maxEventBytes` (1 MiB by default, code `too_large`), and `events()` closes the stream
+  at the end, on an error and when a loop over it is left early (Lua `break`, through a
+  to-be-closed value). A Lua read error is a table with `code` and `message`. `retry`,
+  a CR at the end of a chunk, an empty `event` field and a byte-order mark split across
+  chunks follow the standard (audit 52).
 
 ### Fixed
 
@@ -29,7 +42,9 @@ release-artifact layout).
   tool sandbox so the hull can start its own plugin processes, and the sandbox's thread check
   counts cosmo's own threads when `/proc` is out of reach (inside a plugin's inherited
   Landlock domain). Windows is not covered yet: there the pipeline fails with "build plugins
-  and TypeScript entries do not run on Windows yet" (#1188).
+  and TypeScript entries do not run on Windows yet" (#1188). On a cosmo hull outside Linux and
+  OpenBSD there is no kernel sandbox, so build plugins (code from the app's repository) run
+  unsandboxed; Hull now says so in one WARN when it first starts one (audit 52).
 
 - A dynamically linked Hull binary on a system with glibc 2.42 or later (Arch, and
   distributions following it) was killed by its own Linux sandbox at its first
