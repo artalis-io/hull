@@ -1401,8 +1401,9 @@ static JSValue js_http_stream(JSContext *ctx, JSValueConst this_val,
     if (js_http_timeout_opt(ctx, argc, argv, 2, "httpClient.async.stream", &timeout_ms) != 0)
         return JS_EXCEPTION;
     JSValueConst opts = argc >= 3 ? argv[2] : JS_UNDEFINED;
-    double idle = 0, max_bytes = 0, buf_bytes = 0;
+    double idle = 0, max_bytes = 0, buf_bytes = 0, life = 0;
     if (hs_opt_num(ctx, opts, "idleTimeoutMs", 1, HL_HTTP_STREAM_IDLE_MAX_MS, &idle) ||
+        hs_opt_num(ctx, opts, "lifeMs", 1, HL_HTTP_STREAM_MAX_LIFE_MS, &life) ||
         hs_opt_num(ctx, opts, "maxBytes", 1, 9007199254740991.0, &max_bytes) ||
         hs_opt_num(ctx, opts, "bufferBytes", HL_HTTP_STREAM_BUF_MIN,
                    HL_HTTP_STREAM_BUF_MAX, &buf_bytes))
@@ -1466,7 +1467,8 @@ static JSValue js_http_stream(JSContext *ctx, JSValueConst this_val,
     HlHttpStreamConfig cfg = {
         .server = js->server, .async = js->base.async_ctx,
         .http_cfg = js->base.http_cfg, .timeout_ms = timeout_ms,
-        .idle_ms = (int)idle, .buf_cap = cap, .max_bytes = (size_t)max_bytes,
+        .idle_ms = (int)idle, .life_ms = (int)life,
+        .buf_cap = cap, .max_bytes = (size_t)max_bytes,
         .method = method, .url = url, .headers = headers,
         .num_headers = num_headers, .body = jbody.p, .body_len = jbody.len,
     };
