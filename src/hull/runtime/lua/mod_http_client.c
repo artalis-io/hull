@@ -1100,6 +1100,7 @@ static int lua_http_stream(lua_State *L)
     int timeout_ms = lua_http_timeout_opt(L, 3, "http.async.stream");
     lua_Integer idle = lhs_opt_int(L, 3, "idle_timeout_ms", 1, HL_HTTP_STREAM_IDLE_MAX_MS);
     lua_Integer max_bytes = lhs_opt_int(L, 3, "max_bytes", 1, LUA_MAXINTEGER);
+    lua_Integer life = lhs_opt_int(L, 3, "life_ms", 1, HL_HTTP_STREAM_MAX_LIFE_MS);
     lua_Integer buf_bytes = lhs_opt_int(L, 3, "buffer_bytes", HL_HTTP_STREAM_BUF_MIN,
                                         HL_HTTP_STREAM_BUF_MAX);
     lua_http_charge_request(L);
@@ -1159,7 +1160,8 @@ static int lua_http_stream(lua_State *L)
     HlHttpStreamConfig cfg = {
         .server = lua->server, .async = lua->base.async_ctx,
         .http_cfg = lua->base.http_cfg, .timeout_ms = timeout_ms,
-        .idle_ms = (int)idle, .buf_cap = cap, .max_bytes = (size_t)max_bytes,
+        .idle_ms = (int)idle, .life_ms = (int)life,
+        .buf_cap = cap, .max_bytes = (size_t)max_bytes,
         .method = method, .url = url, .headers = headers,
         .num_headers = num_headers, .body = body, .body_len = body_len,
     };
