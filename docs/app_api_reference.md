@@ -2113,7 +2113,7 @@ from such a response. Declare `"hull/sse-client@1"`; it admits `hull/http-client
 
 ```lua
 local sse = require("hull.sse-client")
-for ev in sse.events(res) do              -- raises "sse-client: <message> (<code>)"
+for ev in sse.events(res) do              -- raises { code, message } on a stream error
     print(ev.event, ev.id, ev.data)       -- event defaults to "message"; ev.retry
 end
 ```
@@ -2123,10 +2123,32 @@ for await (const ev of sseClient.events(res)) console.log(ev.event, ev.id, ev.da
 ```
 
 `ev.id` is the last event id seen on the stream (send it as `Last-Event-ID` when
-reconnecting), `ev.retry` the event's `retry` field in ms. An event the stream
-ended inside is dropped. `sse.parser()` / `sseClient.parser()` is the parser
-alone: `feed(text)` returns the events the text completes, `finish()` ends the
-input.
+reconnecting), `ev.retry` the reconnection time in ms the server last set with a
+`retry` field (kept across events, as the standard says, so a `retry` sent on its
+own is not lost; a value past 2^53 - 1 is ignored), or nil / null. An event with
+an empty `event` field is a `"message"`. An event the stream ended inside is
+dropped. `sse.parser(opts)` / `sseClient.parser(opts)` is the parser alone:
+`feed(text)` returns the events the text completes, `finish()` ends the input.
+A CR ends its line at once, also at the end of a chunk; a byte-order mark split
+across chunks is still skipped.
+
+- **Closing.** `events()` closes the stream when it reaches the end or an error.
+  Leaving the loop early closes it too: in Lua `events()` returns a to-be-closed
+  fourth value, so a generic `for` that is left by `break`, `return` or an error
+  closes the stream; in JS the iterator's `return()` does. JS `next()` calls made
+  before the previous one settled wait their turn (one read at a time).
+- **Errors.** A read that fails raises (Lua) a coded error table: `err.code` is
+  the read's code (`idle`, `overflow`, `too_large`, `closed`, `io_error`, ...),
+  `err.message` its message, `tostring(err)` `"sse-client: <message> (<code>)"`;
+  JS throws the read's own `Error` (its `code`). A runtime refusal (`[hull:busy]`,
+  `[hull:wait_refused]`) passes through unchanged.
+- **Size.** One event is capped: its pending line plus the data it gathered may
+  not pass `max_event_bytes` / `maxEventBytes` (an option of `parser()` and
+  `events()`, default 1 MiB; JS counts UTF-16 code units). Past it the parser
+  raises / throws with code `too_large` (`events()` closes the stream first), and
+  a parser that did is spent. A line
+  split over many chunks is scanned once and its pieces kept as a short tower
+  of strings (O(n log n) copying, even fed a byte at a time).
 
 ### Runtime refusal codes
 

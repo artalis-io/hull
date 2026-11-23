@@ -101,7 +101,7 @@ end)
 
 test("retry takes digits only", function()
     local evs = run({ "retry: 1500\ndata: a\n\nretry: 1.5\ndata: b\n\n" })
-    eq(evs[1].retry, 1500); eq(evs[2].retry, nil)
+    eq(evs[1].retry, 1500); eq(evs[2].retry, 1500)
 end)
 
 test("unknown fields are ignored", function()
@@ -148,6 +148,162 @@ test("events() raises the stream's error with its code", function()
     local ok, err = pcall(it)
     eq(ok, false)
     eq(tostring(err):find("(idle)", 1, true) ~= nil, true, tostring(err))
+end)
+
+-- ── audit 52 ──────────────────────────────────────────────────────────
+
+-- A fake stream: `chunks` read in order, then `final` (nil = the end, or
+-- { err, code }); counts close() calls.
+local function fake(chunks, final)
+    local i, r = 0, { closes = 0 }
+    r.read = function()
+        i = i + 1
+        if chunks[i] then return chunks[i] end
+        if final then return nil, final[1], final[2] end
+        return nil
+    end
+    r.close = function() r.closes = r.closes + 1 end
+    return r
+end
+
+test("sse_client_audit52.long_line_linear", function()
+    -- A 1 MB line in 64-byte chunks: each chunk is scanned once. The old
+    -- parser recopied and rescanned the whole pending line per chunk.
+    local p = sse.parser()
+    local piece = string.rep("x", 64)
+    local t0 = os.clock()
+    p:feed("data: ")
+    for i = 1, 16000 do
+        p:feed(piece)
+        if i % 256 == 0 and os.clock() - t0 > 3 then
+            error("quadratic: " .. i .. " chunks took over 3 s")
+        end
+    end
+    local evs = p:feed("\n\n")
+    eq(#evs, 1); eq(#evs[1].data, 16000 * 64)
+end)
+
+test("sse_client_audit52.tiny_chunks", function()
+    -- 200 KB of a line fed one byte at a time: the pending pieces stay a
+    -- short tower, and the event arrives intact.
+    local p = sse.parser()
+    local t0 = os.clock()
+    p:feed("data: ")
+    for i = 1, 204800 do
+        p:feed(string.char(97 + i % 26))
+        if i % 4096 == 0 and os.clock() - t0 > 3 then
+            error("too slow: " .. i .. " bytes took over 3 s")
+        end
+    end
+    local evs = p:feed("\n\n")
+    eq(#evs, 1); eq(#evs[1].data, 204800)
+    eq(evs[1].data:sub(1, 3), "bcd"); eq(evs[1].data:sub(-1), string.char(97 + 204800 % 26))
+end)
+
+test("sse_client_audit52.max_event_bytes", function()
+    -- A line that never ends.
+    local p = sse.parser({ max_event_bytes = 100 })
+    p:feed("data: " .. string.rep("x", 80))
+    local ok, e = pcall(p.feed, p, string.rep("x", 40))
+    eq(ok, false); eq(type(e), "table"); eq(e.code, "too_large")
+    -- Spent: a later feed raises again.
+    ok, e = pcall(p.feed, p, "\n\n")
+    eq(ok, false); eq(e.code, "too_large")
+    -- data lines with no blank line between them.
+    p = sse.parser({ max_event_bytes = 100 })
+    ok, e = pcall(function()
+        for _ = 1, 50 do p:feed("data: xyz\n") end
+    end)
+    eq(ok, false); eq(e.code, "too_large")
+    -- The default is 1 MiB.
+    p = sse.parser()
+    ok, e = pcall(p.feed, p, "data: " .. string.rep("x", 1048576))
+    eq(ok, false); eq(e.code, "too_large")
+    -- Within it nothing changes, and a dispatch starts the count again.
+    p = sse.parser({ max_event_bytes = 100 })
+    for _ = 1, 5 do eq(#p:feed("data: " .. string.rep("y", 90) .. "\n\n"), 1) end
+    -- Bad options are refused.
+    eq(pcall(sse.parser, { max_event_bytes = 0 }), false)
+    eq(pcall(sse.parser, { max_event_bytes = 1.5 }), false)
+end)
+
+test("sse_client_audit52.events_too_large_closes", function()
+    local res = fake({ "data: " .. string.rep("x", 64) })
+    local it = sse.events(res, { max_event_bytes = 16 })
+    local ok, e = pcall(it)
+    eq(ok, false); eq(e.code, "too_large"); eq(res.closes, 1)
+    eq(it(), nil)
+end)
+
+test("sse_client_audit52.events_close_on_end", function()
+    local res = fake({ "data: 1\n\n" })
+    local got = {}
+    for ev in sse.events(res) do got[#got + 1] = ev.data end
+    eq(#got, 1); eq(res.closes, 1)
+end)
+
+test("sse_client_audit52.events_close_on_error", function()
+    local res = fake({ "data: 1\n\n" }, { "went quiet", "idle" })
+    local it = sse.events(res)
+    eq(it().data, "1")
+    local ok, e = pcall(it)
+    eq(ok, false); eq(e.code, "idle")
+    eq(res.closes, 1)
+    eq(it(), nil)
+end)
+
+test("sse_client_audit52.events_close_on_break", function()
+    local res = fake({ "data: 1\n\ndata: 2\n\n" })
+    local seen = 0
+    for ev in sse.events(res) do
+        seen = seen + 1
+        if ev.data == "1" then break end
+    end
+    eq(seen, 1)
+    eq(res.closes, 1)
+end)
+
+test("sse_client_audit52.error_code", function()
+    local res = fake({}, { "nothing arrived within the idle timeout", "idle" })
+    local ok, e = pcall(sse.events(res))
+    eq(ok, false); eq(type(e), "table")
+    eq(e.code, "idle"); eq(e.message, "nothing arrived within the idle timeout")
+    eq(tostring(e), "sse-client: nothing arrived within the idle timeout (idle)")
+end)
+
+test("sse_client_audit52.retry_persists", function()
+    local evs = run({ "retry: 5000\n\ndata: a\n\nretry: 99999999999999999999\ndata: b\n\n" })
+    eq(#evs, 2); eq(evs[1].retry, 5000); eq(evs[2].retry, 5000)
+    eq(run({ "data: a\n\n" })[1].retry, nil)
+end)
+
+test("sse_client_audit52.cr_at_chunk_end", function()
+    local p = sse.parser()
+    eq(#p:feed("data: a\r"), 0)
+    local evs = p:feed("\r")      -- the blank line ends at once
+    eq(#evs, 1); eq(evs[1].data, "a")
+    -- An LF right after a chunk-ending CR is skipped, once.
+    p = sse.parser()
+    p:feed("data: b\r")
+    evs = p:feed("\n\n")
+    eq(#evs, 1); eq(evs[1].data, "b")
+    p = sse.parser()
+    p:feed("data: c\r")
+    eq(#p:feed("\n"), 0)
+    eq(#p:feed("\n"), 1)
+end)
+
+test("sse_client_audit52.empty_event_type", function()
+    local evs = run({ "event:\ndata: x\n\n" })
+    eq(#evs, 1); eq(evs[1].event, "message")
+end)
+
+test("sse_client_audit52.bom_split", function()
+    eq(run({ "\239", "\187\191data: x\n\n" })[1].data, "x")
+    eq(run({ "\239\187", "\191data: y\n\n" })[1].data, "y")
+    -- Not a BOM after all: the bytes are kept.
+    local evs = run({ "\239", "\187data: z\n\ndata: w\n\n" })
+    eq(#evs, 1); eq(evs[1].data, "w")
 end)
 
 return { pass = pass, fail = fail }
