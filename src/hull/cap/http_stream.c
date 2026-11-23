@@ -216,6 +216,11 @@ static int on_body(const char *data, size_t n, void *user)
     if (s->max_bytes && (n > s->max_bytes || s->total > s->max_bytes - n))
         err = HL_HTTP_STREAM_E_TOO_LARGE;
     else if (n > s->cap - s->len)
+        /* Unreachable while Keel's fragments stay within
+         * HL_HTTP_STREAM_FRAGMENT_MAX (we pause before less than that is
+         * free). Kept so a larger fragment - a future decoder with a bigger
+         * window, a changed receive buffer - ends the stream coded, never
+         * writes past the buffer. */
         err = HL_HTTP_STREAM_E_OVERFLOW;
     if (err) {
         s->state = ST_ERROR;

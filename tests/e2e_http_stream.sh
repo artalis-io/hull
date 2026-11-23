@@ -30,7 +30,9 @@
 #   lifeclamp a life_ms above 24 h is clamped, not refused
 #   lifebad   a life_ms of 0, or not an integer (Lua) / number (JS), is refused
 # and from a request handler in each runtime (the request's connection is
-# suspended while the handler waits on the stream): /proxy relays the events.
+# suspended while the handler waits on the stream): /proxy relays the events,
+# and /gzslow reads a gzip body slowly through a 32 KiB buffer (the pause
+# stops the decoder mid-body; stream_pause.gzip_slow_reader).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -337,6 +339,29 @@ app.get("/proxy", function(req, res)
     for ev in sse.events(s) do parts[#parts + 1] = ev.data end
     res:text(table.concat(parts, ","))
 end)
+-- stream_pause.gzip_slow_reader: a gzip body (300 000 bytes from a few
+-- hundred, so the decoder hands over 32 KiB windows) into a 32 KiB buffer,
+-- read slowly: the pause stops the decoder mid-body and the reader still
+-- gets every byte. Decompression is wired in serve mode only, hence here.
+app.get("/gzslow", function(req, res)
+    local s = assert(http.async.stream("GET",
+        "http://127.0.0.1:" .. env.get("ORIGIN_PORT") .. "/big",
+        { headers = { ["Accept-Encoding"] = "gzip" }, buffer_bytes = 32768 }))
+    hull.sleep(500)
+    local parts, n = {}, 0
+    while true do
+        local c, e, code = s.read()
+        if not c then
+            local body = table.concat(parts)
+            res:text(n .. " " .. (e and code or "end") .. " " ..
+                     tostring(s.headers["content-encoding"]) .. " " ..
+                     (body == string.rep("x", 300000) and "intact" or "corrupt"))
+            return
+        end
+        parts[#parts + 1] = c
+        n = n + #c
+    end
+end)
 EOF
 
 cat > "$TMPDIR/pjs/app.js" <<'EOF'
@@ -353,6 +378,24 @@ app.get("/proxy", async (req, res) => {
     const parts = [];
     for await (const ev of sseClient.events(s)) parts.push(ev.data);
     res.text(parts.join(","));
+});
+// stream_pause.gzip_slow_reader: see the Lua twin.
+app.get("/gzslow", async (req, res) => {
+    const s = await httpClient.async.stream("GET",
+        `http://127.0.0.1:${env.get("ORIGIN_PORT")}/big`,
+        { headers: { "Accept-Encoding": "gzip" }, bufferBytes: 32768 });
+    await hull.sleep(500);
+    let n = 0, why = "end", body = "";
+    try {
+        for (;;) {
+            const c = await s.readText();
+            if (c === null) break;
+            n += c.length;
+            body += c;
+        }
+    } catch (e) { why = e.code || String(e); }
+    res.text(`${n} ${why} ${s.headers["content-encoding"]} ` +
+             (body === "x".repeat(300000) ? "intact" : "corrupt"));
 });
 EOF
 
@@ -422,6 +465,10 @@ for pair in "lua:$PROXY_LUA" "js:$PROXY_JS"; do
     got=$(curl -s --max-time 10 "http://127.0.0.1:$p/proxy" || true)
     [ "$got" = "n=1,n=2,n=3" ] && pass "[$rt] /proxy relays the events" ||
         fail "[$rt] /proxy" "'$got' $(tail -3 "$TMPDIR/p$rt.log" | tr '\n' ' ')"
+    got=$(curl -s --max-time 20 "http://127.0.0.1:$p/gzslow" || true)
+    [ "$got" = "300000 end gzip intact" ] &&
+        pass "[$rt] stream_pause.gzip_slow_reader" ||
+        fail "[$rt] stream_pause.gzip_slow_reader" "'$got' $(tail -3 "$TMPDIR/p$rt.log" | tr '\n' ' ')"
 done
 
 # ── audit 52, JS binding (stream_audit52.*) ──────────────────────────────
