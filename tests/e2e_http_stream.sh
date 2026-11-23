@@ -75,6 +75,7 @@ app.sse("/heartbeat", function(req, stream)
     stream:close()
 end)
 app.get("/big", function(req, res) res:text(string.rep("x", 300000)) end)
+app.get("/small", function(req, res) res:text("hello") end)
 app.get("/slowhead", function(req, res)
     hull.sleep(2000)
     res:text("late")
@@ -144,6 +145,51 @@ app.main(function(ctx)
         local res = assert(http.async.stream("GET", base .. "/quiet"))
         res.read()
         out = "returning"
+    elseif case == "noclose" then
+        -- stream_audit52.noclose: a stream read to its end gives its
+        -- in-flight slot and buffer back without close().
+        local n = 0
+        for _ = 1, 100 do
+            local res = assert(http.async.stream("GET", base .. "/small"))
+            while res.read() do end
+            n = n + 1
+        end
+        out = n
+    elseif case == "noclosehold" then
+        -- stream_audit52.noclosehold: the off-heap hold goes with the end
+        -- (four 16 MiB buffers fill the 64 MiB heap limit).
+        local n = 0
+        for _ = 1, 10 do
+            local res = assert(http.async.stream("GET", base .. "/small",
+                                                 { buffer_bytes = 16 * 1024 * 1024 }))
+            while res.read() do end
+            n = n + 1
+        end
+        out = n
+    elseif case == "endstate" then
+        -- stream_audit52.endstate: after the end, read stays nil and close
+        -- is a no-op.
+        local res = assert(http.async.stream("GET", base .. "/small"))
+        local body = res.read()
+        local a, b = res.read(), res.read()
+        res.close()
+        out = body .. " " .. tostring(a) .. " " .. tostring(b) .. " " .. tostring(res.read())
+    elseif case == "dropped" then
+        -- stream_audit52.dropped: at the in-flight cap, streams the app
+        -- dropped go with one collection.
+        for _ = 1, 80 do
+            local res = assert(http.async.stream("GET", base .. "/quiet",
+                                                 { buffer_bytes = 16384 }))
+            res = nil
+        end
+        out = "ok"
+    elseif case == "stropt" then
+        -- stream_audit52.stropt: a numeric string is not an integer option.
+        local ok = pcall(http.async.stream, "GET", base .. "/small",
+                         { buffer_bytes = "65536" })
+        local ok2 = pcall(http.async.stream, "GET", base .. "/small",
+                          { idle_timeout_ms = 1.5 })
+        out = tostring(ok) .. " " .. tostring(ok2)
     elseif case == "life" then
         local t0 = time.now_ms()
         local res = assert(http.async.stream("GET", base .. "/heartbeat", { life_ms = 1500 }))
@@ -333,6 +379,13 @@ for rt in lua js; do
     if [ "$rt" = lua ]; then expect lua denied "false denied"
     else expect js denied "threw denied"; fi
     expect "$rt" leftopen "returning"
+    if [ "$rt" = lua ]; then
+        expect lua noclose     "100"
+        expect lua noclosehold "10"
+        expect lua endstate    "hello nil nil nil"
+        expect lua dropped     "ok"
+        expect lua stropt      "false false"
+    fi
     expect "$rt" life      "data life bounded"      "stream_audit52.life_short_ends_stream"
     if [ "$rt" = lua ]; then expect lua lifehead "nil life" "stream_audit52.life_bounds_head"
     else expect js lifehead "rejected life" "stream_audit52.life_bounds_head"; fi
