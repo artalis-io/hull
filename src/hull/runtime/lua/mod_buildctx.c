@@ -32,10 +32,12 @@
 #include "hull/cap/fs_policy.h"
 #include "hull/cap/fs_resolve.h"
 #include "hull/manifest.h"
+#include "hull/sandbox.h"
 #include "hull/shared/build_plugin.h"
 #include "hull/utils/alloc.h"
 #include "../../utils/hex.h"
 #include "plain_value.h"
+#include "log.h"
 
 #include "lauxlib.h"
 
@@ -516,6 +518,20 @@ static int plugin_env_ok(const char *kv)
     return 0;
 }
 
+/* A plugin is code from the tree being built, and it confines itself with the
+ * app sandbox, which a cosmo hull has only on Linux and OpenBSD. Elsewhere
+ * (macOS, the other BSDs) the plugin's own "[sandbox] NO kernel sandbox" WARN
+ * goes to its stdio, which is /dev/null, so say it here, once per process. */
+static void plugin_warn_unsandboxed(void)
+{
+    static int warned;
+    if (warned || hl_sandbox_kernel_available()) return;
+    warned = 1;
+    log_warn("[sandbox] NO kernel sandbox on this host: build plugins run "
+             "with only the capability layer confining them (a cosmo hull "
+             "has a kernel sandbox on Linux and OpenBSD only)");
+}
+
 static void proc_kill(BcProc *p)
 {
     if (p->fd >= 0) { close(p->fd); p->fd = -1; }
@@ -546,6 +562,7 @@ static int pl_spawn(lua_State *L)
     if (n < 0 || n > 32) return fail(L, "invalid_args");
 #ifdef HL_CHAN_SUPPORTED
     if (!hl_chan_host_ok()) return fail(L, "unsupported");
+    plugin_warn_unsandboxed();
     const char *argv[32 + 3];
     int k = 0;
     argv[k++] = exe;

@@ -389,7 +389,7 @@ static void test_pledge_allowed(void)
  * promise allowed only the old numbers, so a dynamically linked Hull app on a
  * glibc 2.42 system was killed reading a secret (ctx.stdin.readSecret) or
  * starting a TUI. A pty slave opened before the pledge stands in for the
- * terminal; TIOCSTI (input injection) stays refused.
+ * terminal. That TIOCSTI stays refused is sandbox_audit52 below.
  */
 #if HAS_PLEDGE_MODE && defined(__linux__) && !defined(__COSMOPOLITAN__) && \
     (defined(__x86_64__) || defined(__aarch64__))
@@ -415,8 +415,6 @@ static int test_tty_termios2_child(void)
     if (ioctl(fd, HL_TCSETS2, t2) != 0) { fprintf(stderr, "TCSETS2: %s\n", strerror(errno)); _exit(4); }
     if (ioctl(fd, HL_TCSETSW2, t2) != 0) { fprintf(stderr, "TCSETSW2: %s\n", strerror(errno)); _exit(5); }
     if (ioctl(fd, HL_TCSETSF2, t2) != 0) { fprintf(stderr, "TCSETSF2: %s\n", strerror(errno)); _exit(6); }
-    char c = 'x';
-    if (ioctl(fd, TIOCSTI, &c) == 0 || errno != EPERM) _exit(7); /* still refused */
     _exit(0);
 }
 
@@ -435,6 +433,57 @@ static void test_tty_termios2(void)
     else {
         char buf[96];
         snprintf(buf, sizeof buf, "sandbox_tty.termios2_allowed (status %d)", status);
+        fail(buf);
+    }
+}
+
+/* ── sandbox_audit52.tiocsti_refused_by_filter (native Linux) ──────
+ *
+ * The "tty" promise must not allow TIOCSTI (input injection). The probe has
+ * to reach the filter's verdict, not the kernel's: on a terminal that is not
+ * the caller's controlling tty the kernel's own tiocsti() answers EPERM (or
+ * EIO with dev.tty.legacy_tiocsti = 0) whatever seccomp does, so the earlier
+ * check here (an O_NOCTTY slave) could not fail. Here the child
+ * starts a session and makes the pty slave its controlling tty before the
+ * pledge, so an unfiltered TIOCSTI succeeds (legacy_tiocsti = 1, or with
+ * CAP_SYS_ADMIN) or fails EIO (legacy_tiocsti = 0) - never EPERM, which the
+ * pre-pledge control asserts. After the pledge only the filter can answer
+ * EPERM (PLEDGE_PENALTY_RETURN_EPERM).
+ */
+static int test_tiocsti_filter_child(void)
+{
+    __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
+    if (setsid() < 0) _exit(77);
+    int m = posix_openpt(O_RDWR | O_NOCTTY);
+    if (m < 0 || grantpt(m) != 0 || unlockpt(m) != 0) _exit(77);
+    const char *name = ptsname(m);
+    int fd = name ? open(name, O_RDWR | O_NOCTTY) : -1;
+    if (fd < 0) _exit(77);
+    if (ioctl(fd, TIOCSCTTY, 0) != 0) _exit(77);
+    char c = 'x';
+    /* Control: the kernel alone never refuses its own session's tty EPERM. */
+    if (ioctl(fd, TIOCSTI, &c) != 0 && errno == EPERM) _exit(8);
+    if (pledge("stdio tty", NULL) != 0) _exit(errno == ENOSYS ? 77 : 2);
+    if (ioctl(fd, TIOCSTI, &c) == 0) _exit(7);          /* filter let it through */
+    if (errno != EPERM) _exit(9);                       /* kernel answered, not the filter */
+    _exit(0);
+}
+
+static void test_tiocsti_filter(void)
+{
+    printf("\n=== tty promise refuses TIOCSTI (filter, controlling tty) ===\n");
+    pid_t pid = fork();
+    if (pid < 0) { fail("fork failed"); return; }
+    if (pid == 0) test_tiocsti_filter_child();
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        pass("sandbox_audit52.tiocsti_refused_by_filter");
+    else if (WIFEXITED(status) && WEXITSTATUS(status) == 77)
+        pass("sandbox_audit52.tiocsti_refused_by_filter SKIPPED - no pty, session or seccomp");
+    else {
+        char buf[112];
+        snprintf(buf, sizeof buf, "sandbox_audit52.tiocsti_refused_by_filter (status %d)", status);
         fail(buf);
     }
 }
@@ -1122,6 +1171,7 @@ int main(void)
 #endif
 #ifdef HL_HAVE_TTY_TERMIOS2_TEST
     test_tty_termios2();
+    test_tiocsti_filter();
 #endif
 #endif
 
