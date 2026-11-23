@@ -94,7 +94,7 @@ test("the last id persists across events; an id with NUL is ignored", () => {
 
 test("retry takes digits only", () => {
     const evs = run(["retry: 1500\ndata: a\n\nretry: 1.5\ndata: b\n\n"]);
-    eq(evs[0].retry, 1500); eq(evs[1].retry, null);
+    eq(evs[0].retry, 1500); eq(evs[1].retry, 1500);
 });
 
 test("unknown fields are ignored", () => {
@@ -116,6 +116,167 @@ test("feed refuses a non-string", () => {
     let threw = false;
     try { sseClient.parser().feed(42); } catch (e) { threw = e instanceof TypeError; }
     eq(threw, true);
+});
+
+// ── audit 52 ──────────────────────────────────────────────────────────
+
+async function atest(name, fn) {
+    try {
+        await fn();
+        pass++;
+    } catch (e) {
+        fail++;
+        console.log("FAIL: " + name + ": " + (e && e.message));
+    }
+}
+
+function codeOf(fn) {
+    try { fn(); } catch (e) { return e.code; }
+    return undefined;
+}
+
+// A fake stream: `chunks` read in order, then `final` (null = the end, or
+// an Error to throw); one read at a time (a second is refused "busy", as
+// the binding refuses it); counts close() calls.
+function fake(chunks, final) {
+    let i = 0;
+    let busy = false;
+    const r = { closes: 0 };
+    r.readText = () => {
+        if (busy) {
+            const e = new Error("stream.readText(): a read is already waiting");
+            e.code = "busy";
+            throw e;
+        }
+        busy = true;
+        return Promise.resolve().then(() => {
+            busy = false;
+            if (i < chunks.length) return chunks[i++];
+            if (final) throw final;
+            return null;
+        });
+    };
+    r.close = () => { r.closes++; };
+    return r;
+}
+
+test("sse_client_audit52.long_line_linear", () => {
+    // A 1 MB line in 64-byte chunks: each chunk is scanned once. The old
+    // parser rescanned the whole pending line per chunk.
+    const p = sseClient.parser();
+    const piece = "x".repeat(64);
+    const t0 = Date.now();
+    p.feed("data: ");
+    for (let i = 1; i <= 16000; i++) {
+        p.feed(piece);
+        if (i % 256 === 0 && Date.now() - t0 > 3000)
+            throw new Error("quadratic: " + i + " chunks took over 3 s");
+    }
+    const evs = p.feed("\n\n");
+    eq(evs.length, 1); eq(evs[0].data.length, 16000 * 64);
+});
+
+test("sse_client_audit52.tiny_chunks", () => {
+    // 200 KB of a line fed one byte at a time: the pending pieces stay a
+    // short tower, and the event arrives intact.
+    const p = sseClient.parser();
+    const t0 = Date.now();
+    p.feed("data: ");
+    for (let i = 1; i <= 204800; i++) {
+        p.feed(String.fromCharCode(97 + i % 26));
+        if (i % 4096 === 0 && Date.now() - t0 > 3000)
+            throw new Error("too slow: " + i + " bytes took over 3 s");
+    }
+    const evs = p.feed("\n\n");
+    eq(evs.length, 1); eq(evs[0].data.length, 204800);
+    eq(evs[0].data.slice(0, 3), "bcd");
+    eq(evs[0].data[evs[0].data.length - 1], String.fromCharCode(97 + 204800 % 26));
+});
+
+test("sse_client_audit52.max_event_bytes", () => {
+    // A line that never ends.
+    let p = sseClient.parser({ maxEventBytes: 100 });
+    p.feed("data: " + "x".repeat(80));
+    eq(codeOf(() => p.feed("x".repeat(40))), "too_large");
+    // Spent: a later feed throws again.
+    eq(codeOf(() => p.feed("\n\n")), "too_large");
+    // data lines with no blank line between them.
+    p = sseClient.parser({ maxEventBytes: 100 });
+    eq(codeOf(() => { for (let i = 0; i < 50; i++) p.feed("data: xyz\n"); }), "too_large");
+    // The default is 1 MiB.
+    p = sseClient.parser();
+    eq(codeOf(() => p.feed("data: " + "x".repeat(1048576))), "too_large");
+    // Within it nothing changes, and a dispatch starts the count again.
+    p = sseClient.parser({ maxEventBytes: 100 });
+    for (let i = 0; i < 5; i++) eq(p.feed("data: " + "y".repeat(90) + "\n\n").length, 1);
+    // Bad options are refused.
+    let threw = 0;
+    try { sseClient.parser({ maxEventBytes: 0 }); } catch (e) { threw++; }
+    try { sseClient.parser({ maxEventBytes: 1.5 }); } catch (e) { threw++; }
+    eq(threw, 2);
+});
+
+test("sse_client_audit52.retry_persists", () => {
+    const evs = run(["retry: 5000\n\ndata: a\n\nretry: 99999999999999999999\ndata: b\n\n"]);
+    eq(evs.length, 2); eq(evs[0].retry, 5000); eq(evs[1].retry, 5000);
+    eq(run(["data: a\n\n"])[0].retry, null);
+});
+
+test("sse_client_audit52.cr_at_chunk_end", () => {
+    let p = sseClient.parser();
+    eq(p.feed("data: a\r").length, 0);
+    let evs = p.feed("\r");      // the blank line ends at once
+    eq(evs.length, 1); eq(evs[0].data, "a");
+    // An LF right after a chunk-ending CR is skipped, once.
+    p = sseClient.parser();
+    p.feed("data: b\r");
+    evs = p.feed("\n\n");
+    eq(evs.length, 1); eq(evs[0].data, "b");
+    p = sseClient.parser();
+    p.feed("data: c\r");
+    eq(p.feed("\n").length, 0);
+    eq(p.feed("\n").length, 1);
+});
+
+test("sse_client_audit52.empty_event_type", () => {
+    const evs = run(["event:\ndata: x\n\n"]);
+    eq(evs.length, 1); eq(evs[0].event, "message");
+});
+
+await atest("sse_client_audit52.events_too_large_closes", async () => {
+    const res = fake(["data: " + "x".repeat(64)], null);
+    const it = sseClient.events(res, { maxEventBytes: 16 });
+    let code = null;
+    try { await it.next(); } catch (e) { code = e.code; }
+    eq(code, "too_large"); eq(res.closes, 1);
+    eq((await it.next()).done, true);
+});
+
+await atest("sse_client_audit52.events_close_on_end", async () => {
+    const res = fake(["data: 1\n\n"], null);
+    const got = [];
+    for await (const ev of sseClient.events(res)) got.push(ev.data);
+    eq(got.length, 1); eq(res.closes, 1);
+});
+
+await atest("sse_client_audit52.events_close_on_error", async () => {
+    const err = new Error("went quiet");
+    err.code = "idle";
+    const res = fake(["data: 1\n\n"], err);
+    const it = sseClient.events(res);
+    eq((await it.next()).value.data, "1");
+    let code = null;
+    try { await it.next(); } catch (e) { code = e.code; }
+    eq(code, "idle"); eq(res.closes, 1);
+    eq((await it.next()).done, true);
+});
+
+await atest("sse_client_audit52.concurrent_next", async () => {
+    const res = fake(["data: 1\n\n", "data: 2\n\n"], null);
+    const it = sseClient.events(res);
+    const [a, b, c] = await Promise.all([it.next(), it.next(), it.next()]);
+    eq(a.value.data, "1"); eq(b.value.data, "2"); eq(c.done, true);
+    eq(res.closes, 1);
 });
 
 globalThis.__test_pass = pass;
