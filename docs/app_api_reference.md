@@ -2086,7 +2086,11 @@ for await (const chunk of res) { /* ArrayBuffer */ }
   stream (a second concurrent read is refused `busy`). `close()` (JS: also leaving
   a `for await` early) stops the request; a dropped response is closed when it is
   collected, and the runtime closes every open stream at shutdown. In a request
-  handler, the request waits while a read does, as with `http.fetch`.
+  handler, the request waits while a read does, as with `http.fetch`. In Lua a
+  stream whose read returned the end or an error gives its slot and its buffer back
+  right there (later reads return the same; `close()` then does nothing), and at
+  the cap Lua collects garbage once and looks again. The integer options take
+  numbers only: a numeric string is refused.
 
 `hull/sse-client` parses an event stream (the HTML standard, "Server-sent events")
 from such a response. Declare `"hull/sse-client@1"`; it admits `hull/http-client`.

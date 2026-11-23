@@ -761,7 +761,10 @@ static int lua_http_async_delete(lua_State *L)
  * (timeout, idle, overflow, too_large, closed, io_error) - only once the
  * bytes before it were read. read and close are closures over the stream's
  * userdata, so the stream lives while the response is reachable and is
- * released by its __gc (or close(), or the runtime's teardown) after.
+ * released by its __gc (or close(), or the runtime's teardown) after. A
+ * stream whose read returned the end or an error is released right there:
+ * its in-flight slot and off-heap hold are the VM's, and an ended response
+ * the app keeps but never closes held them until a collection (audit 52).
  * Parking follows mod_ssh.c: try, and on AGAIN park on the stream's op and
  * run the same step again once resumed (the cap wakes a parked reader only
  * when the next step will not wait). See cap/http_stream.h. */
@@ -775,6 +778,9 @@ typedef struct {
     HlAsyncTeardown    track;    /* linked while s is open                */
     HlOffheapHold      hold;     /* the buffer, on the VM's off-heap total */
     int               *inflight; /* the VM's http_inflight while open     */
+    int                done;     /* read reached the end (0) or final_rc  */
+    int                final_rc;
+    char               final_msg[128];
 } HlLuaHttpStream;
 
 static void lhs_release(HlLuaHttpStream *o)
@@ -786,6 +792,17 @@ static void lhs_release(HlLuaHttpStream *o)
     o->s = NULL;
     hl_offheap_drop(&o->hold);
     if (o->inflight) { (*o->inflight)--; o->inflight = NULL; }
+}
+
+/* The read returned the end (rc 0) or an error with nothing left buffered:
+ * keep what later reads return and release the stream. */
+static void lhs_finish(HlLuaHttpStream *o, int rc)
+{
+    o->done = 1;
+    o->final_rc = rc;
+    snprintf(o->final_msg, sizeof o->final_msg, "%s",
+             hl_http_stream_strerror(o->s, rc));
+    lhs_release(o);
 }
 
 static void lhs_teardown(HlAsyncTeardown *t, HlAsyncBackendCtx *loop)
@@ -899,7 +916,8 @@ static int lhs_park(HlLua *lua, HlLuaHttpStream *o)
 static int lhs_push_err(lua_State *L, const HlLuaHttpStream *o, int rc)
 {
     lua_pushnil(L);
-    lua_pushstring(L, hl_http_stream_strerror(o->s, rc));
+    lua_pushstring(L, (!o->s && o->done && rc == o->final_rc)
+                      ? o->final_msg : hl_http_stream_strerror(o->s, rc));
     lua_pushstring(L, hl_http_stream_code(rc));
     return 3;
 }
@@ -918,7 +936,11 @@ static int lhs_read_k(lua_State *L, int status, lua_KContext kctx)
 
 static int lhs_read_step(lua_State *L, HlLuaHttpStream *o)
 {
-    if (!o->s) return lhs_push_err(L, o, HL_HTTP_STREAM_E_CLOSED);
+    if (!o->s) {
+        if (o->done && o->final_rc == 0) { lua_pushnil(L); return 1; }
+        return lhs_push_err(L, o, o->done ? o->final_rc
+                                          : HL_HTTP_STREAM_E_CLOSED);
+    }
     size_t want = hl_http_stream_buffered(o->s);
     if (want > 64u * 1024u) want = 64u * 1024u;
     if (want == 0) want = 1;
@@ -931,6 +953,7 @@ static int lhs_read_step(lua_State *L, HlLuaHttpStream *o)
         luaL_pushresultsize(&b, (size_t)n);
         return 1;
     }
+    if (n != HL_HTTP_STREAM_E_AGAIN) lhs_finish(o, (int)n);
     luaL_pushresultsize(&b, 0);
     lua_pop(L, 1);
     if (n == 0) { lua_pushnil(L); return 1; }   /* the end of the body */
@@ -986,8 +1009,10 @@ static int lhs_head_step(lua_State *L, HlLuaHttpStream *o, int ud_idx);
 static int lhs_head_k(lua_State *L, int status, lua_KContext kctx)
 {
     (void)status;
-    if (!hl_lua_async_k_ok(L))
+    if (!hl_lua_async_k_ok(L)) {
+        lhs_release((HlLuaHttpStream *)kctx);   /* the app never got it */
         return luaL_error(L, "%s: this wait was abandoned", "http.async.stream");
+    }
     return lhs_head_step(L, (HlLuaHttpStream *)kctx, lua_gettop(L));
 }
 
@@ -998,7 +1023,12 @@ static int lhs_head_step(lua_State *L, HlLuaHttpStream *o, int ud_idx)
     int rc = o->s ? hl_http_stream_head(o->s, &status, &h, &n)
                   : HL_HTTP_STREAM_E_CLOSED;
     if (rc == HL_HTTP_STREAM_E_AGAIN) {
-        hl_lua_check_can_wait(L, "http.async.stream()");
+        /* The app has no handle on the stream yet: release it before a
+         * refusal raises, as on a failed park (audit 52). */
+        if (!hl_lua_can_wait(L)) {
+            lhs_release(o);
+            hl_lua_check_can_wait(L, "http.async.stream()");
+        }
         HlLua *lua = get_hl_lua(L);
         if (!lua || lhs_park(lua, o) != 0) {
             lhs_release(o);
@@ -1046,8 +1076,8 @@ static lua_Integer lhs_opt_int(lua_State *L, int idx, const char *name,
     lua_getfield(L, idx, name);
     lua_Integer v = 0;
     if (!lua_isnil(L, -1)) {
-        int ok = 0;
-        v = lua_tointegerx(L, -1, &ok);
+        int ok = 0;   /* a number with an integer value, never a string */
+        v = lua_type(L, -1) == LUA_TNUMBER ? lua_tointegerx(L, -1, &ok) : 0;
         if (!ok || v < lo)
             luaL_error(L, "http.async.stream: opts.%s must be an integer of "
                        "at least %I", name, lo);
@@ -1074,6 +1104,15 @@ static int lua_http_stream(lua_State *L)
                                         HL_HTTP_STREAM_BUF_MAX);
     lua_http_charge_request(L);
 
+    /* At the in-flight cap, streams the app dropped give their slots back
+     * with a collection (as ws.connect does); before the wait check, since
+     * the collection runs __gc finalizers (app code). */
+    if (lua->base.http_inflight >= HL_HTTP_MAX_INFLIGHT) {
+        lua_gc(L, LUA_GCCOLLECT);
+        if (lua->base.shutting_down)
+            return luaL_error(L, "http.async.stream: runtime is shutting down");
+    }
+
     const char *body = NULL;
     size_t body_len = 0;
     HlHttpHeader *headers = NULL;
@@ -1083,6 +1122,14 @@ static int lua_http_stream(lua_State *L)
         if (lua_isstring(L, -1))
             body = lua_tolstring(L, -1, &body_len);
         lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)body_len), 0);
+    }
+    /* The userdata before the headers' scratch, the hold and the request:
+     * a failed allocation raises with nothing taken or started (audit 52). */
+    HlLuaHttpStream *o = lua_newuserdatauv(L, sizeof *o, 0);
+    memset(o, 0, sizeof *o);
+    luaL_setmetatable(L, HL_LUA_HTTP_STREAM_MT);
+    int ud_idx = lua_gettop(L);
+    if (lua_istable(L, 3)) {
         lua_getfield(L, 3, "headers");
         if (lua_istable(L, -1) &&
             lua_parse_http_headers(L, lua_gettop(L), &headers, &num_headers,
@@ -1109,13 +1156,6 @@ static int lua_http_stream(lua_State *L)
                              "stream's buffer would take the VM's off-heap "
                              "copies past its heap limit");
     }
-    /* The userdata before the request: a failed allocation raises with
-     * nothing started. */
-    HlLuaHttpStream *o = lua_newuserdatauv(L, sizeof *o, 0);
-    memset(o, 0, sizeof *o);
-    luaL_setmetatable(L, HL_LUA_HTTP_STREAM_MT);
-    int ud_idx = lua_gettop(L);
-
     HlHttpStreamConfig cfg = {
         .server = lua->server, .async = lua->base.async_ctx,
         .http_cfg = lua->base.http_cfg, .timeout_ms = timeout_ms,
