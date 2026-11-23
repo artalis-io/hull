@@ -33,6 +33,7 @@ FEATURE_SMTP_OBJS := $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_smtp_transport.o \
                      $(BUILDDIR)/cap_smtp_op.o $(BUILDDIR)/cap_smtp_tls.o \
                      $(BUILDDIR)/cap_smtp_async.o
 FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
+                     $(BUILDDIR)/cap_http_stream.o \
                      $(BUILDDIR)/cap_ws.o $(BUILDDIR)/cap_body.o $(FEATURE_SMTP_OBJS)
 
 # libhull_feature-http.a: the runtime-agnostic HTTP CORE as a composable feature

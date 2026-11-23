@@ -338,6 +338,7 @@ Register with `app.use(method, pattern, mw)`:
 | `ws-client` | `hull.web.ws-client` | `hull:web:ws-client` | WebSocket client (`connect`; JS `wsClient.connect`) |
 | `ssh` | `hull.ssh` | `hull:ssh` | SSH-2 client: exec, SFTP, WebSocket-relay tunnels, host-key trust stores; reach granted by `manifest.ssh`. See [SSH client](#ssh-client-hullssh) and [ssh.md](ssh.md) |
 | `sse` | `hull.web.sse` (decorates `app.sse`) | `hull:web:sse` (decorates `app.sse`) | Server-Sent Events |
+| `sse-client` | `hull.sse-client` | `hull:sse-client` | Server-Sent Events client: the HTML standard's event-stream parser over `http-client`'s `async.stream`. See [Streamed responses](#streamed-responses-httpasyncstream-and-hullsse-client) |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 ### Module APIs
@@ -2036,6 +2037,76 @@ const r = await httpClient.async.get("https://api.example.com/report", { timeout
   raises `body must be a string or nil` (Lua) / a `TypeError` `body must be a
   string, ArrayBuffer or typed array` (JS); before audit 44 Lua dropped it, and its
   headers and timeout, without a word.
+
+### Streamed responses (`http.async.stream`) and `hull/sse-client`
+
+`http.async.stream(method, url, opts?)` (JS `httpClient.async.stream`) hands the
+response over as it arrives: it resolves as soon as the status and headers are in,
+and the body is then read chunk by chunk while the request is still running - a
+Server-Sent Events feed, a long download, a model's token stream. It takes the
+`http.async.request` options plus `idle_timeout_ms` / `idleTimeoutMs`, `max_bytes`
+/ `maxBytes` and `buffer_bytes` / `bufferBytes`.
+
+```lua
+local http = require("hull.http-client")
+local res, err, code = http.async.stream("GET", "https://api.example.com/feed",
+    { headers = { accept = "text/event-stream" } })
+if not res then error(err) end            -- nil, message, code
+print(res.status, res.headers["content-type"])
+while true do
+    local chunk, e, c = res.read()        -- a string; nil at the end
+    if not chunk then if e then error(e) end break end
+end
+```
+```javascript
+const res = await httpClient.async.stream("GET", "https://api.example.com/feed",
+    { headers: { accept: "text/event-stream" } });
+for await (const chunk of res) { /* ArrayBuffer */ }
+// or: await res.read() (ArrayBuffer | null), await res.readText() (string | null)
+```
+
+- **Time.** `timeout_ms` bounds the request up to the response headers (the
+  manifest's `http.timeout_ms`, else 30 s; clamped to 10 min). After the headers,
+  `idle_timeout_ms` bounds the gap between two arrivals (default 60 s, at most
+  1 h); there is no overall bound below 24 h. Each read is its own run, so the run
+  watchdog applies to the code between reads, not to the stream.
+- **A slow reader.** Hull cannot pause the server (Keel's client has no read
+  pause), so unread bytes are held up to `buffer_bytes` (default 1 MiB, 16 KiB to
+  16 MiB, held on the VM's off-heap total); a reader that falls that far behind
+  gets the buffered bytes, then the stream ends with code `overflow`.
+- **Errors.** A failure before the headers: Lua returns `nil, message, code`, JS
+  rejects. After them, the read that reaches the failure (once the bytes before it
+  were read) returns `nil, message, code` (Lua) / throws an `Error` with an own
+  `code` (JS): `timeout` (no headers in time), `idle`, `overflow`, `too_large`
+  (the body passed `max_bytes`), `closed` (after `close()`), `io_error` (connect,
+  TLS, a broken connection, a malformed response). A host `manifest.hosts` does
+  not admit is refused coded `denied` before anything is sent, as for `http.fetch`.
+- **Limits.** No redirects: a 3xx is the response. An open stream counts as one of
+  the VM's 64 requests in flight (refused `busy` past it). One read at a time per
+  stream (a second concurrent read is refused `busy`). `close()` (JS: also leaving
+  a `for await` early) stops the request; a dropped response is closed when it is
+  collected, and the runtime closes every open stream at shutdown. In a request
+  handler, the request waits while a read does, as with `http.fetch`.
+
+`hull/sse-client` parses an event stream (the HTML standard, "Server-sent events")
+from such a response. Declare `"hull/sse-client@1"`; it admits `hull/http-client`.
+
+```lua
+local sse = require("hull.sse-client")
+for ev in sse.events(res) do              -- raises "sse-client: <message> (<code>)"
+    print(ev.event, ev.id, ev.data)       -- event defaults to "message"; ev.retry
+end
+```
+```javascript
+import { sseClient } from "hull:sse-client";
+for await (const ev of sseClient.events(res)) console.log(ev.event, ev.id, ev.data);
+```
+
+`ev.id` is the last event id seen on the stream (send it as `Last-Event-ID` when
+reconnecting), `ev.retry` the event's `retry` field in ms. An event the stream
+ended inside is dropped. `sse.parser()` / `sseClient.parser()` is the parser
+alone: `feed(text)` returns the events the text completes, `finish()` ends the
+input.
 
 ### Runtime refusal codes
 
