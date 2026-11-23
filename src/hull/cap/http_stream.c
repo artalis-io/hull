@@ -409,6 +409,11 @@ size_t hl_http_stream_buffered(const HlHttpStream *s)
     return s ? s->len : 0;
 }
 
+int hl_http_stream_client_done(const HlHttpStream *s)
+{
+    return !s || !s->client;
+}
+
 struct HlAsyncOp *hl_http_stream_pending_op(HlHttpStream *s)
 {
     return (s && s->op_pending) ? &s->op : NULL;

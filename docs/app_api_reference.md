@@ -2082,22 +2082,31 @@ for await (const chunk of res) { /* ArrayBuffer */ }
   16 MiB, held on the VM's off-heap total); a reader that falls that far behind
   gets the buffered bytes, then the stream ends with code `overflow`.
 - **Errors.** A failure before the headers: Lua returns `nil, message, code`, JS
-  rejects. After them, the read that reaches the failure (once the bytes before it
+  rejects. A call refused before anything starts - a bad argument or option (the
+  numeric options take integers), an admission refusal (`busy`), a host not
+  admitted (`denied`), a wait refused (`wait_refused`) - throws from the call in
+  JS rather than rejecting, as `http.fetch` does. After them, the read that reaches the failure (once the bytes before it
   were read) returns `nil, message, code` (Lua) / throws an `Error` with an own
   `code` (JS): `timeout` (no headers in time), `idle`, `life`, `overflow`, `too_large`
   (the body passed `max_bytes`), `closed` (after `close()`), `io_error` (connect,
   TLS, a broken connection, a malformed response). A host `manifest.hosts` does
   not admit is refused coded `denied` before anything is sent, as for `http.fetch`.
-- **Limits.** No redirects: a 3xx is the response. An open stream counts as one of
-  the VM's 64 requests in flight (refused `busy` past it). One read at a time per
-  stream (a second concurrent read is refused `busy`). `close()` (JS: also leaving
-  a `for await` early) stops the request; a dropped response is closed when it is
-  collected, and the runtime closes every open stream at shutdown. In a request
-  handler, the request waits while a read does, as with `http.fetch`. In Lua a
-  stream whose read returned the end or an error gives its slot and its buffer back
-  right there (later reads return the same; `close()` then does nothing), and at
-  the cap Lua collects garbage once and looks again. The integer options take
-  numbers only: a numeric string is refused.
+- **Limits.** No redirects: a 3xx is the response. A stream counts as one of the
+  VM's 64 requests in flight while its request runs (refused `busy` past it; at
+  the cap both runtimes collect garbage once and look again before refusing).
+  Once a read has returned the end or the error, the stream gives back its slot
+  and its buffer right there: later reads return the end (or the same error)
+  again, and `close()` changes nothing. One read at a time per stream (a second
+  concurrent read is refused `busy`). `close()` (JS: also leaving a `for await`
+  early) stops the request; a dropped response is closed when it is collected (in
+  JS, never while a read on it is waiting: `await (await stream(...)).read()` is
+  fine), and the runtime closes every open stream at shutdown. In a request
+  handler, the request waits while a read does, as with `http.fetch`. The integer
+  options take numbers only: a numeric string is refused.
+- **Text (JS).** `readText()` returns whole characters: it waits rather than
+  return `""` while only part of a character has arrived, and returns `null`
+  only at the end. Bytes it holds back for a split character are returned first
+  by a following `read()`.
 
 `hull/sse-client` parses an event stream (the HTML standard, "Server-sent events")
 from such a response. Declare `"hull/sse-client@1"`; it admits `hull/http-client`.
