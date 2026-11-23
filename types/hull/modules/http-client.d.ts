@@ -31,12 +31,14 @@ declare module "hull:http-client" {
         timeoutMs?: number | null;
         /** Longest gap (ms, an integer >= 1) between two body arrivals after the headers; default 60 000, at most 1 h. */
         idleTimeoutMs?: number | null;
+        /** The whole stream's life (ms, >= 1) from its start, headers included; past it the stream ends with code "life". Default 600 000 (10 min), clamped to 24 h. */
+        lifeMs?: number | null;
         /** Ends the stream with code "too_large" once the body passes this many bytes (an integer); default no limit. */
         maxBytes?: number | null;
         /** Unread bytes (an integer) held for a slow reader before the stream ends with code "overflow"; default 1 MiB, 16 KiB .. 16 MiB. */
         bufferBytes?: number | null;
     }
-    /** A streamed response: status and headers now, the body as it arrives. A read that ends the stream with an error throws an Error whose `code` is "timeout", "idle", "overflow", "too_large", "closed" or "io_error". */
+    /** A streamed response: status and headers now, the body as it arrives. A read that ends the stream with an error throws an Error whose `code` is "timeout", "idle", "life", "overflow", "too_large", "closed" or "io_error". */
     export interface HttpStream {
         /** The HTTP status code. */
         readonly status: number;

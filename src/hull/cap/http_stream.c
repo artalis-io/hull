@@ -49,7 +49,7 @@ struct HlHttpStream {
 
     int                   idle_ms;
     uint64_t              last_rx;   /* monotonic ms of the last arrival   */
-    uint64_t              head_timer, idle_timer;
+    uint64_t              head_timer, idle_timer, life_timer;
 
     struct HlAsyncOp      op;
     int                   op_pending;
@@ -85,7 +85,8 @@ static void cancel_timers(HlHttpStream *s)
 {
     if (s->head_timer) s->be->timer_cancel(s->loop, s->head_timer);
     if (s->idle_timer) s->be->timer_cancel(s->loop, s->idle_timer);
-    s->head_timer = s->idle_timer = 0;
+    if (s->life_timer) s->be->timer_cancel(s->loop, s->life_timer);
+    s->head_timer = s->idle_timer = s->life_timer = 0;
 }
 
 static void drop_client(HlHttpStream *s)
@@ -124,6 +125,17 @@ static void on_head_timer(void *user)
     HlHttpStream *s = user;
     s->head_timer = 0;
     if (s->state == ST_HEAD) fail_from_timer(s, HL_HTTP_STREAM_E_TIMEOUT);
+}
+
+/* The whole stream's bound, armed at start: it covers the head and the body,
+ * so a relay whose client left (Keel does not notice while the handler
+ * waits) gives its in-flight slot back at the latest after life_ms. */
+static void on_life_timer(void *user)
+{
+    HlHttpStream *s = user;
+    s->life_timer = 0;
+    if (s->state == ST_HEAD || s->state == ST_BODY)
+        fail_from_timer(s, HL_HTTP_STREAM_E_LIFE);
 }
 
 static void on_idle_timer(void *user)
@@ -285,6 +297,8 @@ int hl_http_stream_start(HlHttpStream **out, const HlHttpStreamConfig *cfg)
                                              HL_HTTP_FETCH_MAX_TIMEOUT_MS);
     int idle_ms = cfg->idle_ms > 0 ? cfg->idle_ms : HL_HTTP_STREAM_IDLE_DEFAULT_MS;
     if (idle_ms > HL_HTTP_STREAM_IDLE_MAX_MS) idle_ms = HL_HTTP_STREAM_IDLE_MAX_MS;
+    int life_ms = cfg->life_ms > 0 ? cfg->life_ms : HL_HTTP_STREAM_LIFE_DEFAULT_MS;
+    if (life_ms > HL_HTTP_STREAM_MAX_LIFE_MS) life_ms = HL_HTTP_STREAM_MAX_LIFE_MS;
     size_t cap = cfg->buf_cap ? cfg->buf_cap : HL_HTTP_STREAM_BUF_DEFAULT;
     if (cap < HL_HTTP_STREAM_BUF_MIN) cap = HL_HTTP_STREAM_BUF_MIN;
     if (cap > HL_HTTP_STREAM_BUF_MAX) cap = HL_HTTP_STREAM_BUF_MAX;
@@ -301,10 +315,18 @@ int hl_http_stream_start(HlHttpStream **out, const HlHttpStreamConfig *cfg)
 
     s->head_timer = be->timer_add(s->loop, (uint64_t)timeout_ms, on_head_timer, s);
     if (!s->head_timer) { free(s->buf); free(s); return -1; }
+    s->life_timer = be->timer_add(s->loop, (uint64_t)life_ms, on_life_timer, s);
+    if (!s->life_timer) {
+        be->timer_cancel(s->loop, s->head_timer);
+        free(s->buf);
+        free(s);
+        return -1;
+    }
 
     KlHttpClientConfig kl_cfg = {
         /* Keel always arms a whole-request deadline; the stream's own are
-         * the head timer and the idle timer, so Keel's is the life cap. */
+         * the head, idle and life timers, so Keel's is only a backstop at
+         * the largest life. */
         .timeout_ms        = HL_HTTP_STREAM_MAX_LIFE_MS,
         /* Keel caps a streamed body at max_response_size (0 = its default);
          * the stream's caps are buf_cap and max_bytes. */
@@ -324,7 +346,7 @@ int hl_http_stream_start(HlHttpStream **out, const HlHttpStreamConfig *cfg)
                                        cfg->num_headers, cfg->body, cfg->body_len,
                                        &st, on_done, s);
     if (!s->client) {
-        be->timer_cancel(s->loop, s->head_timer);
+        cancel_timers(s);
         free(s->buf);
         free(s);
         return -1;
@@ -444,6 +466,7 @@ const char *hl_http_stream_code(int rc)
     case HL_HTTP_STREAM_E_OVERFLOW:  return "overflow";
     case HL_HTTP_STREAM_E_TOO_LARGE: return "too_large";
     case HL_HTTP_STREAM_E_CLOSED:    return "closed";
+    case HL_HTTP_STREAM_E_LIFE:      return "life";
     case HL_HTTP_STREAM_E_IO:        return "io_error";
     default:                         return "error";
     }
@@ -462,6 +485,8 @@ const char *hl_http_stream_strerror(const HlHttpStream *s, int rc)
         return "the response body passed max_bytes";
     case HL_HTTP_STREAM_E_CLOSED:
         return "the stream is closed";
+    case HL_HTTP_STREAM_E_LIFE:
+        return "the stream outlived its life limit";
     case HL_HTTP_STREAM_E_IO:
         return (s && s->kerr) ? kl_strerror(s->kerr) : "transport error";
     default:

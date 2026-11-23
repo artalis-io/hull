@@ -17,6 +17,13 @@
 #   close     a read after close() is code "closed"
 #   denied    a host manifest.hosts does not admit is refused coded "denied"
 #   leftopen  app.main returning with a stream still open exits cleanly
+#   life      an upstream that heartbeats every 200 ms (so idle never fires)
+#             still ends the stream at life_ms, coded "life", after the
+#             buffered events (audit 52: the whole stream had no bound below
+#             24 h, so a relay whose client left held its in-flight slot)
+#   lifehead  life_ms also bounds the wait for the headers
+#   lifeclamp a life_ms above 24 h is clamped, not refused
+#   lifebad   a life_ms of 0, or not an integer (Lua) / number (JS), is refused
 # and from a request handler in each runtime (the request's connection is
 # suspended while the handler waits on the stream): /proxy relays the events.
 #
@@ -60,7 +67,15 @@ app.sse("/quiet", function(req, stream)
     hull.sleep(3000)
     stream:close()
 end)
+app.sse("/heartbeat", function(req, stream)
+    for i = 1, 30 do
+        stream:event("beat", "b" .. i, tostring(i))
+        hull.sleep(200)
+    end
+    stream:close()
+end)
 app.get("/big", function(req, res) res:text(string.rep("x", 300000)) end)
+app.get("/small", function(req, res) res:text("hello") end)
 app.get("/slowhead", function(req, res)
     hull.sleep(2000)
     res:text("late")
@@ -130,6 +145,73 @@ app.main(function(ctx)
         local res = assert(http.async.stream("GET", base .. "/quiet"))
         res.read()
         out = "returning"
+    elseif case == "noclose" then
+        -- stream_audit52.noclose: a stream read to its end gives its
+        -- in-flight slot and buffer back without close().
+        local n = 0
+        for _ = 1, 100 do
+            local res = assert(http.async.stream("GET", base .. "/small"))
+            while res.read() do end
+            n = n + 1
+        end
+        out = n
+    elseif case == "noclosehold" then
+        -- stream_audit52.noclosehold: the off-heap hold goes with the end
+        -- (four 16 MiB buffers fill the 64 MiB heap limit).
+        local n = 0
+        for _ = 1, 10 do
+            local res = assert(http.async.stream("GET", base .. "/small",
+                                                 { buffer_bytes = 16 * 1024 * 1024 }))
+            while res.read() do end
+            n = n + 1
+        end
+        out = n
+    elseif case == "endstate" then
+        -- stream_audit52.endstate: after the end, read stays nil and close
+        -- is a no-op.
+        local res = assert(http.async.stream("GET", base .. "/small"))
+        local body = res.read()
+        local a, b = res.read(), res.read()
+        res.close()
+        out = body .. " " .. tostring(a) .. " " .. tostring(b) .. " " .. tostring(res.read())
+    elseif case == "dropped" then
+        -- stream_audit52.dropped: at the in-flight cap, streams the app
+        -- dropped go with one collection.
+        for _ = 1, 80 do
+            local res = assert(http.async.stream("GET", base .. "/quiet",
+                                                 { buffer_bytes = 16384 }))
+            res = nil
+        end
+        out = "ok"
+    elseif case == "stropt" then
+        -- stream_audit52.stropt: a numeric string is not an integer option.
+        local ok = pcall(http.async.stream, "GET", base .. "/small",
+                         { buffer_bytes = "65536" })
+        local ok2 = pcall(http.async.stream, "GET", base .. "/small",
+                          { idle_timeout_ms = 1.5 })
+        out = tostring(ok) .. " " .. tostring(ok2)
+    elseif case == "life" then
+        local t0 = time.now_ms()
+        local res = assert(http.async.stream("GET", base .. "/heartbeat", { life_ms = 1500 }))
+        local n, why = drain(res)
+        local dt = time.now_ms() - t0
+        out = (n > 0 and "data" or "nodata") .. " " .. why .. " " ..
+              ((dt >= 1300 and dt < 4000) and "bounded" or ("dt=" .. dt))
+    elseif case == "lifehead" then
+        local res, err, code = http.async.stream("GET", base .. "/slowhead", { life_ms = 300 })
+        out = tostring(res) .. " " .. tostring(code)
+    elseif case == "lifeclamp" then
+        local res = assert(http.async.stream("GET", base .. "/heartbeat", { life_ms = 1 << 40 }))
+        local c = res.read()
+        res.close()
+        out = c and "ok" or "nochunk"
+    elseif case == "lifebad" then
+        local parts = {}
+        for _, v in ipairs({ 0, -5, 1.5, "x" }) do
+            local ok = pcall(http.async.stream, "GET", base .. "/heartbeat", { life_ms = v })
+            parts[#parts + 1] = ok and "accepted" or "refused"
+        end
+        out = table.concat(parts, ",")
     end
     ctx.stdout:write(case .. ":" .. tostring(out) .. "\n")
     return 0
@@ -195,6 +277,30 @@ app.main(async (ctx) => {
         const res = await stream("GET", base + "/quiet");
         await res.read();
         out = "returning";
+    } else if (kase === "life") {
+        const t0 = Date.now();
+        const [n, why] = await drain(await stream("GET", base + "/heartbeat", { lifeMs: 1500 }));
+        const dt = Date.now() - t0;
+        out = `${n > 0 ? "data" : "nodata"} ${why} ` +
+              (dt >= 1300 && dt < 4000 ? "bounded" : `dt=${dt}`);
+    } else if (kase === "lifehead") {
+        try { await stream("GET", base + "/slowhead", { lifeMs: 300 }); out = "resolved"; }
+        catch (e) { out = `rejected ${e.code}`; }
+    } else if (kase === "lifeclamp") {
+        const res = await stream("GET", base + "/heartbeat", { lifeMs: 2 ** 40 });
+        const c = await res.read();
+        res.close();
+        out = c ? "ok" : "nochunk";
+    } else if (kase === "lifebad") {
+        const parts = [];
+        for (const v of [0, -5, "x", NaN]) {
+            try {
+                const res = await stream("GET", base + "/heartbeat", { lifeMs: v });
+                res.close();
+                parts.push("accepted");
+            } catch (e) { parts.push("refused"); }
+        }
+        out = parts.join(",");
     }
     ctx.stdout.write(`${kase}:${out}\n`);
     return 0;
@@ -245,16 +351,16 @@ wait_port() {
 PIDS="$PIDS $!"
 wait_port "$ORIGIN"
 
-expect() {   # runtime case expected
-    rt=$1; kase=$2; want=$3
+expect() {   # runtime case expected [name]
+    rt=$1; kase=$2; want=$3; name=${4:-$2}
     if [ "$rt" = lua ]; then dir="$TMPDIR/clua"; entry=app.lua; else dir="$TMPDIR/cjs"; entry=app.js; fi
     rc=0
     got=$(cd "$dir" && "$HULL" "$entry" -- "$kase" "$ORIGIN" 2>"$TMPDIR/err.txt") || rc=$?
     got=$(printf '%s\n' "$got" | grep "^$kase:" | head -1)
     if [ "$rc" -eq 0 ] && [ "$got" = "$kase:$want" ]; then
-        pass "[$rt] $kase"
+        pass "[$rt] $name"
     else
-        fail "[$rt] $kase" "rc=$rc '$got' $(tail -3 "$TMPDIR/err.txt" | tr '\n' ' ')"
+        fail "[$rt] $name" "rc=$rc '$got' $(tail -3 "$TMPDIR/err.txt" | tr '\n' ' ')"
     fi
 }
 
@@ -273,6 +379,18 @@ for rt in lua js; do
     if [ "$rt" = lua ]; then expect lua denied "false denied"
     else expect js denied "threw denied"; fi
     expect "$rt" leftopen "returning"
+    if [ "$rt" = lua ]; then
+        expect lua noclose     "100"
+        expect lua noclosehold "10"
+        expect lua endstate    "hello nil nil nil"
+        expect lua dropped     "ok"
+        expect lua stropt      "false false"
+    fi
+    expect "$rt" life      "data life bounded"      "stream_audit52.life_short_ends_stream"
+    if [ "$rt" = lua ]; then expect lua lifehead "nil life" "stream_audit52.life_bounds_head"
+    else expect js lifehead "rejected life" "stream_audit52.life_bounds_head"; fi
+    expect "$rt" lifeclamp "ok"                     "stream_audit52.life_above_max_clamps"
+    expect "$rt" lifebad   "refused,refused,refused,refused" "stream_audit52.life_invalid_refused"
 done
 
 echo "== http stream inside a request handler"
