@@ -125,11 +125,10 @@ assert_contains() {
     esac
 }
 
-# A free TCP port. Asked of the kernel rather than guessed, so parallel CI
-# jobs on one runner do not collide.
-free_port() {
-    python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'
-}
+# Ports without the free-port race (tests/lib/hull_port.sh): the listeners
+# written here bind port 0 and report the port they got; sshd, which takes a
+# fixed one, is started again on a fresh port if its bind fails.
+. "$(dirname "$0")/lib/hull_port.sh"
 
 wait_for_file() {
     _i=0
@@ -142,15 +141,17 @@ wait_for_file() {
 }
 
 start_shim() {
-    # $1 = listen port, $2 = target port, rest = extra args
-    s_listen="$1"; s_target="$2"; shift 2
+    # $1 = target port, rest = extra args. Listens on a port the kernel picks
+    # and sets SHIM_PORT to it, so no other process can take it first.
+    s_target="$1"; shift
     rm -f "$WORK/shim-ready" "$WORK/headers.txt"
-    python3 "$SHIM" --listen "$s_listen" \
+    python3 "$SHIM" --listen 0 \
         --target-host 127.0.0.1 --target-port "$s_target" \
         --headers-out "$WORK/headers.txt" \
         --ready-file "$WORK/shim-ready" "$@" 2>"$WORK/shim.log" &
     SHIM_PID=$!
-    wait_for_file "$WORK/shim-ready" || { echo "shim did not start"; cat "$WORK/shim.log"; exit 1; }
+    SHIM_PORT=$(hull_port_ready_file "$WORK/shim-ready") ||
+        { echo "shim did not start"; cat "$WORK/shim.log"; exit 1; }
 }
 
 stop_shim() {
@@ -720,17 +721,16 @@ echo
 echo "The tunnel seam (real socket, real frames)"
 
 SSH_LOGIN="${USER:-$(id -un 2>/dev/null || echo tester)}"
-PEER_PORT=$(free_port)
-RELAY_PORT=$(free_port)
 
 # A TCP peer that says something SSH-shaped and then nothing. Enough to prove
 # bytes crossed the tunnel in both directions and reached the SSH transport;
 # the handshake then fails, which the live session below does properly.
 python3 -c "
-import socket
+import os, socket
 srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind(('127.0.0.1', $PEER_PORT)); srv.listen(4)
-open('$WORK/peer-ready', 'w').write('x')
+srv.bind(('127.0.0.1', 0)); srv.listen(4)
+open('$WORK/peer-ready.tmp', 'w').write('%d\\n' % srv.getsockname()[1])
+os.replace('$WORK/peer-ready.tmp', '$WORK/peer-ready')
 while True:
     c, _ = srv.accept()
     try:
@@ -742,10 +742,10 @@ while True:
         c.close()
 " &
 PEER_PID=$!
-wait_for_file "$WORK/peer-ready" || { echo "peer did not start"; exit 1; }
+PEER_PORT=$(hull_port_ready_file "$WORK/peer-ready") || { echo "peer did not start"; exit 1; }
 
 # Headers arrive verbatim, over a real socket.
-start_shim "$RELAY_PORT" "$PEER_PORT"
+start_shim "$PEER_PORT"; RELAY_PORT=$SHIM_PORT
 write_app "$WORK/a1" "127.0.0.1" "$PEER_PORT" "127.0.0.1" "$RELAY_PORT" \
     '"127.0.0.1"' "$PEER_PORT" '"127.0.0.1"' "$RELAY_PORT"
 OUT=$(run_app "$WORK/a1")
@@ -767,7 +767,7 @@ case "$OUT" in
 esac
 
 # An Access-style 403 from a REAL relay is reported as upgrade_refused.
-start_shim "$RELAY_PORT" "$PEER_PORT" --require-header "Cf-Access-Client-Id: nope.access"
+start_shim "$PEER_PORT" --require-header "Cf-Access-Client-Id: nope.access"; RELAY_PORT=$SHIM_PORT
 write_app "$WORK/a2" "127.0.0.1" "$PEER_PORT" "127.0.0.1" "$RELAY_PORT" \
     '"127.0.0.1"' "$PEER_PORT" '"127.0.0.1"' "$RELAY_PORT"
 OUT=$(run_app "$WORK/a2")
@@ -784,7 +784,7 @@ assert_contains "seam: the denial names the tunnel list" "$OUT" "ssh.tunnel.host
 
 # The destination grant still bites THROUGH a tunnel. This is the one that
 # matters: an allowed relay must not become a way to reach any host behind it.
-start_shim "$RELAY_PORT" "$PEER_PORT"
+start_shim "$PEER_PORT"; RELAY_PORT=$SHIM_PORT
 write_app "$WORK/a4" "10.9.9.9" "$PEER_PORT" "127.0.0.1" "$RELAY_PORT" \
     '"127.0.0.1"' "$PEER_PORT" '"127.0.0.1"' "$RELAY_PORT"
 OUT=$(run_app "$WORK/a4")
@@ -802,8 +802,6 @@ echo "A TLS relay, and the trust decision"
 if ! command -v openssl >/dev/null 2>&1; then
     echo "  SKIP: no openssl, cannot mint a private CA"
 else
-    TLS_PORT=$(free_port)
-    PEER2_PORT=$(free_port)
     mkdir -p "$WORK/tls"
     # A private CA, and a localhost cert it signed. The point is that the
     # embedded Mozilla bundle has never heard of this CA - so a default build
@@ -841,13 +839,14 @@ else
         # whole script for an unterminated literal - which reads as "the peer
         # did not start", a mile from the actual cause.
         cat > "$WORK/peer2.py" <<'PY'
-import socket, sys
+import os, socket, sys
 port, ready = int(sys.argv[1]), sys.argv[2]
 srv = socket.socket()
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(('127.0.0.1', port))
 srv.listen(4)
-open(ready, 'w').write('x')
+open(ready + '.tmp', 'w').write('%d\n' % srv.getsockname()[1])
+os.replace(ready + '.tmp', ready)
 while True:
     c, _ = srv.accept()
     try:
@@ -858,12 +857,14 @@ while True:
     finally:
         c.close()
 PY
-        python3 "$WORK/peer2.py" "$PEER2_PORT" "$WORK/peer2-ready" &
+        python3 "$WORK/peer2.py" 0 "$WORK/peer2-ready" &
         PEER_PID=$!
-        wait_for_file "$WORK/peer2-ready" || { echo "peer did not start"; exit 1; }
+        PEER2_PORT=$(hull_port_ready_file "$WORK/peer2-ready") ||
+            { echo "peer did not start"; exit 1; }
 
-        start_shim "$TLS_PORT" "$PEER2_PORT" \
+        start_shim "$PEER2_PORT" \
             --tls-cert "$WORK/tls/srv.pem" --tls-key "$WORK/tls/srv.key"
+        TLS_PORT=$SHIM_PORT
 
         # `localhost` rather than 127.0.0.1: the certificate names it, and a
         # hostname is what a real relay is reached by.
@@ -932,8 +933,6 @@ if [ -z "$SSHD" ] || ! command -v ssh-keygen >/dev/null 2>&1; then
         echo "  SKIP: no sshd / ssh-keygen here (the seam checks above still ran)"
     fi
 else
-    SSH_PORT=$(free_port)
-    RELAY_PORT=$(free_port)
     mkdir -p "$WORK/sshd"
     ssh-keygen -q -t ed25519 -N '' -f "$WORK/sshd/host_key" </dev/null
     cp "$WORK/client_key.pub" "$WORK/sshd/authorized_keys"
@@ -943,7 +942,6 @@ else
     # only login it can authenticate, and the one we use. StrictModes off
     # because the key material lives in a temp dir, not in ~/.ssh.
     cat > "$WORK/sshd/sshd_config" <<CFG
-Port $SSH_PORT
 ListenAddress 127.0.0.1
 HostKey $WORK/sshd/host_key
 AuthorizedKeysFile $WORK/sshd/authorized_keys
@@ -959,21 +957,32 @@ Subsystem sftp internal-sftp
 RekeyLimit 1M
 CFG
 
-    # Start sshd and wait for its port, not for a sleep. Sets _ok.
-    start_sshd() {
-        "$SSHD" -f "$WORK/sshd/sshd_config" -D -e >"$WORK/sshd/log" 2>&1 &
+    # Start sshd on $1 and wait for it to say it is listening (its own log
+    # line, not a connect, which another process on the port would answer
+    # too). 0 listening, 2 the bind failed (hull_port_retry tries another
+    # port), 1 anything else.
+    start_sshd_on() {
+        SSH_PORT=$1
+        "$SSHD" -f "$WORK/sshd/sshd_config" -p "$1" -D -e >"$WORK/sshd/log" 2>&1 &
         SSHD_PID=$!
-        _ok=0
         _i=0
         while [ "$_i" -lt 100 ]; do
-            if python3 -c "
-import socket,sys
-s=socket.socket(); s.settimeout(0.2)
-sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
-" 2>/dev/null; then _ok=1; break; fi
+            grep -q "Server listening on 127.0.0.1 port $1" "$WORK/sshd/log" 2>/dev/null && return 0
+            if ! kill -0 "$SSHD_PID" 2>/dev/null; then
+                wait "$SSHD_PID" 2>/dev/null || true
+                grep -q -i -e 'address already in use' -e 'cannot bind' "$WORK/sshd/log" && return 2
+                return 1
+            fi
             _i=$((_i + 1))
             sleep 0.1 2>/dev/null || sleep 1
         done
+        return 1
+    }
+    # Sets _ok.
+    start_sshd() {
+        _ok=0
+        hull_port_retry 5 start_sshd_on && _ok=1
+        return 0
     }
     start_sshd
 
@@ -985,7 +994,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         fi
         sed 's/^/    sshd: /' "$WORK/sshd/log" 2>/dev/null | head -10
     else
-        start_shim "$RELAY_PORT" "$SSH_PORT"
+        start_shim "$SSH_PORT"; RELAY_PORT=$SHIM_PORT
         FULL_INTEROP=1 write_app "$WORK/b1" "127.0.0.1" "$SSH_PORT" "127.0.0.1" "$RELAY_PORT" \
             '"127.0.0.1"' "$SSH_PORT" '"127.0.0.1"' "$RELAY_PORT"
         OUT=$(run_app "$WORK/b1")
@@ -1067,7 +1076,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
                 fail "live: sshd with only a $3 host key would not start"
                 continue
             fi
-            start_shim "$RELAY_PORT" "$SSH_PORT"
+            start_shim "$SSH_PORT"; RELAY_PORT=$SHIM_PORT
             write_app "$WORK/hk_$1$2" "127.0.0.1" "$SSH_PORT" "127.0.0.1" "$RELAY_PORT" \
                 '"127.0.0.1"' "$SSH_PORT" '"127.0.0.1"' "$RELAY_PORT"
             HK_OUT=$(run_app "$WORK/hk_$1$2")
@@ -1088,7 +1097,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         ssh-keygen -q -t rsa -b 3072 -N '' -f "$WORK/client_rsa" </dev/null
         chmod 600 "$WORK/client_rsa"
         cat "$WORK/client_rsa.pub" >> "$WORK/sshd/authorized_keys"
-        start_shim "$RELAY_PORT" "$SSH_PORT"
+        start_shim "$SSH_PORT"; RELAY_PORT=$SHIM_PORT
         CLIENT_KEY="$WORK/client_rsa" write_app "$WORK/rsa_user" "127.0.0.1" "$SSH_PORT" \
             "127.0.0.1" "$RELAY_PORT" '"127.0.0.1"' "$SSH_PORT" '"127.0.0.1"' "$RELAY_PORT"
         RSA_OUT=$(run_app "$WORK/rsa_user")
@@ -1105,7 +1114,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         ssh-keygen -q -t ecdsa -b 256 -N '' -f "$WORK/client_ecdsa" </dev/null
         chmod 600 "$WORK/client_ecdsa"
         cat "$WORK/client_ecdsa.pub" >> "$WORK/sshd/authorized_keys"
-        start_shim "$RELAY_PORT" "$SSH_PORT"
+        start_shim "$SSH_PORT"; RELAY_PORT=$SHIM_PORT
         CLIENT_KEY="$WORK/client_ecdsa" write_app "$WORK/ecdsa_user" "127.0.0.1" "$SSH_PORT" \
             "127.0.0.1" "$RELAY_PORT" '"127.0.0.1"' "$SSH_PORT" '"127.0.0.1"' "$RELAY_PORT"
         EC_OUT=$(run_app "$WORK/ecdsa_user")
