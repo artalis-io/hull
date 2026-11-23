@@ -19,11 +19,17 @@
  *
  * ## Backpressure
  *
- * Keel's client cannot pause its reads, so the server cannot be slowed down:
- * unread bytes are held up to `buf_cap` (default 1 MiB), and a stream whose
- * reader falls that far behind ends with HL_HTTP_STREAM_E_OVERFLOW after the
- * buffered bytes are read. Real backpressure (stop reading the socket while
- * the buffer is full) needs a Keel pause / resume, a follow-up.
+ * Unread bytes are held up to `buf_cap` (default 1 MiB). Once fewer than
+ * HL_HTTP_STREAM_FRAGMENT_MAX bytes are free, the body callback pauses Keel's
+ * client (KL_HTTP_CLIENT_BODY_PAUSE, Keel 3.4.0): it stops reading the
+ * socket, so the server is held back by TCP flow control rather than by
+ * buffering here. A read that drains the buffer to at least
+ * HL_HTTP_STREAM_FRAGMENT_MAX free and at most half full resumes it
+ * (kl_http_client_resume, which only schedules the continuation). A paused
+ * stream is not idle: the idle timer does not fire while paused and restarts
+ * at the resume. HL_HTTP_STREAM_E_OVERFLOW remains only for a fragment larger
+ * than the free space, which Keel's fragment bound (one 8 KiB read, or one
+ * 32 KiB decoder window) and the buffer floor make unreachable.
  *
  * ## Time
  *
@@ -69,14 +75,19 @@ typedef struct HlHttpStream HlHttpStream;
 #define HL_HTTP_STREAM_E_AGAIN    (-1)   /* would wait: park and call again    */
 #define HL_HTTP_STREAM_E_TIMEOUT  (-2)   /* no response headers within timeout */
 #define HL_HTTP_STREAM_E_IDLE     (-3)   /* nothing arrived for idle_ms        */
-#define HL_HTTP_STREAM_E_OVERFLOW (-4)   /* the reader fell buf_cap behind     */
+#define HL_HTTP_STREAM_E_OVERFLOW (-4)   /* a fragment larger than the room    */
 #define HL_HTTP_STREAM_E_TOO_LARGE (-5)  /* the body passed max_bytes          */
 #define HL_HTTP_STREAM_E_IO       (-6)   /* connect / TLS / transport / parse  */
 #define HL_HTTP_STREAM_E_CLOSED   (-7)   /* closed by the caller               */
 #define HL_HTTP_STREAM_E_LIFE     (-8)   /* the stream outlived life_ms        */
 
 #define HL_HTTP_STREAM_BUF_DEFAULT   (1024u * 1024u)
-#define HL_HTTP_STREAM_BUF_MIN       (16u * 1024u)
+/* The largest body fragment one Keel callback hands over: one 8 KiB receive
+ * buffer, or one 32 KiB window of the miniz decoder (Keel 3.4.0,
+ * docs/architecture/http_client_backpressure.md). The stream pauses once less
+ * than this is free, so the buffer floor is this too. */
+#define HL_HTTP_STREAM_FRAGMENT_MAX  (32u * 1024u)
+#define HL_HTTP_STREAM_BUF_MIN       HL_HTTP_STREAM_FRAGMENT_MAX
 #define HL_HTTP_STREAM_BUF_MAX       (16u * 1024u * 1024u)
 #define HL_HTTP_STREAM_IDLE_DEFAULT_MS  60000
 #define HL_HTTP_STREAM_IDLE_MAX_MS      (60 * 60 * 1000)        /* 1 h  */

@@ -2077,17 +2077,20 @@ for await (const chunk of res) { /* ArrayBuffer */ }
   waits on a stream, so a relay of an upstream that keeps sending holds its slot
   until `life_ms` (audit 52). Each read is its own run, so the run watchdog
   applies to the code between reads, not to the stream.
-- **A slow reader.** Hull cannot pause the server (Keel's client has no read
-  pause), so unread bytes are held up to `buffer_bytes` (default 1 MiB, 16 KiB to
-  16 MiB, held on the VM's off-heap total); a reader that falls that far behind
-  gets the buffered bytes, then the stream ends with code `overflow`.
+- **A slow reader.** Unread bytes are held up to `buffer_bytes` (default 1 MiB,
+  32 KiB to 16 MiB, held on the VM's off-heap total). Once the buffer is nearly
+  full, Hull stops reading the connection, so the server is held back by TCP flow
+  control; reads that drain it to half full let the rest in. A slow reader gets
+  the whole body, however large, and a stream held back this way is not idle (the
+  idle timer starts again when reading resumes). `life_ms` still bounds the whole
+  stream.
 - **Errors.** A failure before the headers: Lua returns `nil, message, code`, JS
   rejects. A call refused before anything starts - a bad argument or option (the
   numeric options take integers), an admission refusal (`busy`), a host not
   admitted (`denied`), a wait refused (`wait_refused`) - throws from the call in
   JS rather than rejecting, as `http.fetch` does. After them, the read that reaches the failure (once the bytes before it
   were read) returns `nil, message, code` (Lua) / throws an `Error` with an own
-  `code` (JS): `timeout` (no headers in time), `idle`, `life`, `overflow`, `too_large`
+  `code` (JS): `timeout` (no headers in time), `idle`, `life`, `too_large`
   (the body passed `max_bytes`), `closed` (after `close()`), `io_error` (connect,
   TLS, a broken connection, a malformed response). A host `manifest.hosts` does
   not admit is refused coded `denied` before anything is sent, as for `http.fetch`.
@@ -2138,7 +2141,7 @@ across chunks is still skipped.
   closes the stream; in JS the iterator's `return()` does. JS `next()` calls made
   before the previous one settled wait their turn (one read at a time).
 - **Errors.** A read that fails raises (Lua) a coded error table: `err.code` is
-  the read's code (`idle`, `overflow`, `too_large`, `closed`, `io_error`, ...),
+  the read's code (`idle`, `life`, `too_large`, `closed`, `io_error`, ...),
   `err.message` its message, `tostring(err)` `"sse-client: <message> (<code>)"`;
   JS throws the read's own `Error` (its `code`). A runtime refusal (`[hull:busy]`,
   `[hull:wait_refused]`) passes through unchanged.

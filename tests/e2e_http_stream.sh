@@ -11,8 +11,13 @@
 #   idle      a server that goes quiet past idle_timeout_ms ends the stream
 #             with code "idle", after the event it did send
 #   headtime  no headers within timeout_ms is code "timeout"
-#   overflow  a reader that falls buffer_bytes behind gets what was buffered,
-#             then code "overflow"
+#   slowread  a reader that sleeps while a 300 000-byte body arrives into a
+#             32 KiB buffer gets all of it: the stream pauses Keel's client
+#             (it stops reading the socket) and a read resumes it, so a slow
+#             reader holds the server back instead of ending with "overflow"
+#             (stream_pause.slow_reader_gets_whole_body)
+#   pauseidle the same with an idle timeout shorter than the reader's sleep:
+#             a paused stream is not idle (stream_pause.paused_is_not_idle)
 #   toolarge  a body past max_bytes is code "too_large"
 #   close     a read after close() is code "closed"
 #   denied    a host manifest.hosts does not admit is refused coded "denied"
@@ -124,11 +129,17 @@ app.main(function(ctx)
     elseif case == "headtime" then
         local res, err, code = http.async.stream("GET", base .. "/slowhead", { timeout_ms = 300 })
         out = tostring(res) .. " " .. tostring(code)
-    elseif case == "overflow" then
-        local res = assert(http.async.stream("GET", base .. "/big", { buffer_bytes = 16384 }))
+    elseif case == "slowread" then
+        local res = assert(http.async.stream("GET", base .. "/big", { buffer_bytes = 32768 }))
         hull.sleep(500)
         local n, why = drain(res)
-        out = (n <= 16384 and "bounded" or ("unbounded:" .. n)) .. " " .. why
+        out = n .. " " .. why
+    elseif case == "pauseidle" then
+        local res = assert(http.async.stream("GET", base .. "/big",
+                                             { buffer_bytes = 32768, idle_timeout_ms = 200 }))
+        hull.sleep(600)
+        local n, why = drain(res)
+        out = n .. " " .. why
     elseif case == "toolarge" then
         local n, why = drain(assert(http.async.stream("GET", base .. "/big", { max_bytes = 1000 })))
         out = why
@@ -179,7 +190,7 @@ app.main(function(ctx)
         -- dropped go with one collection.
         for _ = 1, 80 do
             local res = assert(http.async.stream("GET", base .. "/quiet",
-                                                 { buffer_bytes = 16384 }))
+                                                 { buffer_bytes = 32768 }))
             res = nil
         end
         out = "ok"
@@ -257,11 +268,16 @@ app.main(async (ctx) => {
     } else if (kase === "headtime") {
         try { await stream("GET", base + "/slowhead", { timeoutMs: 300 }); out = "resolved"; }
         catch (e) { out = `rejected ${e.code}`; }
-    } else if (kase === "overflow") {
-        const res = await stream("GET", base + "/big", { bufferBytes: 16384 });
+    } else if (kase === "slowread") {
+        const res = await stream("GET", base + "/big", { bufferBytes: 32768 });
         await hull.sleep(500);
         const [n, why] = await drain(res);
-        out = `${n <= 16384 ? "bounded" : "unbounded:" + n} ${why}`;
+        out = `${n} ${why}`;
+    } else if (kase === "pauseidle") {
+        const res = await stream("GET", base + "/big", { bufferBytes: 32768, idleTimeoutMs: 200 });
+        await hull.sleep(600);
+        const [n, why] = await drain(res);
+        out = `${n} ${why}`;
     } else if (kase === "toolarge") {
         const [, why] = await drain(await stream("GET", base + "/big", { maxBytes: 1000 }));
         out = why;
@@ -372,7 +388,8 @@ for rt in lua js; do
     expect "$rt" idle     "data idle"
     if [ "$rt" = lua ]; then expect lua headtime "nil timeout"
     else expect js headtime "rejected timeout"; fi
-    expect "$rt" overflow "bounded overflow"
+    expect "$rt" slowread  "300000 end" "stream_pause.slow_reader_gets_whole_body"
+    expect "$rt" pauseidle "300000 end" "stream_pause.paused_is_not_idle"
     expect "$rt" toolarge "too_large"
     if [ "$rt" = lua ]; then expect lua close "nil closed"
     else expect js close "threw closed"; fi

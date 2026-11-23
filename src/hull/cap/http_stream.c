@@ -49,6 +49,7 @@ struct HlHttpStream {
 
     int                   idle_ms;
     uint64_t              last_rx;   /* monotonic ms of the last arrival   */
+    int                   paused;    /* the body callback returned PAUSE   */
     uint64_t              head_timer, idle_timer, life_timer;
 
     struct HlAsyncOp      op;
@@ -144,6 +145,7 @@ static void on_idle_timer(void *user)
     s->idle_timer = 0;
     if (s->state != ST_BODY) return;
     uint64_t now = now_ms(s), quiet = now - s->last_rx;
+    if (s->paused) quiet = 0;   /* we stopped reading: not the server's gap */
     if (quiet >= (uint64_t)s->idle_ms) {
         fail_from_timer(s, HL_HTTP_STREAM_E_IDLE);
         return;
@@ -208,8 +210,8 @@ oom:
 static int on_body(const char *data, size_t n, void *user)
 {
     HlHttpStream *s = user;
-    if (s->state != ST_BODY) return -1;
-    if (n == 0) return 0;
+    if (s->state != ST_BODY) return KL_HTTP_CLIENT_BODY_ABORT;
+    if (n == 0) return KL_HTTP_CLIENT_BODY_CONTINUE;
     int err = 0;
     if (s->max_bytes && (n > s->max_bytes || s->total > s->max_bytes - n))
         err = HL_HTTP_STREAM_E_TOO_LARGE;
@@ -220,7 +222,7 @@ static int on_body(const char *data, size_t n, void *user)
         s->err = err;
         audit_end("failed", s->status, hl_http_stream_code(err));
         wake(s);
-        return -1;
+        return KL_HTTP_CLIENT_BODY_ABORT;
     }
     if (s->head + s->len + n > s->cap) {   /* room exists, but split: compact */
         memmove(s->buf, s->buf + s->head, s->len);
@@ -231,7 +233,13 @@ static int on_body(const char *data, size_t n, void *user)
     s->total += n;
     s->last_rx = now_ms(s);
     wake(s);
-    return 0;
+    /* Room for less than one more fragment: stop Keel reading the socket
+     * until a read makes room (hl_http_stream_read resumes it). */
+    if (s->cap - s->len < HL_HTTP_STREAM_FRAGMENT_MAX) {
+        s->paused = 1;
+        return KL_HTTP_CLIENT_BODY_PAUSE;
+    }
+    return KL_HTTP_CLIENT_BODY_CONTINUE;
 }
 
 static void on_done(KlHttpClient *client, void *user)
@@ -382,6 +390,20 @@ int hl_http_stream_head(HlHttpStream *s, int *status,
     return HL_HTTP_STREAM_OK;
 }
 
+/* A read made room: let Keel read again once a fragment fits and the
+ * buffer is at most half full (so a big buffer does not resume per read).
+ * Keel only schedules the continuation; a failed schedule leaves the client
+ * paused and the next read tries again. */
+static void maybe_resume(HlHttpStream *s)
+{
+    if (!s->paused || !s->client || s->state != ST_BODY) return;
+    if (s->cap - s->len < HL_HTTP_STREAM_FRAGMENT_MAX || s->len > s->cap / 2)
+        return;
+    if (kl_http_client_resume(s->client) != 0) return;
+    s->paused = 0;
+    s->last_rx = now_ms(s);   /* the idle period starts again here */
+}
+
 long hl_http_stream_read(HlHttpStream *s, uint8_t *buf, size_t n)
 {
     if (!s) return HL_HTTP_STREAM_E_CLOSED;
@@ -392,6 +414,7 @@ long hl_http_stream_read(HlHttpStream *s, uint8_t *buf, size_t n)
         s->head += k;
         s->len -= k;
         if (s->len == 0) s->head = 0;
+        maybe_resume(s);
         return (long)k;
     }
     switch (s->state) {
@@ -399,6 +422,18 @@ long hl_http_stream_read(HlHttpStream *s, uint8_t *buf, size_t n)
     case ST_ERROR:  return s->err;
     case ST_CLOSED: return HL_HTTP_STREAM_E_CLOSED;
     default:
+        /* Empty and still paused: only a failed resume leaves it so, and
+         * nothing would wake this wait. Try once more, else end the stream. */
+        maybe_resume(s);
+        if (s->paused && s->state == ST_BODY) {
+            s->state = ST_ERROR;
+            s->err = HL_HTTP_STREAM_E_IO;
+            s->kerr = KL_ERR_ALLOC;
+            audit_end("failed", s->status, hl_http_stream_code(s->err));
+            cancel_timers(s);
+            drop_client(s);
+            return s->err;
+        }
         s->op_pending = 1;
         return HL_HTTP_STREAM_E_AGAIN;
     }
@@ -480,7 +515,7 @@ const char *hl_http_stream_strerror(const HlHttpStream *s, int rc)
     case HL_HTTP_STREAM_E_IDLE:
         return "nothing arrived within the idle timeout";
     case HL_HTTP_STREAM_E_OVERFLOW:
-        return "the reader fell too far behind (the stream's buffer is full)";
+        return "a body fragment did not fit the stream's buffer";
     case HL_HTTP_STREAM_E_TOO_LARGE:
         return "the response body passed max_bytes";
     case HL_HTTP_STREAM_E_CLOSED:
