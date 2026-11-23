@@ -83,8 +83,8 @@ typedef struct HlHttpStream HlHttpStream;
 
 #define HL_HTTP_STREAM_BUF_DEFAULT   (1024u * 1024u)
 /* The largest body fragment one Keel callback hands over: one 8 KiB receive
- * buffer, or one 32 KiB window of the miniz decoder (Keel 3.4.0,
- * docs/architecture/http_client_backpressure.md). The stream pauses once less
+ * buffer, or one 32 KiB window of the miniz decoder (Keel 3.4.0's client
+ * backpressure design note, in vendor/keel). The stream pauses once less
  * than this is free, so the buffer floor is this too. */
 #define HL_HTTP_STREAM_FRAGMENT_MAX  (32u * 1024u)
 #define HL_HTTP_STREAM_BUF_MIN       HL_HTTP_STREAM_FRAGMENT_MAX
