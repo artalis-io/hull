@@ -274,6 +274,37 @@ else
     fail "lua: gc_db exit $rc"; tail -20 "$WORK/gc-db.log"
 fi
 
+# A server whose port is taken never starts, and must say so: it logged
+# "listening on" before the bind, then "bind failed", and exited 0, so a
+# supervisor or a script took it for a clean run
+# (serve_bind.port_taken_exits_nonzero).
+echo "=== a taken port: exit non-zero, never claim to listen ==="
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import os, socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(1)
+open(sys.argv[1] + ".tmp", "w").write(str(s.getsockname()[1]))
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+time.sleep(60)' "$WORK/held.port" &
+    HOLD_PID=$!
+    for _ in $(seq 1 50); do [ -s "$WORK/held.port" ] && break; sleep 0.1; done
+    HELD=$(cat "$WORK/held.port" 2>/dev/null || echo "")
+    for rt in lua js; do
+        rc=0
+        "$HULL" --no-sandbox -p "$HELD" "$FIX/server.$rt" >"$WORK/bind-$rt.log" 2>&1 || rc=$?
+        if [ -n "$HELD" ] && [ "$rc" -ne 0 ] && grep -q "bind failed" "$WORK/bind-$rt.log" \
+           && ! grep -q "\\[hull:c\\] listening on" "$WORK/bind-$rt.log"; then
+            pass "$rt: serve_bind.port_taken_exits_nonzero (exit $rc)"
+        else
+            fail "$rt: serve_bind.port_taken_exits_nonzero (port '$HELD', exit $rc)"
+            tail -8 "$WORK/bind-$rt.log"
+        fi
+    done
+    kill "$HOLD_PID" 2>/dev/null || true
+else
+    skip "a taken port (no python3)"
+fi
+
 echo ""
 echo "e2e_teardown: $PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" -eq 0 ]

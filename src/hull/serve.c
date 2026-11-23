@@ -2995,20 +2995,35 @@ static void hl_serve_stop_vm_thread(HlServerState *s)
     s->vm_thread = NULL;
 }
 
-/* Phase 4: log + enter the event loop until the server stops. */
-static void hl_serve_run(HlServerState *s)
+/* The "listening" line, from the loop's first turn: kl_http_server_run binds
+ * and listens before it loops, so this runs only once the server really is
+ * listening, and names the bound port (a -p 0 included). Logged before the
+ * run, it claimed a server that then failed to bind. */
+static void hl_serve_log_listening(void *user)
 {
+    HlServerState *s = (HlServerState *)user;
     HlRuntime *rt = hl_app_context_runtime(s->app);
+    int port = kl_http_server_bound_port(&s->server);
     log_info("[hull:c] listening on %s://%s:%d (%s runtime)",
              s->server_tls_ctx ? "https" : "http",
-             s->cfg.bind_addr, s->cfg.port, rt->vt->name);
+             s->cfg.bind_addr, port > 0 ? port : s->cfg.port, rt->vt->name);
+}
 
-    /* Enter event loop */
-    if (kl_http_server_run(&s->server) < 0)
+/* Phase 4: enter the event loop until the server stops. -1 when the server
+ * could not start (the bind failed, the port is taken) or the loop failed,
+ * so the process exits non-zero instead of 0 for a server that never ran. */
+static int hl_serve_run(HlServerState *s)
+{
+    if (kl_timer_add(&s->server.ev, 0, hl_serve_log_listening, s) < 0)
+        hl_serve_log_listening(s);   /* no timer: say it now, as before */
+
+    int rc = kl_http_server_run(&s->server);
+    if (rc < 0)
         log_error("[hull:c] server exited with error: %s",
                   kl_strerror(s->server.last_error));
 
     log_info("[hull:c] server stopped");
+    return rc < 0 ? -1 : 0;
 }
 
 /* Teardown step one (audit 14 G1 / audit 15): stop what the runtime holds on
@@ -3344,9 +3359,9 @@ static int hl_serve_wire_and_start(HlServerState *s)
         return -1;
     }
 
-    hl_serve_run(s);
+    int run_rc = hl_serve_run(s);
     hl_serve_teardown_after_serve(s);
-    return 0;
+    return run_rc;
 }
 
 /* ── Cleanup (checks init flags before freeing) ──────────────────────
