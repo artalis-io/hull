@@ -34,6 +34,12 @@ release-artifact layout).
 
 ### Fixed
 
+- **A server whose port was taken exited 0:** `hull app.lua` (and a built server) on a port
+  another process held logged `listening on ...`, then `bind failed`, and exited with status 0,
+  so a supervisor or a script took a server that never started for a clean run. It now exits 1,
+  and the `listening on` line is logged only once the server is listening, naming the bound
+  port.
+
 - **A cosmo hull could not run TypeScript or build plugins:** on the `hull-cosmo` binary
   (what `install.sh` gives the BSDs and any host without a native build), `hull app.ts`,
   `hull test` of a TypeScript app and every `hull.build.json` app failed with "build plugins
