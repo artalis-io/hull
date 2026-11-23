@@ -30,8 +30,13 @@
  * `timeout_ms` bounds the request up to the response headers (connect, TLS,
  * send, the server's think time), resolved and clamped like http.fetch's.
  * After the headers, `idle_ms` bounds the gap between two arrivals (default
- * 60 s); there is no overall bound below HL_HTTP_STREAM_MAX_LIFE_MS (24 h,
- * Keel's whole-request deadline, which it always arms). A stream does not
+ * 60 s). `life_ms` bounds the whole stream, from the start (default
+ * HL_HTTP_STREAM_LIFE_DEFAULT_MS, 10 min, clamped to
+ * HL_HTTP_STREAM_MAX_LIFE_MS, 24 h, which is also Keel's whole-request
+ * deadline): past it the stream ends with HL_HTTP_STREAM_E_LIFE after the
+ * buffered bytes are read. Keel does not notice a client that hung up while
+ * its handler waits on a stream, so a relay holds its in-flight slot until
+ * the stream ends; the life is what bounds it (audit 52). A stream does not
  * follow redirects: a 3xx is the response.
  *
  * ## Lifetime
@@ -68,12 +73,14 @@ typedef struct HlHttpStream HlHttpStream;
 #define HL_HTTP_STREAM_E_TOO_LARGE (-5)  /* the body passed max_bytes          */
 #define HL_HTTP_STREAM_E_IO       (-6)   /* connect / TLS / transport / parse  */
 #define HL_HTTP_STREAM_E_CLOSED   (-7)   /* closed by the caller               */
+#define HL_HTTP_STREAM_E_LIFE     (-8)   /* the stream outlived life_ms        */
 
 #define HL_HTTP_STREAM_BUF_DEFAULT   (1024u * 1024u)
 #define HL_HTTP_STREAM_BUF_MIN       (16u * 1024u)
 #define HL_HTTP_STREAM_BUF_MAX       (16u * 1024u * 1024u)
 #define HL_HTTP_STREAM_IDLE_DEFAULT_MS  60000
 #define HL_HTTP_STREAM_IDLE_MAX_MS      (60 * 60 * 1000)        /* 1 h  */
+#define HL_HTTP_STREAM_LIFE_DEFAULT_MS  (10 * 60 * 1000)        /* 10 min */
 #define HL_HTTP_STREAM_MAX_LIFE_MS      (24 * 60 * 60 * 1000)   /* 24 h */
 
 typedef struct HlHttpStreamConfig {
@@ -83,6 +90,7 @@ typedef struct HlHttpStreamConfig {
     HlHttpConfig *http_cfg;     /* allowlist, TLS, decompression            */
     int     timeout_ms;         /* up to the headers; <= 0 = the app default */
     int     idle_ms;            /* between arrivals; <= 0 = the default      */
+    int     life_ms;            /* the whole stream; <= 0 = the default      */
     size_t  buf_cap;            /* unread bytes held; 0 = the default        */
     size_t  max_bytes;          /* whole body; 0 = no limit                  */
     const char *method;
@@ -111,6 +119,10 @@ long hl_http_stream_read(HlHttpStream *s, uint8_t *buf, size_t n);
 
 /* Bytes buffered and not yet read. */
 size_t hl_http_stream_buffered(const HlHttpStream *s);
+
+/* 1 once the request is over (ended, failed or closed: the Keel client is
+ * gone), though bytes may still be buffered; 0 while it runs. */
+int hl_http_stream_client_done(const HlHttpStream *s);
 
 /* The op to park on after an AGAIN (NULL otherwise), and the way back from it. */
 struct HlAsyncOp *hl_http_stream_pending_op(HlHttpStream *s);

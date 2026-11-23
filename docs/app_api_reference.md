@@ -2044,8 +2044,8 @@ const r = await httpClient.async.get("https://api.example.com/report", { timeout
 response over as it arrives: it resolves as soon as the status and headers are in,
 and the body is then read chunk by chunk while the request is still running - a
 Server-Sent Events feed, a long download, a model's token stream. It takes the
-`http.async.request` options plus `idle_timeout_ms` / `idleTimeoutMs`, `max_bytes`
-/ `maxBytes` and `buffer_bytes` / `bufferBytes`.
+`http.async.request` options plus `idle_timeout_ms` / `idleTimeoutMs`, `life_ms` /
+`lifeMs`, `max_bytes` / `maxBytes` and `buffer_bytes` / `bufferBytes`.
 
 ```lua
 local http = require("hull.http-client")
@@ -2068,32 +2068,52 @@ for await (const chunk of res) { /* ArrayBuffer */ }
 - **Time.** `timeout_ms` bounds the request up to the response headers (the
   manifest's `http.timeout_ms`, else 30 s; clamped to 10 min). After the headers,
   `idle_timeout_ms` bounds the gap between two arrivals (default 60 s, at most
-  1 h); there is no overall bound below 24 h. Each read is its own run, so the run
-  watchdog applies to the code between reads, not to the stream.
+  1 h). `life_ms` / `lifeMs` bounds the whole stream from its start, headers
+  included (default 10 min, the `http.fetch` ceiling; a larger value up to 24 h is
+  taken, above it clamped; 0, a negative value or a non-integer (Lua) / non-number
+  (JS) is refused): past it the stream ends with code `life` once the buffered
+  bytes are read. A relay holds one of the VM's in-flight slots for as long as its
+  stream runs: Hull does not yet notice a client that hung up while its handler
+  waits on a stream, so a relay of an upstream that keeps sending holds its slot
+  until `life_ms` (audit 52). Each read is its own run, so the run watchdog
+  applies to the code between reads, not to the stream.
 - **A slow reader.** Hull cannot pause the server (Keel's client has no read
   pause), so unread bytes are held up to `buffer_bytes` (default 1 MiB, 16 KiB to
   16 MiB, held on the VM's off-heap total); a reader that falls that far behind
   gets the buffered bytes, then the stream ends with code `overflow`.
 - **Errors.** A failure before the headers: Lua returns `nil, message, code`, JS
-  rejects. After them, the read that reaches the failure (once the bytes before it
+  rejects. A call refused before anything starts - a bad argument or option (the
+  numeric options take integers), an admission refusal (`busy`), a host not
+  admitted (`denied`), a wait refused (`wait_refused`) - throws from the call in
+  JS rather than rejecting, as `http.fetch` does. After them, the read that reaches the failure (once the bytes before it
   were read) returns `nil, message, code` (Lua) / throws an `Error` with an own
-  `code` (JS): `timeout` (no headers in time), `idle`, `overflow`, `too_large`
+  `code` (JS): `timeout` (no headers in time), `idle`, `life`, `overflow`, `too_large`
   (the body passed `max_bytes`), `closed` (after `close()`), `io_error` (connect,
   TLS, a broken connection, a malformed response). A host `manifest.hosts` does
   not admit is refused coded `denied` before anything is sent, as for `http.fetch`.
-- **Limits.** No redirects: a 3xx is the response. An open stream counts as one of
-  the VM's 64 requests in flight (refused `busy` past it). One read at a time per
-  stream (a second concurrent read is refused `busy`). `close()` (JS: also leaving
-  a `for await` early) stops the request; a dropped response is closed when it is
-  collected, and the runtime closes every open stream at shutdown. In a request
-  handler, the request waits while a read does, as with `http.fetch`.
+- **Limits.** No redirects: a 3xx is the response. A stream counts as one of the
+  VM's 64 requests in flight while its request runs (refused `busy` past it; at
+  the cap both runtimes collect garbage once and look again before refusing).
+  Once a read has returned the end or the error, the stream gives back its slot
+  and its buffer right there: later reads return the end (or the same error)
+  again, and `close()` changes nothing. One read at a time per stream (a second
+  concurrent read is refused `busy`). `close()` (JS: also leaving a `for await`
+  early) stops the request; a dropped response is closed when it is collected (in
+  JS, never while a read on it is waiting: `await (await stream(...)).read()` is
+  fine), and the runtime closes every open stream at shutdown. In a request
+  handler, the request waits while a read does, as with `http.fetch`. The integer
+  options take numbers only: a numeric string is refused.
+- **Text (JS).** `readText()` returns whole characters: it waits rather than
+  return `""` while only part of a character has arrived, and returns `null`
+  only at the end. Bytes it holds back for a split character are returned first
+  by a following `read()`.
 
 `hull/sse-client` parses an event stream (the HTML standard, "Server-sent events")
 from such a response. Declare `"hull/sse-client@1"`; it admits `hull/http-client`.
 
 ```lua
 local sse = require("hull.sse-client")
-for ev in sse.events(res) do              -- raises "sse-client: <message> (<code>)"
+for ev in sse.events(res) do              -- raises { code, message } on a stream error
     print(ev.event, ev.id, ev.data)       -- event defaults to "message"; ev.retry
 end
 ```
@@ -2103,10 +2123,32 @@ for await (const ev of sseClient.events(res)) console.log(ev.event, ev.id, ev.da
 ```
 
 `ev.id` is the last event id seen on the stream (send it as `Last-Event-ID` when
-reconnecting), `ev.retry` the event's `retry` field in ms. An event the stream
-ended inside is dropped. `sse.parser()` / `sseClient.parser()` is the parser
-alone: `feed(text)` returns the events the text completes, `finish()` ends the
-input.
+reconnecting), `ev.retry` the reconnection time in ms the server last set with a
+`retry` field (kept across events, as the standard says, so a `retry` sent on its
+own is not lost; a value past 2^53 - 1 is ignored), or nil / null. An event with
+an empty `event` field is a `"message"`. An event the stream ended inside is
+dropped. `sse.parser(opts)` / `sseClient.parser(opts)` is the parser alone:
+`feed(text)` returns the events the text completes, `finish()` ends the input.
+A CR ends its line at once, also at the end of a chunk; a byte-order mark split
+across chunks is still skipped.
+
+- **Closing.** `events()` closes the stream when it reaches the end or an error.
+  Leaving the loop early closes it too: in Lua `events()` returns a to-be-closed
+  fourth value, so a generic `for` that is left by `break`, `return` or an error
+  closes the stream; in JS the iterator's `return()` does. JS `next()` calls made
+  before the previous one settled wait their turn (one read at a time).
+- **Errors.** A read that fails raises (Lua) a coded error table: `err.code` is
+  the read's code (`idle`, `overflow`, `too_large`, `closed`, `io_error`, ...),
+  `err.message` its message, `tostring(err)` `"sse-client: <message> (<code>)"`;
+  JS throws the read's own `Error` (its `code`). A runtime refusal (`[hull:busy]`,
+  `[hull:wait_refused]`) passes through unchanged.
+- **Size.** One event is capped: its pending line plus the data it gathered may
+  not pass `max_event_bytes` / `maxEventBytes` (an option of `parser()` and
+  `events()`, default 1 MiB; JS counts UTF-16 code units). Past it the parser
+  raises / throws with code `too_large` (`events()` closes the stream first), and
+  a parser that did is spent. A line
+  split over many chunks is scanned once and its pieces kept as a short tower
+  of strings (O(n log n) copying, even fed a byte at a time).
 
 ### Runtime refusal codes
 
