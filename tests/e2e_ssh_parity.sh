@@ -46,9 +46,10 @@ cleanup() {
 trap cleanup EXIT INT TERM
 WORK=$(mktemp -d 2>/dev/null || mktemp -d -t hullsshp)
 
-free_port() {
-    python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'
-}
+# Ports without the free-port race (tests/lib/hull_port.sh): silent.py binds
+# port 0 and reports the port it got; sshd and hull, which take a fixed one,
+# are started again on a fresh port if their bind fails.
+. "$(dirname "$0")/lib/hull_port.sh"
 
 # KEY=VALUE from an app's output (a print / console.log is an [app] record).
 line_of() {
@@ -79,7 +80,7 @@ SSH_LOGIN="${USER:-$(id -un 2>/dev/null || echo tester)}"
 
 # ── a peer that accepts and never speaks, logging accepts and closes ─────
 cat > "$WORK/silent.py" <<'PY'
-import socket, sys, threading, time
+import os, socket, sys, threading, time
 port, log, ready = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 srv = socket.socket()
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -98,16 +99,17 @@ def hold(c):
         pass
     note('close')
     c.close()
-open(ready, 'w').write('x')
+open(ready + '.tmp', 'w').write('%d\n' % srv.getsockname()[1])
+os.replace(ready + '.tmp', ready)
 while True:
     c, _ = srv.accept()
     note('accept')
     threading.Thread(target=hold, args=(c,), daemon=True).start()
 PY
-SILENT_PORT=$(free_port)
-python3 "$WORK/silent.py" "$SILENT_PORT" "$WORK/silent.log" "$WORK/silent.ready" &
+python3 "$WORK/silent.py" 0 "$WORK/silent.log" "$WORK/silent.ready" &
 PIDS="$PIDS $!"
-for _ in $(seq 1 50); do [ -f "$WORK/silent.ready" ] && break; sleep 0.1; done
+SILENT_PORT=$(hull_port_ready_file "$WORK/silent.ready") ||
+    { echo "silent peer did not start"; exit 1; }
 count_events() { _n=$(grep -c "^$1 " "$WORK/silent.log" 2>/dev/null); echo "${_n:-0}"; }
 
 # ── sshd, when there is one ──────────────────────────────────────────────
@@ -117,13 +119,11 @@ for cand in /usr/sbin/sshd /usr/local/sbin/sshd /opt/homebrew/sbin/sshd; do
     [ -x "$cand" ] && SSHD="$cand" && break
 done
 if [ -n "$SSHD" ]; then
-    SSH_PORT=$(free_port)
     mkdir -p "$WORK/sshd"
     ssh-keygen -q -t ed25519 -N '' -f "$WORK/sshd/host_key" </dev/null
     cp "$WORK/client_key.pub" "$WORK/sshd/authorized_keys"
     chmod 600 "$WORK/sshd/host_key" "$WORK/sshd/authorized_keys"
     cat > "$WORK/sshd/sshd_config" <<CFG
-Port $SSH_PORT
 ListenAddress 127.0.0.1
 HostKey $WORK/sshd/host_key
 AuthorizedKeysFile $WORK/sshd/authorized_keys
@@ -134,17 +134,23 @@ KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 PidFile $WORK/sshd/pid
 CFG
-    "$SSHD" -f "$WORK/sshd/sshd_config" -D -e >"$WORK/sshd/log" 2>&1 &
-    PIDS="$PIDS $!"
-    _ok=0
-    for _ in $(seq 1 50); do
-        if python3 -c "
-import socket,sys
-s=socket.socket(); s.settimeout(0.2)
-sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)" 2>/dev/null; then _ok=1; break; fi
-        sleep 0.1
-    done
-    [ "$_ok" -eq 1 ] || SSH_PORT=0
+    # Ready is sshd's own "Server listening" line, not a connect (another
+    # process on the port would answer that too). 2 = the bind failed.
+    start_sshd_on() {
+        "$SSHD" -f "$WORK/sshd/sshd_config" -p "$1" -D -e >"$WORK/sshd/log" 2>&1 &
+        _sshd=$!
+        PIDS="$PIDS $_sshd"
+        for _ in $(seq 1 50); do
+            grep -q "Server listening on 127.0.0.1 port $1" "$WORK/sshd/log" 2>/dev/null && return 0
+            if ! kill -0 "$_sshd" 2>/dev/null; then
+                grep -q -i -e 'address already in use' -e 'cannot bind' "$WORK/sshd/log" && return 2
+                return 1
+            fi
+            sleep 0.1
+        done
+        return 1
+    }
+    if hull_port_retry 5 start_sshd_on; then SSH_PORT=$HULL_PORT; else SSH_PORT=0; fi
 fi
 
 # ── the apps: one per runtime, the scenario chosen by its first argument ─
@@ -354,14 +360,21 @@ for rt in lua js; do
     # budget. (A client that merely goes away does not cancel a suspended
     # request in Keel, in either runtime; the connect then ends at its own
     # deadline.)
-    HPORT=$(free_port)
-    (cd "$APPDIR" && exec "$HULL" --no-sandbox --drain-timeout 100 -p "$HPORT" "app.$rt") \
-        > "$WORK/srv_$rt.log" 2>&1 &
-    SRV=$!
-    PIDS="$PIDS $SRV"
-    for _ in $(seq 1 40); do
-        curl -s -o /dev/null -m 1 "http://127.0.0.1:$HPORT/ping" && break; sleep 0.25
-    done
+    start_srv_on() {
+        (cd "$APPDIR" && exec "$HULL" --no-sandbox --drain-timeout 100 -p "$1" "app.$rt") \
+            > "$WORK/srv_$rt.log" 2>&1 &
+        SRV=$!
+        PIDS="$PIDS $SRV"
+        for _ in $(seq 1 40); do
+            grep -q "\\[keel\\] listening on 127.0.0.1:$1\$" "$WORK/srv_$rt.log" 2>/dev/null && return 0
+            grep -q 'bind failed' "$WORK/srv_$rt.log" 2>/dev/null && return 2
+            kill -0 "$SRV" 2>/dev/null || return 1
+            sleep 0.25
+        done
+        return 1
+    }
+    hull_port_retry 5 start_srv_on || true
+    HPORT=$HULL_PORT
     : > "$WORK/silent.log"
     curl -s -o /dev/null -m 20 "http://127.0.0.1:$HPORT/hang" >/dev/null 2>&1 &
     CURL_PID=$!

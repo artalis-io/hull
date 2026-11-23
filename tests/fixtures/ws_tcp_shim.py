@@ -28,6 +28,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 import argparse
 import base64
 import hashlib
+import os
 import select
 import socket
 import struct
@@ -308,9 +309,14 @@ def main():
 
     if args.ready_file:
         # Written AFTER listen(), so the test waits on the socket actually
-        # existing rather than on a sleep.
-        with open(args.ready_file, "w", encoding="utf-8") as fh:
-            fh.write("%d\n" % args.listen)
+        # existing rather than on a sleep. It names the port actually bound,
+        # so a test passes --listen 0 and reads the port back (no window for
+        # another process to take a port picked in advance); renamed into
+        # place, so it is never read half-written.
+        tmp = args.ready_file + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write("%d\n" % srv.getsockname()[1])
+        os.replace(tmp, args.ready_file)
 
     while True:
         try:
