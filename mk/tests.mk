@@ -477,7 +477,7 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDI
 # (hull.buildctx._fs / _store / _plugin), in a plain Lua state with the cap
 # layer linked for the fs policy and the Lua manifest reader for the plugin
 # preset. The plugin host leg spawns real plugins: the hull binary, built first.
-BUILDCTX_TEST_OBJS := $(BUILDDIR)/lua_rt_mod_buildctx.o $(BUILDDIR)/lua_rt_plain_value.o $(BUILDDIR)/manifest.o $(BUILDDIR)/manifest_lua.o
+BUILDCTX_TEST_OBJS := $(BUILDDIR)/lua_rt_mod_buildctx.o $(BUILDDIR)/lua_rt_plain_value.o $(BUILDDIR)/manifest.o $(BUILDDIR)/manifest_lua.o $(SANDBOX_OBJ) $(PLEDGE_OBJS)
 $(BUILDDIR)/test_buildctx: $(TESTDIR)/hull/buildctx/test_buildctx.c $(BUILDCTX_TEST_OBJS) $(RUNTIME_CACHE_COMMON_OBJ) $(LUA_OBJS) $(TEST_COMMON_DEPS) | $(BUILDDIR) $(BUILDDIR)/hull
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDCTX_TEST_OBJS) $(RUNTIME_CACHE_COMMON_OBJ) $(LUA_OBJS) $(TEST_COMMON_LIBS) $(LDFLAGS)
 
