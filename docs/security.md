@@ -598,6 +598,16 @@ platform with no kernel backend. That is a real boundary against the app's own
 code, but unlike pledge/unveil it is not a boundary against native code that
 escapes the runtime.
 
+The same holds for **build plugins** (`hull.build.json`, TypeScript entries):
+a plugin is code from the tree being built, and its process confines itself
+with this same app sandbox, so on a cosmo hull outside Linux and OpenBSD it
+runs with the capability layer alone. Its own warning above is lost (a
+plugin's stdio is `/dev/null`), so the process that spawns plugins logs one
+`[sandbox] NO kernel sandbox on this host: build plugins run with only the
+capability layer confining them` warning instead (`pl_spawn`,
+`src/hull/runtime/lua/mod_buildctx.c`, once per process). Build untrusted
+trees with a native hull, or a cosmo hull on Linux.
+
 Note also that the cosmo branch is selected ahead of the `__APPLE__` one, so an
 APE running on macOS never reaches the Seatbelt profile a native macOS build
 would apply. Wiring Seatbelt into the cosmo path is a tracked follow-up; it

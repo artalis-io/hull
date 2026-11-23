@@ -385,7 +385,17 @@ pid_t hl_chan_spawn_env(const char *exe, char *const argv[], int fd,
 
 int hl_chan_self_exe(char *out, size_t sz)
 {
-#if defined(__linux__)
+    /* The cosmo branch comes first (see HL_CHAN_NATIVE_LINUX below):
+     * /proc/self/exe exists on no other host an APE runs on. */
+#if defined(__COSMOPOLITAN__)
+    /* As hl_release_io_self_path's cosmo branch (release_io.c, which this
+     * object does not link): an APE knows its own path on any host. */
+    const char *p = GetProgramExecutableName();
+    size_t n = p ? strlen(p) : 0;
+    if (n == 0 || n >= sz) return -1;
+    memcpy(out, p, n + 1);
+    return 0;
+#elif defined(__linux__)
     if (sz < sizeof "/proc/self/exe") return -1;
     memcpy(out, "/proc/self/exe", sizeof "/proc/self/exe");
     return 0;
@@ -397,14 +407,6 @@ int hl_chan_self_exe(char *out, size_t sz)
     if (!realpath(raw, real)) return -1;
     if (strlen(real) >= sz) return -1;
     memcpy(out, real, strlen(real) + 1);
-    return 0;
-#elif defined(__COSMOPOLITAN__)
-    /* As hl_release_io_self_path's cosmo branch (release_io.c, which this
-     * object does not link): an APE knows its own path on any host. */
-    const char *p = GetProgramExecutableName();
-    size_t n = p ? strlen(p) : 0;
-    if (n == 0 || n >= sz) return -1;
-    memcpy(out, p, n + 1);
     return 0;
 #else
     (void)out; (void)sz;
@@ -419,7 +421,16 @@ void hl_chan_test_force_close_fallback(int mode) { g_close_fallback = mode; }
 enum { g_close_fallback = 0 };
 #endif
 
-#if defined(__linux__)
+/* The raw syscalls and /proc below are for a native Linux build only (a cosmo
+ * APE may be on XNU or a BSD). cosmocc's wrappers undefine __linux__ for a
+ * compile (libc/integral/normalize.inc), but the cosmo gcc underneath them,
+ * and a -E / -dM probe through the wrappers, define it: test __COSMOPOLITAN__
+ * first so the branch taken never rests on that. */
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+#define HL_CHAN_NATIVE_LINUX 1
+#endif
+
+#ifdef HL_CHAN_NATIVE_LINUX
 /* Close every descriptor from @p lo on that /proc/self/fd lists, through the
  * raw getdents64 into a stack buffer (async-signal-safe: no malloc, no
  * opendir). Passes repeat until one closes nothing, since closing entries
@@ -462,20 +473,19 @@ static int close_fds_proc(unsigned lo)
 
 static void close_fds_from(unsigned lo)
 {
-#if defined(__linux__) && defined(__NR_close_range)
+#if defined(__COSMOPOLITAN__)
+    /* cosmo's closefrom (close_range on Linux). */
+    if (g_close_fallback < 1 && closefrom((int)lo) == 0)
+        return;
+#elif defined(HL_CHAN_NATIVE_LINUX)
+#if defined(__NR_close_range)
     if (g_close_fallback < 1 && syscall(__NR_close_range, lo, ~0u, 0u) == 0)
         return;
 #endif
-#if defined(__linux__)
     /* An old kernel (< 5.9) or a filter that answers ENOSYS (audit 50: the
      * loop below stopped at 4096 under a large limit, and the descriptors
      * past it reached the child). */
     if (g_close_fallback < 2 && close_fds_proc(lo) == 0)
-        return;
-#endif
-#if defined(__COSMOPOLITAN__)
-    /* cosmo's closefrom (close_range on Linux). */
-    if (g_close_fallback < 1 && closefrom((int)lo) == 0)
         return;
 #endif
     /* Up to the soft limit, or the hard one when that is finite and higher
