@@ -29,11 +29,11 @@ declare module "hull:http-client" {
     export interface HttpStreamOptions extends HttpRequestOptions {
         /** Deadline (ms, >= 1) up to the response headers (default manifest `http.timeoutMs`, else 30 s; clamped to 10 min). */
         timeoutMs?: number | null;
-        /** Longest gap (ms, >= 1) between two body arrivals after the headers; default 60 000, at most 1 h. */
+        /** Longest gap (ms, an integer >= 1) between two body arrivals after the headers; default 60 000, at most 1 h. */
         idleTimeoutMs?: number | null;
-        /** Ends the stream with code "too_large" once the body passes this many bytes; default no limit. */
+        /** Ends the stream with code "too_large" once the body passes this many bytes (an integer); default no limit. */
         maxBytes?: number | null;
-        /** Unread bytes held for a slow reader before the stream ends with code "overflow"; default 1 MiB, 16 KiB .. 16 MiB. */
+        /** Unread bytes (an integer) held for a slow reader before the stream ends with code "overflow"; default 1 MiB, 16 KiB .. 16 MiB. */
         bufferBytes?: number | null;
     }
     /** A streamed response: status and headers now, the body as it arrives. A read that ends the stream with an error throws an Error whose `code` is "timeout", "idle", "overflow", "too_large", "closed" or "io_error". */
@@ -44,7 +44,7 @@ declare module "hull:http-client" {
         readonly headers: { [name: string]: string };
         /** The next body bytes; null at the end of the body. */
         read(): Promise<ArrayBuffer | null>;
-        /** The next body text (UTF-8; a character split across chunks waits for the rest); null at the end. */
+        /** The next body text (UTF-8; a character split across chunks waits for the rest, never ""); null at the end. A following read() returns any bytes it held back first. */
         readText(): Promise<string | null>;
         /** Stop the request; a waiting read finds the stream closed. */
         close(): void;
@@ -69,7 +69,7 @@ declare module "hull:http-client" {
         patch(url: string, body?: HttpBody, opts?: HttpOptions): Promise<HttpResponse>;
         /** DELETE `url`. */
         delete(url: string, opts?: HttpRequestOptions): Promise<HttpResponse>;
-        /** Send `method` to `url`; resolves to the response as soon as its headers arrive, the body read from it. No redirects. Counts as one of the 64 requests in flight while open. */
+        /** Send `method` to `url`; resolves to the response as soon as its headers arrive, the body read from it. No redirects. Counts as one of the 64 requests in flight while its request runs. A bad option, a `busy` or `denied` refusal throws from the call, as `request` does; a failure before the headers rejects. */
         stream(method: string, url: string, opts?: HttpStreamOptions): Promise<HttpStream>;
     }
     /** The `hull:http-client` module object. The sync calls block the event loop; prefer `async`. */

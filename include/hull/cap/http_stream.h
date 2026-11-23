@@ -112,6 +112,10 @@ long hl_http_stream_read(HlHttpStream *s, uint8_t *buf, size_t n);
 /* Bytes buffered and not yet read. */
 size_t hl_http_stream_buffered(const HlHttpStream *s);
 
+/* 1 once the request is over (ended, failed or closed: the Keel client is
+ * gone), though bytes may still be buffered; 0 while it runs. */
+int hl_http_stream_client_done(const HlHttpStream *s);
+
 /* The op to park on after an AGAIN (NULL otherwise), and the way back from it. */
 struct HlAsyncOp *hl_http_stream_pending_op(HlHttpStream *s);
 HlHttpStream *hl_http_stream_from_op(struct HlAsyncOp *op);
