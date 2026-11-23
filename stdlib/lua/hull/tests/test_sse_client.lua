@@ -247,14 +247,19 @@ test("sse_client_audit52.events_close_on_error", function()
     local it = sse.events(res)
     eq(it().data, "1")
     local ok, e = pcall(it)
-    eq(ok, false)
+    eq(ok, false); eq(e.code, "idle")
     eq(res.closes, 1)
     eq(it(), nil)
 end)
 
 test("sse_client_audit52.events_close_on_break", function()
     local res = fake({ "data: 1\n\ndata: 2\n\n" })
-    for _ in sse.events(res) do break end
+    local seen = 0
+    for ev in sse.events(res) do
+        seen = seen + 1
+        if ev.data == "1" then break end
+    end
+    eq(seen, 1)
     eq(res.closes, 1)
 end)
 
