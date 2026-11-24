@@ -287,17 +287,29 @@ open(sys.argv[1] + ".tmp", "w").write(str(s.getsockname()[1]))
 os.replace(sys.argv[1] + ".tmp", sys.argv[1])
 time.sleep(60)' "$WORK/held.port" &
     HOLD_PID=$!
+    HELPERS="$HELPERS $HOLD_PID"
     for _ in $(seq 1 50); do [ -s "$WORK/held.port" ] && break; sleep 0.1; done
     HELD=$(cat "$WORK/held.port" 2>/dev/null || echo "")
     for rt in lua js; do
         rc=0
-        "$HULL" --no-sandbox -p "$HELD" "$FIX/server.$rt" >"$WORK/bind-$rt.log" 2>&1 || rc=$?
+        if [ -z "$HELD" ]; then
+            rc=-1   # no port held: never start a server that would bind one
+        else
+            # Bounded: a server that does bind (the case failing) serves until
+            # killed, so a watchdog ends it and the case fails, never hangs.
+            "$HULL" --no-sandbox -p "$HELD" "$FIX/server.$rt" >"$WORK/bind-$rt.log" 2>&1 &
+            BIND_PID=$!
+            ( sleep 10; kill -9 "$BIND_PID" 2>/dev/null ) 2>/dev/null &
+            BIND_WD=$!
+            wait "$BIND_PID" || rc=$?
+            kill "$BIND_WD" 2>/dev/null || true
+        fi
         if [ -n "$HELD" ] && [ "$rc" -ne 0 ] && grep -q "bind failed" "$WORK/bind-$rt.log" \
            && ! grep -q "\\[hull:c\\] listening on" "$WORK/bind-$rt.log"; then
             pass "$rt: serve_bind.port_taken_exits_nonzero (exit $rc)"
         else
             fail "$rt: serve_bind.port_taken_exits_nonzero (port '$HELD', exit $rc)"
-            tail -8 "$WORK/bind-$rt.log"
+            tail -8 "$WORK/bind-$rt.log" 2>/dev/null || true
         fi
     done
     kill "$HOLD_PID" 2>/dev/null || true
