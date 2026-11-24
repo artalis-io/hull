@@ -38,7 +38,7 @@ of it in `tool.spawn` with a compiler allowlist.
 
 | Question | Decision |
 |---|---|
-| Manifest | An `exec` section: name -> `{ path, argv, timeout_ms, stdout_max, stderr_max, env, concurrency, fs, sha256 }`, plus `"hull/exec@1"` in `modules`. Both are needed, as for `tui`. |
+| Manifest | An `exec` section: name -> `{ path, argv, timeout_ms, stdout_max, stderr_max, env, concurrency, fs, unix_sockets, sha256 }`, plus `"hull/exec@1"` in `modules`. Both are needed, as for `tui`. |
 | Slot shapes | **Structured, not regex** (§4): `prefix` / `suffix` / `chars` / `min` / `max` / `enum` / `repeat`. One C matcher is used by both the cap layer and the broker. |
 | Process | Hull's own binary in a hidden mode (`argv[1] == "__hull_exec_broker"`), started with `hl_chan_spawn` before phase 1 and stopped after the manifest if there is no `exec` section. This is the GPU helper's lifecycle. |
 | Policy delivery | Exactly ONE `POLICY` frame, built in C from the sealed `HlManifest` after `hl_sig_check_runtime_policy`. The broker then locks itself down; a second `POLICY` frame makes it exit. |
@@ -50,7 +50,7 @@ of it in `tool.spawn` with a compiler allowlist.
 | App API | Async only: `exec.run(name, args?)` returns a result table (Lua parks the coroutine, JS returns a Promise). It goes through the wait gate and carries refusal codes. |
 | Result | `{ status, signal, stdout, stderr, timed_out, stdout_truncated, stderr_truncated, duration_ms }` |
 | `hull test` / `hull agent` | No broker. `exec.run` answers only from stubs a test registers (`test.exec_stub`); with no stub it refuses (§8). |
-| Binary trust | The ownership and mode check (root-owned path, not group / world-writable, no setuid) is **mandatory**, with or without a pin. Replacement is detected by `(st_dev, st_ino)`. The optional `sha256` checks the main executable's content only (§6.1). |
+| Binary trust | The ownership and mode check (root-owned path, not group / world-writable, no setuid / setgid, no file capabilities) is **mandatory**, with or without a pin. Replacement is detected by `(st_dev, st_ino)`. The optional `sha256` checks the main executable's content only (§6.1). |
 | Taxonomy | A **base cap module** behind a manifest gate, not a `--with` feature, because the broker has to be in the runner's hidden mode before load (§10). |
 
 ## 3. Manifest
@@ -71,6 +71,7 @@ app.manifest({
       argv = { "show", "--no-pager", "-p", "ActiveState,NRestarts,ActiveEnterTimestamp", "--",
                { prefix = "hs-", suffix = ".service", chars = "a-z0-9-", max = 64,
                  ["repeat"] = { min = 1, max = 32 } } },
+      unix_sockets = true,   -- systemctl connects to systemd over a pathname socket
       timeout_ms = 5000, stdout_max = 262144,
     },
   },
@@ -99,13 +100,30 @@ Load-time validation is in `manifest.c` and `cap/exec.c`, and failure refuses ap
   child. The names `LD_*`, `DYLD_*`, `PATH` and `IFS` are refused.
 - **`fs`:** extra Landlock grants for this command (§6.3). Each must be absolute, and `write`
   is only under `/dev`, `/run` or `/tmp`.
-- **`sha256`:** 64 hex characters, optional.
+- **`sha256`:** 64 hex characters, optional. **Refused at app load until the broker enforces
+  it (PR 4):** a signed manifest must never advertise a pin the broker ignores.
 - **`unix_sockets`:** boolean, default false. Lets the child create `AF_UNIX` sockets (§5.3);
   `systemctl` needs it to reach systemd. No other socket family is ever allowed.
 
+  The grant is broader than "talk to systemd". Landlock does not mediate pathname sockets, so
+  the child can `connect` to ANY pathname socket the service account can reach under the
+  filesystem's own permissions: the system D-Bus, `/run/systemd/private`, a database's
+  socket, a container runtime's socket if the account is in its group. The ABI 6
+  abstract-socket scope (§6.2) is a separate restriction: it keeps the child off abstract
+  sockets outside its domain and does not narrow pathname ones. v1 keeps the boolean and
+  makes its scope visible instead of narrowing it.
+
 The section is part of the manifest, so `hull build` signs it and `--verify-sig` compares it
 like every other field. `hull inspect` and `hull agent overview` list the declared commands,
-which is the disclosure an operator reads before running an app.
+which is the disclosure an operator reads before running an app. For each command they show
+the resolved path, the fixed argv, each slot's rules, `fs` grants, and, for
+`unix_sockets = true`, the scope in words:
+
+```
+unit-state  /usr/bin/systemctl
+  local IPC: may connect to any pathname unix socket the service account can reach
+             (not limited to systemd)
+```
 
 `hull build` / `hull check` add a lint, a WARN rather than a boundary:
 
@@ -259,10 +277,20 @@ The child runs these steps in order. Each is async-signal-safe and allocates not
 
 1. `prctl(PR_SET_PDEATHSIG, SIGKILL)`, then `if (getppid() != broker_pid) _exit(127)`. That
    closes the race where the broker died before the prctl. The broker is single-threaded, so
-   the "death of the thread that forked" quirk of PDEATHSIG does not apply. The setting
-   survives `execve` (it is cleared only for a set-id or capability-gaining exec, which §6.1
-   refuses), but NOT a fork: a grandchild would not get it. That is why step 6 refuses
-   process creation.
+   the "death of the thread that forked" quirk of PDEATHSIG does not apply.
+
+   The setting must still be in force while the PROGRAM runs, after `execve`, since that is
+   where the guarantee is relied on. The kernel clears it in four cases, and each is closed:
+
+   | Clears PDEATHSIG | Closed by |
+   |---|---|
+   | a `fork` (the new process does not inherit it) | step 6 refuses process creation |
+   | exec of a set-user-ID or set-group-ID file | §6.1 refuses such a file |
+   | exec of a file with file capabilities (`security.capability`) | §6.1 refuses such a file |
+   | a credential change (effective / filesystem UID or GID) | step 6 refuses the `set*id`, `setgroups` and `capset` calls |
+
+   A program could also clear or replace the setting itself with `prctl(PR_SET_PDEATHSIG, ...)`;
+   step 6 refuses that `prctl` option (a filter can read it).
 2. `setsid()` gives the child its own process group, so the timeout kill reaches the whole
    job with one `kill(-pgid, ...)`.
 3. Set up stdio:
@@ -288,6 +316,10 @@ The child runs these steps in order. Each is async-signal-safe and allocates not
    - `socket` for every domain the command does not need. `AF_UNIX` stays only for a command
      declared `unix_sockets = true` (`unit-state`); none gets `AF_INET` / `AF_INET6` /
      `AF_NETLINK`;
+   - anything that would clear or replace PDEATHSIG (step 1): `setuid`, `setgid`,
+     `setreuid`, `setregid`, `setresuid`, `setresgid`, `setfsuid`, `setfsgid`, `setgroups`,
+     `capset`, and `prctl(PR_SET_PDEATHSIG, ...)`. An unprivileged status tool has no use for
+     them; they fail with `EPERM` as they would for any unprivileged caller;
    - the broker-only calls it no longer needs (`kill` of other pids, `wait4`, the Landlock
      calls).
 
@@ -315,7 +347,10 @@ The child runs these steps in order. Each is async-signal-safe and allocates not
 
 These checks are mandatory. A `sha256` pin is added on top of them, never instead of them.
 
-- The leaf is a regular file, executable, and not setuid or setgid.
+- The leaf is a regular file, executable, not setuid or setgid, and carries no file
+  capabilities (no `security.capability` extended attribute, read with `fgetxattr` on the
+  descriptor). Both kinds would raise privilege without NNP, and an exec of either clears
+  PDEATHSIG (§5.3).
 - Its first bytes are the host's native executable magic (ELF on Linux and OpenBSD), so a
   `#!` script is refused. A script would bring its interpreter, and the Landlock grant would
   have to include `bash`.
@@ -472,7 +507,8 @@ The guarantee: **no process a declared command started outlives the broker.** It
 two facts together:
 
 - every child has `PR_SET_PDEATHSIG(SIGKILL)` against the broker (§5.3), which the kernel
-  delivers however the broker ends, `SIGKILL` included;
+  delivers however the broker ends, `SIGKILL` included, and which stays in force through and
+  after `execve` because every way of clearing it is closed (the table in §5.3 step 1);
 - no child can create a process (§5.3), so there is no grandchild that PDEATHSIG would miss.
 
 Nothing depends on the broker running cleanup code, because a broker killed with `SIGKILL`
@@ -522,14 +558,21 @@ async resume (an offloaded entry), so nothing new crosses threads.
     extended;
   - a `#!` script refused;
   - a replaced binary answering `ESTALE`;
-  - **orderly EOF and abrupt death are tested separately:** teardown with a call in flight,
-    and `kill -9` of the broker with the fixture running, each followed by a check that no
-    process of the fixture is left;
+  - the fixture also tries each call that would clear PDEATHSIG (`prctl(PR_SET_PDEATHSIG, 0)`,
+    `setresuid` to its own uid, `setgroups`, `capset`) and must see each refused;
+  - a binary with file capabilities (`setcap` on a fixture copy) is refused like a setuid one;
+  - **orderly EOF and abrupt death are tested separately**, both at the point hsctl relies
+    on, after exec. The fixture, once running as the exec'd program, reads its own setting
+    with `prctl(PR_GET_PDEATHSIG)`, requires `SIGKILL`, and only then writes a readiness line.
+    The test waits for that line, then either closes the channel (teardown with a call in
+    flight) or sends the broker `kill -9`, and checks that the fixture's pid is gone within a
+    bound;
   - **broker-side admission:** a test-only hook that writes raw `RUN` frames past the
     binding's caps (duplicate ids, more than `HL_EXEC_MAX_INFLIGHT`, past a command's
     `concurrency`, and replies left unread until `HL_EXEC_MAX_BUFFERED`) gets `BUSY`, and
     nothing is forked for them.
-- **PR 2 acceptance on a real host** (not CI-only, recorded in the PR):
+- **PR 2 acceptance on a real host** (not CI-only, recorded in the PR), using the §3 manifest
+  exactly as written, `unix_sockets = true` included:
   - `unit-state` against a known running `hs-*.service`, through a real `systemctl show`
     against the running system manager, under the shipping filter and domain;
   - `gpu-query` on an NVIDIA node, run under the service account hsctl will use.
@@ -599,7 +642,9 @@ and `exec: degraded` when it applies.
 1. **PR 1:**
    - the slot matcher, the manifest section (both extractors), the policy codec, `test_exec`
      and the fuzzers;
-   - no broker yet: `exec.run` refuses on every host except under `hull test` stubs.
+   - no broker yet: `exec.run` refuses on every host except under `hull test` stubs;
+   - a declared `sha256` refuses app load (§3), so no signed manifest carries a pin nothing
+     checks.
 
    This lands the API and its types (`types/hull` drift check).
 2. **PR 2:** the Linux broker (Landlock with the §6.5 rights check, the inherited and
@@ -607,7 +652,8 @@ and `exec: degraded` when it applies.
    INV-16 / 17 and the CLAUDE.md paragraph. Done when the §8 acceptance runs pass; hsctl
    adopts it then, not before.
 3. **PR 3:** macOS Seatbelt, then OpenBSD.
-4. **PR 4:** the optional `sha256` pin, and the `hull build` lint.
+4. **PR 4:** the optional `sha256` pin (the broker verifies it, and only then does the
+   manifest accept the field), and the `hull build` lint.
 
 ## 14. What this does not cover
 
