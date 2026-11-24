@@ -566,7 +566,11 @@ async resume (an offloaded entry), so nothing new crosses threads.
     with `prctl(PR_GET_PDEATHSIG)`, requires `SIGKILL`, and only then writes a readiness line.
     The test waits for that line, then either closes the channel (teardown with a call in
     flight) or sends the broker `kill -9`, and checks that the fixture's pid is gone within a
-    bound;
+    bound. `exec.run` buffers stdout until `DONE`, so the harness cannot see the line through
+    it: in a build with `-DHL_EXEC_TEST_HOOKS` only (the GPU helper's pattern), the broker
+    sends a `PROBE_READY {id, pid}` frame as soon as it reads the line from the child's
+    stdout, and a test hook surfaces it while the call is still running. A release build
+    neither sends nor accepts the frame;
   - **broker-side admission:** a test-only hook that writes raw `RUN` frames past the
     binding's caps (duplicate ids, more than `HL_EXEC_MAX_INFLIGHT`, past a command's
     `concurrency`, and replies left unread until `HL_EXEC_MAX_BUFFERED`) gets `BUSY`, and
