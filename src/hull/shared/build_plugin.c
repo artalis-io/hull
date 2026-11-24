@@ -49,8 +49,7 @@ int hl_build_plugin_take_env(void)
     int ok = strcmp(v, "3") == 0;
     (void)unsetenv(HL_BUILD_PLUGIN_ENV);
 #ifdef HL_CHAN_SUPPORTED
-    struct stat st;
-    if (!ok || fstat(3, &st) != 0 || !S_ISSOCK(st.st_mode)) return -1;
+    if (!ok || !hl_chan_fd_is_channel(3)) return -1;
     (void)fcntl(3, F_SETFD, FD_CLOEXEC);
     hl_chan_set_nonblock(3);
     hl_chan_set_nosigpipe(3);

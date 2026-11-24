@@ -8,7 +8,7 @@
 #   - a manifest the preset refuses (hull/time) never starts serving;
 #   - a frame out of protocol ends the plugin;
 #   - run by hand (no channel), app.transform says so;
-#   - HULL_BUILD_PLUGIN_FD naming no socket stops hull before app code runs.
+#   - HULL_BUILD_PLUGIN_FD naming no channel stops hull before app code runs.
 set -eu
 
 HULL=${HULL:-build/hull}
@@ -62,8 +62,8 @@ for entry in build_plugin_lua/app.lua build_plugin_js/app.js; do
     fi
 done
 HULL_BUILD_PLUGIN_FD=3 "$HULL" "$FIX/build_plugin_lua/app.lua" > "$WORK/fd.txt" 2>&1 || true
-if has "$WORK/fd.txt" "fd 3 is not a socket"; then
-    ok "HULL_BUILD_PLUGIN_FD without a socket stops hull"
+if has "$WORK/fd.txt" "fd 3 is not a build channel"; then
+    ok "HULL_BUILD_PLUGIN_FD without a channel stops hull"
 else
     bad "bad descriptor"; cat "$WORK/fd.txt"
 fi

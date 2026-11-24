@@ -444,12 +444,6 @@ static char **env_without_session(void)
 int hl_generation_produce(const char *app_dir, uint8_t **out, size_t *len)
 {
 #ifdef HL_CHAN_SUPPORTED
-    if (!hl_chan_host_ok()) {
-        snprintf(g_err, sizeof g_err, "build plugins and TypeScript entries "
-                 "do not run on Windows yet (this hull cannot spawn their "
-                 "processes there); run them with hull on Linux, macOS or WSL");
-        return -1;
-    }
     char exe[4096];
     if (hl_chan_self_exe(exe, sizeof exe) != 0) {
         snprintf(g_err, sizeof g_err, "cannot find this hull binary to run "

@@ -39,6 +39,14 @@ on:
       - 'src/hull/sandbox.c'
       - 'src/hull/shared/fs_util.c'
       - 'stdlib/cli/lua/hull/build.lua'
+      - 'src/hull/shared/child_channel.c'
+      - 'src/hull/shared/build_plugin.c'
+      - 'src/hull/shared/generation.c'
+      - 'src/hull/runtime/lua/mod_buildctx.c'
+      - 'stdlib/cli/lua/hull/buildctx/**'
+      - 'tests/hull/test_child_channel.c'
+      - 'tests/hull/test_build_plugin.c'
+      - 'tests/e2e_build_plugin_drive.c'
 
 permissions:
   contents: read
@@ -66,6 +74,17 @@ jobs:
           make platform-cosmo
           make CC=cosmocc EMBED_PLATFORM=cosmo
           ./build/hull version
+      # The plugin channel on Windows (#1188): its unit tests and the fake
+      # build host, as cosmo APEs the Windows job runs.
+      - name: Build the plugin channel tests (cosmo)
+        run: |
+          make CC=cosmocc EMBED_PLATFORM=cosmo build/test_child_channel build/test_build_plugin build/e2e_build_plugin_drive
+          mkdir -p chan
+          cp build/test_child_channel build/test_build_plugin build/e2e_build_plugin_drive chan/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hull-cosmo-chan-tests
+          path: chan/
       # NOTE: a Linux-side "build the cosmo APE and run it here" isolation was
       # tried to classify the exit-256 (hull.json preload) bug, but this runner
       # environment corrupts the system ELF loader once cosmocc is installed
@@ -139,6 +158,89 @@ jobs:
         shell: bash
         timeout-minutes: 3
         run: HULL_BIN=./hull-cosmo.exe sh tests/e2e_db_open_failure.sh
+
+      # The plugin channel on Windows (#1188). Each check reads what the
+      # binaries PRINT: an APE's exit status is unusable from a POSIX shell
+      # there, and is read from PowerShell only as a cross-check.
+      - uses: actions/download-artifact@v4
+        with:
+          name: hull-cosmo-chan-tests
+          path: chan
+
+      - name: Plugin channel - unit tests (test_child_channel, test_build_plugin)
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $fail = 0
+          foreach ($t in @('test_child_channel', 'test_build_plugin')) {
+            Copy-Item "chan\$t" "$t.com" -Force
+            $out = & ".\$t.com" 2>&1 | Out-String
+            $global:LASTEXITCODE = 0
+            Write-Host $out
+            if ($out -match '\[  PASSED  \] \d+ tests\.' -and $out -notmatch 'FAILED') {
+              Write-Host "PASS $t"
+            } else { Write-Host "FAIL $t"; $fail = 1 }
+          }
+          exit $fail
+
+      - name: Plugin channel - TypeScript entry and build plugins
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $fail = 0
+          # hull in a directory of its own, as install.ps1 puts it: the tool
+          # sandbox grants the plugin executable's directory, never the home.
+          New-Item -ItemType Directory -Force -Path hullbin | Out-Null
+          Copy-Item hull-cosmo.exe hullbin\hull.com -Force
+          # Forward slashes: the form cosmo's execve and hull's entry paths take
+          # (verified by hand on Windows 11).
+          $hull = (Resolve-Path hullbin\hull.com).Path -replace '\\', '/'
+
+          New-Item -ItemType Directory -Force -Path tsapp | Out-Null
+          @(
+            'import { app } from "hull:app";',
+            'app.manifest({ modules: [] });',
+            'interface Greeting { who: string; n: number }',
+            'const g: Greeting = { who: "windows", n: 3 };',
+            'app.main((ctx) => { ctx.stdout.write(`TS-OK ${g.who} x${g.n} ${ctx.args.join(",")}\n`); return 0; });'
+          ) | Set-Content tsapp\app.ts -Encoding ascii
+          Push-Location tsapp
+          $out = & $hull app.ts -- a b 2>&1 | Out-String
+          $global:LASTEXITCODE = 0
+          Pop-Location
+          Write-Host $out
+          if ($out -match 'TS-OK windows x3 a,b') { Write-Host "PASS hull app.ts (the ts-erase plugin ran)" }
+          else { Write-Host "FAIL hull app.ts"; $fail = 1 }
+
+          Copy-Item chan\e2e_build_plugin_drive drive.com -Force
+          $fix = "tests/fixtures"
+          $lua = & .\drive.com $hull "$fix/build_plugin_lua/app.lua" 2>&1 | Out-String
+          $js  = & .\drive.com $hull "$fix/build_plugin_js/app.js" 2>&1 | Out-String
+          $ref = & .\drive.com $hull "$fix/build_plugin_refused/app.lua" none 2>&1 | Out-String
+          $global:LASTEXITCODE = 0
+          foreach ($pair in @(@('lua', $lua), @('js', $js))) {
+            $t = $pair[1]
+            $calls = ([regex]::Matches($t, '(?m)^call ')).Count
+            if ($t -match 'written: hi:hello' -and $t -match 'done: ok' -and
+                $t -match 'done: error unit b fails' -and $t -match 'exit: 0' -and $calls -eq 16) {
+              Write-Host "PASS $($pair[0]): two actions, sixteen calls, the second action's error, clean exit"
+            } else { Write-Host "FAIL $($pair[0]) transcript:"; Write-Host $t; $fail = 1 }
+          }
+          if ($lua -ceq $js) { Write-Host "PASS the Lua and JavaScript transcripts are identical" }
+          else { Write-Host "FAIL Lua / JavaScript transcripts differ"; $fail = 1 }
+          if ($ref -match 'exit: 1' -and $ref -notmatch 'call ') { Write-Host "PASS a manifest declaring hull/time is refused" }
+          else { Write-Host "FAIL refused preset:"; Write-Host $ref; $fail = 1 }
+
+          $hand = & $hull "$fix/build_plugin_lua/app.lua" 2>&1 | Out-String
+          $env:HULL_BUILD_PLUGIN_FD = '3'
+          $fd = & $hull "$fix/build_plugin_lua/app.lua" 2>&1 | Out-String
+          Remove-Item Env:HULL_BUILD_PLUGIN_FD
+          $global:LASTEXITCODE = 0
+          if ($hand -match 'no channel to a build host') { Write-Host "PASS run by hand, app.transform names the missing channel" }
+          else { Write-Host "FAIL run by hand:"; Write-Host $hand; $fail = 1 }
+          if ($fd -match 'fd 3 is not a build channel') { Write-Host "PASS HULL_BUILD_PLUGIN_FD without a channel stops hull" }
+          else { Write-Host "FAIL bad descriptor:"; Write-Host $fd; $fail = 1 }
+          exit $fail
 
       # Regression guard for the Windows blob.init drive-root mkdir bug (nexogen
       # asset-tracker PLATFORM_GAPS 2026-07-14, mis-filed as "spaces in path"):

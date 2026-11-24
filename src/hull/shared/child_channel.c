@@ -42,6 +42,7 @@ void hl_chan_frame_reset(HlChanFrame *r)
 #include <time.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -74,13 +75,53 @@ extern char **environ;
 #define CHAN_SEND_FLAGS 0
 #endif
 
-int hl_chan_host_ok(void)
+/* 1 on a cosmo APE running on Windows. Its socketpair is a pair of duplex
+ * pipes there: read / write / recv / send and poll work on it, but send()
+ * refuses MSG_NOSIGNAL (EINVAL) and fcntl F_SETNOSIGPIPE, so a write to a
+ * peer that is gone raises SIGPIPE unless it is blocked (chan_send). */
+static int chan_on_windows(void)
 {
 #if defined(__COSMOPOLITAN__)
-    return !IsWindows();
+    return IsWindows();
 #else
-    return 1;
+    return 0;
 #endif
+}
+
+/* send() that never raises SIGPIPE: MSG_NOSIGNAL where the socket takes it;
+ * on Windows SIGPIPE blocked in this thread around the write, and the one
+ * the write raised (EPIPE) taken off the pending set before it is
+ * unblocked, unless one was pending already. */
+static ssize_t chan_send(int fd, const void *p, size_t n)
+{
+    if (!chan_on_windows())
+        return send(fd, p, n, CHAN_SEND_FLAGS);
+#if defined(__COSMOPOLITAN__)
+    sigset_t pipe_set, prev, pend;
+    sigemptyset(&pipe_set);
+    sigaddset(&pipe_set, SIGPIPE);
+    if (pthread_sigmask(SIG_BLOCK, &pipe_set, &prev) != 0) return -1;
+    int was = sigpending(&pend) == 0 && sigismember(&pend, SIGPIPE);
+    ssize_t w = send(fd, p, n, 0);
+    int e = errno;
+    if (w < 0 && e == EPIPE && !was) {
+        struct timespec zero = { 0, 0 };
+        while (sigtimedwait(&pipe_set, NULL, &zero) < 0 && errno == EINTR) { }
+    }
+    pthread_sigmask(SIG_SETMASK, &prev, NULL);
+    errno = e;
+    return w;
+#else
+    return -1;   /* not reached: only a cosmo APE runs on Windows */
+#endif
+}
+
+int hl_chan_fd_is_channel(int fd)
+{
+    struct stat st;
+    if (fstat(fd, &st) != 0) return 0;
+    if (S_ISSOCK(st.st_mode)) return 1;
+    return chan_on_windows() && S_ISFIFO(st.st_mode);
 }
 
 void hl_chan_set_nonblock(int fd)
@@ -112,7 +153,7 @@ int hl_chan_write_all(int fd, const void *buf, size_t n, uint64_t deadline)
 {
     const uint8_t *p = buf;
     while (n > 0) {
-        ssize_t w = send(fd, p, n, CHAN_SEND_FLAGS);
+        ssize_t w = chan_send(fd, p, n);
         if (w > 0) { p += w; n -= (size_t)w; continue; }
         if (w < 0 && errno == EINTR) continue;
         if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -248,9 +289,12 @@ static int chan_fd_above_stdio(int fd, int *owned)
  * writes its errno to a close-on-exec socket, which reads EOF once the exec
  * succeeded (audit 50: the pid of a child that only _exit(127)ed).
  *
- * A cosmo APE takes this path wherever it has a channel (hl_chan_host_ok):
- * its posix_spawn passes every descriptor without close-on-exec to the child
- * too (#1173). */
+ * A cosmo APE takes this path on every host: its posix_spawn passes every
+ * descriptor without close-on-exec to the child too (#1173). On Windows its
+ * fork and execve carry the channel to the child's fd 3 as they do
+ * elsewhere (#1188); closefrom answers ENOSYS there and getrlimit fails, so
+ * close_fds_from closes every number up to 2^20 (measured 17 ms in a forked
+ * child, Windows 11). */
 static void close_fds_from(unsigned lo);
 
 static void child_fail(int ew)

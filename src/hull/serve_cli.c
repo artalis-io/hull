@@ -415,7 +415,7 @@ int hull_serve(int argc, char **argv)
     /* A build plugin's channel to its host (shared/build_plugin.h): taken,
      * like the session key, before any app code runs - as serve.c does. */
     if (hl_build_plugin_take_env() < 0) {
-        fprintf(stderr, "hull: " HL_BUILD_PLUGIN_ENV " is set but fd 3 is not a socket\n");
+        fprintf(stderr, "hull: " HL_BUILD_PLUGIN_ENV " is set but fd 3 is not a build channel\n");
         return 1;
     }
     /* A pipeline generation the parent handed over: taken here, installed

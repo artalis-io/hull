@@ -543,7 +543,7 @@ static int pipeline_app(char *app)
 {
 #ifdef HL_CHAN_SUPPORTED
     char exe[4096];
-    if (!hl_chan_host_ok() || hl_chan_self_exe(exe, sizeof exe) != 0) return -2;
+    if (hl_chan_self_exe(exe, sizeof exe) != 0) return -2;
 #else
     return -2;
 #endif

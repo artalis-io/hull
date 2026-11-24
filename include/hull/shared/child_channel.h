@@ -9,9 +9,8 @@
  * frame with another magic, or a payload longer than the reader's max, is a
  * protocol error.
  *
- * HL_CHAN_SUPPORTED: every POSIX build and a cosmo APE; not a native Windows
- * build. A cosmo APE running on Windows reports no channel at run time
- * (hl_chan_host_ok).
+ * HL_CHAN_SUPPORTED: every POSIX build and a cosmo APE, on every host it runs
+ * on (Windows included, #1188); not a native Windows build.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -73,10 +72,9 @@ void hl_chan_frame_reset(HlChanFrame *r);
 
 #ifdef HL_CHAN_SUPPORTED
 
-/* 1 when this host can run a channel child: always on a POSIX build; a
- * cosmo APE on any host but Windows, where its socketpair is made of pipes
- * that send() / recv() refuse and the spawn does not hold up (#1173). */
-int hl_chan_host_ok(void);
+/* 1 when @p fd is a channel end: a socket, or on a cosmo APE running on
+ * Windows a pipe (its socketpair is a pair of duplex pipes there). */
+int hl_chan_fd_is_channel(int fd);
 
 /* Milliseconds left until @p deadline as a poll timeout (0 = no deadline:
  * -1, wait for ever). */

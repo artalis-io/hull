@@ -197,7 +197,7 @@ unavailable there. Everything the cosmo base compiles in works normally.
 | WASM compute (`compute.*`) | yes, interpreted | cosmo keeps WASM in-base |
 | Terminal UI (`hull.tui`) | yes | `HL_ENABLE_TUI` defaults to 1 on cosmo |
 | `hull build` of an APE app | yes | needs `cosmocc`; see below |
-| TypeScript entries (`app.ts`) and build plugins (`hull.build.json`) | **no, for now** | their plugin processes cannot be spawned there yet ([#1188](https://github.com/artalis-io/hull/issues/1188)); use WSL or a Linux / macOS host |
+| TypeScript entries (`app.ts`) and build plugins (`hull.build.json`) | yes | a plugin runs under the capability layer only: Windows has no kernel sandbox ([#1188](https://github.com/artalis-io/hull/issues/1188)) |
 | PostgreSQL (`postgres://`) | **no** | native-only feature |
 | MySQL / MariaDB (`mysql://`, `mariadb://`) | **no** | native-only feature |
 | DuckDB (`duckdb://`) | **no** | native-only feature |
