@@ -6,7 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
-## [Unreleased]
+## [0.24.1] - 2026-11-24
+
+A types fix: a TypeScript app can declare `hull/sse-client` in its manifest without a cast.
 
 ### Fixed
 
