@@ -11,8 +11,13 @@
 #   idle      a server that goes quiet past idle_timeout_ms ends the stream
 #             with code "idle", after the event it did send
 #   headtime  no headers within timeout_ms is code "timeout"
-#   overflow  a reader that falls buffer_bytes behind gets what was buffered,
-#             then code "overflow"
+#   slowread  a reader that sleeps while a 300 000-byte body arrives into a
+#             32 KiB buffer gets all of it: the stream pauses Keel's client
+#             (it stops reading the socket) and a read resumes it, so a slow
+#             reader holds the server back instead of ending with "overflow"
+#             (stream_pause.slow_reader_gets_whole_body)
+#   pauseidle the same with an idle timeout shorter than the reader's sleep:
+#             a paused stream is not idle (stream_pause.paused_is_not_idle)
 #   toolarge  a body past max_bytes is code "too_large"
 #   close     a read after close() is code "closed"
 #   denied    a host manifest.hosts does not admit is refused coded "denied"
@@ -25,7 +30,9 @@
 #   lifeclamp a life_ms above 24 h is clamped, not refused
 #   lifebad   a life_ms of 0, or not an integer (Lua) / number (JS), is refused
 # and from a request handler in each runtime (the request's connection is
-# suspended while the handler waits on the stream): /proxy relays the events.
+# suspended while the handler waits on the stream): /proxy relays the events,
+# and /gzslow reads a gzip body slowly through a 32 KiB buffer (the pause
+# stops the decoder mid-body; stream_pause.gzip_slow_reader).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -124,11 +131,17 @@ app.main(function(ctx)
     elseif case == "headtime" then
         local res, err, code = http.async.stream("GET", base .. "/slowhead", { timeout_ms = 300 })
         out = tostring(res) .. " " .. tostring(code)
-    elseif case == "overflow" then
-        local res = assert(http.async.stream("GET", base .. "/big", { buffer_bytes = 16384 }))
+    elseif case == "slowread" then
+        local res = assert(http.async.stream("GET", base .. "/big", { buffer_bytes = 32768 }))
         hull.sleep(500)
         local n, why = drain(res)
-        out = (n <= 16384 and "bounded" or ("unbounded:" .. n)) .. " " .. why
+        out = n .. " " .. why
+    elseif case == "pauseidle" then
+        local res = assert(http.async.stream("GET", base .. "/big",
+                                             { buffer_bytes = 32768, idle_timeout_ms = 200 }))
+        hull.sleep(600)
+        local n, why = drain(res)
+        out = n .. " " .. why
     elseif case == "toolarge" then
         local n, why = drain(assert(http.async.stream("GET", base .. "/big", { max_bytes = 1000 })))
         out = why
@@ -179,7 +192,7 @@ app.main(function(ctx)
         -- dropped go with one collection.
         for _ = 1, 80 do
             local res = assert(http.async.stream("GET", base .. "/quiet",
-                                                 { buffer_bytes = 16384 }))
+                                                 { buffer_bytes = 32768 }))
             res = nil
         end
         out = "ok"
@@ -257,11 +270,16 @@ app.main(async (ctx) => {
     } else if (kase === "headtime") {
         try { await stream("GET", base + "/slowhead", { timeoutMs: 300 }); out = "resolved"; }
         catch (e) { out = `rejected ${e.code}`; }
-    } else if (kase === "overflow") {
-        const res = await stream("GET", base + "/big", { bufferBytes: 16384 });
+    } else if (kase === "slowread") {
+        const res = await stream("GET", base + "/big", { bufferBytes: 32768 });
         await hull.sleep(500);
         const [n, why] = await drain(res);
-        out = `${n <= 16384 ? "bounded" : "unbounded:" + n} ${why}`;
+        out = `${n} ${why}`;
+    } else if (kase === "pauseidle") {
+        const res = await stream("GET", base + "/big", { bufferBytes: 32768, idleTimeoutMs: 200 });
+        await hull.sleep(600);
+        const [n, why] = await drain(res);
+        out = `${n} ${why}`;
     } else if (kase === "toolarge") {
         const [, why] = await drain(await stream("GET", base + "/big", { maxBytes: 1000 }));
         out = why;
@@ -321,6 +339,29 @@ app.get("/proxy", function(req, res)
     for ev in sse.events(s) do parts[#parts + 1] = ev.data end
     res:text(table.concat(parts, ","))
 end)
+-- stream_pause.gzip_slow_reader: a gzip body (300 000 bytes from a few
+-- hundred, so the decoder hands over 32 KiB windows) into a 32 KiB buffer,
+-- read slowly: the pause stops the decoder mid-body and the reader still
+-- gets every byte. Decompression is wired in serve mode only, hence here.
+app.get("/gzslow", function(req, res)
+    local s = assert(http.async.stream("GET",
+        "http://127.0.0.1:" .. env.get("ORIGIN_PORT") .. "/big",
+        { headers = { ["Accept-Encoding"] = "gzip" }, buffer_bytes = 32768 }))
+    hull.sleep(500)
+    local parts, n = {}, 0
+    while true do
+        local c, e, code = s.read()
+        if not c then
+            local body = table.concat(parts)
+            res:text(n .. " " .. (e and code or "end") .. " " ..
+                     tostring(s.headers["content-encoding"]) .. " " ..
+                     (body == string.rep("x", 300000) and "intact" or "corrupt"))
+            return
+        end
+        parts[#parts + 1] = c
+        n = n + #c
+    end
+end)
 EOF
 
 cat > "$TMPDIR/pjs/app.js" <<'EOF'
@@ -337,6 +378,24 @@ app.get("/proxy", async (req, res) => {
     const parts = [];
     for await (const ev of sseClient.events(s)) parts.push(ev.data);
     res.text(parts.join(","));
+});
+// stream_pause.gzip_slow_reader: see the Lua twin.
+app.get("/gzslow", async (req, res) => {
+    const s = await httpClient.async.stream("GET",
+        `http://127.0.0.1:${env.get("ORIGIN_PORT")}/big`,
+        { headers: { "Accept-Encoding": "gzip" }, bufferBytes: 32768 });
+    await hull.sleep(500);
+    let n = 0, why = "end", body = "";
+    try {
+        for (;;) {
+            const c = await s.readText();
+            if (c === null) break;
+            n += c.length;
+            body += c;
+        }
+    } catch (e) { why = e.code || String(e); }
+    res.text(`${n} ${why} ${s.headers["content-encoding"]} ` +
+             (body === "x".repeat(300000) ? "intact" : "corrupt"));
 });
 EOF
 
@@ -372,7 +431,8 @@ for rt in lua js; do
     expect "$rt" idle     "data idle"
     if [ "$rt" = lua ]; then expect lua headtime "nil timeout"
     else expect js headtime "rejected timeout"; fi
-    expect "$rt" overflow "bounded overflow"
+    expect "$rt" slowread  "300000 end" "stream_pause.slow_reader_gets_whole_body"
+    expect "$rt" pauseidle "300000 end" "stream_pause.paused_is_not_idle"
     expect "$rt" toolarge "too_large"
     if [ "$rt" = lua ]; then expect lua close "nil closed"
     else expect js close "threw closed"; fi
@@ -405,6 +465,10 @@ for pair in "lua:$PROXY_LUA" "js:$PROXY_JS"; do
     got=$(curl -s --max-time 10 "http://127.0.0.1:$p/proxy" || true)
     [ "$got" = "n=1,n=2,n=3" ] && pass "[$rt] /proxy relays the events" ||
         fail "[$rt] /proxy" "'$got' $(tail -3 "$TMPDIR/p$rt.log" | tr '\n' ' ')"
+    got=$(curl -s --max-time 20 "http://127.0.0.1:$p/gzslow" || true)
+    [ "$got" = "300000 end gzip intact" ] &&
+        pass "[$rt] stream_pause.gzip_slow_reader" ||
+        fail "[$rt] stream_pause.gzip_slow_reader" "'$got' $(tail -3 "$TMPDIR/p$rt.log" | tr '\n' ' ')"
 done
 
 # ── audit 52, JS binding (stream_audit52.*) ──────────────────────────────

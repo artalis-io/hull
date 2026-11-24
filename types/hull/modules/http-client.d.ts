@@ -35,10 +35,10 @@ declare module "hull:http-client" {
         lifeMs?: number | null;
         /** Ends the stream with code "too_large" once the body passes this many bytes (an integer); default no limit. */
         maxBytes?: number | null;
-        /** Unread bytes (an integer) held for a slow reader before the stream ends with code "overflow"; default 1 MiB, 16 KiB .. 16 MiB. */
+        /** Unread bytes (an integer) held for a slow reader; once nearly full, Hull stops reading the connection until reads make room. Default 1 MiB, 32 KiB .. 16 MiB. */
         bufferBytes?: number | null;
     }
-    /** A streamed response: status and headers now, the body as it arrives. A read that ends the stream with an error throws an Error whose `code` is "timeout", "idle", "life", "overflow", "too_large", "closed" or "io_error". */
+    /** A streamed response: status and headers now, the body as it arrives. A read that ends the stream with an error throws an Error whose `code` is "timeout", "idle", "life", "too_large", "closed" or "io_error". */
     export interface HttpStream {
         /** The HTTP status code. */
         readonly status: number;

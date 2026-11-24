@@ -15,8 +15,10 @@ release-artifact layout).
   chunk by chunk (Lua `res.read()`, JS `read()` / `readText()` / `for await`). Timeouts
   up to the headers and between arrivals (`idle_timeout_ms`), a bound on the whole stream
   (`life_ms` / `lifeMs`, 10 min by default, up to 24 h, code `life` past it), a `max_bytes`
-  cap, and a bounded buffer for a slow reader (`buffer_bytes`, code `overflow` past it:
-  Keel's client cannot pause the server, a follow-up). No redirects. Both runtimes.
+  cap, and backpressure for a slow reader: once `buffer_bytes` (1 MiB by default, 32 KiB
+  to 16 MiB) is nearly full Hull stops reading the connection (Keel 3.4.0's client
+  pause), so the server is held back by TCP flow control and the reader gets the whole
+  body. No redirects. Both runtimes.
   An open stream holds one of the VM's 64 requests in flight; a stream whose read
   returned the end or an error gives back its slot and its buffer at once (later reads
   return the same, `close()` does nothing), and at the cap both runtimes collect garbage
