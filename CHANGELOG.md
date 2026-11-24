@@ -8,6 +8,20 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- **`hull/exec`: declared commands, part 1** (docs/design/exec_broker.md). A manifest `exec`
+  section declares each command an app may run as a shape: an absolute path, fixed
+  arguments, and slots (`prefix` / `suffix` / `chars` / `min` / `max` / `enum` / `repeat`;
+  no regex) whose values never start with `-` unless the slot allows it. The section is
+  encoded once in C by both manifest extractors, validated in full (`cap/exec.c`,
+  `hl_exec_policy_validate`), sealed with the manifest, and checked by one matcher
+  (`hl_exec_check_call`). An unknown key, a value out of range, or a declared `sha256` (not
+  enforced yet) refuses the app. `exec.run(name, args)` (Lua `hull.exec`, JS `hull:exec`)
+  matches the call, then answers from a `hull test` stub (`test.exec_stub` /
+  `test.execStub`); outside `hull test` it fails naming the missing command broker, which
+  lands next. Fuzzed by `fuzz_exec_policy` and `fuzz_exec_slot`; `make e2e-exec`.
+
 ## [0.25.0] - 2026-11-24
 
 TypeScript entries and build plugins run on a cosmo hull on Windows.

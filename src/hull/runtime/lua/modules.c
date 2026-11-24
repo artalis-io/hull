@@ -14,6 +14,7 @@
  */
 
 #include "mod_buffer.h"
+#include "mod_exec.h"
 #include "internal.h"  /* hl_lua_request_register, hl_lua_sse_register_mt */
 #include "hull/cap/gpu.h"  /* hl_gpu_backend_present */
 #include "hull/cap/tui.h"  /* hl_tui_feature_register_lua (composed-feature seam) */
@@ -95,6 +96,7 @@ int hl_lua_register_modules(HlLua *lua)
     register_native_module(L, "hull.fs",     luaopen_hull_fs);
     register_native_module(L, "hull.blob",   luaopen_hull_blob);
     register_native_module(L, "hull.mime",   luaopen_hull_mime);
+    register_native_module(L, "hull.exec",   luaopen_hull_exec);
     register_native_module(L, "hull.archive.tar", luaopen_hull_tar);
     /* image has a DUAL role (audit T4b), unlike blob/mime/tar above which are
      * plain always-in-base cap modules. Two independent gates:

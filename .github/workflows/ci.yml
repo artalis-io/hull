@@ -530,6 +530,9 @@ jobs:
       - name: Refused-host error code (platform gap 3) E2E tests
         timeout-minutes: 2
         run: make e2e-host-denied
+      - name: Declared commands (hull/exec, stubs + matcher) E2E tests
+        timeout-minutes: 2
+        run: make e2e-exec
       - name: Streamed HTTP responses + SSE client E2E tests
         timeout-minutes: 3
         run: make e2e-http-stream
@@ -2127,12 +2130,13 @@ jobs:
             fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff \
             fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_ssh \
             fuzz/fuzz_log_escape fuzz/fuzz_http_guard \
-            fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name fuzz/fuzz_plain_value
+            fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name fuzz/fuzz_plain_value \
+            fuzz/fuzz_exec_policy fuzz/fuzz_exec_slot
       - name: Run core fuzzers (60s each)
         timeout-minutes: 15
         run: |
           set -e
-          for f in sh_json path_normalize mime_sniff host_match encoding ssh log_escape http_guard wasm_log_escape migrate_name plain_value; do
+          for f in sh_json path_normalize mime_sniff host_match encoding ssh log_escape http_guard wasm_log_escape migrate_name plain_value exec_policy exec_slot; do
             echo "== fuzz $f =="
             ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time=60
           done

@@ -201,6 +201,368 @@ static int read_js_port_array(JSContext *ctx, JSValueConst obj, int *out)
     return n;
 }
 
+/* ── exec: { name: { path, argv, ... } } (docs/design/exec_broker.md §3) ──
+ *
+ * The twin of manifest_lua.c's lx_exec: every key checked against what the
+ * section takes (both the camelCase and the snake_case spelling), own data
+ * properties only, commands and env pairs encoded sorted so both runtimes
+ * produce the same bytes. Rules are hl_exec_policy_validate's. */
+
+/* Each row: the accepted spellings of one key (NULL-terminated pairs). */
+static const char *const MX_CMD_KEYS[] = {
+    "path", "argv", "timeoutMs", "timeout_ms", "stdoutMax", "stdout_max",
+    "stderrMax", "stderr_max", "env", "concurrency", "fs", "unixSockets",
+    "unix_sockets", "sha256", NULL };
+static const char *const MX_SLOT_KEYS[] = {
+    "enum", "prefix", "suffix", "chars", "min", "max", "repeat", "allowDash",
+    "allow_dash", NULL };
+static const char *const MX_FS_KEYS[] = { "read", "write", NULL };
+static const char *const MX_REPEAT_KEYS[] = { "min", "max", NULL };
+
+static int mx_key_in(const char *k, const char *const *list)
+{
+    for (int i = 0; list[i]; i++)
+        if (strcmp(k, list[i]) == 0) return 1;
+    return 0;
+}
+
+static int mx_cmp_cstr(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* The own keys of @p obj (strings and symbols); NULL on error, *n = 0. */
+static JSPropertyEnum *mx_own_keys(JSContext *ctx, JSValueConst obj, uint32_t *n)
+{
+    JSPropertyEnum *tab = NULL;
+    *n = 0;
+    if (JS_GetOwnPropertyNames(ctx, &tab, n, obj,
+                               JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) < 0) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        *n = 0;
+        return NULL;
+    }
+    return tab;
+}
+
+static int mx_keys(JSContext *ctx, JSValueConst obj, const char *const *allowed,
+                   HlExecBuf *b, const char *where)
+{
+    uint32_t n;
+    JSPropertyEnum *tab = mx_own_keys(ctx, obj, &n);
+    int rc = 0;
+    for (uint32_t i = 0; i < n && rc == 0; i++) {
+        const char *k = JS_AtomToCString(ctx, tab[i].atom);
+        if (!k) JS_FreeValue(ctx, JS_GetException(ctx));
+        if (!k || !mx_key_in(k, allowed)) {
+            hl_exec_b_fail(b, "%s: unknown key '%s'", where, k ? k : "(symbol)");
+            rc = -1;
+        }
+        if (k) JS_FreeCString(ctx, k);
+    }
+    if (tab) JS_FreePropertyEnum(ctx, tab, n);
+    return rc;
+}
+
+/* An own property under either spelling (@p alt may be NULL). */
+static JSValue mx_own2(JSContext *ctx, JSValueConst obj, const char *key,
+                       const char *alt)
+{
+    JSValue v = mjs_own(ctx, obj, key);
+    if (JS_IsUndefined(v) && alt) v = mjs_own(ctx, obj, alt);
+    return v;
+}
+
+/* An integer field: -1 absent, -2 negative or past 2^32 (refused later). */
+static int64_t mx_int(JSContext *ctx, JSValueConst obj, const char *key,
+                      const char *alt, HlExecBuf *b, const char *where)
+{
+    JSValue v = mx_own2(ctx, obj, key, alt);
+    int64_t out = -1;
+    if (JS_IsNumber(v)) {
+        double d = 0;
+        JS_ToFloat64(ctx, &d, v);   /* a number: runs no app code */
+        if (!(d == d))                              /* NaN */
+            hl_exec_b_fail(b, "%s: %s must be an integer", where, key);
+        else if (d < 0 || d > 4294967295.0)         /* out of range: refused */
+            out = -2;
+        else if (d != (double)(int64_t)d)           /* in range: a defined cast */
+            hl_exec_b_fail(b, "%s: %s must be an integer", where, key);
+        else
+            out = (int64_t)d;
+    } else if (!JS_IsUndefined(v) && !JS_IsNull(v)) {
+        hl_exec_b_fail(b, "%s: %s must be an integer", where, key);
+    }
+    JS_FreeValue(ctx, v);
+    return out;
+}
+
+static int mx_bool(JSContext *ctx, JSValueConst obj, const char *key,
+                   const char *alt, HlExecBuf *b, const char *where)
+{
+    JSValue v = mx_own2(ctx, obj, key, alt);
+    int out = 0;
+    if (JS_IsBool(v)) out = JS_ToBool(ctx, v);
+    else if (!JS_IsUndefined(v) && !JS_IsNull(v))
+        hl_exec_b_fail(b, "%s: %s must be a boolean", where, key);
+    JS_FreeValue(ctx, v);
+    return out;
+}
+
+/* A string field as a C string to JS_FreeCString (NULL when absent). */
+static const char *mx_str(JSContext *ctx, JSValueConst obj, const char *key,
+                          size_t *len, HlExecBuf *b, const char *where)
+{
+    JSValue v = mjs_own(ctx, obj, key);
+    const char *s = NULL;
+    *len = 0;
+    if (JS_IsString(v)) {
+        s = JS_ToCStringLen(ctx, len, v);
+        if (!s) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            hl_exec_b_fail(b, "exec: out of memory");
+        }
+    } else if (!JS_IsUndefined(v) && !JS_IsNull(v)) {
+        hl_exec_b_fail(b, "%s: %s must be a string", where, key);
+    }
+    JS_FreeValue(ctx, v);
+    return s;
+}
+
+static void mx_str_list(JSContext *ctx, JSValueConst obj, const char *key,
+                        HlExecBuf *b, const char *where)
+{
+    size_t mark = hl_exec_b_count_begin(b);
+    size_t n = 0;
+    JSValue arr = mjs_own(ctx, obj, key);
+    if (JS_IsArray(ctx, arr) > 0) {
+        int32_t len = mjs_len(ctx, arr);
+        for (int32_t i = 0; i < len && !b->failed; i++) {
+            JSValue e = mjs_elem(ctx, arr, (uint32_t)i);
+            if (JS_IsString(e)) {
+                size_t sl;
+                const char *sv = JS_ToCStringLen(ctx, &sl, e);
+                if (sv) { hl_exec_b_str(b, sv, sl); JS_FreeCString(ctx, sv); n++; }
+                else { JS_FreeValue(ctx, JS_GetException(ctx));
+                       hl_exec_b_fail(b, "exec: out of memory"); }
+            } else {
+                hl_exec_b_fail(b, "%s: %s[%d] must be a string", where, key, (int)i);
+            }
+            JS_FreeValue(ctx, e);
+        }
+    } else if (!JS_IsUndefined(arr) && !JS_IsNull(arr)) {
+        hl_exec_b_fail(b, "%s: %s must be an array of strings", where, key);
+    }
+    JS_FreeValue(ctx, arr);
+    hl_exec_b_count_end(b, mark, n);
+}
+
+/* Sorted own string keys of @p obj as C strings (each to JS_FreeCString).
+ * Returns the count, or -1 (b failed) past @p max. */
+static int mx_sorted_keys(JSContext *ctx, JSValueConst obj, const char **out,
+                          int max, HlExecBuf *b, const char *where)
+{
+    uint32_t n;
+    JSPropertyEnum *tab = mx_own_keys(ctx, obj, &n);
+    int k = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (k >= max) {
+            hl_exec_b_fail(b, "%s has more than %d entries", where, max);
+            break;
+        }
+        const char *s = JS_AtomToCString(ctx, tab[i].atom);
+        if (!s) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            hl_exec_b_fail(b, "%s: a key is not a string", where);
+            break;
+        }
+        out[k++] = s;
+    }
+    if (tab) JS_FreePropertyEnum(ctx, tab, n);
+    qsort(out, (size_t)k, sizeof out[0], mx_cmp_cstr);
+    return k;
+}
+
+static void mx_slot(JSContext *ctx, JSValueConst t, HlExecBuf *b, const char *where)
+{
+    if (mx_keys(ctx, t, MX_SLOT_KEYS, b, where) != 0) return;
+    int64_t min = mx_int(ctx, t, "min", NULL, b, where);
+    int64_t max = mx_int(ctx, t, "max", NULL, b, where);
+    int dash = mx_bool(ctx, t, "allowDash", "allow_dash", b, where);
+    int repeat = 0;
+    int64_t rmin = -1, rmax = -1;
+    JSValue r = mjs_own(ctx, t, "repeat");
+    if (mjs_is_obj(ctx, r)) {
+        char rw[128];
+        snprintf(rw, sizeof rw, "%s.repeat", where);
+        if (mx_keys(ctx, r, MX_REPEAT_KEYS, b, rw) == 0) {
+            repeat = 1;
+            rmin = mx_int(ctx, r, "min", NULL, b, rw);
+            rmax = mx_int(ctx, r, "max", NULL, b, rw);
+        }
+    } else if (!JS_IsUndefined(r) && !JS_IsNull(r)) {
+        hl_exec_b_fail(b, "%s: repeat must be an object { min, max }", where);
+    }
+    JS_FreeValue(ctx, r);
+    size_t pl, sl, cl;
+    const char *pre = mx_str(ctx, t, "prefix", &pl, b, where);
+    const char *suf = mx_str(ctx, t, "suffix", &sl, b, where);
+    const char *chars = mx_str(ctx, t, "chars", &cl, b, where);
+    hl_exec_b_slot(b, dash, min, max, repeat, rmin, rmax, pre, pl, suf, sl,
+                   chars, cl);
+    if (pre) JS_FreeCString(ctx, pre);
+    if (suf) JS_FreeCString(ctx, suf);
+    if (chars) JS_FreeCString(ctx, chars);
+    mx_str_list(ctx, t, "enum", b, where);
+}
+
+static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *b)
+{
+    char where[96];
+    snprintf(where, sizeof where, "exec.%s", name);
+    if (mx_keys(ctx, t, MX_CMD_KEYS, b, where) != 0) return;
+    JSValue pin = mjs_own(ctx, t, "sha256");
+    int has_pin = !JS_IsUndefined(pin);
+    JS_FreeValue(ctx, pin);
+    if (has_pin) {
+        hl_exec_b_fail(b, "%s: sha256 is not supported yet (it lands with the "
+                       "broker's digest check); remove it", where);
+        return;
+    }
+    size_t pl;
+    const char *path = mx_str(ctx, t, "path", &pl, b, where);
+    if (!path && !b->failed) {
+        hl_exec_b_fail(b, "%s: path is required", where);
+        return;
+    }
+    int64_t timeout = mx_int(ctx, t, "timeoutMs", "timeout_ms", b, where);
+    int64_t so = mx_int(ctx, t, "stdoutMax", "stdout_max", b, where);
+    int64_t se = mx_int(ctx, t, "stderrMax", "stderr_max", b, where);
+    int64_t conc = mx_int(ctx, t, "concurrency", NULL, b, where);
+    int unix_sockets = mx_bool(ctx, t, "unixSockets", "unix_sockets", b, where);
+    hl_exec_b_cmd(b, name, strlen(name), path, pl, timeout, so, se, conc,
+                  unix_sockets);
+    if (path) JS_FreeCString(ctx, path);
+
+    /* env: { NAME: "value" }, sorted by name */
+    size_t mark = hl_exec_b_count_begin(b);
+    int n_env = 0;
+    JSValue env = mjs_own(ctx, t, "env");
+    if (mjs_is_obj(ctx, env)) {
+        const char *keys[HL_EXEC_MAX_ENV + 1];
+        char ew[128];
+        snprintf(ew, sizeof ew, "%s.env", where);
+        n_env = mx_sorted_keys(ctx, env, keys, HL_EXEC_MAX_ENV + 1, b, ew);
+        for (int i = 0; i < n_env; i++) {
+            if (!b->failed) {
+                JSValue v = mjs_own(ctx, env, keys[i]);
+                if (!JS_IsString(v)) {
+                    hl_exec_b_fail(b, "%s: env maps names to literal strings", where);
+                } else {
+                    size_t vl;
+                    const char *vs = JS_ToCStringLen(ctx, &vl, v);
+                    if (!vs) {
+                        JS_FreeValue(ctx, JS_GetException(ctx));
+                        hl_exec_b_fail(b, "exec: out of memory");
+                    } else {
+                        hl_exec_b_str(b, keys[i], strlen(keys[i]));
+                        hl_exec_b_str(b, vs, vl);
+                        JS_FreeCString(ctx, vs);
+                    }
+                }
+                JS_FreeValue(ctx, v);
+            }
+            JS_FreeCString(ctx, keys[i]);
+        }
+    } else if (!JS_IsUndefined(env) && !JS_IsNull(env)) {
+        hl_exec_b_fail(b, "%s: env must be an object", where);
+    }
+    JS_FreeValue(ctx, env);
+    hl_exec_b_count_end(b, mark, n_env < 0 ? 0 : (size_t)n_env);
+
+    /* fs: { read: [...], write: [...] } */
+    JSValue fs = mjs_own(ctx, t, "fs");
+    if (mjs_is_obj(ctx, fs)) {
+        char fw[128];
+        snprintf(fw, sizeof fw, "%s.fs", where);
+        if (mx_keys(ctx, fs, MX_FS_KEYS, b, fw) == 0) {
+            mx_str_list(ctx, fs, "read", b, fw);
+            mx_str_list(ctx, fs, "write", b, fw);
+        }
+    } else {
+        if (!JS_IsUndefined(fs) && !JS_IsNull(fs))
+            hl_exec_b_fail(b, "%s: fs must be an object { read, write }", where);
+        hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
+        hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
+    }
+    JS_FreeValue(ctx, fs);
+
+    /* argv: ["fixed", { slot }, ...] */
+    mark = hl_exec_b_count_begin(b);
+    size_t n_argv = 0;
+    JSValue argv = mjs_own(ctx, t, "argv");
+    if (JS_IsArray(ctx, argv) > 0) {
+        int32_t len = mjs_len(ctx, argv);
+        for (int32_t i = 0; i < len && !b->failed; i++) {
+            JSValue e = mjs_elem(ctx, argv, (uint32_t)i);
+            char aw[128];
+            snprintf(aw, sizeof aw, "%s.argv[%d]", where, (int)i);
+            if (JS_IsString(e)) {
+                size_t sl;
+                const char *sv = JS_ToCStringLen(ctx, &sl, e);
+                if (sv) { hl_exec_b_fixed(b, sv, sl); JS_FreeCString(ctx, sv); n_argv++; }
+                else { JS_FreeValue(ctx, JS_GetException(ctx));
+                       hl_exec_b_fail(b, "exec: out of memory"); }
+            } else if (mjs_is_obj(ctx, e)) {
+                mx_slot(ctx, e, b, aw);
+                n_argv++;
+            } else {
+                hl_exec_b_fail(b, "%s: an argv entry is a string or a slot object", aw);
+            }
+            JS_FreeValue(ctx, e);
+        }
+    } else if (!JS_IsUndefined(argv) && !JS_IsNull(argv)) {
+        hl_exec_b_fail(b, "%s: argv must be an array", where);
+    }
+    JS_FreeValue(ctx, argv);
+    hl_exec_b_count_end(b, mark, n_argv);
+}
+
+static void mx_exec(JSContext *ctx, JSValueConst manifest, HlManifest *out,
+                    HlAllocator *alloc)
+{
+    JSValue ex = mjs_own(ctx, manifest, "exec");
+    if (JS_IsUndefined(ex)) { JS_FreeValue(ctx, ex); return; }
+    out->exec_declared = 1;
+    HlExecBuf *b = &out->exec;
+    hl_exec_b_init(b, alloc);
+    if (!mjs_is_obj(ctx, ex)) {
+        hl_exec_b_fail(b, "exec must be an object of named commands");
+    } else {
+        const char *names[HL_EXEC_MAX_COMMANDS + 1];
+        int n = mx_sorted_keys(ctx, ex, names, HL_EXEC_MAX_COMMANDS + 1, b, "exec");
+        for (int i = 0; i < n; i++) {
+            if (!b->failed) {
+                if (!hl_exec_name_valid(names[i], strlen(names[i]))) {
+                    hl_exec_b_fail(b, "exec: '%s' is not a command name: [a-z0-9] "
+                                   "then up to 63 of [a-z0-9-]", names[i]);
+                } else {
+                    JSValue c = mjs_own(ctx, ex, names[i]);
+                    if (mjs_is_obj(ctx, c)) mx_cmd(ctx, c, names[i], b);
+                    else hl_exec_b_fail(b, "exec.%s must be an object", names[i]);
+                    JS_FreeValue(ctx, c);
+                }
+            }
+            JS_FreeCString(ctx, names[i]);
+        }
+    }
+    JS_FreeValue(ctx, ex);
+    if (hl_exec_b_finish(b) != 0) {
+        log_error("[manifest] %s", b->err);
+        out->exec_invalid = 1;   /* the entry point refuses to start */
+    }
+}
+
 int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
 {
     if (!ctx || !out)
@@ -492,6 +854,8 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     if (JS_IsBool(tui_val))
         out->tui = JS_ToBool(ctx, tui_val);
     JS_FreeValue(ctx, tui_val);
+
+    mx_exec(ctx, manifest, out, alloc);
 
     /* state: { name: "hsctl" } - the per-user state directory
      * (shared/state_dir.h); an unusable name fails the extraction, as in

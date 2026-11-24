@@ -831,8 +831,8 @@ $(BUILDDIR)/test_seal_arena: $(TESTDIR)/hull/test_seal_arena.c $(SH_SEAL_ARENA_O
 # Links only manifest.o (the shared / runtime-free part) - manifest_lua
 # and manifest_js are NOT needed since the fixture builds the manifest
 # by hand, and pulling them in would force a QuickJS + Lua link.
-$(BUILDDIR)/test_manifest_seal: $(TESTDIR)/hull/test_manifest_seal.c $(BUILDDIR)/manifest.o $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDDIR)/manifest.o $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(KEEL_LIB) -lpthread
+$(BUILDDIR)/test_manifest_seal: $(TESTDIR)/hull/test_manifest_seal.c $(BUILDDIR)/manifest.o $(BUILDDIR)/cap_exec.o $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDDIR)/manifest.o $(BUILDDIR)/cap_exec.o $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(KEEL_LIB) -lpthread
 
 # QuickJS HULL PATCH 0009 test seam (audit 40): test_js links a second copy
 # of quickjs.c built with -DQJS_HULL_TEST_HOOKS, which compiles in
@@ -1323,6 +1323,15 @@ fuzz/fuzz_path_normalize: fuzz/fuzz_path_normalize.c $(SRCDIR)/hull/utils/path_n
 fuzz/fuzz_mime_sniff: fuzz/fuzz_mime_sniff.c $(SRCDIR)/hull/cap/mime.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
+# The declared-command policy (cap/exec.c): the validator over untrusted
+# bytes (the broker reads them from the app) and the slot matcher every
+# exec.run argument reaches. Pure C; fuzz_exec_stubs.c is its allocator.
+fuzz/fuzz_exec_policy: fuzz/fuzz_exec_policy.c $(SRCDIR)/hull/cap/exec.c fuzz/fuzz_exec_stubs.c
+	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -o $@ $^
+
+fuzz/fuzz_exec_slot: fuzz/fuzz_exec_slot.c $(SRCDIR)/hull/cap/exec.c fuzz/fuzz_exec_stubs.c
+	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -o $@ $^
+
 # Host-allowlist matcher: glob + CIDR parsing over attacker-influenced patterns
 # and hosts (roadmap §2.2 dynamic DB connections).
 fuzz/fuzz_host_match: fuzz/fuzz_host_match.c $(SRCDIR)/hull/utils/host_match.c
@@ -1521,7 +1530,7 @@ fuzz-js-source: fuzz/fuzz_js_source build/fuzz-corpus/js_source
 fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window fuzz/fuzz_lua_source fuzz/fuzz_js_source fuzz/fuzz_ssh \
       fuzz/fuzz_log_escape fuzz/fuzz_http_guard fuzz/fuzz_sql_kw fuzz/fuzz_dsn_redact fuzz/fuzz_mysql_stmt \
       fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name fuzz/fuzz_pg_msg fuzz/fuzz_mysql_rows \
-      fuzz/fuzz_plain_value
+      fuzz/fuzz_plain_value fuzz/fuzz_exec_policy fuzz/fuzz_exec_slot
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -1550,6 +1559,8 @@ fuzz-run: fuzz
 	./fuzz/fuzz_wasm_log_escape fuzz/corpus_wasm_log_escape/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_migrate_name fuzz/corpus_migrate_name/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_plain_value fuzz/corpus_plain_value/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_exec_policy fuzz/corpus_exec_policy/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_exec_slot fuzz/corpus_exec_slot/ -max_total_time=$(FUZZ_TIME)
 	$(MAKE) fuzz-lua-source FUZZ_TIME=$(FUZZ_TIME)   # stages the full .lua corpus first
 	$(MAKE) fuzz-js-source FUZZ_TIME=$(FUZZ_TIME)    # stages the full .js corpus first
 
@@ -1645,6 +1656,12 @@ e2e-refusal-codes: $(BUILDDIR)/hull
 .PHONY: e2e-host-denied
 e2e-host-denied: $(BUILDDIR)/hull
 	sh tests/e2e_host_denied.sh
+
+# hull/exec PR 1 (docs/design/exec_broker.md): the manifest's exec section,
+# the argument matcher and the hull test stubs, both runtimes.
+.PHONY: e2e-exec
+e2e-exec: $(BUILDDIR)/hull
+	sh tests/e2e_exec.sh
 
 # http-client's async.stream + hull/sse-client, both runtimes: a response
 # handed over as it arrives, its timeouts, buffer and size caps, close, a

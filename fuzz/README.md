@@ -24,6 +24,8 @@ Hull's source, so the two trees don't overlap).
 | `fuzz_mysql_rows` | the MySQL connection layer's handlers (`cap/mysql_conn.c`): the greeting and auth exchange (AuthSwitchRequest, caching_sha2 AuthMoreData), the post-auth VERSION() / login reads, a text reply (lenenc cells, MORE_RESULTS chains), a prepared statement's binary rows (NULL bitmap, every type's decoder, temporal formatting) and a multi-statement script | Above the packet reader `fuzz_mysqlwire` covers (audit 44). Same fake transport as `fuzz_pg_msg`. |
 | `fuzz_wasm_log_escape` | `hl_cap_wasm_log_escape` (cap/wasm_log.c) | A guest's `HL_WASM_OP_LOG` text must not write a log line of its own (audit 26). Oracles: exact-size buffers at every size, no raw control byte, a message that fits copied whole, else the longest whole-token prefix + `...`. Found an escape split by the `...` (`a\x0...`). |
 | `fuzz_plain_value` | `hl_pv_check` + the reader (shared/plain_value.c) | The build plugin channel's value encoding: the bytes a plugin process sends its host (docs/buildcontext_design.md §9.1). Oracles: no read outside the buffer, an accepted value is canonical (walked and re-written byte for byte), and a truncated one is refused. |
+| `fuzz_exec_policy` | `hl_exec_policy_validate` + the readers (cap/exec.c) | The encoded `exec` manifest section, which the command broker (PR 2) reads from the app process it no longer trusts. Oracles: no read outside the buffer, and every reader stays inside a policy the validator accepted. |
+| `fuzz_exec_slot` | `hl_exec_slot_match` via `hl_exec_check_call`, and the builder's `chars` parser | Every `exec.run` argument reaches the matcher. Oracles: no read outside a value, and an admitted value is never empty, never holds a NUL, and never starts with `-` unless the slot allows a dash. |
 | `fuzz_migrate_name` | `hl_migrate_embedded_name` | Only top-level `migrations/<name>.sql` may run in a built binary (audits 25 / 27). Oracle: an independent reference. The rest of `migrate.c` is stubbed in `fuzz_migrate_name_stubs.c`. |
 
 ## Build & run
@@ -41,6 +43,8 @@ make fuzz CC=/opt/homebrew/opt/llvm@18/bin/clang
 ./fuzz/fuzz_sh_json fuzz/corpus_sh_json/ -max_total_time=60
 ./fuzz/fuzz_path_normalize fuzz/corpus_path_normalize/ -max_total_time=60
 ./fuzz/fuzz_mime_sniff fuzz/corpus_mime_sniff/ -max_total_time=60
+./fuzz/fuzz_exec_policy fuzz/corpus_exec_policy/ -max_total_time=60
+./fuzz/fuzz_exec_slot fuzz/corpus_exec_slot/ -max_total_time=60
 
 # Or the time-boxed pass CI runs (FUZZ_TIME overrides the per-target seconds):
 make fuzz-run CC=clang FUZZ_TIME=60

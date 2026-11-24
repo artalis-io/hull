@@ -81,6 +81,8 @@ void hl_manifest_free(HlManifest *m)
         hl_manifest_str_free(a, &m->hosts[i]);
     hl_manifest_str_free(a, &m->csp);
     hl_manifest_str_free(a, &m->state_name);
+    m->exec.alloc = a;
+    hl_exec_buf_free(&m->exec);
     for (int i = 0; i < m->cors_origin_count; i++)
         hl_manifest_str_free(a, &m->cors_origins[i]);
     hl_manifest_str_free(a, &m->cors_methods);
@@ -176,6 +178,21 @@ static int manifest_seal_impl(HlManifest *dst, const HlManifest *src, SealCtx *a
         if (seal_str(arena, &dst->hosts[i], src->hosts[i]) != 0) goto fail;
     if (seal_str(arena, &dst->csp, src->csp) != 0) goto fail;
     if (seal_str(arena, &dst->state_name, src->state_name) != 0) goto fail;
+    /* exec: the declared commands. Position independent, so one copy. */
+    dst->exec.alloc = NULL;
+    dst->exec.data = NULL;
+    dst->exec.cap = 0;
+    if (src->exec.data && src->exec.len) {
+        if (!arena->arena) {
+            arena->need += src->exec.len + 16;
+            dst->exec.data = src->exec.data;
+        } else {
+            dst->exec.data = sh_seal_arena_memdup(arena->arena, src->exec.data,
+                                                  src->exec.len);
+            if (!dst->exec.data) goto fail;
+        }
+        dst->exec.cap = src->exec.len;
+    }
     for (int i = 0; i < src->cors_origin_count; i++)
         if (seal_str(arena, &dst->cors_origins[i], src->cors_origins[i]) != 0)
             goto fail;

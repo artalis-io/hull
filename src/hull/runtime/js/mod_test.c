@@ -12,6 +12,7 @@
 #ifdef HL_ENABLE_JS
 
 #include "hull/cap/test.h"
+#include "mod_exec.h"   /* test.execStub */
 #include "hull/shared/cli_log.h"   /* hl_log_fputs_escaped */
 #include "hull/runtime/test.h"
 #include "hull/runtime/js.h"
@@ -652,6 +653,8 @@ void hl_js_test_register(JSContext *ctx, KlHttpRouter *router, HlJS *js)
     JS_SetOpaque(state_obj, state);
     JS_SetPropertyStr(ctx, store, "__hull_test_state", state_obj);
     JS_FreeValue(ctx, store);
+    /* exec.run answers from these under hull test (mod_exec.c) */
+    hl_js_exec_stubs_reset(ctx);
 
     JSValue global = JS_GetGlobalObject(ctx);
 
@@ -677,6 +680,8 @@ void hl_js_test_register(JSContext *ctx, KlHttpRouter *router, HlJS *js)
                       JS_NewCFunction(ctx, js_test_err, "err", 2));
     JS_SetPropertyStr(ctx, test_fn, "runMain",
                       JS_NewCFunction(ctx, js_test_run_main, "runMain", 2));
+    JS_SetPropertyStr(ctx, test_fn, "execStub",
+                      JS_NewCFunction(ctx, hl_js_exec_stub, "execStub", 2));
     JS_SetPropertyStr(ctx, test_fn, "runTransform",
                       JS_NewCFunction(ctx, js_test_run_transform, "runTransform", 1));
 
@@ -700,6 +705,7 @@ void hl_js_test_clear(JSContext *ctx)
 
     JS_FreeValue(ctx, state->cases);
     state->cases = tcase_new_list(ctx);
+    hl_js_exec_stubs_reset(ctx);   /* one file's stubs never reach the next */
 }
 
 /* A PASS / FAIL line on the optional writer, app text escaped (audit 31). */

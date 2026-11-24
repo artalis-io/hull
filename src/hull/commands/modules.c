@@ -49,6 +49,7 @@ static const struct {
     { HL_MOD_CAP_TUI,         "build:tui"        },
     { HL_MOD_CAP_IMAGE,       "build:image"      },
     { HL_MOD_CAP_NET,         "build:net"        },
+    { HL_MOD_CAP_EXEC,        "exec"             },
     { 0, NULL }
 };
 

@@ -205,6 +205,16 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_ENV, .deps = {0},
     },
     {
+        /* Declared commands (docs/design/exec_broker.md): exec.run(name, args)
+         * runs only a command the manifest's `exec` section declares, its
+         * slots matched by cap/exec.c. A base cap module behind a manifest
+         * gate (§10). Until the broker lands it answers only from the stubs
+         * a `hull test` registers. */
+        .name = "hull/exec",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_EXEC, .deps = {0},
+    },
+    {
         .name = "hull/fs",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_FS, .deps = {0},

@@ -62,6 +62,10 @@
  * HL_ENABLE_HTTP_CLIENT is - that is what compiles the binding - but it is
  * not HTTP, and a module needing it should not have to say it is. */
 #define HL_MOD_CAP_NET         (1u << 10)
+/* The manifest's `exec` section (docs/design/exec_broker.md): a module that
+ * runs declared commands needs one, as hull/tui needs `tui = true`. A
+ * manifest-side cap: never in the build-cap mask. */
+#define HL_MOD_CAP_EXEC        (1u << 11)
 /* Back-compat: HL_MOD_CAP_HTTP means "any HTTP" (server OR client).
  * Existing module specs that haven't been classified yet still use
  * this; new specs should pick CLIENT or SERVER. */
