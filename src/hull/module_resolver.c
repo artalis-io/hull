@@ -282,6 +282,7 @@ static const char *cap_label(uint32_t cap)
     case HL_MOD_CAP_IMAGE:       return "HL_ENABLE_IMAGE (build-time)";
     case HL_MOD_CAP_NET:         return "the outbound socket layer "
                                         "(HL_ENABLE_HTTP_CLIENT, build-time)";
+    case HL_MOD_CAP_EXEC:        return "an exec section in the manifest";
     default:                     return "unknown";
     }
 }
@@ -564,6 +565,17 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
                  "manifest (add `tui = true`)", spec->name);
             return -1;
         }
+        /* The same for exec: hull/exec runs only commands the manifest's
+         * `exec` section declares, so it needs one. */
+        if ((spec->required_caps & HL_MOD_CAP_EXEC) && !manifest->exec_declared) {
+            if (m->optional) {
+                set_optional_absent_bit(out, idx);
+                goto next_module;
+            }
+            ERR1("module '%s' requires an `exec` section in the manifest that "
+                 "declares the commands it may run", spec->name);
+            return -1;
+        }
 
         set_bit(out, idx);
     next_module:;
@@ -624,6 +636,13 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
                              spec->name, dep_spec->name, cap_label(bit));
                         return -1;
                     }
+                }
+                if ((dep_spec->required_caps & HL_MOD_CAP_EXEC)
+                        && !manifest->exec_declared) {
+                    ERR2("module '%s' transitively requires '%s', which "
+                         "needs an `exec` section in the manifest",
+                         spec->name, dep_spec->name);
+                    return -1;
                 }
                 if ((dep_spec->required_caps & HL_MOD_CAP_TUI)
                         && !manifest->tui) {

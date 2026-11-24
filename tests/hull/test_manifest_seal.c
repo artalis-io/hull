@@ -290,6 +290,56 @@ UTEST(manifest_seal, write_to_sealed_string_faults)
     sh_seal_arena_destroy(&arena);
 }
 
+/* The exec section: copied into the arena as one block, byte for byte,
+ * found through the sealed copy, freed with the source, and read-only. */
+UTEST(manifest_seal, exec_policy_is_sealed_with_the_manifest)
+{
+    HlAllocator alloc = {0};
+    HlManifest src;
+    build_fixture(&src, &alloc);
+    hl_exec_b_init(&src.exec, &alloc);
+    hl_exec_b_cmd(&src.exec, "unit-state", 10, "/usr/bin/systemctl", 18,
+                  -1, -1, -1, -1, 1);
+    for (int k = 0; k < 4; k++)
+        hl_exec_b_count_end(&src.exec, hl_exec_b_count_begin(&src.exec), 0);
+    ASSERT_EQ(0, hl_exec_b_finish(&src.exec));
+    src.exec_declared = 1;
+
+    size_t need = hl_manifest_seal_bytes(&src);
+    ShSealArena arena;
+    ASSERT_EQ(0, sh_seal_arena_init(&arena, need + 4096, NULL));
+    HlManifest dst;
+    ASSERT_EQ(0, hl_manifest_seal(&dst, &src, &arena));
+    ASSERT_EQ(0, sh_seal_arena_seal(&arena));
+
+    ASSERT_TRUE(dst.exec.data != NULL);
+    ASSERT_TRUE(dst.exec.data != src.exec.data);
+    ASSERT_EQ(src.exec.len, dst.exec.len);
+    ASSERT_EQ(0, memcmp(src.exec.data, dst.exec.data, src.exec.len));
+    ASSERT_TRUE(dst.exec.alloc == NULL);
+    HlExecCmd c;
+    ASSERT_EQ(0, hl_exec_policy_find(dst.exec.data, dst.exec.len, "unit-state", 10, &c));
+    ASSERT_STREQ("/usr/bin/systemctl", c.path);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS,  SIG_DFL);
+        /* Deliberate write to the sealed policy to prove it faults. */
+        ((uint8_t *)(uintptr_t)dst.exec.data)[6] = 'X';
+        _exit(0);
+    }
+    ASSERT_TRUE(pid > 0);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    ASSERT_TRUE(WIFSIGNALED(status));
+
+    hl_manifest_free(&dst);   /* sealed: no free of arena memory */
+    hl_manifest_free(&src);   /* frees the source policy */
+    ASSERT_EQ(0u, (unsigned)alloc.used);
+    sh_seal_arena_destroy(&arena);
+}
+
 /* ── error paths ──────────────────────────────────────────────────── */
 
 UTEST(manifest_seal, not_present_returns_error)

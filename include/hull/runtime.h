@@ -252,6 +252,11 @@ struct HlRuntime {
              * no gating (legacy entry points: test runner, agent, mcp). When
              * non-NULL, gating fires for any registry-known name not in the set. */
             const HlResolvedModuleSet *module_set;
+            /* The manifest's `exec` section, encoded and validated
+             * (cap/exec.h). Borrowed: the sealed manifest's copy (serve.c)
+             * or the app context's (app_context.c). NULL = no commands. */
+            const uint8_t *exec_policy;
+            size_t         exec_policy_len;
             HlGpuCtx *gpu_ctx;                /* GPU compute context; NULL when no backend
                                                 * (base build without a composed gpu feature) */
 #ifdef HL_ENABLE_WASM

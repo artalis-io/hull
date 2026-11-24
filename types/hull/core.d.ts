@@ -226,7 +226,7 @@ declare namespace Hull {
         | "hull/build-plugin" | "hull/cache"
         | "hull/compute" | "hull/config" | "hull/crypto" | "hull/crypto/envelope"
         | "hull/crypto/hkdf" | "hull/crypto/otp" | "hull/crypto/sealbox" | "hull/csv"
-        | "hull/db" | "hull/email" | "hull/encoding" | "hull/env" | "hull/fs" | "hull/gpu"
+        | "hull/db" | "hull/email" | "hull/encoding" | "hull/env" | "hull/exec" | "hull/fs" | "hull/gpu"
         | "hull/http-client" | "hull/http-server" | "hull/i18n" | "hull/image"
         | "hull/inspect" | "hull/jobs" | "hull/json" | "hull/jwt" | "hull/kv" | "hull/log"
         | "hull/logx" | "hull/mime" | "hull/path" | "hull/qrcode" | "hull/retry"
@@ -273,6 +273,52 @@ declare namespace Hull {
         hosts?: string[];
         /** Allowed ports (integers 1..65535). */
         ports?: number[];
+    }
+
+    /** One slot of a declared command's argv: the shape a value must have. */
+    interface ManifestExecSlot {
+        /** The value is one of these (excludes prefix, suffix and chars). */
+        enum?: string[];
+        /** The value starts with this. */
+        prefix?: string;
+        /** The value ends with this. */
+        suffix?: string;
+        /** Allowed bytes between prefix and suffix (`"a-z0-9._-"`; default `[A-Za-z0-9._-]`). */
+        chars?: string;
+        /** Byte length of the whole value (default 1). */
+        min?: number;
+        /** Byte length of the whole value (default 256, at most 4096). */
+        max?: number;
+        /** The last argv entry only: it takes `min`..`max` values (default min 1). */
+        repeat?: { min?: number; max: number };
+        /** The value may start with `-` (an option); never by default. */
+        allowDash?: boolean;
+    }
+
+    /** One declared command (`exec: { name: {...} }`). Unknown keys refuse the app. */
+    interface ManifestExecCommand {
+        /** Absolute path of the binary. */
+        path: string;
+        /** Fixed arguments (strings) and slots, in order. */
+        argv?: Array<string | ManifestExecSlot>;
+        /** 100..60000 ms (default 5000). */
+        timeoutMs?: number;
+        /** Up to 16 MiB (default 64 KiB). */
+        stdoutMax?: number;
+        /** Up to 1 MiB (default 16 KiB). */
+        stderrMax?: number;
+        /** Literal environment values (no `"$VAR"`; LD_*, DYLD_*, PATH, IFS refused). */
+        env?: Record<string, string>;
+        /** Runs at once, 1..8 (default 2). */
+        concurrency?: number;
+        /** Extra paths the command's own sandbox grants. */
+        fs?: { read?: string[]; write?: string[] };
+        /**
+         * The command may connect to local unix sockets: ANY pathname socket
+         * the service account can reach (systemd, D-Bus, a database's), not
+         * only the one it needs.
+         */
+        unixSockets?: boolean;
     }
 
     /** The object `app.manifest()` takes. Unknown keys are ignored by the runtime. */
@@ -343,6 +389,8 @@ declare namespace Hull {
         };
         /** Allow the terminal UI (`hull/tui`). */
         tui?: boolean;
+        /** Commands `hull/exec` may run, by name (`[a-z0-9][a-z0-9-]{0,63}`). */
+        exec?: Record<string, ManifestExecCommand>;
         /** Allow WASM compute. */
         compute?: boolean;
         /** Allow GPU compute (`true`, or a device list / runtime-shader opt-in). */

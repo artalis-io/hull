@@ -71,5 +71,6 @@ for spec in $(tr "," "\n" < "$WORK/mods.json" | sed -n 's/.*"name": *"\(hull\/[^
     [ "$spec" = hull/app ] && continue
     name="hull:$(echo "${spec#hull/}" | tr / :)"
     extra=""; [ "$spec" = hull/tui ] && extra="tui: true,"
+    [ "$spec" = hull/exec ] && extra="exec: { probe: { path: \"/bin/true\" } },"
     run_app "$name" "$extra" "\"$spec@1\"" "import * as M from \"$name\";"
 done

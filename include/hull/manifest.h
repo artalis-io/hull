@@ -32,6 +32,7 @@
 
 #include "hull/limits/gpu.h"  /* HL_GPU_MAX_DEVICES */
 #include "hull/limits/input.h" /* HL_MANIFEST_MAX_ROUTE_LIMITS, ... */
+#include "hull/cap/exec.h"     /* HlExecBuf: the encoded `exec` section */
 
 /* Forward declarations */
 typedef struct lua_State lua_State;
@@ -305,6 +306,17 @@ typedef struct HlManifest {
      * takes as "no manifest" and runs on without a policy; every entry point
      * refuses to start on it. */
     int         state_invalid;
+
+    /* `exec = { name = { path, argv, ... } }`: the declared commands
+     * (docs/design/exec_broker.md §3), encoded by the extractor through
+     * cap/exec.h's builder and validated in full (hl_exec_policy_validate).
+     * exec.data is NULL when there is no section or it was refused.
+     * exec_invalid = the section was present but refused (the reason was
+     * logged); every entry point refuses to start on it, as on
+     * state_invalid. Sealed with the manifest as one memdup. */
+    HlExecBuf   exec;
+    int         exec_declared;
+    int         exec_invalid;
 
     /* Declared first-party module set.
      *

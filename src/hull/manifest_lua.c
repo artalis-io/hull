@@ -13,6 +13,7 @@
 #include "manifest_internal.h"
 #include "log.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -108,6 +109,328 @@ static int read_port_array(lua_State *L, int table_idx, int *out)
     }
     lua_pop(L, 1); /* pop array table */
     return n;
+}
+
+/* ── exec = { name = { path, argv, ... } } (docs/design/exec_broker.md §3) ──
+ *
+ * Every key is checked against what the section takes, so a typo
+ * (`timeout = 5000`) refuses the app instead of leaving a default in force.
+ * The builder (cap/exec.h) writes straight into out->exec, so a raise
+ * part-way is freed with the manifest; the rules themselves are all in
+ * hl_exec_policy_validate. Commands and env pairs are encoded sorted, so
+ * the same section gives the same bytes in both runtimes. */
+
+static const char *const EXEC_CMD_KEYS[] = {
+    "path", "argv", "timeout_ms", "stdout_max", "stderr_max", "env",
+    "concurrency", "fs", "unix_sockets", "sha256", NULL };
+static const char *const EXEC_SLOT_KEYS[] = {
+    "enum", "prefix", "suffix", "chars", "min", "max", "repeat",
+    "allow_dash", NULL };
+static const char *const EXEC_FS_KEYS[] = { "read", "write", NULL };
+static const char *const EXEC_REPEAT_KEYS[] = { "min", "max", NULL };
+
+static int exec_key_in(const char *k, const char *const *list)
+{
+    for (int i = 0; list[i]; i++)
+        if (strcmp(k, list[i]) == 0) return 1;
+    return 0;
+}
+
+/* Fail on a key of the table at @p t that @p allowed does not name. */
+static int lx_keys(lua_State *L, int t, const char *const *allowed,
+                   HlExecBuf *b, const char *where)
+{
+    lua_pushnil(L);
+    while (lua_next(L, t)) {
+        lua_pop(L, 1);
+        if (lua_type(L, -1) != LUA_TSTRING || !exec_key_in(lua_tostring(L, -1), allowed)) {
+            hl_exec_b_fail(b, "%s: unknown key '%s'", where,
+                           lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1)
+                                                          : "(not a string)");
+            lua_pop(L, 1);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* An integer field: -1 absent, -2 negative (refused by validation). */
+static int64_t lx_int(lua_State *L, int t, const char *key, HlExecBuf *b,
+                      const char *where)
+{
+    lua_getfield(L, t, key);
+    int64_t v = -1;
+    if (lua_isinteger(L, -1)) {
+        lua_Integer x = lua_tointeger(L, -1);
+        v = x < 0 ? -2 : (int64_t)x;
+    } else if (!lua_isnil(L, -1)) {
+        hl_exec_b_fail(b, "%s: %s must be an integer", where, key);
+    }
+    lua_pop(L, 1);
+    return v;
+}
+
+/* A string field pushed on the stack (NULL and nothing pushed when absent). */
+static const char *lx_str(lua_State *L, int t, const char *key, size_t *len,
+                          HlExecBuf *b, const char *where)
+{
+    lua_getfield(L, t, key);
+    if (lua_type(L, -1) == LUA_TSTRING)
+        return lua_tolstring(L, -1, len);
+    if (!lua_isnil(L, -1))
+        hl_exec_b_fail(b, "%s: %s must be a string", where, key);
+    lua_pop(L, 1);
+    *len = 0;
+    return NULL;
+}
+
+static int lx_bool(lua_State *L, int t, const char *key, HlExecBuf *b,
+                   const char *where)
+{
+    lua_getfield(L, t, key);
+    int v = 0;
+    if (lua_isboolean(L, -1)) v = lua_toboolean(L, -1);
+    else if (!lua_isnil(L, -1))
+        hl_exec_b_fail(b, "%s: %s must be a boolean", where, key);
+    lua_pop(L, 1);
+    return v;
+}
+
+/* A sequence of strings at field @p key (absent = empty). */
+static void lx_str_list(lua_State *L, int t, const char *key, HlExecBuf *b,
+                        const char *where)
+{
+    size_t mark = hl_exec_b_count_begin(b);
+    size_t n = 0;
+    lua_getfield(L, t, key);
+    if (lua_istable(L, -1)) {
+        int a = lua_gettop(L);
+        lua_Integer len = (lua_Integer)lua_rawlen(L, a);
+        for (lua_Integer i = 1; i <= len && !b->failed; i++) {
+            lua_rawgeti(L, a, i);
+            if (lua_type(L, -1) == LUA_TSTRING) {
+                size_t sl;
+                const char *sv = lua_tolstring(L, -1, &sl);
+                hl_exec_b_str(b, sv, sl);
+                n++;
+            } else {
+                hl_exec_b_fail(b, "%s: %s[%lld] must be a string", where, key,
+                               (long long)i);
+            }
+            lua_pop(L, 1);
+        }
+    } else if (!lua_isnil(L, -1)) {
+        hl_exec_b_fail(b, "%s: %s must be a list of strings", where, key);
+    }
+    lua_pop(L, 1);
+    hl_exec_b_count_end(b, mark, n);
+}
+
+static int cmp_cstr(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static void lx_slot(lua_State *L, int t, HlExecBuf *b, const char *where)
+{
+    if (lx_keys(L, t, EXEC_SLOT_KEYS, b, where) != 0) return;
+    int64_t min = lx_int(L, t, "min", b, where);
+    int64_t max = lx_int(L, t, "max", b, where);
+    int dash = lx_bool(L, t, "allow_dash", b, where);
+    int repeat = 0;
+    int64_t rmin = -1, rmax = -1;
+    lua_getfield(L, t, "repeat");
+    if (lua_istable(L, -1)) {
+        int r = lua_gettop(L);
+        char rw[256];
+        snprintf(rw, sizeof rw, "%s.repeat", where);
+        if (lx_keys(L, r, EXEC_REPEAT_KEYS, b, rw) == 0) {
+            repeat = 1;
+            rmin = lx_int(L, r, "min", b, rw);
+            rmax = lx_int(L, r, "max", b, rw);
+        }
+    } else if (!lua_isnil(L, -1)) {
+        hl_exec_b_fail(b, "%s: repeat must be a table { min = M, max = N }", where);
+    }
+    lua_pop(L, 1);
+    int base = lua_gettop(L);
+    size_t pl, sl, cl;
+    const char *pre = lx_str(L, t, "prefix", &pl, b, where);
+    const char *suf = lx_str(L, t, "suffix", &sl, b, where);
+    const char *chars = lx_str(L, t, "chars", &cl, b, where);
+    hl_exec_b_slot(b, dash, min, max, repeat, rmin, rmax, pre, pl, suf, sl,
+                   chars, cl);
+    lua_settop(L, base);
+    lx_str_list(L, t, "enum", b, where);
+}
+
+static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
+{
+    char where[96];
+    snprintf(where, sizeof where, "exec.%s", name);
+    if (lx_keys(L, t, EXEC_CMD_KEYS, b, where) != 0) return;
+    lua_getfield(L, t, "sha256");
+    int has_pin = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    if (has_pin) {
+        /* Parsed in a later PR together with the check that enforces it:
+         * until then a signed manifest must not advertise a pin nothing
+         * verifies. */
+        hl_exec_b_fail(b, "%s: sha256 is not supported yet (it lands with the "
+                       "broker's digest check); remove it", where);
+        return;
+    }
+    int base = lua_gettop(L);
+    size_t pl;
+    const char *path = lx_str(L, t, "path", &pl, b, where);
+    if (!path && !b->failed) {
+        hl_exec_b_fail(b, "%s: path is required", where);
+        return;
+    }
+    int64_t timeout = lx_int(L, t, "timeout_ms", b, where);
+    int64_t so = lx_int(L, t, "stdout_max", b, where);
+    int64_t se = lx_int(L, t, "stderr_max", b, where);
+    int64_t conc = lx_int(L, t, "concurrency", b, where);
+    int unix_sockets = lx_bool(L, t, "unix_sockets", b, where);
+    hl_exec_b_cmd(b, name, strlen(name), path, pl, timeout, so, se, conc,
+                  unix_sockets);
+    lua_settop(L, base);
+
+    /* env = { NAME = "value" }, sorted by name */
+    size_t mark = hl_exec_b_count_begin(b);
+    size_t n_env = 0;
+    lua_getfield(L, t, "env");
+    if (lua_istable(L, -1)) {
+        int e = lua_gettop(L);
+        const char *keys[HL_EXEC_MAX_ENV + 1];
+        lua_pushnil(L);
+        while (lua_next(L, e)) {
+            if (lua_type(L, -2) != LUA_TSTRING || lua_type(L, -1) != LUA_TSTRING) {
+                hl_exec_b_fail(b, "%s: env maps names to literal strings", where);
+            } else if (n_env > HL_EXEC_MAX_ENV) {
+                hl_exec_b_fail(b, "%s: env has more than %d entries", where,
+                               HL_EXEC_MAX_ENV);
+            } else {
+                keys[n_env++] = lua_tostring(L, -2);   /* anchored by the table */
+            }
+            lua_pop(L, 1);
+        }
+        if (!b->failed) {
+            qsort(keys, n_env, sizeof keys[0], cmp_cstr);
+            for (size_t i = 0; i < n_env; i++) {
+                size_t kl = 0, vl = 0;
+                lua_getfield(L, e, keys[i]);
+                const char *v = lua_tolstring(L, -1, &vl);
+                const char *k = keys[i];
+                kl = strlen(k);
+                hl_exec_b_str(b, k, kl);
+                hl_exec_b_str(b, v, vl);
+                lua_pop(L, 1);
+            }
+        }
+    } else if (!lua_isnil(L, -1)) {
+        hl_exec_b_fail(b, "%s: env must be a table", where);
+    }
+    lua_pop(L, 1);
+    hl_exec_b_count_end(b, mark, n_env);
+
+    /* fs = { read = {...}, write = {...} } */
+    lua_getfield(L, t, "fs");
+    int fs = lua_gettop(L);
+    if (lua_istable(L, fs)) {
+        char fw[192];
+        snprintf(fw, sizeof fw, "%s.fs", where);
+        if (lx_keys(L, fs, EXEC_FS_KEYS, b, fw) == 0) {
+            lx_str_list(L, fs, "read", b, fw);
+            lx_str_list(L, fs, "write", b, fw);
+        }
+    } else {
+        if (!lua_isnil(L, fs))
+            hl_exec_b_fail(b, "%s: fs must be a table { read = {...}, write = {...} }",
+                           where);
+        hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
+        hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
+    }
+    lua_pop(L, 1);
+
+    /* argv = { "fixed", { slot }, ... } */
+    mark = hl_exec_b_count_begin(b);
+    size_t n_argv = 0;
+    lua_getfield(L, t, "argv");
+    if (lua_istable(L, -1)) {
+        int a = lua_gettop(L);
+        lua_Integer len = (lua_Integer)lua_rawlen(L, a);
+        for (lua_Integer i = 1; i <= len && !b->failed; i++) {
+            lua_rawgeti(L, a, i);
+            char aw[192];
+            snprintf(aw, sizeof aw, "%s.argv[%lld]", where, (long long)i);
+            if (lua_type(L, -1) == LUA_TSTRING) {
+                size_t sl;
+                const char *sv = lua_tolstring(L, -1, &sl);
+                hl_exec_b_fixed(b, sv, sl);
+                n_argv++;
+            } else if (lua_istable(L, -1)) {
+                lx_slot(L, lua_gettop(L), b, aw);
+                n_argv++;
+            } else {
+                hl_exec_b_fail(b, "%s: an argv entry is a string or a slot table", aw);
+            }
+            lua_pop(L, 1);
+        }
+    } else if (!lua_isnil(L, -1)) {
+        hl_exec_b_fail(b, "%s: argv must be a list", where);
+    }
+    lua_pop(L, 1);
+    hl_exec_b_count_end(b, mark, n_argv);
+}
+
+static void lx_exec(lua_State *L, int manifest_idx, HlManifest *out,
+                    HlAllocator *alloc)
+{
+    lua_getfield(L, manifest_idx, "exec");
+    if (lua_isnil(L, -1)) { lua_pop(L, 1); return; }
+    out->exec_declared = 1;
+    HlExecBuf *b = &out->exec;
+    hl_exec_b_init(b, alloc);
+    if (!lua_istable(L, -1)) {
+        hl_exec_b_fail(b, "exec must be a table of named commands");
+    } else {
+        int e = lua_gettop(L);
+        const char *names[HL_EXEC_MAX_COMMANDS + 1];
+        size_t n = 0;
+        lua_pushnil(L);
+        while (lua_next(L, e)) {
+            if (lua_type(L, -2) != LUA_TSTRING) {
+                hl_exec_b_fail(b, "exec: a command name must be a string");
+            } else if (!lua_istable(L, -1)) {
+                hl_exec_b_fail(b, "exec.%s must be a table", lua_tostring(L, -2));
+            } else if (n > HL_EXEC_MAX_COMMANDS) {
+                hl_exec_b_fail(b, "exec: more than %d commands", HL_EXEC_MAX_COMMANDS);
+            } else {
+                names[n++] = lua_tostring(L, -2);   /* anchored by the table */
+            }
+            lua_pop(L, 1);
+        }
+        if (!b->failed) {
+            qsort(names, n, sizeof names[0], cmp_cstr);
+            for (size_t i = 0; i < n && !b->failed; i++) {
+                size_t nl = strlen(names[i]);
+                if (!hl_exec_name_valid(names[i], nl)) {
+                    hl_exec_b_fail(b, "exec: '%s' is not a command name: [a-z0-9] "
+                                   "then up to 63 of [a-z0-9-]", names[i]);
+                    break;
+                }
+                lua_getfield(L, e, names[i]);
+                lx_cmd(L, lua_gettop(L), names[i], b);
+                lua_pop(L, 1);
+            }
+        }
+    }
+    lua_pop(L, 1);
+    if (hl_exec_b_finish(b) != 0) {
+        log_error("[manifest] %s", b->err);
+        out->exec_invalid = 1;   /* the entry point refuses to start */
+    }
 }
 
 int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
@@ -403,6 +726,8 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
         out->state_invalid = 1;
     }
     lua_pop(L, 1);
+
+    lx_exec(L, manifest_idx, out, alloc);
 
     /* modules = { crypto = "1", fs = "1", ["hull/http"] = "1" }
      *

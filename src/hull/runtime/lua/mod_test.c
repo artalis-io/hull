@@ -18,6 +18,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 #include "internal.h"               /* HL_LUA_ARM, get_hl_lua_from_L */
+#include "mod_exec.h"               /* test.exec_stub */
 #include "hull/shared/dispatch_meter.h"   /* hl_meter_ticks */
 
 #include <keel/http_request.h>
@@ -452,6 +453,7 @@ static const luaL_Reg test_methods[] = {
     { "ok",     l_test_ok },
     { "err",    l_test_err },
     { "run_main", hl_lua_test_run_main },
+    { "exec_stub", hl_lua_exec_stub },
     { "run_transform", l_test_run_transform },
     { NULL, NULL }
 };
@@ -468,6 +470,8 @@ void hl_lua_test_register(lua_State *L, KlHttpRouter *router, HlLua *lua)
     /* Create test cases table */
     lua_newtable(L);
     lua_setfield(L, LUA_REGISTRYINDEX, TEST_CASES_KEY);
+    /* exec.run answers from these under hull test (mod_exec.c) */
+    hl_lua_exec_stubs_reset(L);
 
     /* Create the test table with methods */
     hl_lua_newlib(L, test_methods);
@@ -485,6 +489,7 @@ void hl_lua_test_clear(lua_State *L)
 {
     lua_newtable(L);
     lua_setfield(L, LUA_REGISTRYINDEX, TEST_CASES_KEY);
+    hl_lua_exec_stubs_reset(L);   /* one file's stubs never reach the next */
 }
 
 /* A PASS / FAIL line on the optional writer, app text escaped (audit 31). */

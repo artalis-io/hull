@@ -59,11 +59,12 @@ jobs:
           make CC=clang \
             fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match \
             fuzz/fuzz_encoding fuzz/fuzz_log_escape fuzz/fuzz_http_guard \
-            fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name fuzz/fuzz_plain_value
+            fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name fuzz/fuzz_plain_value \
+            fuzz/fuzz_exec_policy fuzz/fuzz_exec_slot
       - name: Run core fuzzers (deep)
         run: |
           set -e
-          for f in sh_json path_normalize mime_sniff host_match encoding log_escape http_guard wasm_log_escape migrate_name plain_value; do
+          for f in sh_json path_normalize mime_sniff host_match encoding log_escape http_guard wasm_log_escape migrate_name plain_value exec_policy exec_slot; do
             echo "== fuzz $f (${FUZZ_SECONDS}s) =="
             ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time="$FUZZ_SECONDS"
           done

@@ -2120,6 +2120,13 @@ static int hl_serve_wire_caps(HlServerState *s)
                       "refusing to start");
             return -1;
         }
+        /* The `exec` section (docs/design/exec_broker.md): present but
+         * refused by its validation, which logged why. */
+        if (s->manifest.exec_invalid) {
+            log_error("[hull:c] the manifest's `exec` section is not usable (see "
+                      "above); refusing to start");
+            return -1;
+        }
         if (s->manifest.state_name) {
             if (hl_state_dir_resolve(s->manifest.state_name, s->state_dir,
                                      sizeof s->state_dir) != 0) {
@@ -2275,6 +2282,9 @@ static int hl_serve_wire_caps(HlServerState *s)
             return -1;
         }
         s->manifest_sealed = 1;
+        /* exec.run reads the declared commands from the sealed copy. */
+        rt->exec_policy = s->manifest.exec.data;
+        rt->exec_policy_len = s->manifest.exec.data ? s->manifest.exec.len : 0;
 
         log_debug("[hull:c] modules resolved: %d admitted",
                  hl_module_set_count(rt->module_set));

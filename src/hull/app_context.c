@@ -120,6 +120,12 @@ struct HlAppContext {
      * its lifetime matches the runtime - rt->module_set borrows. */
     HlResolvedModuleSet module_set;
     int                 module_set_wired;
+    /* The manifest's encoded `exec` section, taken from the extracted
+     * manifest before it is freed; rt->exec_policy borrows it. */
+    uint8_t            *exec_policy;
+    size_t              exec_policy_len;
+    size_t              exec_policy_cap;
+    HlAllocator        *exec_policy_alloc;
 
     /* Factory that built `rt`, owns the heap storage. NULL until init. */
     const HlRuntimeFactory *factory;
@@ -845,6 +851,21 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                     hl_app_context_free(ctx);
                     return -1;
                 }
+                if (m.exec_invalid) {
+                    hl_eprintf_line("[app-context] the manifest's `exec` section is "
+                                    "not usable (see above); refusing to start");
+                    hl_manifest_free(&m);
+                    hl_app_context_free(ctx);
+                    return -1;
+                }
+                if (m.exec.data) {   /* kept past hl_manifest_free below */
+                    ctx->exec_policy = m.exec.data;
+                    ctx->exec_policy_len = m.exec.len;
+                    ctx->exec_policy_cap = m.exec.cap;
+                    ctx->exec_policy_alloc = m.exec.alloc;
+                    m.exec.data = NULL;
+                    m.exec.len = m.exec.cap = 0;
+                }
                 if (m.state_name) {
                     /* A read-only look makes no state directory (audit 44). */
                     int sr = (opts->manifest_default_db && opts->manifest_default_db_peek)
@@ -952,6 +973,8 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             }
             ctx->rt->module_set = &ctx->module_set;
             ctx->module_set_wired = 1;
+            ctx->rt->exec_policy = ctx->exec_policy;
+            ctx->rt->exec_policy_len = ctx->exec_policy_len;
 
             /* What the app's top level required / imported before this set
              * existed was let through unchecked; check it now, as serve.c
@@ -1070,6 +1093,9 @@ void hl_app_context_free(HlAppContext *ctx)
     /* Free the fs authorization policy (closes its held anchor fds; idempotent).
      * The runtime that borrowed rt->fs_cfg->policy is destroyed above. */
     hl_fs_policy_free(&ctx->fs_policy_storage);
+    if (ctx->exec_policy)   /* the runtime that borrowed it is destroyed above */
+        hl_alloc_free(ctx->exec_policy_alloc, ctx->exec_policy, ctx->exec_policy_cap);
+    ctx->exec_policy = NULL;
     free(ctx->app_dir_copy);
     ctx->app_dir_copy = NULL;
     free(ctx);

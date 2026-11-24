@@ -35,6 +35,17 @@ declare namespace Hull {
         timeoutMs?: number;
     }
 
+    /** What a `test.execStub` answers; omitted fields take their defaults. */
+    interface TestExecStubResult {
+        status?: number;
+        signal?: string | null;
+        /** A byte string (code units 0..255) or bytes. */
+        stdout?: string | ArrayBuffer;
+        stderr?: string | ArrayBuffer;
+        timedOut?: boolean;
+        durationMs?: number;
+    }
+
     /** The result of `test.runMain`. */
     interface TestRunMainResult {
         /** main's exit code (1 when it threw or rejected). */
@@ -119,6 +130,14 @@ declare namespace Hull {
         err(fn: () => unknown, pattern?: string): void;
         /** Run `app.main` once with captured stdio. */
         runMain(args?: string[], opts?: TestRunMainOptions): TestRunMainResult;
+        /**
+         * Answer `exec.run(name, ...)` in this file's tests: a result object, or
+         * a function `(args, name) => result`; null removes the stub. The call
+         * is still matched against the declared command first.
+         */
+        execStub(name: string,
+                 result: TestExecStubResult | ((args: string[], name: string) => TestExecStubResult)
+                       | null): void;
         /** Run a build plugin's transform once against a stub host. */
         runTransform(spec?: TestTransformSpec): Promise<TestTransformResult>;
     }

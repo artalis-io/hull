@@ -9,6 +9,7 @@
  */
 
 #include "mod_buffer.h"
+#include "mod_exec.h"
 #include "internal.h"  /* hl_js_request_register, hl_js_sse_register_class */
 #include "hull/cap/gpu.h"  /* hl_gpu_backend_present */
 #include "hull/cap/tui.h"  /* hl_tui_feature_register_js (composed-feature seam) */
@@ -98,6 +99,11 @@ int hl_js_register_modules(HlJS *js)
 
     /* Register hull:mime module - pure utility, always available */
     if (hl_js_init_mime_module(js->ctx, js) != 0)
+        return -1;
+
+    /* Register hull:exec - declared commands, gated by the manifest's exec
+     * section (docs/design/exec_broker.md) */
+    if (hl_js_init_exec_module(js->ctx, js) != 0)
         return -1;
 
     /* Register hull:tar module - pure format core; extract/pack use fs cap */

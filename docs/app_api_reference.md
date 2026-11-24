@@ -3015,6 +3015,84 @@ WASM and GPU compute share symmetric naming where the concepts align:
 
 Intentionally different: `call` vs `dispatch` (function call vs hardware dispatch), `instance` vs `buffer` (retained linear memory vs GPU storage), `segment` vs `buffer` (read-only shared heap vs read/write GPU buffer).
 
+### Declared commands (`hull/exec`)
+
+An app may run a system tool only as a **declared command shape**: the binary, its fixed
+arguments, and the few slots the app fills, each with a shape its value must match
+([docs/design/exec_broker.md](design/exec_broker.md)). There is no shell anywhere; the
+arguments reach the program exactly as matched.
+
+> **Status.** This release ships the manifest section, the matcher and the `hull test` stubs.
+> The command broker that runs a command (Linux first) lands next; until then `exec.run`
+> outside `hull test` fails after the match, naming the missing broker.
+
+```lua
+app.manifest({
+  modules = { "hull/exec@1" },
+  exec = {
+    ["unit-state"] = {
+      path = "/usr/bin/systemctl",
+      argv = { "show", "--no-pager", "-p", "ActiveState,NRestarts", "--",
+               { prefix = "hs-", suffix = ".service", chars = "a-z0-9-", max = 64,
+                 ["repeat"] = { min = 1, max = 32 } } },
+      unix_sockets = true,   -- systemctl connects to systemd over a pathname socket
+      timeout_ms = 5000, stdout_max = 262144,
+    },
+  },
+})
+local exec = require("hull.exec")
+local r = exec.run("unit-state", { "hs-api.service" })
+-- r = { status, signal, stdout, stderr, timed_out, stdout_truncated,
+--       stderr_truncated, duration_ms }
+```
+
+JS: `import { exec } from "hull:exec"`; `await exec.run(name, args)` resolves to `{ status,
+signal, stdout, stderr, stdoutBytes, timedOut, stdoutTruncated, stderrTruncated, durationMs }`
+(`stdout` / `stderr` are byte strings, one code unit per byte); the manifest keys are
+`timeoutMs`, `stdoutMax`, `stderrMax`, `unixSockets`, `allowDash` (snake_case is read too).
+
+**A command:** `path` (absolute, no `.` / `..` / empty component), `argv` (fixed strings and
+slots, at most 64, 16 KiB of fixed text), `timeout_ms` (100..60000, default 5000),
+`stdout_max` (up to 16 MiB, default 64 KiB), `stderr_max` (up to 1 MiB, default 16 KiB),
+`concurrency` (1..8, default 2), `env` (literal values only; `LD_*`, `DYLD_*`, `PATH`, `IFS`,
+`ENV`, `BASH_ENV` refused), `fs` (`read` / `write` paths the command's own sandbox grants;
+`write` only under `/dev`, `/run`, `/tmp`), `unix_sockets` (default false). At most 32
+commands, each named `[a-z0-9][a-z0-9-]{0,63}`.
+
+**A slot** is a conjunction of linear checks, no regex: `enum` (one of these values,
+excluding the rest), `prefix` / `suffix` (literal), `chars` (the allowed bytes between them,
+printable ASCII ranges and literals like `a-z0-9._-`; default `[A-Za-z0-9._-]`), `min` /
+`max` (byte length, default 1 / 256, at most 4096), `repeat = { min, max }` (the last argv
+entry only: it takes `min`..`max` values, `min` defaults to 1), `allow_dash`. Every value is
+non-empty, holds no NUL, and **never starts with `-` unless the slot sets `allow_dash`**: that
+closes option injection (`--host=evil`), which is also why the example puts `--` before the
+slot. All values of one call together are at most 64 KiB.
+
+**`unix_sockets = true` grants more than it names.** It lets the command connect to ANY
+pathname unix socket the service account can reach under the filesystem's permissions (the
+system D-Bus, `/run/systemd/private`, a database's socket, a container runtime's if the
+account is in its group), not only the one the tool needs. No other socket family is ever
+allowed.
+
+**Refused at load (the app does not start):** an unknown key anywhere in the section (a typo
+is never a default left in force), a value of the wrong type or out of range, `repeat` on a
+non-last entry, and `sha256` (pinning lands with the broker's digest check; until then a
+signed manifest must not advertise a pin nothing verifies). `hull/exec` without an `exec`
+section is refused by the resolver. The section is part of the signed manifest.
+
+**Errors and refusals.** An undeclared name or an argument a slot does not admit raises (Lua)
+/ throws a TypeError synchronously (JS), naming the argument and the rule, before anything
+runs. A call inside a database transaction, in JS middleware or at the module top level is
+refused with code `wait_refused` (it will wait for the command).
+
+**Tests.** `test.exec_stub(name, result)` (JS `test.execStub`) answers `exec.run(name, ...)`
+in that test file: a result table (omitted fields default: status 0, empty output) or a
+function `(args, name) -> result` that gets a copy of the arguments; `nil` / `null` removes
+it. The call is matched in full before the stub answers, and the output is cut to the
+command's `stdout_max` / `stderr_max`, so a test sees what the broker will return. JS stub
+output is a byte string (code units 0..255) or an ArrayBuffer. Stubs reset between test
+files. With no stub the call fails naming the command.
+
 ### Test harness (`hull test`)
 
 `hull test` loads the app once and runs every `test_*.lua` / `test_*.js`
