@@ -5,17 +5,11 @@
 # question worth answering about this hang is whether the stuck compiler is
 # BURNING CPU or BLOCKED - which needs CPU sampled twice.
 #
-# Two snapshots `IntervalSeconds` apart, reporting the delta:
-#   dcpu ~= 0        -> blocked (file lock, pipe, temp-file wait). Suspect the
-#                       environment: cosmocc's mktemper temp files, AV scanning,
-#                       a stalled pipe - not the optimizer.
-#   dcpu ~= interval -> spinning. Suspect codegen/optimizer on that exact TU.
-#
-# Context: .github/workflows/windows-source-build.yml wedges intermittently
-# (~1 run in 4). Two captured signatures so far, and they do NOT share a cause:
-# miniz at -O2 (fixed - Keel never got HL_OPT), and stdlib_js_registry at -O0
-# (open). Both showed ~0 CPU indefinitely, which is what this script exists to
-# confirm or refute with actual numbers.
+# Two snapshots `IntervalSeconds` apart, reporting the delta. A wedged cc1
+# shows dcpu ~0. hull#462 found why, from a full dump of one on a Windows 11
+# machine: cc1 took an access violation inside cosmo's malloc and GCC's crash
+# handler then deadlocked on the malloc lock (a crash that cannot report
+# itself; see make-watched.sh). A non-zero delta would be something else.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -83,6 +77,6 @@ foreach ($proc in ($second | Sort-Object Cpu -Descending)) {
 
 Write-Host ""
 Write-Host "READ THIS AS:"
-Write-Host "  dcpu ~0 on the stuck compiler -> BLOCKED (I/O, lock, pipe, temp file)."
-Write-Host "     Next: which handle. Process Monitor, or check cosmocc's temp dir."
-Write-Host ("  dcpu ~{0} -> SPINNING (optimizer/codegen). Next: that TU at -O0 vs -O1." -f $IntervalSeconds)
+Write-Host "  dcpu ~0 on cc1 -> the hull#462 wedge (cosmo malloc crash, crash handler"
+Write-Host "     deadlocked on the malloc lock). Known; retrying is the response."
+Write-Host ("  dcpu ~{0} -> SPINNING, a different problem. Next: that TU at -O0 vs -O1." -f $IntervalSeconds)

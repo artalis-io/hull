@@ -106,9 +106,23 @@ name: Windows source build + unit tests + app build (cosmocc, -O0)
 # it block PRs - a hang-prone job on the PR path is worse than no job. That
 # clause has now been exercised: see HANG below.
 #
-# HANG - OPEN, INTERMITTENT, NOT UNDERSTOOD.
-#   MEASURED (#462, probe runs 34112570526 and 34114442514): cosmocc's cc1
-#   blocks indefinitely at ~0 CPU on about 12% of compiles of a LARGE
+# HANG - UNDERSTOOD (#462), UPSTREAM, MITIGATED HERE.
+#   ROOT CAUSE, from a full dump of a wedged cc1 on a Windows 11 machine: cc1
+#   takes an access violation on a write inside cosmo's malloc
+#   (__mspace_malloc), to the unmapped tail of a block dlmalloc believes it
+#   owns, and GCC's crash handler (crash_signal -> internal_error -> xmalloc)
+#   then waits for ever on the malloc lock the faulting frame holds. A crash
+#   that cannot report itself, in the cosmo runtime linked into cosmocc
+#   4.0.2's cc1 (built Nov 2024, before upstream's Dec 2024 memory-manager
+#   rework; no cosmocc release since). Load raises the rate: 8 parallel
+#   compiles wedged 20/120 on that machine, one at a time 1/100. Raising GCC's
+#   ggc thresholds and pinning to one core changed nothing. make-watched.sh
+#   therefore calls a cc1 whose CPU time stops moving for 30s a stall and
+#   retries at once, instead of after 5 minutes of silence.
+#   Reported upstream as jart/cosmopolitan#1522.
+#
+#   EARLIER MEASUREMENTS (#462, probe runs 34112570526 and 34114442514): cc1
+#   wedges at ~0 CPU on about 12% of compiles of a LARGE
 #   translation unit. That is a cosmocc-on-Windows bug, not a Hull one. It
 #   needs neither parallelism (-j1 wedges too) nor MSYS2's temp directory
 #   (relocating it changed nothing, 4/10 vs 2/10, p=0.63). Established over 250
@@ -146,8 +160,9 @@ name: Windows source build + unit tests + app build (cosmocc, -O0)
 #   not a bad TU; it is size- or concurrency-dependent. Strongest lead: cc1 was
 #   blocked writing its .s output into MSYS2's temp dir.
 #
-#   Issue #462 carries the full evidence and the next experiments (relocate
-#   TMPDIR, -j1, whether it is always aarch64). Do NOT assume this is (a) - that
+#   SUPERSEDED: the I/O reading above was wrong. A 0-CPU wait is also what a
+#   deadlock looks like, and that is what it is - see ROOT CAUSE at the top of
+#   this section. Do NOT assume this is (a) either - that
 #   one was deterministic, -O2-caused, and is fixed; cc1's own arguments in the
 #   capture above show -O0 reaching the compiler.
 #
