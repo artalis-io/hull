@@ -1663,6 +1663,12 @@ e2e-host-denied: $(BUILDDIR)/hull
 e2e-exec: $(BUILDDIR)/hull
 	sh tests/e2e_exec.sh
 
+# The command broker on Linux (tests/e2e_exec_broker.sh): needs a build made
+# with `make HL_EXEC_TEST_HOOKS=1`; skips on another host or build.
+.PHONY: e2e-exec-broker
+e2e-exec-broker: $(BUILDDIR)/hull
+	sh tests/e2e_exec_broker.sh
+
 # http-client's async.stream + hull/sse-client, both runtimes: a response
 # handed over as it arrives, its timeouts, buffer and size caps, close, a
 # denied host, and a stream awaited inside a request handler.

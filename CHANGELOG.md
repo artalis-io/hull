@@ -10,6 +10,21 @@ release-artifact layout).
 
 ### Added
 
+- **`hull/exec`: the command broker (Linux)** (docs/design/exec_broker.md, part 2). `exec.run`
+  now runs the declared command on native Linux. A broker (this binary in a hidden mode) is
+  spawned before the sandbox, given the policy once, and runs each call after matching it again
+  and enforcing admission itself (8 in flight, each command's `concurrency`, 32 MiB of output
+  held until delivered). Each child gets its own Landlock domain (execute only its binary and
+  loader), a seccomp filter that refuses process creation, credential changes and non-`AF_UNIX`
+  sockets (`AF_UNIX` only with `unix_sockets`), `PR_SET_PDEATHSIG`, a timeout kill, and capped
+  output. A replaced binary fails with ESTALE ("restart the app"); a `#!` script, a set-user-ID
+  binary or one with file capabilities is refused at start. Below Landlock ABI 6, or on a host
+  with no broker, the app is refused at start unless `--allow-degraded-sandbox`; Windows always.
+  `hull inspect` and `hull agent overview` list the declared commands, with the scope of
+  `unix_sockets`. New invariant lints INV-16 (process creation only in the files that already
+  spawn) and INV-17 (every declared-command start matched by `hl_exec_check_call`). Tests:
+  `tests/e2e_exec_broker.sh` (`make HL_EXEC_TEST_HOOKS=1`, CI job `exec-broker`).
+
 - **`hull/exec`: declared commands, part 1** (docs/design/exec_broker.md). A manifest `exec`
   section declares each command an app may run as a shape: an absolute path, fixed
   arguments, and slots (`prefix` / `suffix` / `chars` / `min` / `max` / `enum` / `repeat`;
@@ -18,9 +33,8 @@ release-artifact layout).
   `hl_exec_policy_validate`), sealed with the manifest, and checked by one matcher
   (`hl_exec_check_call`). An unknown key, a value out of range, or a declared `sha256` (not
   enforced yet) refuses the app. `exec.run(name, args)` (Lua `hull.exec`, JS `hull:exec`)
-  matches the call, then answers from a `hull test` stub (`test.exec_stub` /
-  `test.execStub`); outside `hull test` it fails naming the missing command broker, which
-  lands next. Fuzzed by `fuzz_exec_policy` and `fuzz_exec_slot`; `make e2e-exec`.
+  matches the call, and under `hull test` answers from a stub (`test.exec_stub` /
+  `test.execStub`). Fuzzed by `fuzz_exec_policy` and `fuzz_exec_slot`; `make e2e-exec`.
 
 ## [0.25.0] - 2026-11-24
 

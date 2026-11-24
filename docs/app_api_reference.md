@@ -3022,9 +3022,21 @@ arguments, and the few slots the app fills, each with a shape its value must mat
 ([docs/design/exec_broker.md](design/exec_broker.md)). There is no shell anywhere; the
 arguments reach the program exactly as matched.
 
-> **Status.** This release ships the manifest section, the matcher and the `hull test` stubs.
-> The command broker that runs a command (Linux first) lands next; until then `exec.run`
-> outside `hull test` fails after the match, naming the missing broker.
+> **Where it runs.** Native Linux, through the command broker (below). macOS and OpenBSD are
+> planned; on a host with no broker an app with an `exec` section is refused at start, unless
+> `--allow-degraded-sandbox` (then `exec.run` fails). Windows is refused at start always: its
+> processes re-split their one command line, so a matched value could become several arguments.
+>
+> **How a command runs.** A small broker process (this binary in a hidden mode) is spawned
+> before the sandbox, given the policy once, and then runs each call: it matches the arguments
+> again, re-checks the binary (root-owned path, no setuid / setgid or file capabilities; a binary
+> replaced since start fails with "restart the app (ESTALE)"), and starts the child with its own
+> Landlock domain (execute only its binary and loader, read only `/usr /lib /lib64 /etc /proc
+> /sys /dev` plus its `fs.read`, write only `/dev/null` plus its `fs.write`) and a seccomp filter
+> that refuses creating processes (threads work), changing credentials, and any socket but
+> `AF_UNIX` with `unix_sockets`. The child is killed (SIGKILL to its group) at `timeout_ms`, and
+> it dies with the broker, which dies with the app, even on SIGKILL. Below Landlock ABI 6 the
+> app is refused at start unless `--allow-degraded-sandbox`, which logs each missing guarantee.
 
 ```lua
 app.manifest({
@@ -3082,8 +3094,10 @@ section is refused by the resolver. The section is part of the signed manifest.
 
 **Errors and refusals.** An undeclared name or an argument a slot does not admit raises (Lua)
 / throws a TypeError synchronously (JS), naming the argument and the rule, before anything
-runs. A call inside a database transaction, in JS middleware or at the module top level is
-refused with code `wait_refused` (it will wait for the command).
+runs. A call waits like `hull.sleep`, so it is refused with code `wait_refused` where a wait is
+refused (inside a database transaction, in JS middleware, at the module top level, in a request
+`test.get` dispatches), and with code `busy` past 8 calls in flight or the command's
+`concurrency`. The command's output is charged to the run (1 unit per 8 bytes) when it arrives.
 
 **Tests.** `test.exec_stub(name, result)` (JS `test.execStub`) answers `exec.run(name, ...)`
 in that test file: a result table (omitted fields default: status 0, empty output) or a

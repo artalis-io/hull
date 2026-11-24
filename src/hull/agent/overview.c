@@ -19,6 +19,7 @@
 #include "limits.h"
 #include "hull/app_context.h"
 #include "hull/manifest.h"
+#include "hull/cap/exec.h"   /* the declared commands */
 #include "hull/runtime.h"
 #include "hull/tools_install.h"
 
@@ -172,6 +173,38 @@ static void emit_modules_list(ShJsonWriter *w, const HlManifest *m)
     sh_json_write_array_end(w);
 }
 
+/* The declared commands (docs/design/exec_broker.md §3): name, path, and
+ * whether it may reach local unix sockets - the disclosure an operator (or
+ * an agent) reads before running the app. */
+static void emit_exec_list(ShJsonWriter *w, const HlManifest *m)
+{
+    sh_json_write_array_start(w);
+    int n = m && m->exec.data ? hl_exec_policy_count(m->exec.data, m->exec.len) : 0;
+    for (int i = 0; i < n; i++) {
+        HlExecCmd c;
+        if (hl_exec_policy_at(m->exec.data, m->exec.len, i, &c) != 0) break;
+        int slots = 0;
+        const uint8_t *cur = c.argv;
+        for (uint16_t e = 0; e < c.n_argv; e++) {
+            HlExecArg a;
+            hl_exec_next_arg(&cur, c.end, &a);
+            slots += a.is_slot;
+        }
+        sh_json_write_object_start(w);
+        sh_json_write_kv_string(w, "name", c.name);
+        sh_json_write_kv_string(w, "path", c.path);
+        sh_json_write_kv_int(w, "slots", slots);
+        sh_json_write_kv_int(w, "timeout_ms", (int64_t)c.timeout_ms);
+        sh_json_write_kv_bool(w, "unix_sockets", (c.flags & HL_EXEC_CMD_UNIX_SOCKETS) != 0);
+        if (c.flags & HL_EXEC_CMD_UNIX_SOCKETS)
+            sh_json_write_kv_string(w, "unix_sockets_scope",
+                                    "any pathname unix socket the service account "
+                                    "can reach, not only the one it needs");
+        sh_json_write_object_end(w);
+    }
+    sh_json_write_array_end(w);
+}
+
 /* ── Main entry point ─────────────────────────────────────────── */
 
 int hl_agent_overview_ctx(HlAppContext *ctx, ShJsonBuf *out)
@@ -271,6 +304,8 @@ int hl_agent_overview_ctx(HlAppContext *ctx, ShJsonBuf *out)
     sh_json_write_kv_bool(&w, "manifest_present", have_manifest && m.modules_declared);
     sh_json_write_key(&w, "modules_declared");
     emit_modules_list(&w, have_manifest ? &m : NULL);
+    sh_json_write_key(&w, "exec");
+    emit_exec_list(&w, have_manifest ? &m : NULL);
     if (have_manifest) hl_manifest_free(&m);
 
     /* Tests. */

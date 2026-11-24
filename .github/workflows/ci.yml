@@ -2893,6 +2893,25 @@ jobs:
         timeout-minutes: 15
         run: sh tests/e2e_feature_tui.sh
 
+  exec-broker:
+    needs: [classify]
+    if: needs.classify.outputs.run_core_common == 'true'
+    name: Command broker (Linux, hull/exec)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+          submodules: true
+      # The test hooks let a binary this user owns pass the root-ownership
+      # check (no sudo here) and log the broker's pid and a probe's
+      # readiness; a release build never has them.
+      - name: Build with the broker's test hooks
+        run: make -j"$(nproc)" HL_EXEC_TEST_HOOKS=1
+      - name: Command broker E2E (sandbox, deaths, admission)
+        timeout-minutes: 5
+        run: HULL_REQUIRE_EXEC_BROKER=1 sh tests/e2e_exec_broker.sh
+
   postgres-feature:
     needs: [classify]
     if: needs.classify.outputs.run_db_postgres == 'true'
@@ -3370,6 +3389,7 @@ jobs:
       - duckdb-feature
       - gpu-feature
       - tui-feature
+      - exec-broker
       - postgres-feature
       - mysql-feature
       - db-shared-feature
