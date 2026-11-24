@@ -8,6 +8,10 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-24
+
+TypeScript entries and build plugins run on a cosmo hull on Windows.
+
 ### Added
 
 - **TypeScript entries and build plugins run on a cosmo hull on Windows** (#1188). `hull
