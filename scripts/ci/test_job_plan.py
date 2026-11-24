@@ -308,6 +308,7 @@ CANONICAL_FUZZ = {
     "sh_json", "path_normalize", "mime_sniff", "host_match", "encoding", "ssh",  # core
     "log_escape", "http_guard", "wasm_log_escape", "migrate_name",    # core (audit 28)
     "plain_value",                                                    # core (build plugin channel)
+    "exec_policy", "exec_slot",                                       # core (hull/exec)
     "pgwire", "pg_dsn", "pg_rewrite", "mysqlwire", "mysql_dsn", "respwire", "valkey_dsn",  # db wire
     "sql_kw", "dsn_redact", "mysql_stmt",                             # db (audit 28)
     "pg_msg", "mysql_rows",                                           # db (audit 44)
