@@ -6,7 +6,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
-## [Unreleased]
+## [0.24.0] - 2026-11-24
+
+Streamed HTTP responses and a Server-Sent Events client: `http.async.stream` hands a
+response over as it arrives, with a bound on its life and backpressure for a slow reader,
+and `hull/sse-client` parses an event stream over it, in both runtimes. A cosmo hull now
+runs TypeScript entries and build plugins on Linux and macOS (not yet on Windows, #1188).
+Upgrade note: a server whose port is taken now exits 1 instead of 0, so a supervisor or a
+script that relied on status 0 there sees the failure.
 
 ### Added
 
