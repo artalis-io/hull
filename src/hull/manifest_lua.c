@@ -242,7 +242,7 @@ static void lx_slot(lua_State *L, int t, HlExecBuf *b, const char *where)
     lua_getfield(L, t, "repeat");
     if (lua_istable(L, -1)) {
         int r = lua_gettop(L);
-        char rw[128];
+        char rw[256];
         snprintf(rw, sizeof rw, "%s.repeat", where);
         if (lx_keys(L, r, EXEC_REPEAT_KEYS, b, rw) == 0) {
             repeat = 1;
@@ -338,7 +338,7 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
     lua_getfield(L, t, "fs");
     int fs = lua_gettop(L);
     if (lua_istable(L, fs)) {
-        char fw[128];
+        char fw[192];
         snprintf(fw, sizeof fw, "%s.fs", where);
         if (lx_keys(L, fs, EXEC_FS_KEYS, b, fw) == 0) {
             lx_str_list(L, fs, "read", b, fw);
@@ -362,7 +362,7 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
         lua_Integer len = (lua_Integer)lua_rawlen(L, a);
         for (lua_Integer i = 1; i <= len && !b->failed; i++) {
             lua_rawgeti(L, a, i);
-            char aw[128];
+            char aw[192];
             snprintf(aw, sizeof aw, "%s.argv[%lld]", where, (long long)i);
             if (lua_type(L, -1) == LUA_TSTRING) {
                 size_t sl;

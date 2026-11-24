@@ -393,7 +393,7 @@ static void mx_slot(JSContext *ctx, JSValueConst t, HlExecBuf *b, const char *wh
     int64_t rmin = -1, rmax = -1;
     JSValue r = mjs_own(ctx, t, "repeat");
     if (mjs_is_obj(ctx, r)) {
-        char rw[128];
+        char rw[256];
         snprintf(rw, sizeof rw, "%s.repeat", where);
         if (mx_keys(ctx, r, MX_REPEAT_KEYS, b, rw) == 0) {
             repeat = 1;
@@ -450,7 +450,7 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     JSValue env = mjs_own(ctx, t, "env");
     if (mjs_is_obj(ctx, env)) {
         const char *keys[HL_EXEC_MAX_ENV + 1];
-        char ew[128];
+        char ew[192];
         snprintf(ew, sizeof ew, "%s.env", where);
         n_env = mx_sorted_keys(ctx, env, keys, HL_EXEC_MAX_ENV + 1, b, ew);
         for (int i = 0; i < n_env; i++) {
@@ -483,7 +483,7 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     /* fs: { read: [...], write: [...] } */
     JSValue fs = mjs_own(ctx, t, "fs");
     if (mjs_is_obj(ctx, fs)) {
-        char fw[128];
+        char fw[192];
         snprintf(fw, sizeof fw, "%s.fs", where);
         if (mx_keys(ctx, fs, MX_FS_KEYS, b, fw) == 0) {
             mx_str_list(ctx, fs, "read", b, fw);
@@ -505,7 +505,7 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
         int32_t len = mjs_len(ctx, argv);
         for (int32_t i = 0; i < len && !b->failed; i++) {
             JSValue e = mjs_elem(ctx, argv, (uint32_t)i);
-            char aw[128];
+            char aw[192];
             snprintf(aw, sizeof aw, "%s.argv[%d]", where, (int)i);
             if (JS_IsString(e)) {
                 size_t sl;

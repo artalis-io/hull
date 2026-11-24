@@ -141,13 +141,13 @@ static void put_u8(HlExecBuf *b, uint8_t v) { put(b, &v, 1); }
 
 static void put_u16(HlExecBuf *b, uint16_t v)
 {
-    uint8_t x[2] = { (uint8_t)v, (uint8_t)(v >> 8) };
+    const uint8_t x[2] = { (uint8_t)v, (uint8_t)(v >> 8) };
     put(b, x, 2);
 }
 
 static void put_u32(HlExecBuf *b, uint32_t v)
 {
-    uint8_t x[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16),
+    const uint8_t x[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16),
                      (uint8_t)(v >> 24) };
     put(b, x, 4);
 }

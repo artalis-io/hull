@@ -137,7 +137,7 @@ static JSValue build_result(JSContext *ctx, JSValueConst stub, const HlExecCmd *
 {
     uint8_t *so = NULL, *se = NULL;
     size_t sol = 0, sel = 0;
-    JSValue res = JS_UNDEFINED;
+    JSValue res;
     int64_t status = 0, ms = 0;
 
     JSValue v = JS_GetPropertyStr(ctx, stub, "status");
