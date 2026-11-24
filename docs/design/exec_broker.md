@@ -597,7 +597,7 @@ row's guarantees are a plan, not a claim.
 
 | Host | Status | Kernel layer | Guarantees demonstrated |
 |---|---|---|---|
-| Linux, native, Landlock ABI 6+ | PR 2 | Landlock + seccomp (raw syscalls) | every row of §6.5: `tests/e2e_exec_broker.sh` on x86_64 (ABI 10) and aarch64 (ABI 8); the §8 acceptance runs pending |
+| Linux, native, Landlock ABI 6+ | PR 2 | Landlock + seccomp (raw syscalls) | every row of §6.5: `tests/e2e_exec_broker.sh` on x86_64 (ABI 10) and aarch64 (ABI 8); §8 acceptance passed on spark-7468 (GB10, `hs-metrics`, 2026-11-25) |
 | Linux, cosmo APE | planned | as native, once the APE build carries the broker | none; refused at start (no broker) unless `--allow-degraded-sandbox` |
 | Linux, Landlock below ABI 6 | PR 2 | as above, minus the missing rights | refused unless `--allow-degraded-sandbox`, which names what is missing |
 | OpenBSD | **planned** (PR 3) | unveil `x` + pledge `execpromises` | none; union of grants, no per-child narrowing |
