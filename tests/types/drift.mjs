@@ -73,5 +73,13 @@ for (const line of lines) {
     walk(id, rec.module, rec, rec.exports);
     out.push("");
 }
+// Every registry module (inventory.sh writes one line each, compiled in or
+// not) against the declared module names.
+const registry = lines.map((l) => JSON.parse(l).module.replace(/:/g, "/"));
+const names = registry.map(lit).join(" | ");
+out.push("// Hull.ModuleName: the registry's modules, no more and no fewer.");
+out.push(`type Registry = ${names};`);
+out.push("export const mn: [Exclude<Registry, Hull.ModuleName>] extends [never] ? true : Exclude<Registry, Hull.ModuleName> = true; // a registry module Hull.ModuleName lacks");
+out.push("export const en: [Exclude<Hull.ModuleName, Registry>] extends [never] ? true : Exclude<Hull.ModuleName, Registry> = true; // a Hull.ModuleName the registry lacks");
 writeFileSync(outPath, out.join("\n") + "\n");
 console.log(`drift.mjs: ${modules} modules, ${n} assertions -> ${outPath}`);

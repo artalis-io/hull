@@ -6,6 +6,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
+## [Unreleased]
+
+### Fixed
+
+- **`hull/sse-client` can be declared from TypeScript.** `types/hull` left it out of
+  `Hull.ModuleName`, so a typed manifest naming `"hull/sse-client@1"` failed `hull check
+  --types` (TS2322) and needed a cast. `make check-types` now also checks that
+  `Hull.ModuleName` is exactly the module registry, so a new module cannot be left out
+  again.
+
 ## [0.24.0] - 2026-11-24
 
 Streamed HTTP responses and a Server-Sent Events client: `http.async.stream` hands a
