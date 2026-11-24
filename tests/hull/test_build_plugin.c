@@ -16,6 +16,9 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#if defined(__COSMOPOLITAN__)
+#include <cosmo.h>   /* IsWindows */
+#endif
 
 static void base(HlManifest *m)
 {
@@ -100,9 +103,17 @@ static int high(int fd)
     return h;
 }
 
+static int on_windows(void)
+{
+#if defined(__COSMOPOLITAN__)
+    return IsWindows();
+#else
+    return 0;
+#endif
+}
+
 UTEST(build_plugin, take_env)
 {
-    if (!hl_chan_host_ok()) UTEST_SKIP("no channel child on Windows");
     unsetenv(HL_BUILD_PLUGIN_ENV);
     ASSERT_EQ(0, hl_build_plugin_take_env());            /* not a plugin */
     ASSERT_EQ(-1, hl_build_plugin_fd());
@@ -111,16 +122,20 @@ UTEST(build_plugin, take_env)
     ASSERT_EQ(-1, hl_build_plugin_take_env());
     ASSERT_TRUE(getenv(HL_BUILD_PLUGIN_ENV) == NULL);    /* removed anyway */
 
-    int saved = fcntl(3, F_DUPFD, 10);                   /* fd 3 a pipe */
-    int p[2];
-    ASSERT_EQ(0, pipe(p));
-    p[0] = high(p[0]);
-    p[1] = high(p[1]);
-    ASSERT_EQ(3, dup2(p[0], 3));
-    setenv(HL_BUILD_PLUGIN_ENV, "3", 1);
-    ASSERT_EQ(-1, hl_build_plugin_take_env());           /* not a socket */
-    close(p[0]);
-    close(p[1]);
+    int saved = fcntl(3, F_DUPFD, 10);
+    if (!on_windows()) {
+        /* fd 3 a pipe: not a channel. (On Windows cosmo's socketpair is a
+         * pair of pipes, so a pipe there is taken: hl_chan_fd_is_channel.) */
+        int p[2];
+        ASSERT_EQ(0, pipe(p));
+        p[0] = high(p[0]);
+        p[1] = high(p[1]);
+        ASSERT_EQ(3, dup2(p[0], 3));
+        setenv(HL_BUILD_PLUGIN_ENV, "3", 1);
+        ASSERT_EQ(-1, hl_build_plugin_take_env());       /* not a socket */
+        close(p[0]);
+        close(p[1]);
+    }
 
     int sv[2];
     ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));

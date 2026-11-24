@@ -125,6 +125,10 @@ function M.materialize(p)
     if type(files) ~= "table" then return nil, p.identity .. ": no entry" end
     local dir = tool.tmpdir()
     if not dir then return nil, p.identity .. ": cannot make a directory for it" end
+    -- A cosmo hull on Windows makes it as C:/Users/... (the form busybox
+    -- takes); a plugin entry is an absolute path in cosmo's own form,
+    -- /C/Users/..., which every check of a plugin path expects (#1188).
+    dir = dir:gsub("^(%a):/", "/%1/")
     local entry
     for _, f in ipairs(files) do
         if type(f.name) ~= "string" or not f.name:match("^[%w_%-%.]+$") or f.name:sub(1, 1) == "." then

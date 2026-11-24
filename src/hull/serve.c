@@ -3512,7 +3512,7 @@ int hull_serve(int argc, char **argv)
      * like the session key, before any app code runs. */
     if (hl_build_plugin_take_env() < 0) {
         log_error("[hull:c] " HL_BUILD_PLUGIN_ENV " is set but fd 3 is not "
-                  "a socket");
+                  "a build channel");
         return 1;
     }
 

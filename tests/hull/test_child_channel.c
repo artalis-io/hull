@@ -3,6 +3,10 @@
  * (a wrong magic, an oversized payload, a peer gone mid-frame, a quiet
  * peer), and a spawned child on fd 3 with a filtered environment.
  *
+ * The children are this test binary itself (--chan-child MODE): no /bin/sh,
+ * which a cosmo APE on Windows cannot execve, so the same cases run there
+ * (#1188).
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -25,9 +29,61 @@
 
 #define MAGIC 0x54534554u   /* "TEST" */
 
-/* A cosmo APE running on Windows has no channel (hl_chan_host_ok). */
-#define NEED_HOST()                                                        \
-    do { if (!hl_chan_host_ok()) UTEST_SKIP("no channel child on Windows"); } while (0)
+#if defined(__COSMOPOLITAN__)
+#include <cosmo.h>   /* IsWindows */
+#endif
+
+#define CHILD_FLAG "--chan-child"
+
+static int on_windows(void)
+{
+#if defined(__COSMOPOLITAN__)
+    return IsWindows();
+#else
+    return 0;
+#endif
+}
+
+static char g_self[4096];
+
+/* What a child does with its fd 3 (CHILD_FLAG MODE [ARG]):
+ *   env   write "$HULL_CHAN_KEPT|$HULL_CHAN_SECRET", then echo fd 3 to fd 3
+ *   cat   read fd 3 until EOF
+ *   fd N  exit 3 when descriptor N is open, else 0
+ *   ok    write "ok" to fd 3 */
+static int chan_child(int argc, const char *const argv[])
+{
+    const char *mode = argc > 2 ? argv[2] : "";
+    char buf[512];
+    if (strcmp(mode, "env") == 0) {
+        const char *k = getenv("HULL_CHAN_KEPT"), *x = getenv("HULL_CHAN_SECRET");
+        int n = snprintf(buf, sizeof buf, "%s|%s", k ? k : "", x ? x : "");
+        if (write(3, buf, (size_t)n) != n) return 10;
+        for (;;) {
+            ssize_t r = read(3, buf, sizeof buf);
+            if (r <= 0) return 0;
+            if (write(3, buf, (size_t)r) != r) return 11;
+        }
+    }
+    if (strcmp(mode, "cat") == 0) {
+        while (read(3, buf, sizeof buf) > 0) { }
+        return 0;
+    }
+    if (strcmp(mode, "fd") == 0 && argc > 3)
+        return fcntl(atoi(argv[3]), F_GETFD) >= 0 ? 3 : 0;
+    if (strcmp(mode, "ok") == 0)
+        return write(3, "ok", 2) == 2 ? 0 : 12;
+    return 20;
+}
+
+/* Spawn this binary as a child in @p mode (and @p arg) on @p fd. */
+static pid_t spawn_child(const char *mode, const char *arg, int fd,
+                         int (*env_ok)(const char *kv))
+{
+    char *argv[] = { g_self, (char *)CHILD_FLAG, (char *)(uintptr_t)mode,
+                     (char *)(uintptr_t)arg, NULL };
+    return hl_chan_spawn(g_self, argv, fd, env_ok);
+}
 
 static void pair(int sv[2])
 {
@@ -50,7 +106,6 @@ static void child_pair(int sv[2])
 
 UTEST(child_channel, frame_round_trip)
 {
-    NEED_HOST();
     int sv[2];
     pair(sv);
     uint64_t dl = hl_chan_mono_ms() + 2000;
@@ -74,7 +129,6 @@ UTEST(child_channel, frame_round_trip)
 
 UTEST(child_channel, frame_errors)
 {
-    NEED_HOST();
     int sv[2];
     uint64_t dl = hl_chan_mono_ms() + 2000;
     HlChanFrame r = { .magic = MAGIC, .max = 4 };
@@ -119,15 +173,11 @@ static int keep_only_kept(const char *kv)
 
 UTEST(child_channel, spawn_on_fd3)
 {
-    NEED_HOST();
     int sv[2];
     child_pair(sv);
     setenv("HULL_CHAN_KEPT", "yes", 1);
     setenv("HULL_CHAN_SECRET", "no", 1);
-    char a0[] = "/bin/sh", a1[] = "-c",
-         a2[] = "printf '%s|%s' \"$HULL_CHAN_KEPT\" \"$HULL_CHAN_SECRET\" >&3; cat <&3 >&3";
-    char *argv[] = { a0, a1, a2, NULL };
-    pid_t pid = hl_chan_spawn("/bin/sh", argv, sv[1], keep_only_kept);
+    pid_t pid = spawn_child("env", NULL, sv[1], keep_only_kept);
     close(sv[1]);
     ASSERT_GT(pid, 0);
     uint64_t dl = hl_chan_mono_ms() + 5000;
@@ -161,12 +211,9 @@ UTEST(child_channel, spawn_on_fd3)
 
 UTEST(child_channel, reap_a_running_child_times_out)
 {
-    NEED_HOST();
     int sv[2];
     child_pair(sv);
-    char a0[] = "/bin/sh", a1[] = "-c", a2[] = "cat <&3";
-    char *argv[] = { a0, a1, a2, NULL };
-    pid_t pid = hl_chan_spawn("/bin/sh", argv, sv[1], NULL);
+    pid_t pid = spawn_child("cat", NULL, sv[1], NULL);
     close(sv[1]);
     ASSERT_GT(pid, 0);
     int st;
@@ -182,7 +229,6 @@ UTEST(child_channel, reap_a_running_child_times_out)
  * use one the build host had open. */
 UTEST(child_channel_audit49, spawn_closes_inherited_fds)
 {
-    NEED_HOST();
     int sv[2];
     child_pair(sv);
     int p[2];
@@ -190,11 +236,9 @@ UTEST(child_channel_audit49, spawn_closes_inherited_fds)
     int leak = fcntl(p[1], F_DUPFD, 20);      /* high, and inheritable */
     ASSERT_GE(leak, 20);
     ASSERT_EQ(0, fcntl(leak, F_SETFD, 0));
-    char script[96];
-    snprintf(script, sizeof script, "if [ -e /dev/fd/%d ]; then exit 3; fi; exit 0", leak);
-    char a0[] = "/bin/sh", a1[] = "-c";
-    char *argv[] = { a0, a1, script, NULL };
-    pid_t pid = hl_chan_spawn("/bin/sh", argv, sv[1], NULL);
+    char num[16];
+    snprintf(num, sizeof num, "%d", leak);
+    pid_t pid = spawn_child("fd", num, sv[1], NULL);
     close(sv[1]);
     ASSERT_GT(pid, 0);
     int st = -1;
@@ -204,12 +248,11 @@ UTEST(child_channel_audit49, spawn_closes_inherited_fds)
     close(leak); close(p[0]); close(p[1]); close(sv[0]);
 }
 
-/* Spawn /bin/sh -c @p script with @p chan as fd 3; its exit status, or -1. */
-static int run_sh(const char *script, int chan)
+/* Spawn a child in @p mode (and @p arg) with @p chan as fd 3; its exit
+ * status, or -1. */
+static int run_child(const char *mode, const char *arg, int chan)
 {
-    char a0[] = "/bin/sh", a1[] = "-c";
-    char *argv[] = { a0, a1, (char *)(uintptr_t)script, NULL };
-    pid_t pid = hl_chan_spawn("/bin/sh", argv, chan, NULL);
+    pid_t pid = spawn_child(mode, arg, chan, NULL);
     if (pid <= 0) return -1;
     int st = -1;
     if (hl_chan_reap(pid, &st, 5000, NULL) != 1 || !WIFEXITED(st)) return -1;
@@ -223,21 +266,25 @@ static int run_sh(const char *script, int chan)
  * loop to the limit. */
 UTEST(child_channel_audit50, high_fd_closed_without_close_range)
 {
-    NEED_HOST();
+    /* Windows has no descriptor limit to read (getrlimit fails): the
+     * fallback loop closes every number up to 2^20 there. */
     struct rlimit rl, saved;
-    ASSERT_EQ(0, getrlimit(RLIMIT_NOFILE, &saved));
-    rl = saved;
-    rlim_t want = 70000;
-    if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max < want) want = rl.rlim_max;
-    if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur < want) {
-        rl.rlim_cur = want;
-        (void)setrlimit(RLIMIT_NOFILE, &rl);
-    }
-    ASSERT_EQ(0, getrlimit(RLIMIT_NOFILE, &rl));
-    if (rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur <= 5000) {
-        printf("  (descriptor limit %llu: no descriptor above 4096, skipped)\n",
-               (unsigned long long)rl.rlim_cur);
-        return;
+    int have_limit = getrlimit(RLIMIT_NOFILE, &saved) == 0;
+    if (!on_windows()) ASSERT_TRUE(have_limit);
+    if (have_limit) {
+        rl = saved;
+        rlim_t want = 70000;
+        if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max < want) want = rl.rlim_max;
+        if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur < want) {
+            rl.rlim_cur = want;
+            (void)setrlimit(RLIMIT_NOFILE, &rl);
+        }
+        ASSERT_EQ(0, getrlimit(RLIMIT_NOFILE, &rl));
+        if (rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur <= 5000) {
+            printf("  (descriptor limit %llu: no descriptor above 4096, skipped)\n",
+                   (unsigned long long)rl.rlim_cur);
+            return;
+        }
     }
     int sv[2];
     child_pair(sv);
@@ -245,15 +292,15 @@ UTEST(child_channel_audit50, high_fd_closed_without_close_range)
     ASSERT_EQ(0, pipe(p));
     int high = 5000;
     ASSERT_EQ(high, dup2(p[1], high));        /* inheritable: dup2 clears CLOEXEC */
-    char script[96];
-    snprintf(script, sizeof script, "if [ -e /dev/fd/%d ]; then exit 3; fi; exit 0", high);
+    char num[16];
+    snprintf(num, sizeof num, "%d", high);
     for (int mode = 1; mode <= 2; mode++) {
         hl_chan_test_force_close_fallback(mode);
-        EXPECT_EQ(0, run_sh(script, sv[1]));  /* 3: the descriptor was there */
+        EXPECT_EQ(0, run_child("fd", num, sv[1]));  /* 3: the descriptor was there */
     }
     hl_chan_test_force_close_fallback(0);
     close(high); close(p[0]); close(p[1]); close(sv[0]); close(sv[1]);
-    (void)setrlimit(RLIMIT_NOFILE, &saved);
+    if (have_limit) (void)setrlimit(RLIMIT_NOFILE, &saved);
 }
 
 /* A binary that cannot be executed is reported as posix_spawn reports it:
@@ -261,7 +308,6 @@ UTEST(child_channel_audit50, high_fd_closed_without_close_range)
  * only _exit(127)ed). */
 UTEST(child_channel_audit50, exec_failure_reported)
 {
-    NEED_HOST();
     int sv[2];
     child_pair(sv);
     char a0[] = "/nonexistent/hull-audit50";
@@ -271,7 +317,8 @@ UTEST(child_channel_audit50, exec_failure_reported)
     int err = errno;
     if (pid > 0) { int st; (void)hl_chan_reap(pid, &st, 5000, NULL); }
     EXPECT_EQ(-1, (int)pid);
-    EXPECT_EQ(ENOENT, err);
+    /* Windows names a missing directory ERROR_PATH_NOT_FOUND: ENOTDIR. */
+    EXPECT_TRUE(err == ENOENT || (on_windows() && err == ENOTDIR));
     close(sv[0]); close(sv[1]);
 }
 
@@ -280,7 +327,6 @@ UTEST(child_channel_audit50, exec_failure_reported)
  * and the child talked to /dev/null (audit 50). */
 UTEST(child_channel_audit50, low_fd_channel_survives)
 {
-    NEED_HOST();
     int saved0 = fcntl(0, F_DUPFD_CLOEXEC, 10);
     ASSERT_GE(saved0, 10);
     close(0);
@@ -288,9 +334,12 @@ UTEST(child_channel_audit50, low_fd_channel_survives)
     ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
     int child_end = sv[0] == 0 ? sv[0] : sv[1];
     int our_end = child_end == sv[0] ? sv[1] : sv[0];
-    int st = (child_end == 0) ? run_sh("printf ok >&3", child_end) : -2;
+    int st = (child_end == 0) ? run_child("ok", NULL, child_end) : -2;
     char buf[4] = { 0 };
-    ssize_t n = st == 0 ? recv(our_end, buf, 2, MSG_DONTWAIT) : -1;
+    /* Non-blocking by the descriptor, not MSG_DONTWAIT: Windows' socketpair
+     * (pipes) refuses recv flags. */
+    hl_chan_set_nonblock(our_end);
+    ssize_t n = st == 0 ? recv(our_end, buf, 2, 0) : -1;
     close(sv[0]); close(sv[1]);
     ASSERT_EQ(0, dup2(saved0, 0));
     close(saved0);
@@ -299,6 +348,20 @@ UTEST(child_channel_audit50, low_fd_channel_survives)
     EXPECT_STREQ("ok", buf);
 }
 
-#endif /* HL_CHAN_SUPPORTED */
+UTEST_STATE();
+
+int main(int argc, const char *const argv[])
+{
+    if (argc > 1 && strcmp(argv[1], CHILD_FLAG) == 0) return chan_child(argc, argv);
+    if (hl_chan_self_exe(g_self, sizeof g_self) != 0) {
+        fprintf(stderr, "test_child_channel: cannot find this binary\n");
+        return 1;
+    }
+    return utest_main(argc, argv);
+}
+
+#else /* !HL_CHAN_SUPPORTED */
 
 UTEST_MAIN()
+
+#endif /* HL_CHAN_SUPPORTED */

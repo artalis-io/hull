@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
+## [Unreleased]
+
+### Added
+
+- **TypeScript entries and build plugins run on a cosmo hull on Windows** (#1188). `hull
+  app.ts`, `hull test` of a TypeScript app and a `hull.build.json` app no longer fail there
+  with "do not run on Windows yet". Cosmo's socketpair on Windows is a pair of duplex pipes,
+  and `send()` refuses `MSG_NOSIGNAL` on it (EINVAL): the channel now writes there with
+  SIGPIPE blocked and takes a pipe as the plugin's fd 3. A bundled plugin's directory is given
+  in cosmo's own `/C/...` spelling. There is no kernel sandbox on Windows, so a plugin runs
+  under the capability layer and the plugin preset only, as the app does. `test_child_channel`
+  no longer runs `/bin/sh` (its children are the test binary), and the Windows e2e workflow
+  runs it, `test_build_plugin`, a TypeScript app and the build-plugin fixtures.
+
 ## [0.24.1] - 2026-11-24
 
 A types fix: a TypeScript app can declare `hull/sse-client` in its manifest without a cast.

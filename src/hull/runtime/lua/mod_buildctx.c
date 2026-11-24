@@ -474,7 +474,7 @@ int luaopen_hull_buildctx_store(lua_State *L)
  *   P.empty_array                          -- encodes as []
  *   P.preset_check(manifest)               -> true | nil, reason
  *
- * Tokens: "unsupported" (no channel on this host), "spawn_failed" (and the
+ * Tokens: "unsupported" (a build with no channel: a native Windows one), "spawn_failed" (and the
  * system's reason),
  * "timeout", "eof" (the plugin closed its end or exited), "protocol" (a
  * frame with another magic or past the payload limit), "malformed" (a value
@@ -561,7 +561,6 @@ static int pl_spawn(lua_State *L)
     lua_Integer n = lua_istable(L, 3) ? luaL_len(L, 3) : 0;
     if (n < 0 || n > 32) return fail(L, "invalid_args");
 #ifdef HL_CHAN_SUPPORTED
-    if (!hl_chan_host_ok()) return fail(L, "unsupported");
     plugin_warn_unsandboxed();
     const char *argv[32 + 3];
     int k = 0;
