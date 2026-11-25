@@ -31,6 +31,7 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <string.h>
 #include <sys/types.h>
 
 /* One declared command as the broker holds it. */
@@ -43,7 +44,24 @@ typedef struct HlExecBrokerCmd {
     int       plat;                 /* the host's per-command handle, -1 = none
                                        (Linux: the child's Landlock ruleset) */
     int       running;
+    /* Its child manifest's fs grants (manifest.fs), resolved at policy load
+     * to real paths: n_app_read then n_app_write NUL-terminated strings. */
+    char     *app_paths;
+    int      *app_fds;              /* the opened grants (exec_child.h), closed
+                                       once the lock is applied; -1 = none */
+    uint16_t  n_app_read;
+    uint16_t  n_app_write;
 } HlExecBrokerCmd;
+
+/* The @p i th resolved child-manifest path of @p c (reads first, then
+ * writes), or NULL past the end. */
+static inline const char *hl_exec_cmd_app_path(const HlExecBrokerCmd *c, unsigned i)
+{
+    const char *p = c->app_paths;
+    if (!p || i >= (unsigned)c->n_app_read + c->n_app_write) return NULL;
+    while (i--) p += strlen(p) + 1;
+    return p;
+}
 
 /* The broker's report: lines appended at @p at, never past @p size. */
 typedef struct HlExecReport {

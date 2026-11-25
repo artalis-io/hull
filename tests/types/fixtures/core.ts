@@ -48,6 +48,25 @@ export function manifest(): void {
     app.manifest({ host: ["a.example"] });
     // @ts-expect-error - csp is a string or false
     app.manifest({ csp: true });
+    // A declared command: path, pin, argv and host on the entry; its own
+    // manifest uses the app manifest's fs, in the same shape.
+    app.manifest({
+        modules: ["hull/exec@1"],
+        fs: { read: ["data/"] },
+        exec: {
+            "gpu-query": {
+                path: "/usr/bin/nvidia-smi",
+                sha256: "0".repeat(64),
+                argv: ["--format=csv"],
+                host: { read: ["/dev/nvidiactl"], write: ["/dev/nvidiactl"], unixSockets: false },
+                manifest: { fs: { read: ["data/"] } },
+            },
+        },
+    });
+    // @ts-expect-error - an app-only capability inside a command's manifest
+    app.manifest({ exec: { a: { path: "/bin/true", manifest: { hosts: ["a.example"] } } } });
+    // @ts-expect-error - the pin belongs on the command entry, not in its manifest
+    app.manifest({ exec: { a: { path: "/bin/true", manifest: { sha256: "0".repeat(64) } } } });
     const m = app.getManifest();
     const mods = m && m.modules;
     void mods;

@@ -8,6 +8,7 @@
  */
 
 #include "hull/manifest.h"
+#include "hull/cap/exec_child.h"         /* the child manifest's rules */
 #include "hull/shared/state_dir.h"   /* hl_state_dir_name_valid */
 #include "hull/utils/alloc.h"
 #include "manifest_internal.h"
@@ -122,7 +123,10 @@ static int read_port_array(lua_State *L, int table_idx, int *out)
 
 static const char *const EXEC_CMD_KEYS[] = {
     "path", "argv", "timeout_ms", "stdout_max", "stderr_max", "env",
-    "concurrency", "fs", "unix_sockets", "stdin_max", "sha256", NULL };
+    "concurrency", "host", "manifest", "stdin_max", "sha256",
+    "fs", "unix_sockets",              /* v0.26.0 spellings of host's fields */
+    NULL };
+static const char *const EXEC_HOST_KEYS[] = { "read", "write", "unix_sockets", NULL };
 static const char *const EXEC_SLOT_KEYS[] = {
     "enum", "prefix", "suffix", "chars", "min", "max", "repeat",
     "allow_dash", NULL };
@@ -264,6 +268,89 @@ static void lx_slot(lua_State *L, int t, HlExecBuf *b, const char *where)
     lx_str_list(L, t, "enum", b, where);
 }
 
+/* manifest.fs.<list>: each entry checked as a command's app grant. */
+static size_t lx_child_list(lua_State *L, int fs, const char *list, const char *cmd,
+                            HlExecBuf *b, int write)
+{
+    size_t n = 0;
+    lua_getfield(L, fs, list);
+    if (lua_istable(L, -1)) {
+        int a = lua_gettop(L);
+        lua_Integer len = (lua_Integer)lua_rawlen(L, a);
+        for (lua_Integer i = 1; i <= len && !b->failed; i++) {
+            lua_rawgeti(L, a, i);
+            size_t sl;
+            const char *sv = lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &sl)
+                                                           : NULL;
+            if (!sv)
+                hl_exec_b_fail(b, "exec.%s.manifest.fs.%s[%lld] must be a string",
+                               cmd, list, (long long)i);
+            else if (hl_exec_child_grant_entry(b, cmd, list, (unsigned)i, sv, sl) == 0 &&
+                     write >= 0)
+                hl_exec_b_str(b, sv, sl);
+            n++;
+            lua_pop(L, 1);
+        }
+    } else if (!lua_isnil(L, -1)) {
+        hl_exec_b_fail(b, "exec.%s.manifest.fs.%s must be a list of strings", cmd, list);
+    }
+    lua_pop(L, 1);
+    return n;
+}
+
+/* manifest = { fs = { read, write } }: a strict subset of the app manifest,
+ * appended after the argv only when it grants something, so a v0.26.0
+ * command encodes to the same bytes (§3). */
+static void lx_child_manifest(lua_State *L, int t, const char *cmd, HlExecBuf *b)
+{
+    if (b->failed) return;
+    int base = lua_gettop(L);
+    lua_getfield(L, t, "manifest");
+    int m = lua_gettop(L);
+    if (lua_isnil(L, m)) { lua_settop(L, base); return; }
+    if (!lua_istable(L, m)) {
+        hl_exec_b_fail(b, "exec.%s.manifest must be a table (a subset of the app "
+                       "manifest)", cmd);
+        lua_settop(L, base);
+        return;
+    }
+    lua_pushnil(L);
+    while (lua_next(L, m)) {
+        lua_pop(L, 1);
+        if (lua_type(L, -1) != LUA_TSTRING) {
+            hl_exec_b_fail(b, "exec.%s.manifest: a key is not a string", cmd);
+            lua_settop(L, base);
+            return;
+        }
+        if (hl_exec_child_key(b, cmd, lua_tostring(L, -1)) != 0) {
+            lua_settop(L, base);
+            return;
+        }
+    }
+    lua_getfield(L, m, "fs");
+    int fs = lua_gettop(L);
+    if (lua_isnil(L, fs)) { lua_settop(L, base); return; }
+    if (!lua_istable(L, fs)) {
+        hl_exec_b_fail(b, "exec.%s.manifest.fs must be a table { read, write }", cmd);
+        lua_settop(L, base);
+        return;
+    }
+    char fw[128];
+    snprintf(fw, sizeof fw, "exec.%s.manifest.fs", cmd);
+    if (lx_keys(L, fs, EXEC_FS_KEYS, b, fw) != 0) { lua_settop(L, base); return; }
+    /* Checked first, written only when there is something to write. */
+    size_t nr = lx_child_list(L, fs, "read", cmd, b, -1);
+    size_t nw = lx_child_list(L, fs, "write", cmd, b, -1);
+    if (!b->failed && nr + nw > 0) {
+        hl_exec_b_app_fs(b);
+        size_t mark = hl_exec_b_count_begin(b);
+        hl_exec_b_count_end(b, mark, lx_child_list(L, fs, "read", cmd, b, 0));
+        mark = hl_exec_b_count_begin(b);
+        hl_exec_b_count_end(b, mark, lx_child_list(L, fs, "write", cmd, b, 1));
+    }
+    lua_settop(L, base);
+}
+
 static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
 {
     char where[96];
@@ -280,7 +367,46 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
     int64_t so = lx_int(L, t, "stdout_max", b, where);
     int64_t se = lx_int(L, t, "stderr_max", b, where);
     int64_t conc = lx_int(L, t, "concurrency", b, where);
-    int unix_sockets = lx_bool(L, t, "unix_sockets", b, where);
+    /* host = { read, write, unix_sockets }; the v0.26.0 spellings fs and
+     * unix_sockets map onto it, never both for one grant. */
+    int hb = lua_gettop(L);
+    lua_getfield(L, t, "host");
+    int host = lua_gettop(L);
+    if (!lua_isnil(L, host) && !lua_istable(L, host))
+        hl_exec_b_fail(b, "%s: host must be a table { read, write, unix_sockets }", where);
+    else if (lua_istable(L, host)) {
+        char hw[192];
+        snprintf(hw, sizeof hw, "%s.host", where);
+        (void)lx_keys(L, host, EXEC_HOST_KEYS, b, hw);
+    }
+    lua_getfield(L, t, "fs");
+    int legacy_fs = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    lua_getfield(L, t, "unix_sockets");
+    int legacy_unix = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    int host_rw = 0, host_unix = 0;
+    if (lua_istable(L, host)) {
+        lua_getfield(L, host, "read");
+        host_rw |= !lua_isnil(L, -1);
+        lua_getfield(L, host, "write");
+        host_rw |= !lua_isnil(L, -1);
+        lua_getfield(L, host, "unix_sockets");
+        host_unix = !lua_isnil(L, -1);
+        lua_pop(L, 3);
+    }
+    if (legacy_fs && host_rw)
+        hl_exec_b_fail(b, "%s: fs and host.read / host.write both given; fs is the "
+                       "v0.26.0 spelling of host = { read, write }: keep host", where);
+    if (legacy_unix && host_unix)
+        hl_exec_b_fail(b, "%s: unix_sockets and host.unix_sockets both given; keep "
+                       "host.unix_sockets", where);
+    if (legacy_fs) hl_exec_legacy_note(name, "fs", "host");
+    if (legacy_unix) hl_exec_legacy_note(name, "unix_sockets", "host.unix_sockets");
+    int unix_sockets = legacy_unix ? lx_bool(L, t, "unix_sockets", b, where)
+                     : lua_istable(L, host) ? lx_bool(L, host, "unix_sockets", b, where)
+                     : 0;
+    lua_settop(L, hb);
     int64_t stdin_max = lx_int(L, t, "stdin_max", b, where);
     size_t hl;
     const char *pin = lx_str(L, t, "sha256", &hl, b, where);
@@ -326,18 +452,19 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
     lua_pop(L, 1);
     hl_exec_b_count_end(b, mark, n_env);
 
-    /* fs = { read = {...}, write = {...} } */
-    lua_getfield(L, t, "fs");
+    /* The host grants: absolute paths (host.read / host.write, or the
+     * v0.26.0 fs = { read, write }), encoded as before. */
+    lua_getfield(L, t, legacy_fs ? "fs" : "host");
     int fs = lua_gettop(L);
     if (lua_istable(L, fs)) {
         char fw[192];
-        snprintf(fw, sizeof fw, "%s.fs", where);
-        if (lx_keys(L, fs, EXEC_FS_KEYS, b, fw) == 0) {
+        snprintf(fw, sizeof fw, "%s.%s", where, legacy_fs ? "fs" : "host");
+        if (!legacy_fs || lx_keys(L, fs, EXEC_FS_KEYS, b, fw) == 0) {
             lx_str_list(L, fs, "read", b, fw);
             lx_str_list(L, fs, "write", b, fw);
         }
     } else {
-        if (!lua_isnil(L, fs))
+        if (legacy_fs)
             hl_exec_b_fail(b, "%s: fs must be a table { read = {...}, write = {...} }",
                            where);
         hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
@@ -374,6 +501,7 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
     }
     lua_pop(L, 1);
     hl_exec_b_count_end(b, mark, n_argv);
+    lx_child_manifest(L, t, name, b);
 }
 
 static void lx_exec(lua_State *L, int manifest_idx, HlManifest *out,

@@ -39,6 +39,7 @@ typedef struct HlExecBuf {
     size_t       cap;
     HlAllocator *alloc;
     uint16_t     ncmds;
+    size_t       flags_at;          /* the last command's flags byte */
     int          failed;
     char         err[192];
 } HlExecBuf;
@@ -62,6 +63,10 @@ void   hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
  * call may send it (1..HL_EXEC_STDIN_CEIL, checked by validation).
  * `sha256_hex` NULL = no pin; otherwise exactly 64 hex characters (either
  * case), the digest of the main executable the broker checks (§6.1). */
+/* The last command has a child manifest with `fs` grants (§3): sets
+ * HL_EXEC_CMD_APP_FS on it. The two lists (manifest.fs.read, then
+ * manifest.fs.write: count_begin, str..., count_end each) follow its argv. */
+void   hl_exec_b_app_fs(HlExecBuf *b);
 /* A count of what follows (env pairs, fs paths, argv entries, enum values),
  * written as a placeholder and filled in by hl_exec_b_count_end. */
 size_t hl_exec_b_count_begin(HlExecBuf *b);
@@ -96,6 +101,7 @@ int hl_exec_policy_validate(const uint8_t *data, size_t len,
 #define HL_EXEC_CMD_UNIX_SOCKETS 0x01u
 #define HL_EXEC_CMD_SHA256       0x02u   /* 32 digest bytes follow the flags */
 #define HL_EXEC_CMD_STDIN        0x04u   /* u32 stdin_max follows (after the pin) */
+#define HL_EXEC_CMD_APP_FS       0x08u   /* manifest.fs read / write lists follow the argv */
 
 #define HL_EXEC_SLOT_ALLOW_DASH  0x01u
 #define HL_EXEC_SLOT_HAS_CHARS   0x02u
@@ -118,10 +124,14 @@ typedef struct HlExecCmd {
     uint16_t       n_fs_read;
     uint16_t       n_fs_write;
     uint16_t       n_argv;
+    uint16_t       n_app_read;       /* manifest.fs.read (app-root / @state/ relative) */
+    uint16_t       n_app_write;      /* manifest.fs.write */
     const uint8_t *env;              /* n_env (name, value) pairs */
     const uint8_t *fs_read;
     const uint8_t *fs_write;
     const uint8_t *argv;
+    const uint8_t *app_read;
+    const uint8_t *app_write;
     const uint8_t *end;              /* the policy's end: bounds hl_exec_next_arg */
 } HlExecCmd;
 

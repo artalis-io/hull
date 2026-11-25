@@ -7,9 +7,16 @@
 
 #include "utest.h"
 #include "hull/cap/exec.h"
+#include "hull/cap/exec_child.h"
+#include "hull/cap/exec_broker.h"
+#include "hull/shared/fs_util.h"
 
+#include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
 
@@ -654,6 +661,361 @@ UTEST(exec_stdin, a_truncated_stdin_max_is_refused)
     for (size_t cut = at; cut < at + 4; cut++)
         EXPECT_EQ(-1, hl_exec_policy_validate(b.data, cut, NULL, 0));
     hl_exec_buf_free(&b);
+}
+
+/* ── The child manifest (exec.<name>.manifest, §3) ─────────────────── */
+
+/* gpu-query as v0.26.0 encodes it (host fs + unix_sockets, no child
+ * manifest): captured from the v0.26.0 cap/exec.o. A command with no child
+ * manifest must encode to exactly these bytes, so a signed v0.26.0 policy
+ * still means what it meant. */
+static const uint8_t V026_GPU_QUERY[] = {
+    0x48, 0x58, 0x50, 0x31, 0x01, 0x00, 0x09, 0x00, 0x67, 0x70, 0x75, 0x2d,
+    0x71, 0x75, 0x65, 0x72, 0x79, 0x00, 0x13, 0x00, 0x2f, 0x75, 0x73, 0x72,
+    0x2f, 0x62, 0x69, 0x6e, 0x2f, 0x6e, 0x76, 0x69, 0x64, 0x69, 0x61, 0x2d,
+    0x73, 0x6d, 0x69, 0x00, 0x88, 0x13, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x00, 0x40, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00, 0x0e, 0x00,
+    0x2f, 0x64, 0x65, 0x76, 0x2f, 0x6e, 0x76, 0x69, 0x64, 0x69, 0x61, 0x63,
+    0x74, 0x6c, 0x00, 0x01, 0x00, 0x0e, 0x00, 0x2f, 0x64, 0x65, 0x76, 0x2f,
+    0x6e, 0x76, 0x69, 0x64, 0x69, 0x61, 0x63, 0x74, 0x6c, 0x00, 0x01, 0x00,
+    0x00, 0x0c, 0x00, 0x2d, 0x2d, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x3d,
+    0x63, 0x73, 0x76, 0x00,
+};
+
+static int build_gpu_query(HlExecBuf *b, int child)
+{
+    hl_exec_b_init(b, NULL);
+    hl_exec_b_cmd(b, S("gpu-query"), S("/usr/bin/nvidia-smi"), 5000, 65536, -1, -1,
+                  1, -1, NULL, 0);
+    hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);              /* env */
+    size_t m = hl_exec_b_count_begin(b);                              /* host.read */
+    hl_exec_b_str(b, S("/dev/nvidiactl"));
+    hl_exec_b_count_end(b, m, 1);
+    m = hl_exec_b_count_begin(b);                                     /* host.write */
+    hl_exec_b_str(b, S("/dev/nvidiactl"));
+    hl_exec_b_count_end(b, m, 1);
+    m = hl_exec_b_count_begin(b);                                     /* argv */
+    hl_exec_b_fixed(b, S("--format=csv"));
+    hl_exec_b_count_end(b, m, 1);
+    if (child) {                                                      /* manifest.fs */
+        hl_exec_b_app_fs(b);
+        m = hl_exec_b_count_begin(b);
+        hl_exec_b_str(b, S("data/gpu-ids"));
+        hl_exec_b_str(b, S("@state/cache/"));
+        hl_exec_b_count_end(b, m, 2);
+        m = hl_exec_b_count_begin(b);
+        hl_exec_b_str(b, S("out/"));
+        hl_exec_b_count_end(b, m, 1);
+    }
+    return hl_exec_b_finish(b);
+}
+
+UTEST(exec_child, no_child_manifest_encodes_as_v0_26_0)
+{
+    HlExecBuf b;
+    ASSERT_EQ(0, build_gpu_query(&b, 0));
+    ASSERT_EQ(sizeof V026_GPU_QUERY, b.len);
+    EXPECT_EQ(0, memcmp(V026_GPU_QUERY, b.data, b.len));
+    /* and v0.26.0's bytes still validate and read the same */
+    HlExecCmd c;
+    ASSERT_EQ(0, hl_exec_policy_validate(V026_GPU_QUERY, sizeof V026_GPU_QUERY, NULL, 0));
+    ASSERT_EQ(0, hl_exec_policy_at(V026_GPU_QUERY, sizeof V026_GPU_QUERY, 0, &c));
+    EXPECT_TRUE(c.flags & HL_EXEC_CMD_UNIX_SOCKETS);
+    EXPECT_FALSE(c.flags & HL_EXEC_CMD_APP_FS);
+    EXPECT_EQ(1, c.n_fs_read);
+    EXPECT_EQ(0, c.n_app_read);
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_child, manifest_fs_is_encoded_and_read_back)
+{
+    HlExecBuf b;
+    HlExecCmd c;
+    ASSERT_EQ(0, build_gpu_query(&b, 1));
+    ASSERT_EQ(0, hl_exec_policy_find(b.data, b.len, S("gpu-query"), &c));
+    EXPECT_TRUE(c.flags & HL_EXEC_CMD_APP_FS);
+    EXPECT_EQ(1, c.n_fs_read);             /* the host grants are unchanged */
+    EXPECT_EQ(1, c.n_argv);
+    ASSERT_EQ(2, c.n_app_read);
+    ASSERT_EQ(1, c.n_app_write);
+    const uint8_t *cur = c.app_read;
+    EXPECT_STREQ("data/gpu-ids", hl_exec_next_str(&cur, NULL));
+    EXPECT_STREQ("@state/cache/", hl_exec_next_str(&cur, NULL));
+    cur = c.app_write;
+    EXPECT_STREQ("out/", hl_exec_next_str(&cur, NULL));
+    /* every truncation inside the child lists is refused */
+    for (size_t cut = sizeof V026_GPU_QUERY; cut < b.len; cut++)
+        EXPECT_EQ(-1, hl_exec_policy_validate(b.data, cut, NULL, 0));
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_child, an_absolute_child_entry_is_refused_by_validation)
+{
+    HlExecBuf b;
+    hl_exec_b_init(&b, NULL);
+    hl_exec_b_cmd(&b, S("c"), S("/bin/cat"), -1, -1, -1, -1, 0, -1, NULL, 0);
+    for (int k = 0; k < 4; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    hl_exec_b_app_fs(&b);
+    size_t m = hl_exec_b_count_begin(&b);
+    hl_exec_b_str(&b, S("/etc/passwd"));
+    hl_exec_b_count_end(&b, m, 1);
+    hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    EXPECT_EQ(-1, hl_exec_b_finish(&b));
+    EXPECT_TRUE(strstr(b.err, "manifest.fs.read entry 1") != NULL);
+}
+
+UTEST(exec_child, grants_a_command_may_take)
+{
+    char why[160];
+    static const char *const ok[] = { "data/gpu-ids", "data/", "./data/x.csv",
+                                      "@state/cache", "@state/cache/", NULL };
+    for (int i = 0; ok[i]; i++)
+        EXPECT_EQ(0, hl_exec_child_grant_check(ok[i], strlen(ok[i]), why, sizeof why));
+    /* valid for an app, refused for a command, each with its reason */
+    static const struct { const char *g, *why; } bad[] = {
+        { ".", "whole app directory" },
+        { "./", "whole app directory" },
+        { "@state", "whole state directory" },
+        { "data/*.csv", "pattern" },
+        { "*.log", "pattern" },
+        /* invalid anywhere */
+        { "/etc/passwd", "not an fs grant" },
+        { "../x", "not an fs grant" },
+        { "data/../../x", "not an fs grant" },
+        { ".hull/internal.db", "reserved" },
+        { "@other/x", "reserved" },
+        { NULL, NULL } };
+    for (int i = 0; bad[i].g; i++) {
+        EXPECT_EQ(-1, hl_exec_child_grant_check(bad[i].g, strlen(bad[i].g), why,
+                                                sizeof why));
+        EXPECT_TRUE(strstr(why, bad[i].why) != NULL);
+    }
+}
+
+UTEST(exec_child, resolve_names_exactly_what_the_entry_names)
+{
+    char root[] = "/tmp/hull-exec-child-XXXXXX";
+    ASSERT_TRUE(mkdtemp(root) != NULL);
+    char app[PATH_MAX], state[PATH_MAX], p[PATH_MAX + 64], out[PATH_MAX], why[160];
+    snprintf(app, sizeof app, "%s/app", root);
+    snprintf(state, sizeof state, "%s/state", root);
+    ASSERT_EQ(0, mkdir(app, 0700));
+    ASSERT_EQ(0, mkdir(state, 0700));
+    snprintf(p, sizeof p, "%s/data", app);
+    ASSERT_EQ(0, mkdir(p, 0700));
+    snprintf(p, sizeof p, "%s/data/f.txt", app);
+    FILE *f = fopen(p, "w");
+    ASSERT_TRUE(f != NULL);
+    fclose(f);
+    snprintf(p, sizeof p, "%s/link", app);
+    ASSERT_EQ(0, symlink("/etc", p));
+
+    char real_app[PATH_MAX], want[PATH_MAX + 64];
+    ASSERT_TRUE(realpath(app, real_app) != NULL);
+    /* a file: the file itself, never its parent */
+    ASSERT_EQ(0, hl_exec_child_grant_resolve(app, NULL, "data/f.txt", out, sizeof out,
+                                             why, sizeof why));
+    snprintf(want, sizeof want, "%s/data/f.txt", real_app);
+    EXPECT_STREQ(want, out);
+    /* a directory to create (trailing slash), as the app's sandbox does */
+    ASSERT_EQ(0, hl_exec_child_grant_resolve(app, NULL, "out/", out, sizeof out,
+                                             why, sizeof why));
+    struct stat st;
+    snprintf(p, sizeof p, "%s/out", app);
+    EXPECT_EQ(0, stat(p, &st));
+    /* refused: a missing file, a symbolic link, @state with no state, a pattern */
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, NULL, "data/missing.txt", out,
+                                              sizeof out, why, sizeof why));
+    EXPECT_TRUE(strstr(why, "does not exist") != NULL);
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, NULL, "link/passwd", out,
+                                              sizeof out, why, sizeof why));
+    EXPECT_TRUE(strstr(why, "symbolic link") != NULL);
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, NULL, "@state/x/", out, sizeof out,
+                                              why, sizeof why));
+    EXPECT_TRUE(strstr(why, "no state directory") != NULL);
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, NULL, "data/*.txt", out, sizeof out,
+                                              why, sizeof why));
+    /* @state/ resolves under the state root */
+    ASSERT_EQ(0, hl_exec_child_grant_resolve(app, state, "@state/cache/", out,
+                                             sizeof out, why, sizeof why));
+    EXPECT_TRUE(strstr(out, "/state/cache") != NULL);
+
+    /* Remove exactly what the test made, deepest first. */
+    static const char *const made[] = { "app/data/f.txt", "app/link", "app/data",
+                                        "app/out", "state/cache", "app", "state", NULL };
+    for (int i = 0; made[i]; i++) {
+        snprintf(p, sizeof p, "%s/%s", root, made[i]);
+        struct stat ls;
+        if (lstat(p, &ls) == 0) EXPECT_EQ(0, S_ISDIR(ls.st_mode) ? rmdir(p) : unlink(p));
+    }
+    EXPECT_EQ(0, rmdir(root));
+}
+
+/* Review findings on the child grant (each failed before its fix). */
+static void mk(const char *root, const char *rel, int dir)
+{
+    char p[PATH_MAX + 64];
+    snprintf(p, sizeof p, "%s/%s", root, rel);
+    if (dir) { (void)mkdir(p, 0700); return; }
+    FILE *f = fopen(p, "w");
+    if (f) { fputs("x", f); fclose(f); }
+}
+
+static void rm_list(const char *root, const char *const *rel)
+{
+    char p[PATH_MAX + 64];
+    for (int i = 0; rel[i]; i++) {
+        snprintf(p, sizeof p, "%s/%s", root, rel[i]);
+        struct stat ls;
+        if (lstat(p, &ls) == 0) (void)(S_ISDIR(ls.st_mode) ? rmdir(p) : unlink(p));
+    }
+    (void)rmdir(root);
+}
+
+UTEST(exec_child, review_broad_root_nested_hull_db_and_binding)
+{
+    char root[] = "/tmp/hull-exec-review-XXXXXX";
+    ASSERT_TRUE(mkdtemp(root) != NULL);
+    char app[PATH_MAX], why[192], out[PATH_MAX];
+    snprintf(app, sizeof app, "%s/app", root);
+    mk(root, "app", 1);
+    mk(app, ".hull", 1);
+    mk(app, "st", 1);              /* a state directory inside the app directory */
+    mk(app, "st/.hull", 1);
+    mk(app, "st/.hull/internal.db", 0);
+    mk(app, "data", 1);
+    mk(app, "data/app.db", 0);
+    mk(app, "data/app.db-shm", 0);
+    mk(app, "data/f.txt", 0);
+    char st[PATH_MAX + 8];
+    snprintf(st, sizeof st, "%s/st", app);
+
+    /* Q1: "/" (or the home) as the app root is not an app directory */
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve("/", NULL, "tmp/", out, sizeof out,
+                                              why, sizeof why));
+    EXPECT_TRUE(strstr(why, "not an app directory") != NULL);
+    /* Q2: the state root nested in the app root: neither its directory nor
+     * anything through its .hull */
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, st, "st/", out, sizeof out,
+                                              why, sizeof why));
+    EXPECT_TRUE(strstr(why, "holds the state directory") != NULL);
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, st, "st/.hull/internal.db", out,
+                                              sizeof out, why, sizeof why));
+    EXPECT_TRUE(strstr(why, ".hull") != NULL);
+    /* Q2 (re-review): a .hull that does not exist yet at load. The walk
+     * reaches the state root and would create its .hull: it is compared
+     * with the root's .hull as it is after the mkdirat, refused, and the
+     * directory it made is removed (on HFS+ an ignorable-code-point name is
+     * the same directory; APFS shows the same path with the plain name). */
+    mk(app, "st2", 1);
+    char st2[PATH_MAX + 8], st2h[PATH_MAX + 16];
+    snprintf(st2, sizeof st2, "%s/st2", app);
+    snprintf(st2h, sizeof st2h, "%s/.hull", st2);
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, st2, "st2/.hull/x/", out, sizeof out,
+                                              why, sizeof why));
+    EXPECT_TRUE(strstr(why, ".hull") != NULL);
+    struct stat gone;
+    EXPECT_NE(0, lstat(st2h, &gone));          /* not left behind */
+    /* Q2: a write grant may not reach the database or its sidecars; a read may */
+    const char *protect[1] = { "data/app.db" };
+    HlExecChildRoots r = { app, NULL, protect, 1 };
+    HlExecChildGrant g;
+    EXPECT_EQ(-1, hl_exec_child_grant_open(&r, "data/", 1, &g, why, sizeof why));
+    EXPECT_TRUE(strstr(why, "contains the app's database") != NULL);
+    EXPECT_EQ(-1, hl_exec_child_grant_open(&r, "data/app.db-shm", 1, &g, why, sizeof why));
+    EXPECT_TRUE(strstr(why, "sidecar") != NULL);
+    ASSERT_EQ(0, hl_exec_child_grant_open(&r, "data/", 0, &g, why, sizeof why));
+    close(g.fd);
+    /* Q3: the grant is the opened object: a later swap of a component for a
+     * symbolic link does not change what the descriptor names */
+    ASSERT_EQ(0, hl_exec_child_grant_open(&r, "data/f.txt", 0, &g, why, sizeof why));
+    char from[PATH_MAX + 16], to[PATH_MAX + 16];
+    snprintf(from, sizeof from, "%s/data", app);
+    snprintf(to, sizeof to, "%s/data2", app);
+    ASSERT_EQ(0, rename(from, to));
+    ASSERT_EQ(0, symlink("/etc", from));
+    struct stat a, b;
+    char moved[PATH_MAX + 32];
+    snprintf(moved, sizeof moved, "%s/data2/f.txt", app);
+    ASSERT_EQ(0, fstat(g.fd, &a));
+    ASSERT_EQ(0, stat(moved, &b));
+    EXPECT_TRUE(a.st_ino == b.st_ino && a.st_dev == b.st_dev);
+    close(g.fd);
+    /* and resolving again now refuses the link */
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, NULL, "data/f.txt", out, sizeof out,
+                                              why, sizeof why));
+    EXPECT_TRUE(strstr(why, "symbolic link") != NULL);
+
+    static const char *const made[] = { "app/data2/app.db", "app/data2/app.db-shm",
+        "app/data2/f.txt", "app/data2", "app/data", "app/st/.hull/internal.db",
+        "app/st/.hull", "app/st", "app/st2", "app/.hull", "app", NULL };
+    rm_list(root, made);
+}
+
+/* Final review: a first start, an unresolvable app directory, DuckDB. */
+UTEST(exec_child, final_first_start_unresolvable_root_and_duckdb)
+{
+    char root[] = "/tmp/hull-exec-final-XXXXXX";
+    ASSERT_TRUE(mkdtemp(root) != NULL);
+    char app[PATH_MAX], rapp[PATH_MAX], why[192];
+    snprintf(app, sizeof app, "%s/app", root);
+    mk(root, "app", 1);
+    ASSERT_TRUE(realpath(app, rapp) != NULL);
+
+    /* First start: the database's directory does not exist yet. The server
+     * sends the path it will have; the broker refuses a write grant that
+     * would hold it, by path, before the database is ever opened. */
+    char fresh[PATH_MAX + 32];
+    snprintf(fresh, sizeof fresh, "%s/data/sub/other.db", rapp);
+    const char *p1[1] = { fresh };
+    HlExecChildRoots r1 = { app, NULL, p1, 1 };
+    HlExecChildGrant g;
+    EXPECT_EQ(-1, hl_exec_child_grant_open(&r1, "data/", 1, &g, why, sizeof why));
+    EXPECT_TRUE(strstr(why, "contains the app's database") != NULL);
+    /* the same check from the path the server computes */
+    char resolved[PATH_MAX];
+    char rel[PATH_MAX + 32];
+    snprintf(rel, sizeof rel, "%s/nope/sub/x.db", app);
+    ASSERT_EQ(0, hl_path_resolve_partial(rel, resolved));
+    char want[PATH_MAX + 32];
+    snprintf(want, sizeof want, "%s/nope/sub/x.db", rapp);
+    EXPECT_STREQ(want, resolved);
+    snprintf(rel, sizeof rel, "%s/nope/../x.db", app);
+    EXPECT_EQ(-1, hl_path_resolve_partial(rel, resolved));
+
+    /* DuckDB: its .wal and its .tmp directory are the database's too */
+    mk(app, "duck", 1);
+    mk(app, "duck/app.duckdb", 0);
+    mk(app, "duck/app.duckdb.wal", 0);
+    mk(app, "duck/app.duckdb.tmp", 1);
+    char duck[PATH_MAX + 32];
+    snprintf(duck, sizeof duck, "%s/duck/app.duckdb", rapp);
+    const char *p2[1] = { duck };
+    HlExecChildRoots r2 = { app, NULL, p2, 1 };
+    EXPECT_EQ(-1, hl_exec_child_grant_open(&r2, "duck/app.duckdb.wal", 1, &g, why,
+                                           sizeof why));
+    EXPECT_EQ(-1, hl_exec_child_grant_open(&r2, "duck/app.duckdb.tmp/", 1, &g, why,
+                                           sizeof why));
+
+    /* An app directory that cannot be resolved: refused before any broker
+     * (none runs in this test), when a command has an app-relative grant. */
+    HlExecBuf b;
+    hl_exec_b_init(&b, NULL);
+    hl_exec_b_cmd(&b, S("c"), S("/bin/cat"), -1, -1, -1, -1, 0, -1, NULL, 0);
+    for (int k = 0; k < 4; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    hl_exec_b_app_fs(&b);
+    size_t m = hl_exec_b_count_begin(&b);
+    hl_exec_b_str(&b, S("data/"));
+    hl_exec_b_count_end(&b, m, 1);
+    hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    ASSERT_EQ(0, hl_exec_b_finish(&b));
+    EXPECT_EQ(-1, hl_exec_broker_apply(b.data, b.len, 1, 0, "/nonexistent-hull-app-dir",
+                                       NULL, NULL, NULL));
+    hl_exec_buf_free(&b);
+
+    static const char *const made[] = { "app/duck/app.duckdb.tmp", "app/duck/app.duckdb.wal",
+        "app/duck/app.duckdb", "app/duck", "app/data", "app", NULL };
+    rm_list(root, made);
 }
 
 UTEST_MAIN()

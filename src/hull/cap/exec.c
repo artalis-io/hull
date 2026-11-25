@@ -230,11 +230,18 @@ void hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
     put_u32(b, opt_u32(stderr_max, HL_EXEC_STDERR_DEFAULT));
     put_u8(b, opt_u8(concurrency, HL_EXEC_CONCURRENCY_DEFAULT));
     int has_stdin = stdin_max != -1 && stdin_max != 0;
+    b->flags_at = b->len;
     put_u8(b, (uint8_t)((unix_sockets ? HL_EXEC_CMD_UNIX_SOCKETS : 0) |
                         (sha256_hex ? HL_EXEC_CMD_SHA256 : 0) |
                         (has_stdin ? HL_EXEC_CMD_STDIN : 0)));
     if (sha256_hex) put(b, pin, sizeof pin);
     if (has_stdin) put_u32(b, opt_u32(stdin_max, 0));   /* out of range: kept, refused */
+}
+
+void hl_exec_b_app_fs(HlExecBuf *b)
+{
+    if (b->failed || b->ncmds == 0 || b->flags_at >= b->len) return;
+    b->data[b->flags_at] |= HL_EXEC_CMD_APP_FS;
 }
 
 size_t hl_exec_b_count_begin(HlExecBuf *b)
@@ -425,6 +432,30 @@ static int v_fs_list(Rd *r, const char *cmd, const char *what, int write,
     return 0;
 }
 
+/* A child manifest's fs list (§3): the shape only. Each entry is an app-root
+ * or "@state/" relative grant; the canonical rules (hl_fs_grant_parse) and
+ * what a command may be granted are checked by hl_exec_child_grant_check,
+ * which the extractors and the broker run - this file stays free of the fs
+ * layer, so the fuzzers link it alone. */
+static int v_app_list(Rd *r, const char *cmd, const char *what,
+                      char *err, size_t err_size)
+{
+    uint16_t n = rd_u16(r);
+    if (r->bad) VERR("exec: the policy is truncated");
+    if (n > HL_EXEC_MAX_FS)
+        VERR("exec.%s: manifest.fs.%s has more than %d paths", cmd, what, HL_EXEC_MAX_FS);
+    for (uint16_t i = 0; i < n; i++) {
+        size_t len;
+        const char *s = rd_str(r, &len);
+        if (!s) VERR("exec: the policy is malformed");
+        if (len == 0 || len >= 4096 || s[0] == '/' || memchr(s, '\0', len))
+            VERR("exec.%s: manifest.fs.%s entry %u must be a path under the app "
+                 "directory or \"@state/\" (as an app's fs grant)", cmd, what,
+                 (unsigned)i + 1);
+    }
+    return 0;
+}
+
 static int bm_has(const uint8_t *bm, unsigned char c)
 {
     return (bm[c >> 3] >> (c & 7)) & 1;
@@ -523,7 +554,8 @@ static int v_cmd(Rd *r, const char **names, size_t *name_lens, int ci,
         VERR("exec.%s: stderr_max is at most %u", name, (unsigned)HL_EXEC_STDERR_CEIL);
     if (conc < 1 || conc > HL_EXEC_CONCURRENCY_MAX)
         VERR("exec.%s: concurrency must be 1..%d", name, HL_EXEC_CONCURRENCY_MAX);
-    if (flags & ~(HL_EXEC_CMD_UNIX_SOCKETS | HL_EXEC_CMD_SHA256 | HL_EXEC_CMD_STDIN))
+    if (flags & ~(HL_EXEC_CMD_UNIX_SOCKETS | HL_EXEC_CMD_SHA256 | HL_EXEC_CMD_STDIN |
+                  HL_EXEC_CMD_APP_FS))
         VERR("exec.%s: unknown command flags", name);
     if ((flags & HL_EXEC_CMD_SHA256) && !rd_bytes(r, 32))
         VERR("exec: the policy is truncated");
@@ -586,6 +618,10 @@ static int v_cmd(Rd *r, const char **names, size_t *name_lens, int ci,
         } else {
             VERR("exec: the policy is malformed");
         }
+    }
+    if (flags & HL_EXEC_CMD_APP_FS) {
+        if (v_app_list(r, name, "read", err, err_size) != 0) return -1;
+        if (v_app_list(r, name, "write", err, err_size) != 0) return -1;
     }
     return 0;
 }
@@ -670,6 +706,14 @@ static void read_cmd(Rd *r, HlExecCmd *c)
         uint8_t kind = rd_u8(r);
         if (kind == 0) { (void)rd_str(r, &len); }
         else { HlExecSlot s; read_slot(r, &s); }
+    }
+    if (c->flags & HL_EXEC_CMD_APP_FS) {
+        c->n_app_read = rd_u16(r);
+        c->app_read = r->p;
+        skip_strs(r, c->n_app_read);
+        c->n_app_write = rd_u16(r);
+        c->app_write = r->p;
+        skip_strs(r, c->n_app_write);
     }
 }
 

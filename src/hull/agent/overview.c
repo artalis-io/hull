@@ -200,6 +200,21 @@ static void emit_exec_list(ShJsonWriter *w, const HlManifest *m)
             sh_json_write_kv_string(w, "unix_sockets_scope",
                                     "any pathname unix socket the service account "
                                     "can reach, not only the one it needs");
+        /* Its grants: `host` (absolute paths) and its child manifest's fs
+         * (app-root / "@state/" relative, as an app's own grants). */
+        static const char *const keys[4] = { "host_read", "host_write",
+                                             "manifest_fs_read", "manifest_fs_write" };
+        const uint8_t *lists[4] = { c.fs_read, c.fs_write, c.app_read, c.app_write };
+        const uint16_t counts[4] = { c.n_fs_read, c.n_fs_write, c.n_app_read,
+                                     c.n_app_write };
+        for (int k = 0; k < 4; k++) {
+            sh_json_write_key(w, keys[k]);
+            sh_json_write_array_start(w);
+            const uint8_t *p = lists[k];
+            for (uint16_t e = 0; e < counts[k]; e++)
+                sh_json_write_string(w, hl_exec_next_str(&p, NULL));
+            sh_json_write_array_end(w);
+        }
         sh_json_write_object_end(w);
     }
     sh_json_write_array_end(w);

@@ -46,7 +46,7 @@ of it in `tool.spawn` with a compiler allowlist.
 
 | Question | Decision |
 |---|---|
-| Manifest | An `exec` section: name -> `{ path, argv, timeout_ms, stdout_max, stderr_max, env, concurrency, fs, unix_sockets, stdin_max, sha256 }`, plus `"hull/exec@1"` in `modules`. Both are needed, as for `tui`. |
+| Manifest | An `exec` section: name -> `{ path, sha256, argv, host, manifest, timeout_ms, stdout_max, stderr_max, env, concurrency, stdin_max }`, plus `"hull/exec@1"` in `modules`. Both are needed, as for `tui`. `manifest` is the command's own manifest, a strict subset of the app manifest (§3.1); `host` holds the grants an app manifest has no field for. |
 | Slot shapes | **Structured, not regex** (§4): `prefix` / `suffix` / `chars` / `min` / `max` / `enum` / `repeat`. One C matcher is used by both the cap layer and the broker. |
 | Process | Hull's own binary in a hidden mode (`argv[1] == "__hull_exec_broker"`), started with `hl_chan_spawn` before phase 1 and stopped after the manifest if there is no `exec` section. This is the GPU helper's lifecycle. |
 | Policy delivery | Exactly ONE `POLICY` frame, built in C from the sealed `HlManifest` after `hl_sig_check_runtime_policy`. The broker then locks itself down; a second `POLICY` frame makes it exit. |
@@ -72,14 +72,14 @@ app.manifest({
       argv = { "--query-gpu=index,name,memory.used,memory.total,temperature.gpu,power.draw,utilization.gpu",
                "--format=csv,noheader,nounits" },
       timeout_ms = 5000, stdout_max = 65536,
-      fs = { read = { "/dev/nvidiactl", "/dev/nvidia0" }, write = { "/dev/nvidiactl", "/dev/nvidia0" } },
+      host = { read = { "/dev/nvidiactl", "/dev/nvidia0" }, write = { "/dev/nvidiactl", "/dev/nvidia0" } },
     },
     ["unit-state"] = {
       path = "/usr/bin/systemctl",
       argv = { "show", "--no-pager", "-p", "ActiveState,NRestarts,ActiveEnterTimestamp", "--",
                { prefix = "hs-", suffix = ".service", chars = "a-z0-9-", max = 64,
                  ["repeat"] = { min = 1, max = 32 } } },
-      unix_sockets = true,   -- systemctl connects to systemd over a pathname socket
+      host = { unix_sockets = true },   -- systemctl connects to systemd over a pathname socket
       timeout_ms = 5000, stdout_max = 262144,
     },
   },
@@ -106,14 +106,18 @@ Load-time validation is in `manifest.c` and `cap/exec.c`, and failure refuses ap
   64 KiB). `stderr_max` is up to 1 MiB (default 16 KiB). `concurrency` is 1..8 (default 2).
 - **`env`:** a name -> LITERAL value map. No `"$VAR"` reference and no secret ever reaches a
   child. The names `LD_*`, `DYLD_*`, `PATH` and `IFS` are refused.
-- **`fs`:** extra Landlock grants for this command (§6.3). Each must be absolute, and `write`
-  is only under `/dev`, `/run` or `/tmp`.
+- **`host`:** the grants an app manifest has no field for. `read` / `write`: extra Landlock
+  grants for this command (§6.3), each absolute, `write` only under `/dev`, `/run` or `/tmp`
+  (device ioctls included). `unix_sockets`: below. Through §5-§9, a command's `fs.read`,
+  `fs.write` and `unix_sockets` mean these (`host.read`, `host.write`, `host.unix_sockets`; the
+  v0.26.0 names), with the `manifest.fs` grants of §3.1 added to the same rules.
+- **`manifest`:** the command's own manifest (§3.1).
 - **`sha256`:** 64 hex characters (either case), optional. The broker hashes the main
   executable from the descriptor it will exec, at policy load (a mismatch refuses the start)
   and on every call (a mismatch refuses the call, naming the digest it found). A pinned binary
   is hashed whole, so one over 512 MiB is refused. Until PR 4 a declared pin refused app load,
   so no signed manifest ever advertised a pin nothing checked.
-- **`unix_sockets`:** boolean, default false. Lets the child create `AF_UNIX` sockets (§5.3);
+- **`host.unix_sockets`:** boolean, default false. Lets the child create `AF_UNIX` sockets (§5.3);
   `systemctl` needs it to reach systemd. No other socket family is ever allowed.
 - **`stdin_max`:** 1..1 MiB (`HL_EXEC_STDIN_CEIL`), optional. A call may then pass `stdin`
   (`exec.run(name, args, { stdin = bytes })`), up to that many bytes, written to the child's
@@ -152,6 +156,166 @@ unit-state  /usr/bin/systemctl
 - a slot with `allow_dash`;
 - a `path` outside `/usr`, `/bin`, `/sbin` and `/opt`;
 - a non-`enum` slot after fixed arguments with no `--` before it (once per command).
+
+### 3.1 The command's own manifest (`exec.<name>.manifest`)
+
+The contract: each command entry has a nested `manifest`, and its value is a **strict subset
+of the app manifest schema**: the same field names, nesting, types and meaning, including path
+resolution. The executable `path`, the `sha256` pin, the `argv` policy and `host` are siblings
+of `manifest` on the entry, never inside it. So is the call contract (`timeout_ms`,
+`stdout_max`, `stderr_max`, `concurrency`, `stdin_max`) and `env`: an app's `env` is an
+allowlist of variable names it may read, a command's is a map of literal values it is given,
+so the same name with another type and meaning could not go in the subset.
+
+**What the subset takes: `fs` only.** Derived from the app schema by asking, for each field,
+whether the broker can enforce it on an exec'd child:
+
+| App field | In a command's manifest | Why |
+|---|---|---|
+| `fs.read` / `fs.write` | yes, same syntax and meaning (app root or `@state/`, `hl_fs_grant_parse`) | Landlock / Seatbelt grant files and directories |
+| `hosts`, `http`, `ssh`, `databases`, `kv` | refused | the broker's seccomp ceiling refuses every socket family but `AF_UNIX` for every child (§6.2), and no kernel rule names a host |
+| `env`, `secrets` | refused | a child gets only literal values (§3); no secret reaches one |
+| `state`, `modules`, `exec`, `tui`, `gpu`, `compute`, `wasm`, `limits`, `csp`, `cors`, `allow_dynamic_*` | refused | properties of a Hull runtime, which a native child is not |
+
+A refusal names the command and field: an app field
+(`exec.report.manifest.hosts: an app capability a command cannot be given`), an entry field
+(`exec.report.manifest.sha256: not a manifest field; it belongs on the command entry
+(exec.report.sha256)`), or `unknown key`. The rules live in `cap/exec_child.c`, which both
+extractors call, so Lua and JS refuse with the same words.
+
+**Values: valid for an app, refused for a command.** An app's own kernel grant is WIDER than
+its `fs` grant, on purpose: `hl_sandbox_resolve_grant` grants a file write's parent directory,
+a pattern's literal directory, and `.` / `@state` as the whole root (`.hull` included), and the
+capability layer narrows each call back to the grant in process. A command has no capability
+layer: its kernel grant is the whole boundary. Reusing the app's kernel resolution would break
+an existing guarantee, for example:
+
+- `fs.read = { "." }` gives an app every file but `.hull` (audit 37: the internal database,
+  the dev-session sidecars). A command given the same grant through Landlock would read
+  `.hull/internal.db` (sessions, TOTP secrets): Landlock can only add access, so the
+  subdirectory cannot be taken back out;
+- `fs.write = { "out/report.json" }` lets an app write that file; the app's kernel grant is
+  all of `out/`, so a command given it would write every file there.
+
+So `hl_exec_child_grant_check` refuses `.` and `@state` (the whole root) and any pattern, and
+the broker resolves each entry to EXACTLY the file or directory it names
+(`hl_exec_child_grant_resolve`, at policy load: each component `lstat`ed, no symbolic link, a
+regular file or a directory). Such a path must exist when the app starts, except one ending in
+`/`, a directory the app's sandbox would create, which is created. A read grant gives read; a
+write grant gives write, truncate and create (files and directories) but not read, as an app's
+`fs.write` does not imply `fs.read` (`hl_fs_policy_select`). No device ioctl: that is a `host`
+grant. The rules below were added after an independent review of the first version.
+
+**Independent authority, not delegation.** A command's `manifest.fs` grant is not required to
+lie inside the app's own `fs` grants: a command may be granted `out/` though the app holds no
+`fs.write` there. "Subset" describes the schema, not the authority. This is the model the
+host grants already had (a command reaches `/dev/nvidiactl`, which the app process never
+can), and it is the least-privilege one: requiring containment would make the app hold every
+grant its commands need. Both are declared by the same author in the same signed manifest
+and fixed before the app serves any input (§5.1). (A future Hull-built callee that declares
+its own authority is the case for an intersection, the caller capping what the callee may
+take; not this section.)
+
+**What the broker refuses at policy load, beyond the parser** (`hl_exec_child_grant_open`):
+
+- an app root that is `/` or the home (a built tool run from there, whose app directory is
+  its working directory): the grant would name the user's own files. A tool run from anywhere
+  uses `@state/`; `hl_sandbox_manifest_rootless_ok` counts a non-`@state/` `manifest.fs` entry
+  as disqualifying. Judged by the SERVER (`hl_exec_broker_apply`, with its own `$HOME`; the
+  broker's environment holds only `LANG` and `TZ`) before the broker creates anything;
+- any component that IS either root's `.hull`, compared by inode, and, directly under a root,
+  with that root's `.hull` as it is right after any `mkdirat` (on HFS+ a name with an ignorable
+  code point is `.hull` itself, and may not exist yet at load; a directory made that turns out
+  to be it is removed). Also a directory that is either root or an ancestor of one (a state
+  directory inside the app directory, or the reverse);
+- for a write grant, any database file the app's registry would open by name - the default
+  (`-d` or the manifest's), `databases.named`, the internal database - or its sidecars
+  (SQLite's `-wal` / `-shm` / `-journal`; DuckDB's `.wal`, `.wal.checkpoint`,
+  `.wal.recovery` and `.tmp` directory), or a directory holding one: truncating a live `-shm`
+  kills the app with SIGBUS, which the app's own fs layer refuses (`database_file_in_use`) and
+  a command has no layer to refuse. The server resolves each to its real path
+  (`hl_db_registry_file_paths`: a symbolic link followed, a relative `-d` against its own
+  working directory, and a file whose directory is not made yet - a first start - as its
+  nearest existing ancestor's real path plus the rest), and the broker compares by inode and,
+  for a directory grant, also by path (the database's directory may not exist yet). A path
+  that cannot be resolved refuses the start, and so does an app with more than
+  `HL_EXEC_MAX_PROTECT` (16) database files when a command has a `manifest.fs` write grant.
+  Not covered: a `db.open` file (its DSN is chosen at run time), a hard link
+  to a database file planted under another name inside a granted directory after start (a
+  command cannot make one; another local principal with write access to the tree could), and a
+  `host.write` path under `/tmp` naming a database there (the operator's absolute path, as in
+  v0.26.0).
+
+**No window between resolving and granting.** The walk is by descriptor from the root: each
+component `fstatat(AT_SYMLINK_NOFOLLOW)`, opened `O_NOFOLLOW`, and the opened object compared
+with the one checked; a directory made for a trailing-`/` grant (`mkdirat`) is checked again
+the same way, `EEXIST` included. On Linux the Landlock rule is made from the final descriptor
+(`O_PATH`), so nothing is looked up by path again; on macOS the profile takes the path from
+`F_GETPATH` on that descriptor, never a second `realpath`. A component swapped for a symbolic
+link between the check and the rule cannot redirect the grant.
+
+**What an exact grant binds.** Linux binds the inode of the descriptor opened at load: a
+rename moves the grant with the object, and whatever is put at the path afterwards is not
+covered. **On macOS a command's grant is a path, not an object.** Seatbelt matches the
+resolved path at each open; the broker opens each grant without following links and records
+its real path (`F_GETPATH`), so a replacement during the walk is refused, but from then on, for
+the broker's whole life, whatever directory or file is renamed into that path is covered, and
+the original is not once it moves away. A symbolic link put at the path gains nothing
+(Seatbelt matches the resolved target). Doing that needs write access to the directory above
+the grant, i.e. to the app or state tree, and the same limit already applies to the `host`
+grants and to the app's own Seatbelt profile. On Linux a grant covers its inode, so a hard
+link to a granted file at another pathname is reachable too; on macOS a grant on one pathname
+does not by itself grant access through a hard link at another pathname. On both, a hard link
+placed inside a granted directory is reachable through it (a child cannot make one: Linux grants no REFER, macOS refuses the link). A write
+grant gives write, truncate and create, never read, delete or rename, on both (macOS
+`file-write-data file-write-create`).
+
+**Defaults.** An absent `manifest` (or `fs`) grants nothing, as an app with no `fs` reaches
+no file. Every command also reads the system trees (`/usr /lib /lib64 /etc /proc /sys /dev` on
+Linux, §6.2), which is the broker's, not the manifest's.
+
+**What a grant means on each platform.** Linux: each command gets exactly its own `host` and
+`manifest.fs` grants (§6.3). macOS: all commands of an app share ONE Seatbelt profile (§6.4),
+so a command's grant is reachable by every command of the app; `hull inspect` and the start
+report (`exec: limit:`) say so. The same text therefore grants one command a file on Linux
+and every command that file on macOS.
+
+**Before and after** (`gpu-query` as v0.26.0 published it, then in the new spelling with a
+child manifest):
+
+```lua
+-- v0.26.0
+["gpu-query"] = {
+  path = "/usr/bin/nvidia-smi",
+  argv = { "--format=csv,noheader" },
+  fs = { read = { "/dev/nvidiactl" }, write = { "/dev/nvidiactl" } },
+  unix_sockets = false,
+},
+-- now
+["gpu-query"] = {
+  path = "/usr/bin/nvidia-smi",
+  sha256 = "<64 hex>",
+  argv = { "--format=csv,noheader" },
+  host = { read = { "/dev/nvidiactl" }, write = { "/dev/nvidiactl" } },
+  manifest = { fs = { read = { "data/gpu-ids" } } },   -- as the app writes its own grant
+},
+```
+
+**Compatibility.** A command with no `manifest` encodes to exactly the v0.26.0 bytes (a new
+command flag, `HL_EXEC_CMD_APP_FS`, appends the child lists only when there are any; a golden
+test holds the v0.26.0 encoding), so a v0.26.0 policy still means what it meant. The v0.26.0
+spellings `fs` and `unix_sockets` on the entry are taken as `host = { read, write }` and
+`host.unix_sockets`, with the same meaning (absolute paths, never reinterpreted as
+app-relative), one WARN per process at load, and a `hull check` lint naming the replacement.
+Giving both spellings for one grant (`fs` with `host.read` / `host.write`, or `unix_sockets`
+with `host.unix_sockets`) is refused. They are accepted through 0.27.x and refused from 0.28.0.
+A manifest using `manifest` or `host` is refused by v0.26.0 (an unknown key), which fails
+closed.
+
+**`hull inspect`** shows a command's whole authority: `host.read`, `host.write`,
+`manifest.fs.read`, `manifest.fs.write`, the scope of `host.unix_sockets`, and the macOS union.
+`hull agent overview` lists the same four lists per command (`host_read`, `host_write`,
+`manifest_fs_read`, `manifest_fs_write`).
 
 ## 4. Slot shapes (why not regex)
 
@@ -338,7 +502,7 @@ The child runs these steps in order. Each is async-signal-safe and allocates not
    - `CORE` 0;
    - `CPU` set to the timeout plus 1 s;
    - `NOFILE` 256;
-   - `FSIZE` 0 unless the command has `fs.write`.
+   - `FSIZE` 0 unless the command has `host.write` or `manifest.fs.write`.
 
    `NPROC` is NOT lowered: it counts every process of the user, and `nvidia-smi` and
    `systemctl` both use threads.
@@ -506,14 +670,22 @@ directory. A command that legitimately needs one of them names it in `fs.read`.
     `opendirectoryd.libinfo` lookup (getpwuid, so `id` and `ls -l` work);
   - per command: `process-exec`, `file-read*` and `file-map-executable` of its binary by its
     real path (a parameter, never text in the profile), `file-read*` of each `fs.read`,
-    `file-read* file-write* file-ioctl` of each `fs.write` (resolved: Seatbelt matches the
-    real path; a path that does not exist is skipped, as on Linux);
+    `file-read* file-write* file-ioctl` of each `host.write` (resolved: Seatbelt matches the
+    real path; a path that does not exist is skipped, as on Linux), and `file-read*` /
+    `file-write*` of each `manifest.fs` entry, resolved to the exact path as on Linux (§3.1);
   - `AF_UNIX` (`system-socket` of that domain, `network-outbound` to a unix socket) only when
-    some command sets `unix_sockets`; no other network.
+    some command sets `host.unix_sockets`; no other network.
 
-  So one command sees another's `fs.read`, `fs.write` and `unix_sockets`. The broker says so
-  at start (`exec: limit: macOS cannot narrow each command`) when the app declares more than
-  one command.
+  So every command gets the union of ALL the commands' grants: another's `host` and
+  `manifest.fs` grants, its `unix_sockets`, and `process-exec` of every declared binary. The
+  last means a command that calls `execve` itself can run another command's binary with any
+  arguments, outside that command's argv shape (the shape is matched by the broker, which that
+  exec does not go through). Nothing outside the declared grants and the fixed default set
+  above is added. The broker says so at start (`exec: limit: macOS runs every command in ONE
+  shared sandbox ...`) when the app declares more than one command, and `hull inspect` prints
+  the union as each command's effective authority on macOS. Per-command isolation on macOS
+  would need a broker per command, or a helper that applies each command's own profile before
+  its exec; not done.
 - **No process creation, kept.** `(allow process-fork (process-path (param "SELF")))`: the
   fork right is filtered to the broker's own image. The broker forks; anything it execs gets
   `EPERM` from `fork`, `vfork` and `posix_spawn` (measured, and asserted by
