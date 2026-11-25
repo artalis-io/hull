@@ -233,9 +233,40 @@ local function main()
                     print("               can reach (not limited to the one it needs)")
                 end
             end
-            print("  Every command also reads the system trees (/usr /lib /etc /proc /sys /dev on")
-            print("  Linux). On macOS the commands share ONE sandbox: each gets the union of all")
-            print("  their grants above.")
+            -- Effective authority (docs/design/exec_broker.md §3.1, §6.4): what
+            -- each command can actually reach, per platform, not only what it
+            -- declares.
+            local u = { exec = {}, hr = {}, hw = {}, mr = {}, mw = {}, unix = false }
+            local function add(set, l)
+                for _, v in ipairs(type(l) == "table" and l or {}) do set[#set + 1] = v end
+            end
+            for _, name in ipairs(names) do
+                local c = m.exec[name]
+                u.exec[#u.exec + 1] = tostring(c.path)
+                local h = type(c.host) == "table" and c.host or (type(c.fs) == "table" and c.fs) or {}
+                add(u.hr, h.read); add(u.hw, h.write)
+                local cf = type(c.manifest) == "table" and type(c.manifest.fs) == "table"
+                           and c.manifest.fs or {}
+                add(u.mr, cf.read); add(u.mw, cf.write)
+                if (type(c.host) == "table" and (c.host.unix_sockets or c.host.unixSockets))
+                   or c.unix_sockets or c.unixSockets then u.unix = true end
+            end
+            local function show(label, l)
+                if #l > 0 then print("      " .. label .. table.concat(l, ", ")) end
+            end
+            print("  Effective authority:")
+            print("    Linux: each command exactly as listed above, plus reads of /usr /lib")
+            print("      /lib64 /etc /proc /sys /dev.")
+            print("    macOS: ONE sandbox for all commands. EVERY command gets all of:")
+            show("exec:              ", u.exec)
+            print("                         (a command that execs one of these itself is not held")
+            print("                         to that command's argv)")
+            show("host.read:         ", u.hr)
+            show("host.write:        ", u.hw)
+            show("manifest.fs.read:  ", u.mr)
+            show("manifest.fs.write: ", u.mw)
+            print("      unix sockets:      " .. (u.unix and "yes (any pathname socket)" or "no"))
+            print("      plus reads of / /usr /bin /sbin /System /private/etc and dyld's cache")
             print("")
         end
     end

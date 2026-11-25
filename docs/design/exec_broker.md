@@ -606,14 +606,22 @@ directory. A command that legitimately needs one of them names it in `fs.read`.
     `opendirectoryd.libinfo` lookup (getpwuid, so `id` and `ls -l` work);
   - per command: `process-exec`, `file-read*` and `file-map-executable` of its binary by its
     real path (a parameter, never text in the profile), `file-read*` of each `fs.read`,
-    `file-read* file-write* file-ioctl` of each `fs.write` (resolved: Seatbelt matches the
-    real path; a path that does not exist is skipped, as on Linux);
+    `file-read* file-write* file-ioctl` of each `host.write` (resolved: Seatbelt matches the
+    real path; a path that does not exist is skipped, as on Linux), and `file-read*` /
+    `file-write*` of each `manifest.fs` entry, resolved to the exact path as on Linux (§3.1);
   - `AF_UNIX` (`system-socket` of that domain, `network-outbound` to a unix socket) only when
-    some command sets `unix_sockets`; no other network.
+    some command sets `host.unix_sockets`; no other network.
 
-  So one command sees another's `fs.read`, `fs.write` and `unix_sockets`. The broker says so
-  at start (`exec: limit: macOS cannot narrow each command`) when the app declares more than
-  one command.
+  So every command gets the union of ALL the commands' grants: another's `host` and
+  `manifest.fs` grants, its `unix_sockets`, and `process-exec` of every declared binary. The
+  last means a command that calls `execve` itself can run another command's binary with any
+  arguments, outside that command's argv shape (the shape is matched by the broker, which that
+  exec does not go through). Nothing outside the declared grants and the fixed default set
+  above is added. The broker says so at start (`exec: limit: macOS runs every command in ONE
+  shared sandbox ...`) when the app declares more than one command, and `hull inspect` prints
+  the union as each command's effective authority on macOS. Per-command isolation on macOS
+  would need a broker per command, or a helper that applies each command's own profile before
+  its exec; not done.
 - **No process creation, kept.** `(allow process-fork (process-path (param "SELF")))`: the
   fork right is filtered to the broker's own image. The broker forks; anything it execs gets
   `EPERM` from `fork`, `vfork` and `posix_spawn` (measured, and asserted by

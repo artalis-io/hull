@@ -112,7 +112,7 @@ check_line "/etc is readable" "etc=ok"
 check_line "AF_UNIX connect refused without unix_sockets" "no-unix: unix=EPERM"
 check_line "exec of an undeclared binary refused" "Operation not permitted"
 check_line "a declared command cannot fork (time)" "time: status=1"
-check_line "the start report names the union of grants" "exec: limit: macOS cannot narrow each command"
+check_line "the start report names the shared sandbox" "exec: limit: macOS runs every command in ONE shared sandbox"
 check_line "the start report names the missing parent-death signal" "exec: limit: no parent-death signal on macOS"
 
 # unix_sockets on one command opens AF_UNIX to every command of the app

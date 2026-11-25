@@ -298,9 +298,10 @@ int hl_exec_plat_lock(HlExecBrokerCmd *cmds, int n, unsigned flags,
         return 0;
     }
     if (n > 1)
-        hl_exec_report_line(r, "exec: limit: macOS cannot narrow each command: "
-                            "every command gets the union of their fs and "
-                            "socket grants");
+        hl_exec_report_line(r, "exec: limit: macOS runs every command in ONE "
+                            "shared sandbox: each gets the union of all commands' "
+                            "host and manifest grants, and may exec any declared "
+                            "binary (`hull inspect` shows the union)");
     hl_exec_report_line(r, "exec: limit: no parent-death signal on macOS: a "
                         "broker killed with SIGKILL leaves a running command "
                         "until it exits (it cannot fork; its CPU limit holds)");

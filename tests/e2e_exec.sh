@@ -432,7 +432,10 @@ out=$("$HULL" inspect "$d" 2>&1) || true
 for want in "host.read:  /dev/nvidiactl" "host.write: /dev/nvidiactl" \
             "manifest.fs.read:  data/gpu-ids" "manifest.fs.write: out/" \
             "host.read:  /etc" "local IPC: may connect to any pathname unix socket" \
-            "each gets the union of all"; do
+            "macOS: ONE sandbox for all commands" \
+            "exec:              /usr/bin/nvidia-smi, /bin/cat" \
+            "host.read:         /dev/nvidiactl, /etc" \
+            "manifest.fs.write: out/" "unix sockets:      yes"; do
     if printf '%s\n' "$out" | grep -qF -- "$want"; then pass "inspect: $want"
     else fail "inspect: $want" "$out"; fi
 done
