@@ -207,7 +207,7 @@ static int lua_exec_run(lua_State *L)
     if (total > HL_EXEC_MAX_ARG_BYTES)
         return luaL_error(L, "exec.run: the arguments are longer than %d bytes "
                           "together", (int)HL_EXEC_MAX_ARG_BYTES);
-    char *block = malloc(total + in_len ? total + in_len : 1);
+    char *block = malloc((total + in_len) ? total + in_len : 1);
     if (!block) return luaL_error(L, "exec.run: out of memory");
     for (size_t i = 0, off = 0; i < n; i++) {
         memcpy(block + off, args[i], lens[i]);
