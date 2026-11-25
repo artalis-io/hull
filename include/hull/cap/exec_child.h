@@ -62,7 +62,39 @@ void hl_exec_legacy_note(const char *cmd, const char *legacy, const char *replac
  * the reason in @p why. Pure string check (no filesystem access). */
 int hl_exec_child_grant_check(const char *raw, size_t n, char *why, size_t why_size);
 
-/* Resolve one child grant for the broker, at policy load: the app's root
+#include <limits.h>
+
+/* What a child grant is resolved against. @p protect: database files (the
+ * app's default; relative = under @p app_dir) a WRITE grant may not reach,
+ * with their -wal / -shm / -journal. */
+typedef struct HlExecChildRoots {
+    const char        *app_dir;
+    const char        *state_dir;     /* NULL = none declared */
+    const char *const *protect;
+    int                n_protect;
+} HlExecChildRoots;
+
+/* One opened grant: the descriptor of the exact file or directory (Linux
+ * O_PATH; the Landlock rule is made from it, never from the path again) and
+ * its real path (macOS: from F_GETPATH on that descriptor). */
+typedef struct HlExecChildGrant {
+    int  fd;
+    char path[PATH_MAX];
+} HlExecChildGrant;
+
+/* Open one child grant for the broker, at policy load, from the root's
+ * descriptor component by component (fstatat NOFOLLOW, openat NOFOLLOW, the
+ * opened object compared with the one checked): no symbolic link, no
+ * component that is either root's .hull (by inode), not a directory that is
+ * or holds either root, and for @p write not a protected database. "/" or
+ * the home as the app root is refused (a built tool run from there). A
+ * missing path is refused, except a trailing-'/' directory, which is made
+ * (mkdirat) and checked again. 0 (caller closes out->fd) / -1 with @p why. */
+int hl_exec_child_grant_open(const HlExecChildRoots *r, const char *raw, int write,
+                             HlExecChildGrant *out, char *why, size_t why_size);
+
+/* hl_exec_child_grant_open for read, the path only (tests, inspection).
+ * Resolve one child grant for the broker, at policy load: the app's root
  * (@p app_dir) or its state root (@p state_dir, NULL = none declared), then
  * each component without following a symbolic link. The path must exist,
  * except a grant ending in '/' (a directory), which is created as the app's

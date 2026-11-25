@@ -229,6 +229,26 @@ if [ "$(cat "$CM/out/w.txt" 2>/dev/null)" = "written-by-child" ]; then
 else
     fail "the file holds what the command wrote" "$out"
 fi
+out=$(run_main "$CM" <<EOF
+app.manifest({ modules = { "hull/exec@1" }, exec = {
+  del = { path = "/bin/rm", argv = { "$CMR/out/w.txt" },
+          manifest = { fs = { write = { "out/" } } } } } })
+local exec = require("hull.exec")
+app.main(function()
+  local r = exec.run("del")
+  print(("del: status=%d"):format(r.status))
+  return 0
+end)
+EOF
+)
+check_line "a write grant does not delete" "del: status=1"
+out=$(run_main "$FIX/cm3" <<EOF
+app.manifest({ modules = { "hull/exec@1", "hull/db@1" }, exec = {
+  a = { path = "/bin/cat", manifest = { fs = { write = { "data.db" } } } } } })
+app.main(function() return 0 end)
+EOF
+)
+check_line "a write grant to the app's database is refused at start" "is the app's database"
 out=$(run_main "$FIX/cm2" <<EOF
 app.manifest({ modules = { "hull/exec@1" }, exec = {
   a = { path = "/bin/cat", manifest = { fs = { read = { "data/gone.txt" } } } } } })

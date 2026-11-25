@@ -148,6 +148,22 @@ static void p_grant(Prof *p, const char *ops, const char *prefix, int i, int j,
     p_put(p, line);
 }
 
+/* As p_grant, for a path that is already the real path of an opened grant
+ * (exec_child.c, F_GETPATH on its descriptor): not resolved again, so a
+ * component swapped for a symbolic link since cannot redirect it. */
+static void p_grant_real(Prof *p, const char *ops, const char *prefix, int i, int j,
+                         const char *real)
+{
+    char name[32];
+    if (!real || real[0] != '/') return;
+    snprintf(name, sizeof name, "%s%d_%d", prefix, i, j);
+    const char *key = p_param(p, name, real);
+    if (!key) return;
+    char line[256];
+    snprintf(line, sizeof line, "(allow %s (subpath (param \"%s\")))\n", ops, key);
+    p_put(p, line);
+}
+
 static void prof_free(Prof *p)
 {
     for (int i = 0; i < p->n; i++) { free(p->keys[i]); free(p->vals[i]); }
@@ -188,9 +204,11 @@ int hl_exec_macos_profile(const HlExecBrokerCmd *cmds, int n, const char *self,
         /* The child manifest's fs, resolved to the exact paths. On macOS
          * every command shares one profile, so these join the union (§6.4). */
         for (unsigned j = 0; j < c->n_app_read; j++)
-            p_grant(&p, "file-read*", "AR", i, (int)j, hl_exec_cmd_app_path(c, j));
+            p_grant_real(&p, "file-read*", "AR", i, (int)j, hl_exec_cmd_app_path(c, j));
+        /* write, truncate and create - not unlink or rename (as on Linux,
+         * where an app write grant carries no REMOVE right) */
         for (unsigned j = 0; j < c->n_app_write; j++)
-            p_grant(&p, "file-write*", "AW", i, (int)j,
+            p_grant_real(&p, "file-write-data file-write-create", "AW", i, (int)j,
                     hl_exec_cmd_app_path(c, c->n_app_read + j));
         if (c->c.flags & HL_EXEC_CMD_UNIX_SOCKETS) unix_sockets = 1;
     }

@@ -18,6 +18,7 @@
 #include "hull/sandbox.h"
 #include "hull/shared/cache_dir.h"
 #include "hull/cap/fs_policy.h"    /* hl_fs_grant_is_state */
+#include "hull/cap/exec.h"         /* a command's manifest.fs (rootless) */
 #include "hull/shared/host.h"   /* hl_host_path_too_broad */
 #include "hull/limits/gpu.h"     /* HL_GPU_MAX_DEVICES */
 #include "log.h"
@@ -2064,6 +2065,20 @@ int hl_sandbox_manifest_rootless_ok(const HlManifest *m)
         if (!hl_fs_grant_is_state(m->fs_read[i])) return 0;
     for (int i = 0; i < m->fs_write_count; i++)
         if (!hl_fs_grant_is_state(m->fs_write[i])) return 0;
+    /* A declared command's own manifest.fs counts too: an app-relative grant
+     * there names the app directory, which a rootless tool does not have
+     * (docs/design/exec_broker.md §3.1). */
+    int nc = m->exec.data ? hl_exec_policy_count(m->exec.data, m->exec.len) : 0;
+    for (int i = 0; i < nc; i++) {
+        HlExecCmd c;
+        if (hl_exec_policy_at(m->exec.data, m->exec.len, i, &c) != 0) return 0;
+        const uint8_t *cur = c.app_read;
+        for (unsigned k = 0; k < c.n_app_read; k++)
+            if (!hl_fs_grant_is_state(hl_exec_next_str(&cur, NULL))) return 0;
+        cur = c.app_write;
+        for (unsigned k = 0; k < c.n_app_write; k++)
+            if (!hl_fs_grant_is_state(hl_exec_next_str(&cur, NULL))) return 0;
+    }
     /* A file DSN must be under the state root; a network DSN, an env
      * reference (resolved to one at open, confined then) or :memory: needs
      * no directory. hl_sandbox_db_path gives a file DSN's path. */

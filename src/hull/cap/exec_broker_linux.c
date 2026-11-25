@@ -125,6 +125,19 @@ static int ll_allow(int rs, const char *path, uint64_t access)
     return rc;
 }
 
+/* As ll_allow, on a descriptor the caller opened (exec_child.c): the rule
+ * is bound to that object, never to a path looked up again. */
+static int ll_allow_fd(int rs, int fd, uint64_t access)
+{
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0) return -1;
+    if (!S_ISDIR(st.st_mode)) access &= LL_FILE_RIGHTS;
+    access &= g_ll_fs_mask;
+    if (!access) return 0;
+    struct ll_path_beneath pb = { access, fd };
+    return (int)syscall(__NR_landlock_add_rule, rs, 1 /* PATH_BENEATH */, &pb, 0u);
+}
+
 /* The trees every command may read (§6.2); never the home directories, the
  * app directory, /srv or /var. */
 static const char *const READ_SET[] = { "/usr", "/lib", "/lib64", "/etc",
@@ -152,10 +165,10 @@ static int ll_grant_cmd(int rs, const HlExecBrokerCmd *cmd)
      * writes and creates - and does not read, as in the app (fs_policy.c).
      * No device ioctls: those are host grants. */
     for (unsigned i = 0; i < cmd->n_app_read; i++)
-        rc |= ll_allow(rs, hl_exec_cmd_app_path(cmd, i), LL_READ_FILE | LL_READ_DIR);
+        rc |= ll_allow_fd(rs, cmd->app_fds[i], LL_READ_FILE | LL_READ_DIR);
     for (unsigned i = 0; i < cmd->n_app_write; i++)
-        rc |= ll_allow(rs, hl_exec_cmd_app_path(cmd, cmd->n_app_read + i),
-                       LL_WRITE_FILE | LL_TRUNCATE | LL_MAKE_REG | LL_MAKE_DIR);
+        rc |= ll_allow_fd(rs, cmd->app_fds[cmd->n_app_read + i],
+                          LL_WRITE_FILE | LL_TRUNCATE | LL_MAKE_REG | LL_MAKE_DIR);
     return rc;
 }
 

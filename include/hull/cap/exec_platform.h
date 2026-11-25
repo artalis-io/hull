@@ -47,6 +47,8 @@ typedef struct HlExecBrokerCmd {
     /* Its child manifest's fs grants (manifest.fs), resolved at policy load
      * to real paths: n_app_read then n_app_write NUL-terminated strings. */
     char     *app_paths;
+    int      *app_fds;              /* the opened grants (exec_child.h), closed
+                                       once the lock is applied; -1 = none */
     uint16_t  n_app_read;
     uint16_t  n_app_write;
 } HlExecBrokerCmd;

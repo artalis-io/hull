@@ -20,8 +20,13 @@ release-artifact layout).
   boundary (an app's own is narrowed again in process). `path`, the `sha256` pin, `argv` and the
   new `host` stay on the entry; `host = { read, write, unix_sockets }` holds the absolute grants
   and local sockets no app field names. On macOS every command still gets the union of all
-  commands' grants. `hull inspect` shows a command's `host` and `manifest.fs` grants together,
-  and `hull agent overview` lists them.
+  commands' grants. A command's grant is its own: it need not lie inside the app's `fs`. Also
+  refused at start: a relative grant in a tool run from `/` or the home, one reaching either
+  root's `.hull`, and a write grant to the app's database or its sidecars. The broker walks
+  each grant by descriptor and grants that descriptor, so a component swapped for a symbolic
+  link cannot redirect it. `hull inspect` shows each command's grants and, per platform, what
+  every command can actually reach (on macOS the union, including `exec` of every declared
+  binary); `hull agent overview` lists them.
 
 ### Deprecated
 

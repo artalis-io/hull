@@ -204,7 +204,48 @@ regular file or a directory). Such a path must exist when the app starts, except
 `/`, a directory the app's sandbox would create, which is created. A read grant gives read; a
 write grant gives write, truncate and create (files and directories) but not read, as an app's
 `fs.write` does not imply `fs.read` (`hl_fs_policy_select`). No device ioctl: that is a `host`
-grant.
+grant. The rules below were added after an independent review of the first version.
+
+**Independent authority, not delegation.** A command's `manifest.fs` grant is not required to
+lie inside the app's own `fs` grants: a command may be granted `out/` though the app holds no
+`fs.write` there. "Subset" describes the schema, not the authority. This is the model the
+host grants already had (a command reaches `/dev/nvidiactl`, which the app process never
+can), and it is the least-privilege one: requiring containment would make the app hold every
+grant its commands need. Both are declared by the same author in the same signed manifest
+and fixed before the app serves any input (§5.1). (A future Hull-built callee that declares
+its own authority is the case for an intersection, the caller capping what the callee may
+take; not this section.)
+
+**What the broker refuses at policy load, beyond the parser** (`hl_exec_child_grant_open`):
+
+- an app root that is `/` or the home (a built tool run from there, whose app directory is
+  its working directory): the grant would name the user's own files. A tool run from anywhere
+  uses `@state/`; `hl_sandbox_manifest_rootless_ok` counts a non-`@state/` `manifest.fs` entry
+  as disqualifying;
+- any component that IS either root's `.hull`, compared by inode (so a case variant or an HFS+
+  ignorable spelling cannot hide it), and a directory that is either root or an ancestor of
+  one (a state directory inside the app directory, or the reverse);
+- for a write grant, the app's default database or its `-wal` / `-shm` / `-journal`, or a
+  directory holding it: truncating the live `-shm` kills the app with SIGBUS, which the app's
+  own fs layer refuses (`database_file_in_use`) and a command has no layer to refuse. (A
+  `host.write` path under `/tmp` can still name a database there; that is the operator's
+  absolute path, unchanged from v0.26.0.)
+
+**No window between resolving and granting.** The walk is by descriptor from the root: each
+component `fstatat(AT_SYMLINK_NOFOLLOW)`, opened `O_NOFOLLOW`, and the opened object compared
+with the one checked; a directory made for a trailing-`/` grant (`mkdirat`) is checked again
+the same way, `EEXIST` included. On Linux the Landlock rule is made from the final descriptor
+(`O_PATH`), so nothing is looked up by path again; on macOS the profile takes the path from
+`F_GETPATH` on that descriptor, never a second `realpath`. A component swapped for a symbolic
+link between the check and the rule cannot redirect the grant.
+
+**What an exact grant binds.** Linux binds the inode opened at load: a file replaced by a
+rename afterwards is not covered. macOS binds the path for the broker's life: a replacement
+at that path is covered. On both, a grant covers its inode, so a hard link to that file
+elsewhere is the same file, and a hard link placed inside a granted directory is reachable
+through it (a child cannot make one: Linux grants no REFER, macOS refuses the link). A write
+grant gives write, truncate and create, never read, delete or rename, on both (macOS
+`file-write-data file-write-create`).
 
 **Defaults.** An absent `manifest` (or `fs`) grants nothing, as an app with no `fs` reaches
 no file. Every command also reads the system trees (`/usr /lib /lib64 /etc /proc /sys /dev` on

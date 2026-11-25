@@ -849,4 +849,91 @@ UTEST(exec_child, resolve_names_exactly_what_the_entry_names)
     EXPECT_EQ(0, rmdir(root));
 }
 
+/* Review findings on the child grant (each failed before its fix). */
+static void mk(const char *root, const char *rel, int dir)
+{
+    char p[PATH_MAX + 64];
+    snprintf(p, sizeof p, "%s/%s", root, rel);
+    if (dir) { (void)mkdir(p, 0700); return; }
+    FILE *f = fopen(p, "w");
+    if (f) { fputs("x", f); fclose(f); }
+}
+
+static void rm_list(const char *root, const char *const *rel)
+{
+    char p[PATH_MAX + 64];
+    for (int i = 0; rel[i]; i++) {
+        snprintf(p, sizeof p, "%s/%s", root, rel[i]);
+        struct stat ls;
+        if (lstat(p, &ls) == 0) (void)(S_ISDIR(ls.st_mode) ? rmdir(p) : unlink(p));
+    }
+    (void)rmdir(root);
+}
+
+UTEST(exec_child, review_broad_root_nested_hull_db_and_binding)
+{
+    char root[] = "/tmp/hull-exec-review-XXXXXX";
+    ASSERT_TRUE(mkdtemp(root) != NULL);
+    char app[PATH_MAX], why[192], out[PATH_MAX];
+    snprintf(app, sizeof app, "%s/app", root);
+    mk(root, "app", 1);
+    mk(app, ".hull", 1);
+    mk(app, "st", 1);              /* a state directory inside the app directory */
+    mk(app, "st/.hull", 1);
+    mk(app, "st/.hull/internal.db", 0);
+    mk(app, "data", 1);
+    mk(app, "data/app.db", 0);
+    mk(app, "data/app.db-shm", 0);
+    mk(app, "data/f.txt", 0);
+    char st[PATH_MAX + 8];
+    snprintf(st, sizeof st, "%s/st", app);
+
+    /* Q1: "/" (or the home) as the app root is not an app directory */
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve("/", NULL, "tmp/", out, sizeof out,
+                                              why, sizeof why));
+    EXPECT_TRUE(strstr(why, "not an app directory") != NULL);
+    /* Q2: the state root nested in the app root: neither its directory nor
+     * anything through its .hull */
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, st, "st/", out, sizeof out,
+                                              why, sizeof why));
+    EXPECT_TRUE(strstr(why, "holds the state directory") != NULL);
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, st, "st/.hull/internal.db", out,
+                                              sizeof out, why, sizeof why));
+    EXPECT_TRUE(strstr(why, ".hull") != NULL);
+    /* Q2: a write grant may not reach the database or its sidecars; a read may */
+    const char *protect[1] = { "data/app.db" };
+    HlExecChildRoots r = { app, NULL, protect, 1 };
+    HlExecChildGrant g;
+    EXPECT_EQ(-1, hl_exec_child_grant_open(&r, "data/", 1, &g, why, sizeof why));
+    EXPECT_TRUE(strstr(why, "contains the app's database") != NULL);
+    EXPECT_EQ(-1, hl_exec_child_grant_open(&r, "data/app.db-shm", 1, &g, why, sizeof why));
+    EXPECT_TRUE(strstr(why, "sidecar") != NULL);
+    ASSERT_EQ(0, hl_exec_child_grant_open(&r, "data/", 0, &g, why, sizeof why));
+    close(g.fd);
+    /* Q3: the grant is the opened object: a later swap of a component for a
+     * symbolic link does not change what the descriptor names */
+    ASSERT_EQ(0, hl_exec_child_grant_open(&r, "data/f.txt", 0, &g, why, sizeof why));
+    char from[PATH_MAX + 16], to[PATH_MAX + 16];
+    snprintf(from, sizeof from, "%s/data", app);
+    snprintf(to, sizeof to, "%s/data2", app);
+    ASSERT_EQ(0, rename(from, to));
+    ASSERT_EQ(0, symlink("/etc", from));
+    struct stat a, b;
+    char moved[PATH_MAX + 32];
+    snprintf(moved, sizeof moved, "%s/data2/f.txt", app);
+    ASSERT_EQ(0, fstat(g.fd, &a));
+    ASSERT_EQ(0, stat(moved, &b));
+    EXPECT_TRUE(a.st_ino == b.st_ino && a.st_dev == b.st_dev);
+    close(g.fd);
+    /* and resolving again now refuses the link */
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, NULL, "data/f.txt", out, sizeof out,
+                                              why, sizeof why));
+    EXPECT_TRUE(strstr(why, "symbolic link") != NULL);
+
+    static const char *const made[] = { "app/data2/app.db", "app/data2/app.db-shm",
+        "app/data2/f.txt", "app/data2", "app/data", "app/st/.hull/internal.db",
+        "app/st/.hull", "app/st", "app/.hull", "app", NULL };
+    rm_list(root, made);
+}
+
 UTEST_MAIN()

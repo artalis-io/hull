@@ -3108,6 +3108,14 @@ narrow its kernel grant the way an app's is narrowed in process:
   names, resolved without following a symbolic link, and a write grant gives write and create,
   not read (as for the app).
 
+A command's grant is its own, not a share of the app's: it need not lie inside the app's `fs`
+grants (both are declared in the same signed manifest). Also refused at start: a relative
+grant in a tool run from `/` or the home (use `@state/` there), a grant that reaches either
+root's `.hull` or holds the other root, and a write grant to the app's database or its
+`-wal` / `-shm` / `-journal`. A grant covers the object it named at start (Linux: that
+inode; macOS: that path), and a hard link to a granted file is the same file. A write grant
+never deletes or renames.
+
 What a child grant means also depends on the platform: on Linux each command gets exactly its
 own grants; on macOS all commands of an app share one sandbox, so each gets the union of every
 command's `host` and `manifest.fs` grants (logged at start as `exec: limit:`). Every command

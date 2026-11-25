@@ -58,13 +58,15 @@ void hl_exec_broker_stop(void);
 
 /* Send the one POLICY frame and wait for READY. @p app_dir and @p state_dir
  * (NULL = none) are the roots a command's child manifest (`manifest.fs`) is
- * resolved against, as the app's own grants are (exec_child.h). 0: the broker took it and
+ * resolved against, as the app's own grants are (exec_child.h); @p db_path
+ * (the default database's file, NULL = none) is one no write grant may
+ * reach. 0: the broker took it and
  * locked itself down; @p report gets its startup lines (resolved paths, and
  * any guarantee it does not hold), one per line. -1: refused or lost;
  * @p report says why. Either way the policy can never be sent again. */
 int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
                           const char *app_dir, const char *state_dir,
-                          char *report, size_t report_size);
+                          const char *db_path, char *report, size_t report_size);
 
 /* What an entry point does once its manifest is applied and checked, before
  * the phase-2 sandbox: no commands -> stop the broker; Windows -> refuse;
@@ -72,7 +74,8 @@ int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
  * else send the policy, logging the broker's report. 0, or -1 (logged:
  * refuse to start). */
 int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
-                         int no_sandbox, const char *app_dir, const char *state_dir);
+                         int no_sandbox, const char *app_dir, const char *state_dir,
+                         const char *db_path);
 
 /* One reply. Owned by the callee of HlExecDoneFn; free with
  * hl_exec_reply_free. */
