@@ -1095,8 +1095,8 @@ static int policy_load(const uint8_t *p, size_t len, char *report, size_t rsz)
             }
         }
     } else {
-        int w = snprintf(report + at, rsz - at, "exec: no sandbox (--no-sandbox)\n");
-        if (w > 0 && (size_t)w < rsz - at) at += (size_t)w;
+        /* The last line: nothing is appended after it. */
+        (void)snprintf(report + at, rsz - at, "exec: no sandbox (--no-sandbox)\n");
     }
 
     g_devnull = open("/dev/null", O_RDWR | O_CLOEXEC);

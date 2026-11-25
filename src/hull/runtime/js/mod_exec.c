@@ -219,6 +219,8 @@ static JSValue build_result(JSContext *ctx, JSValueConst stub, const HlExecCmd *
 
 /* The broker's answer as the promise's value: the result object for DONE,
  * else an error (BUSY carries the code busy). */
+/* The continuation's push_result signature fixes the parameter type. */
+// cppcheck-suppress constParameterCallback
 static JSValue exec_push(JSContext *ctx, void *driver)
 {
     const HlExecOp *op = driver;

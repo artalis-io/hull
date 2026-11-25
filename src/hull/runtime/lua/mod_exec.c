@@ -102,6 +102,8 @@ static void push_result(lua_State *L, int stub, const HlExecCmd *cmd)
 /* The broker's answer, pushed before the coroutine resumes (it must not
  * raise: hl_lua_async_resume runs it under a protected push). DONE pushes
  * the result table; anything else pushes nil for lua_exec_k to raise. */
+/* The HlLuaPushResultFn signature fixes the parameter type. */
+// cppcheck-suppress constParameterCallback
 static void lua_exec_push(lua_State *L, void *driver)
 {
     const HlExecOp *op = driver;
