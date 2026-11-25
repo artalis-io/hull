@@ -6,6 +6,12 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+/* O_PATH (glibc hides it under -std=c11); before any header. Without it the
+ * walk fell back to O_RDONLY on Linux, which needs read permission. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "hull/cap/exec_child.h"
 #include "hull/cap/exec.h"
 #include "hull/cap/fs_policy.h"
@@ -130,6 +136,9 @@ int hl_exec_child_grant_check(const char *raw, size_t n, char *why, size_t why_s
 /* A descriptor for walking and for the Landlock rule: Linux O_PATH needs no
  * read permission; macOS has no O_PATH (O_EVTONLY opens a file for events
  * only). */
+#if defined(__linux__) && !defined(__COSMOPOLITAN__) && !defined(O_PATH)
+#error "exec_child.c: O_PATH is not visible; the grant walk would need read permission"
+#endif
 #ifdef O_PATH
 #define HX_DIR_FLAGS  (O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
 #define HX_FILE_FLAGS (O_PATH | O_NOFOLLOW | O_CLOEXEC)
