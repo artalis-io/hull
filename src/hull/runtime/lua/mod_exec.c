@@ -3,18 +3,20 @@
  *
  *   local exec = require("hull.exec")
  *   local r = exec.run("unit-state", { "hs-api.service" })
+ *   local r = exec.run("key-import", {}, { stdin = record })
  *   -- r = { status, signal, stdout, stderr, timed_out, stdout_truncated,
  *   --       stderr_truncated, duration_ms }
  *
  * The name must be declared in the manifest's `exec` section, and the
  * arguments must fill its slots (cap/exec.c, hl_exec_check_call - the one
- * matcher). A mismatch raises, naming the argument and the rule.
+ * matcher). A mismatch raises, naming the argument and the rule. `stdin`
+ * (a string) is written to the command's stdin; a non-empty one needs the
+ * command's stdin_max, and is never logged.
  *
- * This version has no command broker yet: outside `hull test` every call
- * raises after the match. Under `hull test`, test.exec_stub(name, result)
- * registers the answer; the call is still matched in full first, so a test
- * catches a bad argument, and the output is cut to the command's
- * stdout_max / stderr_max as the broker will cut it.
+ * The command broker runs the call (cap/exec_broker.c). Under `hull test`,
+ * test.exec_stub(name, result) registers the answer; the call is still
+ * matched in full first, so a test catches a bad argument, and the output
+ * is cut to the command's stdout_max / stderr_max as the broker cuts it.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -145,14 +147,39 @@ static int lua_exec_k(lua_State *L, int status, lua_KContext kctx)
     return 1;
 }
 
-/* exec.run(name, args?) -> result */
+/* exec.run(name, args?, opts?) -> result; opts = { stdin = string } */
 static int lua_exec_run(lua_State *L)
 {
     size_t name_len = 0;
     const char *name = luaL_checklstring(L, 1, &name_len);
     int has_args = !lua_isnoneornil(L, 2);
     if (has_args) luaL_checktype(L, 2, LUA_TTABLE);
-    lua_settop(L, 2);
+    if (!lua_isnoneornil(L, 3)) luaL_checktype(L, 3, LUA_TTABLE);
+    lua_settop(L, 3);
+
+    /* opts, read raw (lua_next / lua_rawget: no metamethods): `stdin` is
+     * the only key, so a typo is never a silent no-op. */
+    const char *in = NULL;
+    size_t in_len = 0;
+    if (lua_istable(L, 3)) {
+        lua_pushnil(L);
+        while (lua_next(L, 3) != 0) {
+            if (lua_type(L, -2) != LUA_TSTRING || strcmp(lua_tostring(L, -2), "stdin") != 0)
+                return luaL_error(L, "exec.run: unknown option (the only one is stdin)");
+            lua_pop(L, 1);
+        }
+        lua_pushliteral(L, "stdin");
+        lua_rawget(L, 3);
+        if (!lua_isnil(L, -1)) {
+            if (lua_type(L, -1) != LUA_TSTRING)
+                return luaL_error(L, "exec.run: stdin must be a string");
+            in = lua_tolstring(L, -1, &in_len);
+        }
+        lua_pop(L, 1);   /* still referenced by opts: the bytes stay valid */
+        if (in_len > HL_EXEC_STDIN_CEIL)
+            return luaL_error(L, "exec.run: stdin is longer than %d bytes",
+                              (int)HL_EXEC_STDIN_CEIL);
+    }
 
     /* The values, read raw (no __index / __len: no app code), and copied
      * into one C block at once: every later step may allocate, and a Lua
@@ -178,18 +205,23 @@ static int lua_exec_run(lua_State *L)
         }
     }
     if (total > HL_EXEC_MAX_ARG_BYTES)
-        return luaL_error(L, "exec.run: the arguments are longer than %u bytes "
-                          "together", (unsigned)HL_EXEC_MAX_ARG_BYTES);
-    char *block = malloc(total ? total : 1);
+        return luaL_error(L, "exec.run: the arguments are longer than %d bytes "
+                          "together", (int)HL_EXEC_MAX_ARG_BYTES);
+    char *block = malloc((total + in_len) ? total + in_len : 1);
     if (!block) return luaL_error(L, "exec.run: out of memory");
     for (size_t i = 0, off = 0; i < n; i++) {
         memcpy(block + off, args[i], lens[i]);
         args[i] = block + off;
         off += lens[i];
     }
+    if (in_len) {
+        memcpy(block + total, in, in_len);
+        in = block + total;
+    }
 
-    /* The match walks the policy and the arguments: charged first. */
-    lua_hlwork(L, 64 + total / 8, 0);
+    /* The match walks the policy and the arguments, and stdin is copied
+     * twice more (the frame, the broker): charged first. */
+    lua_hlwork(L, 64 + (total + in_len) / 8, 0);
 
     HlLua *lua = get_hl_lua(L);
     HlExecCmd cmd;
@@ -207,11 +239,23 @@ static int lua_exec_run(lua_State *L)
         free(block);
         return luaL_error(L, "exec.run('%s'): %s", name, err);
     }
+    if (in_len > cmd.stdin_max) {
+        free(block);
+        if (!cmd.stdin_max)
+            return luaL_error(L, "exec.run('%s'): the command takes no stdin "
+                              "(declare stdin_max)", name);
+        return luaL_error(L, "exec.run('%s'): stdin is %d bytes; the command's "
+                          "stdin_max is %d", name, (int)in_len, (int)cmd.stdin_max);
+    }
 
     /* Under hull test: a stub answers, with no wait (a request test.get
      * dispatches may not wait), after the same match. */
     lua_getfield(L, LUA_REGISTRYINDEX, EXEC_STUBS_KEY);
     if (lua_istable(L, -1)) {
+        int stubs = lua_gettop(L);
+        /* the stub's copy of stdin, then nothing of block is needed */
+        if (in_len) lua_pushlstring(L, in, in_len); else lua_pushnil(L);
+        int stub_in = lua_gettop(L);
         free(block);
 #ifdef HL_ENABLE_DB
         const char *txn = lua->base.db_registry
@@ -222,21 +266,22 @@ static int lua_exec_run(lua_State *L)
                                  "'%s': commit or roll back first", txn);
 #endif
         lua_pushvalue(L, 1);
-        lua_rawget(L, -2);
+        lua_rawget(L, stubs);
         int stub_type = lua_type(L, -1);
         if (stub_type == LUA_TNIL)
             return luaL_error(L, "exec.run: no stub for '%s' in hull test (register "
                               "one with test.exec_stub)", name);
         if (stub_type == LUA_TFUNCTION) {
-            /* stub(args, name): a fresh copy of the arguments, so the stub
-             * cannot change the caller's table. */
+            /* stub(args, name, stdin): a fresh copy of the arguments, so the
+             * stub cannot change the caller's table. */
             lua_createtable(L, (int)n, 0);
             for (size_t i = 1; i <= n; i++) {
                 lua_rawgeti(L, 2, (lua_Integer)i);
                 lua_rawseti(L, -2, (lua_Integer)i);
             }
             lua_pushvalue(L, 1);
-            lua_call(L, 2, 1);
+            lua_pushvalue(L, stub_in);
+            lua_call(L, 3, 1);
             if (!lua_istable(L, -1))
                 return luaL_error(L, "exec stub for '%s' must return a result table",
                                   name);
@@ -270,7 +315,7 @@ static int lua_exec_run(lua_State *L)
     ctx->detached = (lua->active_conn == NULL);
     char why[256];
     if (hl_exec_op_start(ctx, lua->base.async_ctx, name, name_len, args, lens, n,
-                         cmd.timeout_ms, why, sizeof why) != 0) {
+                         in, in_len, cmd.timeout_ms, why, sizeof why) != 0) {
         free(block);
         hl_async_ctx_free(ctx);
         return luaL_error(L, "exec.run('%s'): %s", name, why);

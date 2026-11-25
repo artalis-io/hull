@@ -37,6 +37,9 @@
 #define HL_EXEC_STDERR_CEIL         (1024u * 1024u)
 #define HL_EXEC_CONCURRENCY_DEFAULT 2
 #define HL_EXEC_CONCURRENCY_MAX     8
+/* Bytes a call may write to the command's stdin: none unless the command
+ * declares stdin_max (1..ceiling). */
+#define HL_EXEC_STDIN_CEIL          (1024u * 1024u)
 
 /* One call: every slot value of it together. */
 #define HL_EXEC_MAX_ARG_BYTES       (64u * 1024u)

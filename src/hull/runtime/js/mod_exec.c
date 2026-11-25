@@ -4,6 +4,7 @@
  *
  *   import { exec } from "hull:exec";
  *   const r = await exec.run("unit-state", ["hs-api.service"]);
+ *   const r = await exec.run("key-import", [], { stdin: record });
  *   // r = { status, signal, stdout, stderr, stdoutBytes, timedOut,
  *   //       stdoutTruncated, stderrTruncated, durationMs }
  *
@@ -11,11 +12,13 @@
  * manifest's `exec` section and the arguments must fill its slots
  * (hl_exec_check_call, the one matcher); a mismatch throws. stdout and
  * stderr are byte strings (one code unit per byte), as hull/ssh's are;
- * stdoutBytes is the same bytes as an ArrayBuffer.
+ * stdoutBytes is the same bytes as an ArrayBuffer. `stdin` (a string,
+ * sent as UTF-8, or an ArrayBuffer / typed array) is written to the
+ * command's stdin; a non-empty one needs the command's stdin_max.
  *
- * No command broker yet: outside `hull test` every call throws after the
- * match. Under `hull test`, test.execStub(name, result) registers the
- * answer, given after the full match and cut to stdout_max / stderr_max.
+ * The command broker runs the call (cap/exec_broker.c). Under `hull test`,
+ * test.execStub(name, result) registers the answer, given after the full
+ * match and cut to stdout_max / stderr_max.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -258,7 +261,8 @@ static JSValue exec_push(JSContext *ctx, void *driver)
  * parked until the reply (the promise). JS_EXCEPTION with one pending. */
 static JSValue exec_run_broker(JSContext *ctx, HlJS *js, const char *name,
                                size_t name_len, const char *const *args,
-                               const size_t *lens, size_t n, const HlExecCmd *cmd)
+                               const size_t *lens, size_t n, const uint8_t *in,
+                               size_t in_len, const HlExecCmd *cmd)
 {
     if (!js || !hl_exec_broker_running() || !js->base.async_ctx)
         return JS_ThrowTypeError(ctx, "exec.run('%s'): the command broker is not "
@@ -294,7 +298,7 @@ static JSValue exec_run_broker(JSContext *ctx, HlJS *js, const char *name,
     actx->detached = (hl_js_cont_suspend_conn(cont) == NULL);
     char why[256];
     if (hl_exec_op_start(actx, js->base.async_ctx, name, name_len, args, lens, n,
-                         cmd->timeout_ms, why, sizeof why) != 0) {
+                         in, in_len, cmd->timeout_ms, why, sizeof why) != 0) {
         actx->cont->destroy(actx->cont);   /* never armed: frees resolve / reject */
         actx->cont = NULL;
         hl_async_ctx_free(actx);
@@ -317,7 +321,78 @@ static JSValue exec_run_broker(JSContext *ctx, HlJS *js, const char *name,
     return promise;
 }
 
-/* exec.run(name, args?) -> Promise<result> */
+/* opts.stdin, copied at once (a view's buffer could be detached or resized
+ * by later app code). `stdin` is the only key: a typo is never a silent
+ * no-op. 0 with *out / *len set (NULL / 0 when absent), or -1 with an
+ * exception pending. */
+static int read_opts(JSContext *ctx, JSValueConst opts, uint8_t **out, size_t *len)
+{
+    *out = NULL;
+    *len = 0;
+    if (JS_IsUndefined(opts) || JS_IsNull(opts)) return 0;
+    if (!JS_IsObject(opts) || JS_IsArray(ctx, opts) != 0 || JS_IsFunction(ctx, opts)) {
+        JS_ThrowTypeError(ctx, "exec.run: options must be an object ({ stdin })");
+        return -1;
+    }
+    JSPropertyEnum *tab = NULL;
+    uint32_t np = 0;
+    if (JS_GetOwnPropertyNames(ctx, &tab, &np, opts,
+                               JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) < 0)
+        return -1;
+    int bad = 0;
+    for (uint32_t i = 0; i < np; i++) {
+        const char *k = JS_AtomToCString(ctx, tab[i].atom);
+        if (!k || strcmp(k, "stdin") != 0) bad = 1;
+        if (k) JS_FreeCString(ctx, k);
+    }
+    JS_FreePropertyEnum(ctx, tab, np);
+    if (bad) {
+        JS_ThrowTypeError(ctx, "exec.run: unknown option (the only one is stdin)");
+        return -1;
+    }
+    JSValue v = JS_GetPropertyStr(ctx, opts, "stdin");
+    if (JS_IsException(v)) return -1;
+    int rc = 0;
+    if (JS_IsUndefined(v) || JS_IsNull(v)) {
+        /* none */
+    } else if (JS_IsString(v)) {
+        size_t sl = 0;
+        const char *str = JS_ToCStringLen(ctx, &sl, v);   /* UTF-8 */
+        if (!str) { rc = -1; goto done; }
+        if (sl > HL_EXEC_STDIN_CEIL) {
+            JS_FreeCString(ctx, str);
+            JS_ThrowRangeError(ctx, "exec.run: stdin is longer than %u bytes",
+                               (unsigned)HL_EXEC_STDIN_CEIL);
+            rc = -1;
+            goto done;
+        }
+        *out = js_malloc(ctx, sl ? sl : 1);
+        if (*out) { memcpy(*out, str, sl); *len = sl; } else rc = -1;
+        JS_FreeCString(ctx, str);
+    } else {
+        size_t bl = 0;
+        const uint8_t *p = hl_js_bytes_view(ctx, &bl, v);
+        if (!p) {
+            JS_ThrowTypeError(ctx, "exec.run: stdin must be a string, an "
+                              "ArrayBuffer or a typed array");
+            rc = -1;
+            goto done;
+        }
+        if (bl > HL_EXEC_STDIN_CEIL) {
+            JS_ThrowRangeError(ctx, "exec.run: stdin is longer than %u bytes",
+                               (unsigned)HL_EXEC_STDIN_CEIL);
+            rc = -1;
+            goto done;
+        }
+        *out = js_malloc(ctx, bl ? bl : 1);   /* no app code since the view */
+        if (*out) { if (bl) memcpy(*out, p, bl); *len = bl; } else rc = -1;
+    }
+done:
+    JS_FreeValue(ctx, v);
+    return rc;
+}
+
+/* exec.run(name, args?, opts?) -> Promise<result> */
 static JSValue js_exec_run(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
@@ -337,6 +412,9 @@ static JSValue js_exec_run(JSContext *ctx, JSValueConst this_val,
     const char *name = NULL;
     size_t name_len = 0;
     JSValue copy = JS_UNDEFINED;   /* the arguments, for a stub function */
+    JSValue stub_in = JS_UNDEFINED;   /* the stdin, for a stub function */
+    uint8_t *in = NULL;
+    size_t in_len = 0;
 
     if (argc > 1 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) {
         if (JS_IsArray(ctx, argv[1]) <= 0)
@@ -369,11 +447,13 @@ static JSValue js_exec_run(JSContext *ctx, JSValueConst this_val,
             n++;
         }
     }
+    if (argc > 2 && read_opts(ctx, argv[2], &in, &in_len) != 0) goto out;
     name = JS_ToCStringLen(ctx, &name_len, argv[0]);
     if (!name) goto out;
 
-    /* The match walks the policy and the arguments: charged first. */
-    if (hl_js_budget_charge(ctx, 64 + total / 8)) goto out;
+    /* The match walks the policy and the arguments, and stdin is copied
+     * twice more (the frame, the broker): charged first. */
+    if (hl_js_budget_charge(ctx, 64 + (total + in_len) / 8)) goto out;
 
     HlExecCmd cmd;
     char err[256];
@@ -388,6 +468,16 @@ static JSValue js_exec_run(JSContext *ctx, JSValueConst this_val,
     }
     if (rc != HL_EXEC_OK) {
         JS_ThrowTypeError(ctx, "exec.run('%s'): %s", name, err);
+        goto out;
+    }
+    if (in_len > cmd.stdin_max) {
+        if (!cmd.stdin_max)
+            JS_ThrowTypeError(ctx, "exec.run('%s'): the command takes no stdin "
+                              "(declare stdinMax)", name);
+        else
+            JS_ThrowTypeError(ctx, "exec.run('%s'): stdin is %zu bytes; the "
+                              "command's stdinMax is %u", name, in_len,
+                              (unsigned)cmd.stdin_max);
         goto out;
     }
 
@@ -407,7 +497,8 @@ static JSValue js_exec_run(JSContext *ctx, JSValueConst this_val,
     JSValue stubs = exec_stubs(ctx);
     if (!JS_IsObject(stubs)) {          /* not hull test: the broker runs it */
         JS_FreeValue(ctx, stubs);
-        ret = exec_run_broker(ctx, js, name, name_len, args, lens, n, &cmd);
+        ret = exec_run_broker(ctx, js, name, name_len, args, lens, n, in, in_len,
+                              &cmd);
         goto out;
     }
     JSValue stub = JS_GetPropertyStr(ctx, stubs, name);
@@ -430,8 +521,13 @@ static JSValue js_exec_run(JSContext *ctx, JSValueConst this_val,
                 goto out;
             }
         }
-        JSValue cargs[2] = { copy, argv[0] };
-        JSValue r = JS_Call(ctx, stub, JS_UNDEFINED, 2, cargs);
+        /* stub(args, name, stdin): stdin as an ArrayBuffer, or undefined */
+        if (in_len) {
+            stub_in = JS_NewArrayBufferCopy(ctx, in, in_len);
+            if (JS_IsException(stub_in)) { JS_FreeValue(ctx, stub); goto out; }
+        }
+        JSValue cargs[3] = { copy, argv[0], stub_in };
+        JSValue r = JS_Call(ctx, stub, JS_UNDEFINED, 3, cargs);
         JS_FreeValue(ctx, stub);
         if (JS_IsException(r)) goto out;
         stub = r;
@@ -467,6 +563,8 @@ static JSValue js_exec_run(JSContext *ctx, JSValueConst this_val,
 out:
     if (name) JS_FreeCString(ctx, name);
     JS_FreeValue(ctx, copy);
+    JS_FreeValue(ctx, stub_in);
+    js_free(ctx, in);
     for (size_t i = 0; i < n; i++) js_free(ctx, bufs[i]);
     return ret;
 }

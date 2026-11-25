@@ -46,11 +46,11 @@ of it in `tool.spawn` with a compiler allowlist.
 
 | Question | Decision |
 |---|---|
-| Manifest | An `exec` section: name -> `{ path, argv, timeout_ms, stdout_max, stderr_max, env, concurrency, fs, unix_sockets, sha256 }`, plus `"hull/exec@1"` in `modules`. Both are needed, as for `tui`. |
+| Manifest | An `exec` section: name -> `{ path, argv, timeout_ms, stdout_max, stderr_max, env, concurrency, fs, unix_sockets, stdin_max, sha256 }`, plus `"hull/exec@1"` in `modules`. Both are needed, as for `tui`. |
 | Slot shapes | **Structured, not regex** (§4): `prefix` / `suffix` / `chars` / `min` / `max` / `enum` / `repeat`. One C matcher is used by both the cap layer and the broker. |
 | Process | Hull's own binary in a hidden mode (`argv[1] == "__hull_exec_broker"`), started with `hl_chan_spawn` before phase 1 and stopped after the manifest if there is no `exec` section. This is the GPU helper's lifecycle. |
 | Policy delivery | Exactly ONE `POLICY` frame, built in C from the sealed `HlManifest` after `hl_sig_check_runtime_policy`. The broker then locks itself down; a second `POLICY` frame makes it exit. |
-| Child | Forked by the broker. It gets `setsid`, closed fds, stdin from `/dev/null`, capped stdout / stderr pipes, a fixed environment, rlimits, `PR_SET_PDEATHSIG`, its own narrower Landlock domain, and a seccomp filter that **refuses process creation** (threads allowed). It runs the binary through `execveat(fd, "", ..., AT_EMPTY_PATH)` on the descriptor that was checked. |
+| Child | Forked by the broker. It gets `setsid`, closed fds, stdin from `/dev/null` (or a pipe the broker fills with the call's `stdin`, when the command declares `stdin_max`), capped stdout / stderr pipes, a fixed environment, rlimits, `PR_SET_PDEATHSIG`, its own narrower Landlock domain, and a seccomp filter that **refuses process creation** (threads allowed). It runs the binary through `execveat(fd, "", ..., AT_EMPTY_PATH)` on the descriptor that was checked. |
 | Seccomp | Filters are inherited and can only narrow, so the broker's filter admits the union of what the broker AND the supported commands need (`socket` for `AF_UNIX` only, for `systemctl`). Each child then adds a filter removing what its command does not need (§6.2). |
 | Admission | **The broker is authoritative** for the in-flight cap, per-command concurrency, live request ids and aggregate buffered output. The binding checks the same caps only to answer `busy` fast (§5.2). |
 | Kernel | Linux: Landlock `EXECUTE` on the declared binaries and their `PT_INTERP` only, with a defined minimum ABI per guarantee (§6.5). macOS: one Seatbelt profile, the union of the commands' grants (§6.4). OpenBSD and Windows: **not supported** (§9). |
@@ -115,6 +115,12 @@ Load-time validation is in `manifest.c` and `cap/exec.c`, and failure refuses ap
   so no signed manifest ever advertised a pin nothing checked.
 - **`unix_sockets`:** boolean, default false. Lets the child create `AF_UNIX` sockets (§5.3);
   `systemctl` needs it to reach systemd. No other socket family is ever allowed.
+- **`stdin_max`:** 1..1 MiB (`HL_EXEC_STDIN_CEIL`), optional. A call may then pass `stdin`
+  (`exec.run(name, args, { stdin = bytes })`), up to that many bytes, written to the child's
+  stdin. Without it the child reads `/dev/null`, and a call that passes stdin is refused. It is
+  the channel for secrets and records: an argument shows in the process listing and in the
+  audit record (§12), stdin in neither. Encoded as a command flag (`HL_EXEC_CMD_STDIN`) and a
+  u32 after the pin.
 
   The grant is broader than "talk to systemd". Landlock does not mediate pathname sockets, so
   the child can `connect` to ANY pathname socket the service account can reach under the
@@ -256,7 +262,8 @@ The app side (binding, then the cap layer):
      enforces the same caps itself (below).
 5. Charge the run `HL_WORK_EXEC_UNITS` (128k, about 2 ms of fork + exec at 64 units/us) plus
    `hl_work_bulk_units` of the argument bytes.
-6. Send `RUN {id, name, args[]}` and park. The loop watches the channel fd through the async
+6. Send `RUN {id, name, args[], stdin}` and park (`stdin` already checked against the
+   command's `stdin_max`). The loop watches the channel fd through the async
    backend.
 7. The timeout is the command's `timeout_ms`. It is not clamped to the run's deadline: the run
    is parked, so the wait holds no loop.
@@ -276,17 +283,22 @@ The broker treats the app as untrusted after `READY`. It is the authority on adm
    completed call whose reply the app does not read therefore still holds its slot, so a
    stalled reader cannot pile up finished replies outside the cap. Writes are non-blocking;
    a reply waits in the broker's queue, never blocks the broker's loop.
-2. Match the call again (§4). A mismatch is a `REFUSED {id}` reply.
+2. Match the call again (§4), and check its `stdin` against the command's `stdin_max`. A
+   mismatch is a `REFUSED {id}` reply. The stdin counts toward the `HL_EXEC_MAX_BUFFERED`
+   reservation with the output caps.
 3. Open the binary and check it again (§6.1). With a pin, hash the descriptor.
 4. Fork the child.
-5. Read stdout and stderr into buffers up to their caps.
+5. Write the call's stdin, if any, to the child's stdin pipe as it takes it (non-blocking,
+   from the same loop), then close it. When the child exits or closes its stdin first, the
+   rest is dropped (`EPIPE`; the broker ignores `SIGPIPE`).
+6. Read stdout and stderr into buffers up to their caps.
    - It keeps DRAINING past a cap and discards the extra, so the child cannot block on a full
      pipe.
    - It records `*_truncated`.
-6. At `timeout_ms` the broker sends `kill(-pgid, SIGKILL)`, reaps the child and sets
+7. At `timeout_ms` the broker sends `kill(-pgid, SIGKILL)`, reaps the child and sets
    `timed_out`. The child cannot have created processes (§5.3), so its process group is the
    whole job.
-7. Reply `DONE {id, status, signal, ...}`, with a payload capped at
+8. Reply `DONE {id, status, signal, ...}`, with a payload capped at
    `stdout_max + stderr_max + 64`.
 
 The resume charges the output 1 unit per 8 bytes and builds the result table. stdout and stderr
@@ -316,7 +328,8 @@ The child runs these steps in order. Each is async-signal-safe and allocates not
 2. `setsid()` gives the child its own process group, so the timeout kill reaches the whole
    job with one `kill(-pgid, ...)`.
 3. Set up stdio:
-   - `dup2` of `/dev/null` (opened by the broker before lock-down) onto fd 0;
+   - `dup2` of `/dev/null` (opened by the broker before lock-down) onto fd 0, or of the
+     read end of the call's stdin pipe when it sent stdin;
    - the pipes onto fds 1 and 2;
    - the binary's descriptor moved to fd 3;
    - `close_range(4, ~0)`.
@@ -713,7 +726,7 @@ and fixtures in the same PR:
 
 `--audit` gets one record per call: command name, argument count, each argument escaped
 (`hl_log_escape_line`), status / signal, `timed_out`, duration and output byte counts.
-stdout / stderr are never logged. Startup logs one line per command with its resolved path,
+stdout / stderr and stdin are never logged (stdin by its length only). Startup logs one line per command with its resolved path,
 and `exec: degraded` when it applies.
 
 ## 13. Phasing

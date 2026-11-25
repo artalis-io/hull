@@ -10,6 +10,7 @@
  *   cmd     := str:name str:path u32:timeout_ms u32:stdout_max
  *              u32:stderr_max u8:concurrency u8:flags
  *              [32 bytes: the sha256 pin, if flags has SHA256]
+ *              [u32:stdin_max, if flags has STDIN]
  *              u16:n_env (str:name str:value)*n_env
  *              u16:n_fs_read str*  u16:n_fs_write str*
  *              u16:n_argv arg*n_argv
@@ -202,7 +203,7 @@ static uint8_t opt_u8(int64_t v, uint8_t dflt)
 void hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
                    const char *path, size_t path_len,
                    int64_t timeout_ms, int64_t stdout_max, int64_t stderr_max,
-                   int64_t concurrency, int unix_sockets,
+                   int64_t concurrency, int unix_sockets, int64_t stdin_max,
                    const char *sha256_hex, size_t sha256_len)
 {
     if (b->ncmds == 0xFFFF) { hl_exec_b_fail(b, "exec: too many commands"); return; }
@@ -228,9 +229,12 @@ void hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
     put_u32(b, opt_u32(stdout_max, HL_EXEC_STDOUT_DEFAULT));
     put_u32(b, opt_u32(stderr_max, HL_EXEC_STDERR_DEFAULT));
     put_u8(b, opt_u8(concurrency, HL_EXEC_CONCURRENCY_DEFAULT));
+    int has_stdin = stdin_max != -1 && stdin_max != 0;
     put_u8(b, (uint8_t)((unix_sockets ? HL_EXEC_CMD_UNIX_SOCKETS : 0) |
-                        (sha256_hex ? HL_EXEC_CMD_SHA256 : 0)));
+                        (sha256_hex ? HL_EXEC_CMD_SHA256 : 0) |
+                        (has_stdin ? HL_EXEC_CMD_STDIN : 0)));
     if (sha256_hex) put(b, pin, sizeof pin);
+    if (has_stdin) put_u32(b, opt_u32(stdin_max, 0));   /* out of range: kept, refused */
 }
 
 size_t hl_exec_b_count_begin(HlExecBuf *b)
@@ -519,10 +523,16 @@ static int v_cmd(Rd *r, const char **names, size_t *name_lens, int ci,
         VERR("exec.%s: stderr_max is at most %u", name, (unsigned)HL_EXEC_STDERR_CEIL);
     if (conc < 1 || conc > HL_EXEC_CONCURRENCY_MAX)
         VERR("exec.%s: concurrency must be 1..%d", name, HL_EXEC_CONCURRENCY_MAX);
-    if (flags & ~(HL_EXEC_CMD_UNIX_SOCKETS | HL_EXEC_CMD_SHA256))
+    if (flags & ~(HL_EXEC_CMD_UNIX_SOCKETS | HL_EXEC_CMD_SHA256 | HL_EXEC_CMD_STDIN))
         VERR("exec.%s: unknown command flags", name);
     if ((flags & HL_EXEC_CMD_SHA256) && !rd_bytes(r, 32))
         VERR("exec: the policy is truncated");
+    if (flags & HL_EXEC_CMD_STDIN) {
+        uint32_t sm = rd_u32(r);
+        if (r->bad) VERR("exec: the policy is truncated");
+        if (sm < 1 || sm > HL_EXEC_STDIN_CEIL)
+            VERR("exec.%s: stdin_max must be 1..%u", name, (unsigned)HL_EXEC_STDIN_CEIL);
+    }
 
     /* env */
     uint16_t n_env = rd_u16(r);
@@ -643,6 +653,7 @@ static void read_cmd(Rd *r, HlExecCmd *c)
     c->concurrency = rd_u8(r);
     c->flags = rd_u8(r);
     if (c->flags & HL_EXEC_CMD_SHA256) c->sha256 = rd_bytes(r, 32);
+    if (c->flags & HL_EXEC_CMD_STDIN) c->stdin_max = rd_u32(r);
     c->n_env = rd_u16(r);
     c->env = r->p;
     skip_strs(r, (size_t)c->n_env * 2);

@@ -209,7 +209,7 @@ static int one_make(One *o)
 {
     memset(o, 0, sizeof *o);
     hl_exec_b_init(&o->b, NULL);
-    hl_exec_b_cmd(&o->b, "t", 1, "/usr/bin/true", 13, -1, -1, -1, -1, 0, NULL, 0);
+    hl_exec_b_cmd(&o->b, "t", 1, "/usr/bin/true", 13, -1, -1, -1, -1, 0, -1, NULL, 0);
     for (int k = 0; k < 4; k++)
         hl_exec_b_count_end(&o->b, hl_exec_b_count_begin(&o->b), 0);
     if (hl_exec_b_finish(&o->b) != 0) return -1;

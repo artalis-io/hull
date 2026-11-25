@@ -10,6 +10,15 @@ release-artifact layout).
 
 ### Added
 
+- **`hull/exec`: stdin for a declared command.** A command that declares `stdin_max` (JS
+  `stdinMax`, 1 byte..1 MiB) takes `exec.run(name, args, { stdin = bytes })` (JS a string, sent
+  as UTF-8, or an ArrayBuffer / typed array): the broker writes it to the child's stdin as the
+  child reads it, and drops the rest when the child exits first. Without `stdin_max` the child
+  reads `/dev/null` and a call passing stdin is refused; a longer stdin is refused by the
+  binding and again by the broker. It is the channel for secrets and records (never argv, never
+  logged). Under `hull test`, a stub function gets the stdin as its third argument. `hull
+  inspect` shows the limit.
+
 - **`hull/exec` on macOS** (docs/design/exec_broker.md, part 3). The command broker now runs
   on macOS under one Seatbelt profile: deny by default, `exec` only of the declared binaries,
   the fork right limited to the broker's own image (so a command gets `EPERM` from `fork`,
@@ -33,6 +42,11 @@ release-artifact layout).
   pin.
 
 ### Fixed
+
+- **`hull/exec` (Lua): an over-long argument list raised "invalid option '%u'"** instead of
+  saying the arguments are longer than 64 KiB together (Lua's formatter has no `%u`).
+- **`make check-types` failed on macOS** since the macOS broker: its `hull/exec` probe app
+  declared `/bin/true`, which macOS does not have; it uses `/usr/bin/true`.
 
 - **`hull check` and `hull build --sign` / `--flavor` refused every app declaring `exec`.** The
   tool-side module resolve did not see the `exec` section, so `hull/exec` failed with "requires

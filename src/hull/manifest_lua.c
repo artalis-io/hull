@@ -122,7 +122,7 @@ static int read_port_array(lua_State *L, int table_idx, int *out)
 
 static const char *const EXEC_CMD_KEYS[] = {
     "path", "argv", "timeout_ms", "stdout_max", "stderr_max", "env",
-    "concurrency", "fs", "unix_sockets", "sha256", NULL };
+    "concurrency", "fs", "unix_sockets", "stdin_max", "sha256", NULL };
 static const char *const EXEC_SLOT_KEYS[] = {
     "enum", "prefix", "suffix", "chars", "min", "max", "repeat",
     "allow_dash", NULL };
@@ -281,10 +281,11 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
     int64_t se = lx_int(L, t, "stderr_max", b, where);
     int64_t conc = lx_int(L, t, "concurrency", b, where);
     int unix_sockets = lx_bool(L, t, "unix_sockets", b, where);
+    int64_t stdin_max = lx_int(L, t, "stdin_max", b, where);
     size_t hl;
     const char *pin = lx_str(L, t, "sha256", &hl, b, where);
     hl_exec_b_cmd(b, name, strlen(name), path, pl, timeout, so, se, conc,
-                  unix_sockets, pin, hl);
+                  unix_sockets, stdin_max, pin, hl);
     lua_settop(L, base);
 
     /* env = { NAME = "value" }, sorted by name */
