@@ -89,6 +89,7 @@ GROUP = {
     "embed-zig": "core-common",
     "tui-feature": "core-common",
     "exec-broker": "core-common",
+    "exec-broker-macos": "core-common",
     "fuzz-core-security": "core-common",
     "benchmark": "core-common",          # push-only (extra event guard in its if:)
     # -- db subsystem (per-backend integrations) --
