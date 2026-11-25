@@ -158,6 +158,8 @@ int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
 #else
     (void)dbreg;
 #endif
+    /* n_dbs is 0 here on a build without HL_ENABLE_DB. */
+    // cppcheck-suppress knownConditionTrueFalse
     if (writes && n_dbs >= 0 && default_db && default_db[0]) {
         const char *f = hl_dsn_file_path(default_db);
         if (f && f[0] && strcmp(f, ":memory:") != 0) {
@@ -166,6 +168,7 @@ int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
                 n_dbs = -1;
             } else {
                 int dup = 0;
+                // cppcheck-suppress knownConditionTrueFalse
                 for (int k = 0; k < n_dbs && k < HL_EXEC_MAX_PROTECT; k++)
                     dup |= strcmp(dbs[k], real) == 0;
                 if (!dup) {
