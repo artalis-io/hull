@@ -22,10 +22,13 @@ local function main()
     -- the first positional, which is the app dir. Don't break early -
     -- --json may appear after the positional.
     local want_json = false
+    local exec_lint = false   -- --exec-lint: hull check's manifest step
     local app_dir
     for i = 1, #arg do
         if arg[i] == "--json" then
             want_json = true
+        elseif arg[i] == "--exec-lint" then
+            exec_lint = true
         elseif arg[i]:sub(1, 1) ~= "-" and not app_dir then
             app_dir = arg[i]
         end
@@ -43,6 +46,8 @@ local function main()
         tool.stderr("hull modules list: no app.manifest() declared in " .. tool.escape(entry) .. "\n")
         tool.exit(1)
     end
+
+    if exec_lint then require("hull.exec_lint").report(m, "hull check") end
 
     local modules = m.modules
 

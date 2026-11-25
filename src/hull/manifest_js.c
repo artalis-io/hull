@@ -421,14 +421,6 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     char where[96];
     snprintf(where, sizeof where, "exec.%s", name);
     if (mx_keys(ctx, t, MX_CMD_KEYS, b, where) != 0) return;
-    JSValue pin = mjs_own(ctx, t, "sha256");
-    int has_pin = !JS_IsUndefined(pin);
-    JS_FreeValue(ctx, pin);
-    if (has_pin) {
-        hl_exec_b_fail(b, "%s: sha256 is not supported yet (it lands with the "
-                       "broker's digest check); remove it", where);
-        return;
-    }
     size_t pl;
     const char *path = mx_str(ctx, t, "path", &pl, b, where);
     if (!path && !b->failed) {
@@ -440,8 +432,11 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     int64_t se = mx_int(ctx, t, "stderrMax", "stderr_max", b, where);
     int64_t conc = mx_int(ctx, t, "concurrency", NULL, b, where);
     int unix_sockets = mx_bool(ctx, t, "unixSockets", "unix_sockets", b, where);
+    size_t hl;
+    const char *pin = mx_str(ctx, t, "sha256", &hl, b, where);
     hl_exec_b_cmd(b, name, strlen(name), path, pl, timeout, so, se, conc,
-                  unix_sockets);
+                  unix_sockets, pin, hl);
+    if (pin) JS_FreeCString(ctx, pin);
     if (path) JS_FreeCString(ctx, path);
 
     /* env: { NAME: "value" }, sorted by name */

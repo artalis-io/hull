@@ -14,6 +14,8 @@
 #   - a timeout kills the child (SIGKILL, timed_out); output is cut at the
 #     caps while the child is drained to its end;
 #   - a real `systemctl show` against the running system manager;
+#   - a sha256 pin: a match runs, a mismatch refuses the start, a binary
+#     rewritten in place (same inode) fails the next call;
 #   - a replaced binary answers ESTALE; a #! script and a set-user-ID
 #     binary are refused at start;
 #   - abrupt broker death, orderly shutdown and server death, each AFTER the
@@ -171,6 +173,28 @@ EOF
 )
 check_line "a set-user-ID binary is refused at start" "set-user-ID"
 
+# ── The sha256 pin ──────────────────────────────────────────────────
+
+echo "== sha256 pin"
+PIN=$(sha256sum "$PROBE" | cut -d' ' -f1)
+PIN_UPPER=$(printf '%s' "$PIN" | tr a-f A-F)
+out=$(run_main "$FIX/p1" <<EOF
+app.manifest({ modules = { "hull/exec@1" },
+  exec = { p = { path = "$PROBE", argv = { "unix" }, sha256 = "$PIN_UPPER" } } })
+local exec = require("hull.exec")
+app.main(function() print("pinned: " .. exec.run("p").stdout:gsub("\\n", "")) return 0 end)
+EOF
+)
+check_line "a matching pin runs (either hex case)" "pinned: unix=EACCES"
+WRONG=$(printf '%064d' 0)
+out=$(run_main "$FIX/p2" <<EOF
+app.manifest({ modules = { "hull/exec@1" },
+  exec = { p = { path = "$PROBE", argv = { "unix" }, sha256 = "$WRONG" } } })
+app.main(function() return 0 end)
+EOF
+)
+check_line "a wrong pin refuses the app at start" "does not match its sha256 pin (its sha256 is $PIN)"
+
 # ── Server-mode cases: ESTALE and the three deaths ───────────────────
 
 PORT=${PORT:-19861}
@@ -221,6 +245,26 @@ second=$(curl -s "http://127.0.0.1:$PORT/p")
 case "$first" in *'"ok":true'*) pass "runs before the swap" ;; *) fail "runs before the swap" "$first" ;; esac
 case "$second" in *"was replaced since the app started"*) pass "a replaced binary answers ESTALE" ;;
                   *) fail "a replaced binary answers ESTALE" "$second" ;; esac
+kill -TERM "$SPID"; wait "$SPID" 2>/dev/null || true
+
+echo "== pinned binary rewritten in place"
+cp "$PROBE" "$FIX/pin_probe"
+start_server "$FIX/s2" <<EOF
+app.manifest({ modules = { "hull/exec@1", "hull/http-server@1" },
+  exec = { p = { path = "$FIX/pin_probe", argv = { "unix" }, sha256 = "$PIN" } } })
+local exec = require("hull.exec")
+app.get("/p", function(req, res)
+  local ok, r = pcall(exec.run, "p")
+  res:json({ ok = ok, out = ok and r.stdout or tostring(r) })
+end)
+EOF
+first=$(curl -s "http://127.0.0.1:$PORT/p")
+printf 'x' >> "$FIX/pin_probe"   # same inode, new content
+second=$(curl -s "http://127.0.0.1:$PORT/p")
+case "$first" in *'"ok":true'*) pass "a pinned binary runs before the rewrite" ;;
+                 *) fail "a pinned binary runs before the rewrite" "$first" ;; esac
+case "$second" in *"does not match its sha256 pin"*) pass "a binary rewritten in place fails its pin" ;;
+                  *) fail "a binary rewritten in place fails its pin" "$second" ;; esac
 kill -TERM "$SPID"; wait "$SPID" 2>/dev/null || true
 
 # The probe confirms PR_GET_PDEATHSIG == SIGKILL as the exec'd program,

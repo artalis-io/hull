@@ -10,6 +10,22 @@ release-artifact layout).
 
 ### Added
 
+- **`hull/exec`: the `sha256` pin and the command lint** (docs/design/exec_broker.md, part 4).
+  A declared command may set `sha256` (64 hex characters): the broker hashes the main
+  executable from the descriptor it execs, at start (a mismatch refuses the app) and before
+  every call (a mismatch fails the call naming the digest found), so a binary rewritten in
+  place is caught as a replaced one already was. `hull build` and `hull check` warn about risky
+  commands: a general-purpose program (shell, interpreter, `env`, `find`, `ssh`, `curl`,
+  `sudo`, ...), a path outside `/usr` `/bin` `/sbin` `/opt`, a slot with no `chars` / `enum`,
+  a slot with `allow_dash`, a slot after fixed arguments with no `--`. `hull inspect` shows the
+  pin.
+
+### Fixed
+
+- **`hull check` and `hull build --sign` / `--flavor` refused every app declaring `exec`.** The
+  tool-side module resolve did not see the `exec` section, so `hull/exec` failed with "requires
+  an `exec` section". It is now passed through, as `tui` and `gpu` are.
+
 - **`hull/exec`: the command broker (Linux)** (docs/design/exec_broker.md, part 2). `exec.run`
   now runs the declared command on native Linux. A broker (this binary in a hidden mode) is
   spawned before the sandbox, given the policy once, and runs each call after matching it again

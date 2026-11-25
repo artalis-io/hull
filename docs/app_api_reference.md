@@ -3068,8 +3068,17 @@ slots, at most 64, 16 KiB of fixed text), `timeout_ms` (100..60000, default 5000
 `stdout_max` (up to 16 MiB, default 64 KiB), `stderr_max` (up to 1 MiB, default 16 KiB),
 `concurrency` (1..8, default 2), `env` (literal values only; `LD_*`, `DYLD_*`, `PATH`, `IFS`,
 `ENV`, `BASH_ENV` refused), `fs` (`read` / `write` paths the command's own sandbox grants;
-`write` only under `/dev`, `/run`, `/tmp`), `unix_sockets` (default false). At most 32
-commands, each named `[a-z0-9][a-z0-9-]{0,63}`.
+`write` only under `/dev`, `/run`, `/tmp`), `unix_sockets` (default false), `sha256` (optional,
+64 hex characters: the digest of the main executable). At most 32 commands, each named
+`[a-z0-9][a-z0-9-]{0,63}`.
+
+**`sha256` pins the main executable's bytes.** The broker hashes the file from the descriptor
+it will exec: at start (a mismatch refuses the app) and before every call (a mismatch fails the
+call with the digest it found: "restore the binary or update the pin"). So a package upgrade
+that rewrites the binary in place stops the command until the pin is updated. It covers the
+main executable only, not its loader or shared libraries, and it is checked on top of the
+ownership and mode checks, never instead of them. Get the value with `sha256sum`. A pinned
+binary over 512 MiB is refused.
 
 **A slot** is a conjunction of linear checks, no regex: `enum` (one of these values,
 excluding the rest), `prefix` / `suffix` (literal), `chars` (the allowed bytes between them,
@@ -3088,9 +3097,14 @@ allowed.
 
 **Refused at load (the app does not start):** an unknown key anywhere in the section (a typo
 is never a default left in force), a value of the wrong type or out of range, `repeat` on a
-non-last entry, and `sha256` (pinning lands with the broker's digest check; until then a
-signed manifest must not advertise a pin nothing verifies). `hull/exec` without an `exec`
+non-last entry, and a `sha256` that is not 64 hex characters. `hull/exec` without an `exec`
 section is refused by the resolver. The section is part of the signed manifest.
+
+**Lint.** `hull build` and `hull check` print a WARN (never a failure) for a command whose
+binary is a general-purpose program (a shell, an interpreter, `env`, `find`, `xargs`, `ssh`,
+`curl`, `sudo`, `systemd-run`, `git`, `tar`, ...), whose path is outside `/usr`, `/bin`,
+`/sbin` and `/opt`, or that has a slot with no `chars` or `enum`, a slot with `allow_dash`, or a
+slot after fixed arguments with no `--` before it. `hull inspect` shows each command's pin.
 
 **Errors and refusals.** An undeclared name or an argument a slot does not admit raises (Lua)
 / throws a TypeError synchronously (JS), naming the argument and the rule, before anything

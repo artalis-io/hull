@@ -2704,7 +2704,8 @@ binaries and their `PT_INTERP`, and a seccomp filter that is the CEILING every c
 admits `AF_UNIX` sockets for `systemctl`; a later filter can only narrow). Each RUN is admitted and
 matched again by the broker (in-flight cap, per-command concurrency, live ids, 32 MiB of reserved
 output held until delivered - the binding's checks are only a fast path), the binary re-opened and
-re-checked (a replaced inode is `ESTALE`: restart the app), and the child set up between fork and
+re-checked (a replaced inode is `ESTALE`: restart the app; an optional manifest `sha256` pin is
+hashed from the same descriptor, at load and before every call), and the child set up between fork and
 exec: `PR_SET_PDEATHSIG(SIGKILL)` + a `getppid` check, `setsid`, `/dev/null` stdin, capped pipes,
 a fixed environment, rlimits, its own narrower Landlock domain (device ioctls on its own `fs.write`
 devices only), and a stacked seccomp filter refusing process creation (`fork` / `vfork`, `clone`
@@ -2714,7 +2715,8 @@ process, so PDEATHSIG covers the whole job, and a broker killed with SIGKILL tak
 with it. `exec.run` parks like `hull.sleep` (attached or detached `HlAsyncCtx`, `hl_exec_op_start`);
 the op's free sends `KILL`, so every cancel path stops the child; a broker lost while serving fails
 the waiting calls, and teardown stops it in step (1) while the loop is alive. Under `hull test` only
-stubs answer. Windows is refused at start; a host with no broker is refused unless
+stubs answer. `hull build` / `hull check` warn about risky commands (`hull/exec_lint.lua`; never a
+failure). Windows is refused at start; a host with no broker is refused unless
 `--allow-degraded-sandbox` (exec.run then fails). **A new process-creating call site (`fork`,
 `exec*`, `posix_spawn*`, `system`, `popen`, or a raw syscall number of one) must be in a file that
 already spawns, else reviewed (INV-16); a new path that starts a declared command must match it

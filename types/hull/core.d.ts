@@ -319,6 +319,11 @@ declare namespace Hull {
          * only the one it needs.
          */
         unixSockets?: boolean;
+        /**
+         * SHA-256 of the main executable, 64 hex characters. The broker checks it
+         * at start and before every call.
+         */
+        sha256?: string;
     }
 
     /** The object `app.manifest()` takes. Unknown keys are ignored by the runtime. */

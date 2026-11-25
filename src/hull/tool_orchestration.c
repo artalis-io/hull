@@ -94,6 +94,14 @@ static int l_tool_modules_resolve(lua_State *L)
     lua_getfield(L, 1, "gpu");
     m.gpu = lua_toboolean(L, -1);
     lua_pop(L, 1);
+    /* hull/exec needs an `exec` section (module_resolver.c); the section
+     * itself was already validated by the extractor that produced this
+     * table, so only its presence is copied. Without it every tool-side
+     * resolve (hull check's import step, hull build --sign / --flavor)
+     * refused an app that declares commands. */
+    lua_getfield(L, 1, "exec");
+    m.exec_declared = lua_istable(L, -1);
+    lua_pop(L, 1);
 
     /* modules - copy names so the resolver sees stable pointers. */
     char *owned_names[HL_MANIFEST_MAX_MODULES] = {0};

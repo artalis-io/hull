@@ -9,6 +9,7 @@
  *   policy  := "HXP1" u16:ncmds cmd*ncmds
  *   cmd     := str:name str:path u32:timeout_ms u32:stdout_max
  *              u32:stderr_max u8:concurrency u8:flags
+ *              [32 bytes: the sha256 pin, if flags has SHA256]
  *              u16:n_env (str:name str:value)*n_env
  *              u16:n_fs_read str*  u16:n_fs_write str*
  *              u16:n_argv arg*n_argv
@@ -169,6 +170,14 @@ static void put_str(HlExecBuf *b, const char *s, size_t n)
 
 /* -1 = the default; anything else out of the field's range is written as
  * its all-ones value, which every ceiling refuses. */
+static int hexval(unsigned char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 static uint32_t opt_u32(int64_t v, uint32_t dflt)
 {
     if (v == -1) return dflt;
@@ -193,9 +202,25 @@ static uint8_t opt_u8(int64_t v, uint8_t dflt)
 void hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
                    const char *path, size_t path_len,
                    int64_t timeout_ms, int64_t stdout_max, int64_t stderr_max,
-                   int64_t concurrency, int unix_sockets)
+                   int64_t concurrency, int unix_sockets,
+                   const char *sha256_hex, size_t sha256_len)
 {
     if (b->ncmds == 0xFFFF) { hl_exec_b_fail(b, "exec: too many commands"); return; }
+    uint8_t pin[32];
+    if (sha256_hex) {
+        int ok = sha256_len == 64;
+        for (size_t i = 0; ok && i < 32; i++) {
+            int hi = hexval((unsigned char)sha256_hex[2 * i]);
+            int lo = hexval((unsigned char)sha256_hex[2 * i + 1]);
+            if (hi < 0 || lo < 0) ok = 0;
+            else pin[i] = (uint8_t)(hi << 4 | lo);
+        }
+        if (!ok) {
+            hl_exec_b_fail(b, "exec.%.*s: sha256 must be 64 hex characters",
+                           (int)(name_len > 64 ? 64 : name_len), name);
+            return;
+        }
+    }
     b->ncmds++;
     put_str(b, name, name_len);
     put_str(b, path, path_len);
@@ -203,7 +228,9 @@ void hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
     put_u32(b, opt_u32(stdout_max, HL_EXEC_STDOUT_DEFAULT));
     put_u32(b, opt_u32(stderr_max, HL_EXEC_STDERR_DEFAULT));
     put_u8(b, opt_u8(concurrency, HL_EXEC_CONCURRENCY_DEFAULT));
-    put_u8(b, unix_sockets ? HL_EXEC_CMD_UNIX_SOCKETS : 0);
+    put_u8(b, (uint8_t)((unix_sockets ? HL_EXEC_CMD_UNIX_SOCKETS : 0) |
+                        (sha256_hex ? HL_EXEC_CMD_SHA256 : 0)));
+    if (sha256_hex) put(b, pin, sizeof pin);
 }
 
 size_t hl_exec_b_count_begin(HlExecBuf *b)
@@ -492,8 +519,10 @@ static int v_cmd(Rd *r, const char **names, size_t *name_lens, int ci,
         VERR("exec.%s: stderr_max is at most %u", name, (unsigned)HL_EXEC_STDERR_CEIL);
     if (conc < 1 || conc > HL_EXEC_CONCURRENCY_MAX)
         VERR("exec.%s: concurrency must be 1..%d", name, HL_EXEC_CONCURRENCY_MAX);
-    if (flags & ~HL_EXEC_CMD_UNIX_SOCKETS)
+    if (flags & ~(HL_EXEC_CMD_UNIX_SOCKETS | HL_EXEC_CMD_SHA256))
         VERR("exec.%s: unknown command flags", name);
+    if ((flags & HL_EXEC_CMD_SHA256) && !rd_bytes(r, 32))
+        VERR("exec: the policy is truncated");
 
     /* env */
     uint16_t n_env = rd_u16(r);
@@ -613,6 +642,7 @@ static void read_cmd(Rd *r, HlExecCmd *c)
     c->stderr_max = rd_u32(r);
     c->concurrency = rd_u8(r);
     c->flags = rd_u8(r);
+    if (c->flags & HL_EXEC_CMD_SHA256) c->sha256 = rd_bytes(r, 32);
     c->n_env = rd_u16(r);
     c->env = r->p;
     skip_strs(r, (size_t)c->n_env * 2);

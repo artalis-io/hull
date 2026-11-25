@@ -2690,6 +2690,12 @@ local function main()
         ctx.static_files, ctx.migration_files, ctx.compute_files, ctx.shader_files,
         ctx.cc, ctx.is_cosmo
     local prebuilt_aot = ctx.prebuilt_aot
+    -- Declared commands (exec): warn about risky shapes. Advisory only; the
+    -- broker enforces the shapes whatever this says.
+    do
+        local mf = extract_app_manifest(opts.app_dir)
+        if mf then require("hull.exec_lint").report(mf, "hull build") end
+    end
     -- ── Build flavor (--flavor) ──
     -- Validate the requested flavor and (for non-default flavors) check the
     -- app's manifest against the TARGET flavor's caps, aborting if a declared
