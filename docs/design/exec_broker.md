@@ -1,7 +1,8 @@
 # Design: declared commands through a spawn broker (`hull/exec`)
 
-- **Status:** PR 1 (#1210: manifest section, matcher, stubs) and PR 2 (the native Linux broker)
-  implemented; macOS / OpenBSD (PR 3) and the `sha256` pin (PR 4) planned. Review rounds 1-3
+- **Status:** PR 1 (#1210: manifest section, matcher, stubs), PR 2 (#1211: the native Linux
+  broker) and PR 4 (the `sha256` pin and the `hull build` / `hull check` lint) implemented;
+  macOS / OpenBSD (PR 3) planned. Review rounds 1-3
   folded in: seccomp inheritance, child process creation, broker-side admission, required
   Landlock rights, file identity vs content, `unix_sockets` scope, `sha256` until enforced.
 - **Motivation:** hsctl needs to read node state that only a system tool reports: `nvidia-smi`
@@ -102,8 +103,11 @@ Load-time validation is in `manifest.c` and `cap/exec.c`, and failure refuses ap
   child. The names `LD_*`, `DYLD_*`, `PATH` and `IFS` are refused.
 - **`fs`:** extra Landlock grants for this command (§6.3). Each must be absolute, and `write`
   is only under `/dev`, `/run` or `/tmp`.
-- **`sha256`:** 64 hex characters, optional. **Refused at app load until the broker enforces
-  it (PR 4):** a signed manifest must never advertise a pin the broker ignores.
+- **`sha256`:** 64 hex characters (either case), optional. The broker hashes the main
+  executable from the descriptor it will exec, at policy load (a mismatch refuses the start)
+  and on every call (a mismatch refuses the call, naming the digest it found). A pinned binary
+  is hashed whole, so one over 512 MiB is refused. Until PR 4 a declared pin refused app load,
+  so no signed manifest ever advertised a pin nothing checked.
 - **`unix_sockets`:** boolean, default false. Lets the child create `AF_UNIX` sockets (§5.3);
   `systemctl` needs it to reach systemd. No other socket family is ever allowed.
 
@@ -127,13 +131,16 @@ unit-state  /usr/bin/systemctl
              (not limited to systemd)
 ```
 
-`hull build` / `hull check` add a lint, a WARN rather than a boundary:
+`hull build` / `hull check` add a lint, a WARN rather than a boundary
+(`stdlib/cli/lua/hull/exec_lint.lua`):
 
-- a `path` whose basename is a general-purpose program (the list in §1, plus interpreters and
-  `env`);
+- a `path` whose basename is a general-purpose program (the list in §1, plus interpreters,
+  editors, pagers, fetchers and container CLIs; a versioned name such as `python3.12` counts as
+  its family);
 - a slot with no `chars` or `enum`;
 - a slot with `allow_dash`;
-- a `path` outside `/usr`, `/bin`, `/sbin` and `/opt`.
+- a `path` outside `/usr`, `/bin`, `/sbin` and `/opt`;
+- a non-`enum` slot after fixed arguments with no `--` before it (once per command).
 
 ## 4. Slot shapes (why not regex)
 
@@ -661,8 +668,8 @@ and `exec: degraded` when it applies.
    INV-16 / 17 and the CLAUDE.md paragraph. Done when the §8 acceptance runs pass; hsctl
    adopts it then, not before.
 3. **PR 3:** macOS Seatbelt, then OpenBSD.
-4. **PR 4:** the optional `sha256` pin (the broker verifies it, and only then does the
-   manifest accept the field), and the `hull build` lint.
+4. **PR 4 (done):** the optional `sha256` pin (the broker verifies it, and only then does the
+   manifest accept the field), and the `hull build` / `hull check` lint.
 
 ## 14. What this does not cover
 

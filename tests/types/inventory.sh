@@ -38,7 +38,8 @@ function desc(v, depth, seen) {
   return { kind: t };
 }'
 
-run_app() {  # $1 = JS module name, $2 = manifest extra, $3 = modules list, $4 = import line
+run_app() {  # $1 = JS module name, $2 = manifest extra, $3 = modules list, $4 = import line,
+            # $5 = extra hull flags
     d=$WORK/app; rm -rf "$d"; mkdir -p "$d"
     cat > "$d/app.js" <<JS
 $4
@@ -52,7 +53,7 @@ app.main((ctx) => {
   return 0;
 });
 JS
-    if (cd "$d" && "$HULL" app.js > out.json 2> err.txt); then
+    if (cd "$d" && "$HULL" ${5:-} app.js > out.json 2> err.txt); then
         cat "$d/out.json"
     elif grep -q 'requires HL_ENABLE_' "$d/err.txt"; then
         printf '{"module":"%s","unavailable":true}\n' "$1"
@@ -71,6 +72,10 @@ for spec in $(tr "," "\n" < "$WORK/mods.json" | sed -n 's/.*"name": *"\(hull\/[^
     [ "$spec" = hull/app ] && continue
     name="hull:$(echo "${spec#hull/}" | tr / :)"
     extra=""; [ "$spec" = hull/tui ] && extra="tui: true,"
-    [ "$spec" = hull/exec ] && extra="exec: { probe: { path: \"/bin/true\" } },"
-    run_app "$name" "$extra" "\"$spec@1\"" "import * as M from \"$name\";"
+    flags=""
+    # A host with no command broker (macOS, a cosmo APE) refuses an exec
+    # section at start; the inventory only lists exports, so degraded is fine.
+    [ "$spec" = hull/exec ] && extra="exec: { probe: { path: \"/bin/true\" } }," &&
+        flags="--allow-degraded-sandbox"
+    run_app "$name" "$extra" "\"$spec@1\"" "import * as M from \"$name\";" "$flags"
 done
