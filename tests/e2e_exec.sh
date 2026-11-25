@@ -9,7 +9,7 @@
 #     the slot's class, too few / too many values and an undeclared name are
 #     refused before the stub; a call inside a transaction is refused coded
 #     wait_refused; a removed stub, or one for an undeclared name, is refused;
-#   - at load: an unusable section refuses the app (sha256, an unknown key, a
+#   - at load: an unusable section refuses the app (a malformed sha256 pin, an unknown key, a
 #     typo inside a slot, a non-integer, a bad name, `repeat` on a non-last
 #     entry, fs.write outside /dev /run /tmp), and hull/exec needs a section;
 #   - outside hull test: on Linux the broker runs the command; elsewhere the
@@ -247,9 +247,15 @@ refuse() {
 }
 
 echo "== load-time refusals =="
-refuse "sha256 is refused until it is enforced" "sha256 is not supported yet" \
+refuse "a short sha256 pin" "sha256 must be 64 hex characters" \
     'exec = { a = { path = "/bin/true", sha256 = "00" } }' \
     'exec: { a: { path: "/bin/true", sha256: "00" } }'
+refuse "a sha256 pin that is not hex" "sha256 must be 64 hex characters" \
+    'exec = { a = { path = "/bin/true", sha256 = string.rep("g", 64) } }' \
+    'exec: { a: { path: "/bin/true", sha256: "g".repeat(64) } }'
+refuse "a sha256 pin that is not a string" "sha256 must be a string" \
+    'exec = { a = { path = "/bin/true", sha256 = 5 } }' \
+    'exec: { a: { path: "/bin/true", sha256: 5 } }'
 refuse "an unknown command key" "unknown key 'timeout'" \
     'exec = { a = { path = "/bin/true", timeout = 5 } }' \
     'exec: { a: { path: "/bin/true", timeout: 5 } }'
@@ -284,6 +290,66 @@ refuse "hull/exec without an exec section" "requires an \`exec\` section" "" ""
 # On Linux the command broker runs the declared command (tests/
 # e2e_exec_broker.sh covers it in depth); on a host without one the app is
 # refused at start, and with --allow-degraded-sandbox exec.run fails.
+echo "== the hull check lint =="
+# hull check (and hull build) warn about risky declared commands; a warning
+# never fails the step. The import step must also resolve an app that
+# declares commands (the tool-side resolve once dropped the section).
+lint_app() {   # dir runtime
+    d=$1
+    rm -rf "$d"; mkdir -p "$d/tests"
+    if [ "$2" = lua ]; then
+        cat > "$d/app.lua" <<'APP'
+app.manifest({ modules = { "hull/exec@1" }, exec = {
+  ["sh-run"] = { path = "/bin/sh", argv = { "-c", { chars = "a-z" } } },
+  loose = { path = "/home/x/tool", argv = { "show", { allow_dash = true } } },
+  ok = { path = "/usr/bin/systemctl", argv = { "show", "--", { chars = "a-z" } },
+         sha256 = string.rep("ab", 32) },
+} })
+local exec = require("hull.exec")
+app.main(function() return 0 end)
+APP
+        printf 'test("ok", function() test.eq(1, 1) end)\n' > "$d/tests/test_app.lua"
+    else
+        cat > "$d/app.js" <<'APP'
+import { app } from "hull:app";
+import { exec } from "hull:exec";
+app.manifest({ modules: ["hull/exec@1"], exec: {
+  "sh-run": { path: "/bin/sh", argv: ["-c", { chars: "a-z" }] },
+  loose: { path: "/home/x/tool", argv: ["show", { allowDash: true }] },
+  ok: { path: "/usr/bin/systemctl", argv: ["show", "--", { chars: "a-z" }],
+        sha256: "ab".repeat(32) },
+} });
+app.main(() => 0);
+APP
+        printf 'test("ok", () => { test.eq(1, 1); });\n' > "$d/tests/test_app.js"
+    fi
+}
+for rt in lua js; do
+    d="$TMPDIR/lint_$rt"
+    lint_app "$d" $rt
+    out=$("$HULL" check "$d" 2>&1) && rc=0 || rc=$?
+    want_ok=1
+    for w in "WARN exec.sh-run: sh is a general-purpose program" \
+             "WARN exec.loose: /home/x/tool is outside" \
+             "WARN exec.loose: argv 2 may start with '-'" \
+             "WARN exec.loose: argv 2 has no chars or enum" \
+             "WARN exec.sh-run: argv 2 follows fixed arguments with no \"--\""; do
+        printf '%s\n' "$out" | grep -qF -- "$w" || { want_ok=0; break; }
+    done
+    if [ $want_ok = 1 ]; then pass "$rt: hull check warns about risky commands"
+    else fail "$rt: hull check warns about risky commands (missing: $w)" "$out"; fi
+    if printf '%s\n' "$out" | grep -q "WARN exec.ok"; then
+        fail "$rt: a narrow pinned command gets no warning" "$out"
+    else
+        pass "$rt: a narrow pinned command gets no warning"
+    fi
+    if printf '%s\n' "$out" | grep -q "import analysis failed\|requires an \`exec\` section"; then
+        fail "$rt: the import step resolves an app with commands" "$out"
+    else
+        pass "$rt: the import step resolves an app with commands"
+    fi
+done
+
 echo "== outside hull test"
 mkdir -p "$TMPDIR/run_lua" "$TMPDIR/run_js"
 cat > "$TMPDIR/run_lua/app.lua" <<'APP'

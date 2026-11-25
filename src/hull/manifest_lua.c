@@ -269,17 +269,6 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
     char where[96];
     snprintf(where, sizeof where, "exec.%s", name);
     if (lx_keys(L, t, EXEC_CMD_KEYS, b, where) != 0) return;
-    lua_getfield(L, t, "sha256");
-    int has_pin = !lua_isnil(L, -1);
-    lua_pop(L, 1);
-    if (has_pin) {
-        /* Parsed in a later PR together with the check that enforces it:
-         * until then a signed manifest must not advertise a pin nothing
-         * verifies. */
-        hl_exec_b_fail(b, "%s: sha256 is not supported yet (it lands with the "
-                       "broker's digest check); remove it", where);
-        return;
-    }
     int base = lua_gettop(L);
     size_t pl;
     const char *path = lx_str(L, t, "path", &pl, b, where);
@@ -292,8 +281,10 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
     int64_t se = lx_int(L, t, "stderr_max", b, where);
     int64_t conc = lx_int(L, t, "concurrency", b, where);
     int unix_sockets = lx_bool(L, t, "unix_sockets", b, where);
+    size_t hl;
+    const char *pin = lx_str(L, t, "sha256", &hl, b, where);
     hl_exec_b_cmd(b, name, strlen(name), path, pl, timeout, so, se, conc,
-                  unix_sockets);
+                  unix_sockets, pin, hl);
     lua_settop(L, base);
 
     /* env = { NAME = "value" }, sorted by name */

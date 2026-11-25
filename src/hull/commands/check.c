@@ -97,8 +97,11 @@ static int modules_step(const char *verb, const char *app_dir, const HlCommandEn
         return 1;
     }
     if (pid == 0) {
-        const char *margv[3] = { "check", verb, app_dir };
-        int rc = hl_cmd_modules(3, (char **)(uintptr_t)margv, env);  /* does not modify argv */
+        /* The manifest step also lints the exec section (warnings only). */
+        int lint = strcmp(verb, "list") == 0;
+        const char *margv[5] = { "check", verb, lint ? "--exec-lint" : app_dir,
+                                 lint ? app_dir : NULL, NULL };
+        int rc = hl_cmd_modules(lint ? 4 : 3, (char **)(uintptr_t)margv, env);  /* does not modify argv */
         fflush(NULL);
         _exit(rc < 0 ? 1 : rc & 0xff);   /* not exit(): the parent's atexit work is its own */
     }

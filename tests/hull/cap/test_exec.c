@@ -19,7 +19,7 @@
 static int build_unit_state(HlExecBuf *b, int64_t rmin, int64_t rmax)
 {
     hl_exec_b_init(b, NULL);
-    hl_exec_b_cmd(b, S("unit-state"), S("/usr/bin/systemctl"), -1, 64, -1, -1, 1);
+    hl_exec_b_cmd(b, S("unit-state"), S("/usr/bin/systemctl"), -1, 64, -1, -1, 1, NULL, 0);
     hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);   /* env */
     hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);   /* fs.read */
     hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);   /* fs.write */
@@ -41,7 +41,7 @@ static int build_one_slot(HlExecBuf *b, int dash, int64_t min, int64_t max,
                           const char *chars, const char *const *enums)
 {
     hl_exec_b_init(b, NULL);
-    hl_exec_b_cmd(b, S("cmd"), S("/usr/bin/tool"), -1, -1, -1, -1, 0);
+    hl_exec_b_cmd(b, S("cmd"), S("/usr/bin/tool"), -1, -1, -1, -1, 0, NULL, 0);
     hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
     hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
     hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
@@ -86,7 +86,7 @@ static int build_raw(HlExecBuf *b, const RawCmd *c)
 {
     hl_exec_b_init(b, NULL);
     hl_exec_b_cmd(b, c->name, strlen(c->name), c->path, strlen(c->path),
-                  c->timeout, c->so, c->se, c->conc, 0);
+                  c->timeout, c->so, c->se, c->conc, 0, NULL, 0);
     size_t m = hl_exec_b_count_begin(b);
     if (c->env_k) {
         hl_exec_b_str(b, c->env_k, strlen(c->env_k));
@@ -425,13 +425,13 @@ UTEST(exec_validate, too_many_and_duplicate_commands)
     for (int i = 0; i < HL_EXEC_MAX_COMMANDS + 1; i++) {
         char name[8];
         snprintf(name, sizeof name, "c%d", i);
-        hl_exec_b_cmd(&b, name, strlen(name), S("/bin/true"), -1, -1, -1, -1, 0);
+        hl_exec_b_cmd(&b, name, strlen(name), S("/bin/true"), -1, -1, -1, -1, 0, NULL, 0);
         for (int k = 0; k < 4; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
     }
     EXPECT_EQ(-1, hl_exec_b_finish(&b));
     hl_exec_b_init(&b, NULL);
     for (int i = 0; i < 2; i++) {
-        hl_exec_b_cmd(&b, S("same"), S("/bin/true"), -1, -1, -1, -1, 0);
+        hl_exec_b_cmd(&b, S("same"), S("/bin/true"), -1, -1, -1, -1, 0, NULL, 0);
         for (int k = 0; k < 4; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
     }
     EXPECT_EQ(-1, hl_exec_b_finish(&b));
@@ -515,6 +515,76 @@ UTEST(exec_names, valid_names)
     memset(longname, 'a', 65);
     EXPECT_FALSE(hl_exec_name_valid(longname, 65));
     EXPECT_TRUE(hl_exec_name_valid(longname, 64));
+}
+
+/* ── The sha256 pin (PR 4) ─────────────────────────────────────────── */
+
+static int build_pinned(HlExecBuf *b, const char *hex, size_t hex_len)
+{
+    hl_exec_b_init(b, NULL);
+    hl_exec_b_cmd(b, S("gpu"), S("/usr/bin/nvidia-smi"), -1, -1, -1, -1, 0,
+                  hex, hex_len);
+    for (int k = 0; k < 4; k++) hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
+    return hl_exec_b_finish(b);
+}
+
+UTEST(exec_pin, a_pin_is_encoded_and_read_back)
+{
+    static const char hex[] =
+        "00112233445566778899AABBCCDDEEFF00112233445566778899aabbccddeeff";
+    HlExecBuf b;
+    ASSERT_EQ(0, build_pinned(&b, hex, 64));
+    HlExecCmd c;
+    ASSERT_EQ(0, hl_exec_policy_at(b.data, b.len, 0, &c));
+    ASSERT_TRUE(c.sha256 != NULL);
+    EXPECT_TRUE(c.flags & HL_EXEC_CMD_SHA256);
+    for (int i = 0; i < 32; i++)
+        EXPECT_EQ((i % 16) * 0x11, c.sha256[i]);
+    /* what follows the pin still reads: no env, fs or argv */
+    EXPECT_EQ(0, c.n_env);
+    EXPECT_EQ(0, c.n_argv);
+    EXPECT_EQ(0, hl_exec_policy_validate(b.data, b.len, NULL, 0));
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_pin, no_pin_reads_as_null)
+{
+    HlExecBuf b;
+    ASSERT_EQ(0, build_pinned(&b, NULL, 0));
+    HlExecCmd c;
+    ASSERT_EQ(0, hl_exec_policy_at(b.data, b.len, 0, &c));
+    EXPECT_TRUE(c.sha256 == NULL);
+    EXPECT_FALSE(c.flags & HL_EXEC_CMD_SHA256);
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_pin, a_malformed_pin_fails_the_build)
+{
+    HlExecBuf b;
+    char hex[66];
+    memset(hex, 'a', sizeof hex);
+    EXPECT_EQ(-1, build_pinned(&b, hex, 63));
+    EXPECT_TRUE(strstr(b.err, "64 hex") != NULL);
+    hl_exec_buf_free(&b);
+    EXPECT_EQ(-1, build_pinned(&b, hex, 65));
+    hl_exec_buf_free(&b);
+    hex[10] = 'g';
+    EXPECT_EQ(-1, build_pinned(&b, hex, 64));
+    hl_exec_buf_free(&b);
+    EXPECT_EQ(-1, build_pinned(&b, "", 0));
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_pin, a_truncated_pin_is_refused)
+{
+    static const char hex[] =
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    HlExecBuf b;
+    ASSERT_EQ(0, build_pinned(&b, hex, 64));
+    /* the flag claims a pin the bytes do not hold */
+    for (size_t cut = 1; cut < b.len; cut++)
+        EXPECT_EQ(-1, hl_exec_policy_validate(b.data, b.len - cut, NULL, 0));
+    hl_exec_buf_free(&b);
 }
 
 UTEST_MAIN()

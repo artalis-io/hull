@@ -120,7 +120,7 @@ static HlExecBuf policy_one(const char *name, const char *path,
     HlExecBuf b;
     hl_exec_b_init(&b, NULL);
     hl_exec_b_cmd(&b, name, strlen(name), path, strlen(path), 60000, stdout_max,
-                  -1, conc, 0);
+                  -1, conc, 0, NULL, 0);
     for (int k = 0; k < 3; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
     size_t m = hl_exec_b_count_begin(&b);
     for (int i = 0; i < nfixed; i++) hl_exec_b_fixed(&b, fixed[i], strlen(fixed[i]));

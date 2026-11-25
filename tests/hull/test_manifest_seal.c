@@ -299,7 +299,7 @@ UTEST(manifest_seal, exec_policy_is_sealed_with_the_manifest)
     build_fixture(&src, &alloc);
     hl_exec_b_init(&src.exec, &alloc);
     hl_exec_b_cmd(&src.exec, "unit-state", 10, "/usr/bin/systemctl", 18,
-                  -1, -1, -1, -1, 1);
+                  -1, -1, -1, -1, 1, NULL, 0);
     for (int k = 0; k < 4; k++)
         hl_exec_b_count_end(&src.exec, hl_exec_b_count_begin(&src.exec), 0);
     ASSERT_EQ(0, hl_exec_b_finish(&src.exec));

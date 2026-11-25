@@ -30,6 +30,7 @@
 
 #include "hull/cap/exec_broker.h"
 #include "hull/cap/exec.h"
+#include "hull/cap/crypto.h"   /* the sha256 pin */
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"
@@ -358,6 +359,55 @@ static int elf_read(int fd, const char *real, char *interp, size_t isz,
     return 0;
 }
 
+/* The sha256 pin (§6.1): the bytes of the main executable, read from the
+ * very descriptor that will be exec'd. A file over HL_EXEC_PIN_MAX_BYTES
+ * is refused rather than hashed for ever. 0 / -1 (why says). */
+static int pin_check(const Cmd *cmd, int fd, char *why, size_t why_size)
+{
+    if (!cmd->c.sha256) return 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 0 ||
+        (uint64_t)st.st_size > HL_EXEC_PIN_MAX_BYTES) {
+        snprintf(why, why_size, "%s is too large to check its sha256 pin "
+                 "(over %u MiB)", cmd->real, (unsigned)(HL_EXEC_PIN_MAX_BYTES >> 20));
+        return -1;
+    }
+    static uint8_t buf[64 * 1024];
+    HlSha256Ctx h;
+    hl_cap_crypto_sha256_init(&h);
+    off_t off = 0;
+    for (;;) {
+        ssize_t n = pread(fd, buf, sizeof buf, off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) {
+            snprintf(why, why_size, "%s: reading it for its sha256 pin: %s",
+                     cmd->real, strerror(errno));
+            return -1;
+        }
+        if (n == 0) break;
+        (void)hl_cap_crypto_sha256_update(&h, buf, (size_t)n);
+        off += n;
+        if ((uint64_t)off > HL_EXEC_PIN_MAX_BYTES) {
+            snprintf(why, why_size, "%s grew past %u MiB while its sha256 pin "
+                     "was checked", cmd->real, (unsigned)(HL_EXEC_PIN_MAX_BYTES >> 20));
+            return -1;
+        }
+    }
+    uint8_t got[32];
+    (void)hl_cap_crypto_sha256_final(&h, got);
+    if (memcmp(got, cmd->c.sha256, sizeof got) == 0) return 0;
+    char hex[65];
+    static const char HEX[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        hex[2 * i] = HEX[got[i] >> 4];
+        hex[2 * i + 1] = HEX[got[i] & 15];
+    }
+    hex[64] = '\0';
+    snprintf(why, why_size, "%s does not match its sha256 pin (its sha256 is "
+             "%s); restore the binary or update the pin", cmd->real, hex);
+    return -1;
+}
+
 /* Open @p real and check it; with @p want_dev set, it must still be the
  * file found at policy load. The descriptor, or -1 (why says). */
 static int open_checked(const Cmd *cmd, char *why, size_t why_size)
@@ -385,6 +435,7 @@ static int open_checked(const Cmd *cmd, char *why, size_t why_size)
         close(fd);
         return -1;
     }
+    if (pin_check(cmd, fd, why, why_size) != 0) { close(fd); return -1; }
     return fd;
 }
 
@@ -407,6 +458,7 @@ static int cmd_load(Cmd *cmd, char *why, size_t why_size)
     int rc = leaf_ok(fd, cmd->real, &st, why, why_size);
     if (rc == 0) rc = elf_read(fd, cmd->real, raw_interp, sizeof raw_interp,
                                why, why_size);
+    if (rc == 0) rc = pin_check(cmd, fd, why, why_size);
     close(fd);
     if (rc != 0) return -1;
     cmd->dev = st.st_dev;

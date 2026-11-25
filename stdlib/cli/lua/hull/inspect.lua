@@ -194,6 +194,9 @@ local function main()
             for _, name in ipairs(names) do
                 local c = m.exec[name]
                 print("  " .. name .. "  " .. tostring(c.path))
+                if type(c.sha256) == "string" then
+                    print("    sha256 pin: " .. c.sha256:lower())
+                end
                 local argv = {}
                 for _, a in ipairs(c.argv or {}) do
                     argv[#argv + 1] = type(a) == "table" and slot_desc(a) or string.format("%q", a)

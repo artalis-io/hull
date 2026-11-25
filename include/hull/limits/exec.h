@@ -19,6 +19,7 @@
 #define HL_EXEC_MAX_FS              16          /* fs.read, and fs.write, each */
 #define HL_EXEC_MAX_ENUM            64
 #define HL_EXEC_POLICY_MAX_BYTES    (1u << 20)  /* the whole encoding */
+#define HL_EXEC_PIN_MAX_BYTES       (512u * 1024u * 1024u)  /* a pinned binary is hashed whole */
 
 /* A slot. */
 #define HL_EXEC_SLOT_DEFAULT_MIN    1
