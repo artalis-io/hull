@@ -1,7 +1,6 @@
 // hull:exec - run a command the manifest's `exec` section declares
-// (docs/design/exec_broker.md). Until the command broker lands, a call is
-// answered only by a `hull test` stub (test.execStub); elsewhere it throws
-// after the match.
+// (docs/design/exec_broker.md), through the command broker (native Linux).
+// Under `hull test` a call is answered only by a stub (test.execStub).
 declare module "hull:exec" {
     /** What one run of a declared command produced. */
     interface ExecResult {

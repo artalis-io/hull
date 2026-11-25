@@ -168,6 +168,53 @@ local function main()
             print("  [!] allow_dynamic_libraries: true  (RISKY - dlopen of native libs)")
         end
         print("")
+        -- Declared commands (docs/design/exec_broker.md §3): what each may run,
+        -- with which arguments, and the authority unix_sockets carries.
+        if type(m.exec) == "table" and next(m.exec) then
+            print("Commands (exec):")
+            local names = {}
+            for name in pairs(m.exec) do names[#names + 1] = name end
+            table.sort(names)
+            local function slot_desc(s)
+                if type(s.enum) == "table" then
+                    return "<one of: " .. table.concat(s.enum, ", ") .. ">"
+                end
+                local parts = {}
+                if s.prefix then parts[#parts + 1] = "prefix " .. string.format("%q", s.prefix) end
+                if s.suffix then parts[#parts + 1] = "suffix " .. string.format("%q", s.suffix) end
+                parts[#parts + 1] = "chars " .. (s.chars or "A-Za-z0-9._-")
+                parts[#parts + 1] = "len " .. (s.min or 1) .. ".." .. (s.max or 256)
+                local rep = s["repeat"]
+                if type(rep) == "table" then
+                    parts[#parts + 1] = "x" .. (rep.min or 1) .. ".." .. (rep.max or "?")
+                end
+                if s.allow_dash or s.allowDash then parts[#parts + 1] = "[!] may start with '-'" end
+                return "<" .. table.concat(parts, ", ") .. ">"
+            end
+            for _, name in ipairs(names) do
+                local c = m.exec[name]
+                print("  " .. name .. "  " .. tostring(c.path))
+                local argv = {}
+                for _, a in ipairs(c.argv or {}) do
+                    argv[#argv + 1] = type(a) == "table" and slot_desc(a) or string.format("%q", a)
+                end
+                if #argv > 0 then print("    argv: " .. table.concat(argv, " ")) end
+                local t = c.timeout_ms or c.timeoutMs or 5000
+                local so = c.stdout_max or c.stdoutMax or 65536
+                local se = c.stderr_max or c.stderrMax or 16384
+                print(string.format("    limits: %d ms, stdout %d, stderr %d, %d at once",
+                                    t, so, se, c.concurrency or 2))
+                if type(c.fs) == "table" then
+                    if c.fs.read then print("    fs.read:  " .. table.concat(c.fs.read, ", ")) end
+                    if c.fs.write then print("    fs.write: " .. table.concat(c.fs.write, ", ")) end
+                end
+                if c.unix_sockets or c.unixSockets then
+                    print("    local IPC: may connect to any pathname unix socket the service account")
+                    print("               can reach (not limited to the one it needs)")
+                end
+            end
+            print("")
+        end
     end
 
     -- ── Runtime caches (disclosure) ─────────────────────────────────

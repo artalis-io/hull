@@ -1119,6 +1119,94 @@ def inv15(tree, ctx):
     return findings
 
 
+# INV-16 ------------------------------------------------------------------
+# How it decides (docs/design/exec_broker.md section 11): a process is
+# created or replaced only by the files that already do it - the tool
+# runner, the dev / check supervisors, the child channel, the generation
+# builder, and the command broker. Any `fork` / `vfork` / `exec*` /
+# `fexecve` / `posix_spawn*` / `system` / `popen` call, or a raw syscall
+# number of one (__NR_* / SYS_* for execve, execveat, fork, vfork, clone,
+# clone3), in src/hull/ outside them is a finding: a new spawn site is a new
+# way out of the app sandbox and needs a reviewed allowlist entry. (The GPU
+# compile helper spawns through shared/child_channel.c; its seccomp filter
+# names __NR_execve, so it is listed too.)
+
+INV16_SPAWNERS = {
+    "src/hull/cap/tool.c", "src/hull/commands/dev.c", "src/hull/commands/check.c",
+    "src/hull/shared/child_channel.c", "src/hull/shared/generation.c",
+    "src/hull/cap/gpu_helper.c", "src/hull/cap/exec_broker.c",
+}
+INV16_CALL = re.compile(
+    r"\b(fork|vfork|execve|execveat|execv|execvp|execvpe|execl|execlp|execle|"
+    r"fexecve|posix_spawn|posix_spawnp|system|popen)\s*\(")
+INV16_NR = re.compile(r"\b(?:__NR|SYS)_(execve|execveat|fork|vfork|clone|clone3)\b")
+
+
+@rule("INV-16", "processes are created only by the files that already spawn")
+def inv16(tree, ctx):
+    findings, seen = [], set()
+    for p in tree.files("src/hull", exts=(".c", ".h")):
+        if p in INV16_SPAWNERS:
+            continue
+        cf = tree.cfile(p)
+        for pat in (INV16_CALL, INV16_NR):
+            for m in pat.finditer(cf.code):
+                sid = f"{p}:{cf.symbol_at(m.start())}"
+                if sid not in seen:
+                    seen.add(sid)
+                    findings.append((sid, f"{m.group(0).rstrip('( ')} at line "
+                                     f"{cf.line_of(m.start())}: a new spawn site "
+                                     "(the files that spawn are listed in INV-16)"))
+    return findings
+
+
+# INV-17 ------------------------------------------------------------------
+# How it decides (docs/design/exec_broker.md section 11): there is ONE
+# argument matcher. `hl_exec_slot_match` is called only by
+# `hl_exec_check_call` (src/hull/cap/exec.c), and every function in
+# src/hull/ that starts a declared command - one that calls
+# `hl_exec_op_start` / `hl_exec_submit` (the bindings) or `fork` in the
+# broker (src/hull/cap/exec_broker.c) - calls `hl_exec_check_call` itself,
+# or has same-file callers that all do, so neither side runs a command its
+# own match did not admit.
+
+INV17_SLOT = re.compile(r"\bhl_exec_slot_match\s*\(")
+INV17_START = {"hl_exec_op_start", "hl_exec_submit"}
+
+
+@rule("INV-17", "every declared-command start is matched by hl_exec_check_call")
+def inv17(tree, ctx):
+    findings = []
+    for p in tree.files("src/hull", exts=(".c",)):
+        cf = tree.cfile(p)
+        for m in INV17_SLOT.finditer(cf.code):
+            sym = cf.symbol_at(m.start())
+            if sym == "<file>":
+                continue    # its definition or a declaration, not a call
+            if p == "src/hull/cap/exec.c" and sym == "hl_exec_check_call":
+                continue
+            findings.append((f"{p}:{sym}", f"hl_exec_slot_match called at line "
+                             f"{cf.line_of(m.start())}: match through "
+                             "hl_exec_check_call, the one matcher"))
+        for fn in cf.funcs:
+            if fn.name in INV17_START or fn.name == "hl_exec_op_start":
+                continue    # the primitives' own definitions
+            starts = INV17_START & set(fn.calls)
+            if p == "src/hull/cap/exec_broker.c" and "fork" in fn.calls:
+                starts = starts | {"fork"}
+            if not starts or "hl_exec_check_call" in fn.calls:
+                continue
+            # A helper that starts the call for its caller passes when it has
+            # same-file callers and every one of them matches first.
+            callers = [g for g in cf.funcs if fn.name in g.calls]
+            if callers and all("hl_exec_check_call" in g.calls for g in callers):
+                continue
+            findings.append((f"{p}:{fn.name}", f"{', '.join(sorted(starts))} "
+                             "without hl_exec_check_call in the function or "
+                             "every same-file caller"))
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------

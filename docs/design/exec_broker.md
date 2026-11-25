@@ -1,7 +1,9 @@
 # Design: declared commands through a spawn broker (`hull/exec`)
 
-- **Status:** Proposed (review round 1 folded in: seccomp inheritance, child process creation,
-  broker-side admission, required Landlock rights, file identity vs content).
+- **Status:** PR 1 (#1210: manifest section, matcher, stubs) and PR 2 (the native Linux broker)
+  implemented; macOS / OpenBSD (PR 3) and the `sha256` pin (PR 4) planned. Review rounds 1-3
+  folded in: seccomp inheritance, child process creation, broker-side admission, required
+  Landlock rights, file identity vs content, `unix_sockets` scope, `sha256` until enforced.
 - **Motivation:** hsctl needs to read node state that only a system tool reports: `nvidia-smi`
   for GPUs, `systemctl show` for its own `hs-*` units. Today an app cannot run any program: the
   app sandbox has no `exec` / `proc` / `fork`, and `hl_tool_spawn` exists only in tool mode.
@@ -420,7 +422,9 @@ would not catch a filter that is too narrow.
 rule was added. A package upgrade that renames a new `nvidia-smi` over the old one gives it a
 new inode, which has no `EXECUTE` right. A domain can only narrow, and the app cannot respawn
 the broker (it cannot spawn). The broker detects the replacement by `(st_dev, st_ino)` (§6.1)
-before trying to exec, and the call fails coded as:
+before trying to exec. Under the broker's own domain the replacement cannot even be opened
+(its read right went with the old inode too), so an `EACCES` on the open is checked with `stat`,
+which Landlock does not mediate. Either way the call fails coded as:
 
 ```
 exec: /usr/bin/nvidia-smi was replaced since the app started; restart the app (ESTALE)
@@ -593,7 +597,8 @@ row's guarantees are a plan, not a claim.
 
 | Host | Status | Kernel layer | Guarantees demonstrated |
 |---|---|---|---|
-| Linux, native or cosmo APE, Landlock ABI 6+ | PR 2 | Landlock + seccomp (raw syscalls, as `gpu_helper.c` does on cosmo) | none yet; target is every row of §6.5 |
+| Linux, native, Landlock ABI 6+ | PR 2 | Landlock + seccomp (raw syscalls) | every row of §6.5: `tests/e2e_exec_broker.sh` on x86_64 (ABI 10) and aarch64 (ABI 8); §8 acceptance passed on spark-7468 (GB10, `hs-metrics`, 2026-11-25) |
+| Linux, cosmo APE | planned | as native, once the APE build carries the broker | none; refused at start (no broker) unless `--allow-degraded-sandbox` |
 | Linux, Landlock below ABI 6 | PR 2 | as above, minus the missing rights | refused unless `--allow-degraded-sandbox`, which names what is missing |
 | OpenBSD | **planned** (PR 3) | unveil `x` + pledge `execpromises` | none; union of grants, no per-child narrowing |
 | macOS | **planned** (PR 3) | Seatbelt `process-exec literal` | none; union of grants, no `execveat`, no PDEATHSIG |

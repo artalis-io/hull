@@ -25,6 +25,9 @@
 #include "internal.h"   /* hl_js_export_frozen, hl_js_internals, hl_js_get_length32 */
 #include "refusal.h"
 #include "hull/cap/exec.h"
+#include "hull/cap/exec_broker.h"
+#include "hull/shared/async.h"
+#include "hull/net_backend.h"
 #ifdef HL_ENABLE_DB
 #include "db_wait.h"    /* hl_js_db_refuse_wait */
 #endif
@@ -214,6 +217,106 @@ static JSValue build_result(JSContext *ctx, JSValueConst stub, const HlExecCmd *
     return res;
 }
 
+/* The broker's answer as the promise's value: the result object for DONE,
+ * else an error (BUSY carries the code busy). */
+/* The continuation's push_result signature fixes the parameter type. */
+// cppcheck-suppress constParameterCallback
+static JSValue exec_push(JSContext *ctx, void *driver)
+{
+    const HlExecOp *op = driver;
+    const HlExecReply *r = op ? op->reply : NULL;
+    if (!r) return JS_ThrowTypeError(ctx, "exec.run: no reply from the command broker");
+    if (r->kind == HL_EXEC_R_BUSY)
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowTypeError(ctx, "%s", r->msg));
+    if (r->kind != HL_EXEC_R_DONE) return JS_ThrowTypeError(ctx, "%s", r->msg);
+    /* The output is charged on the way out, 1 unit per 8 bytes. */
+    if (hl_js_budget_charge(ctx, (r->out_len + r->err_len) / 8)) return JS_EXCEPTION;
+    JSValue res = JS_NewObject(ctx);
+    JSValue s_out = byte_string(ctx, r->out, r->out_len);
+    JSValue s_err = byte_string(ctx, r->err, r->err_len);
+    JSValue ab = JS_NewArrayBufferCopy(ctx, r->out, r->out_len);
+    JSValue sig = r->signal[0] ? JS_NewString(ctx, r->signal) : JS_NULL;
+    if (JS_IsException(res) || JS_IsException(s_out) || JS_IsException(s_err) ||
+        JS_IsException(ab) || JS_IsException(sig)) {
+        JS_FreeValue(ctx, res); JS_FreeValue(ctx, s_out); JS_FreeValue(ctx, s_err);
+        JS_FreeValue(ctx, ab); JS_FreeValue(ctx, sig);
+        return JS_EXCEPTION;
+    }
+    JS_DefinePropertyValueStr(ctx, res, "status", JS_NewInt32(ctx, r->status), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "signal", sig, JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "stdout", s_out, JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "stderr", s_err, JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "stdoutBytes", ab, JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "timedOut", JS_NewBool(ctx, r->timed_out), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "stdoutTruncated", JS_NewBool(ctx, r->out_cut), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "stderrTruncated", JS_NewBool(ctx, r->err_cut), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "durationMs", JS_NewInt64(ctx, r->duration_ms), JS_PROP_C_W_E);
+    return res;
+}
+
+/* The call through the broker: gated as every Hull wait, submitted, and
+ * parked until the reply (the promise). JS_EXCEPTION with one pending. */
+static JSValue exec_run_broker(JSContext *ctx, HlJS *js, const char *name,
+                               size_t name_len, const char *const *args,
+                               const size_t *lens, size_t n, const HlExecCmd *cmd)
+{
+    if (!js || !hl_exec_broker_running() || !js->base.async_ctx)
+        return JS_ThrowTypeError(ctx, "exec.run('%s'): the command broker is not "
+                                 "running (this host has none, or it was lost)", name);
+    /* The fast admission check; the broker decides (§5.2). */
+    if (hl_exec_inflight() >= HL_EXEC_MAX_INFLIGHT ||
+        hl_exec_inflight_cmd(name, name_len) >= cmd->concurrency)
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY,
+                            JS_ThrowTypeError(ctx, "exec.run('%s'): too many calls "
+                                              "in flight", name));
+    if (hl_js_async_gate(ctx, js, "exec.run") != 0) return JS_EXCEPTION;
+#ifdef HL_ENABLE_DB
+    if (hl_js_db_refuse_wait(ctx, "exec.run") != 0) return JS_EXCEPTION;
+#endif
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx, js->base.alloc);
+    if (!actx) return JS_ThrowInternalError(ctx, "exec.run: out of memory");
+    JSValue fns[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, fns);
+    if (JS_IsException(promise)) { hl_async_ctx_free(actx); return JS_EXCEPTION; }
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
+        JSValue resolve, JSValue reject, HlAllocator *alloc,
+        JSValue (*push_result)(JSContext *, void *));
+    HlAsyncCont *cont = hl_js_async_cont_create(js, fns[0], fns[1], js->base.alloc,
+                                                exec_push);
+    if (!cont) {
+        JS_FreeValue(ctx, fns[0]);
+        JS_FreeValue(ctx, fns[1]);
+        JS_FreeValue(ctx, promise);
+        hl_async_ctx_free(actx);
+        return JS_ThrowInternalError(ctx, "exec.run: out of memory");
+    }
+    actx->cont = cont;
+    actx->detached = (hl_js_cont_suspend_conn(cont) == NULL);
+    char why[256];
+    if (hl_exec_op_start(actx, js->base.async_ctx, name, name_len, args, lens, n,
+                         cmd->timeout_ms, why, sizeof why) != 0) {
+        actx->cont->destroy(actx->cont);   /* never armed: frees resolve / reject */
+        actx->cont = NULL;
+        hl_async_ctx_free(actx);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowTypeError(ctx, "exec.run('%s'): %s", name, why);
+    }
+    if (!actx->detached) {
+        if (hl_js_op_suspend(js, (HlSuspendOp *)&actx->op) < 0) {
+            actx->cont->destroy(actx->cont);
+            actx->cont = NULL;
+            hl_async_ctx_cancel(actx);     /* frees the op: KILL */
+            JS_FreeValue(ctx, promise);
+            return JS_ThrowInternalError(ctx, "exec.run: failed to suspend");
+        }
+    } else {
+        /* No request holds it: a teardown cancels it, and the op's free
+         * sends KILL. */
+        hl_async_ctx_track(actx, &js->base.async_live);
+    }
+    return promise;
+}
+
 /* exec.run(name, args?) -> Promise<result> */
 static JSValue js_exec_run(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
@@ -302,11 +405,9 @@ static JSValue js_exec_run(JSContext *ctx, JSValueConst this_val,
 #endif
 
     JSValue stubs = exec_stubs(ctx);
-    if (!JS_IsObject(stubs)) {
+    if (!JS_IsObject(stubs)) {          /* not hull test: the broker runs it */
         JS_FreeValue(ctx, stubs);
-        JS_ThrowTypeError(ctx, "exec.run('%s'): this version of Hull has no "
-                          "command broker yet, so a declared command can only be "
-                          "answered by a hull test stub (test.execStub)", name);
+        ret = exec_run_broker(ctx, js, name, name_len, args, lens, n, &cmd);
         goto out;
     }
     JSValue stub = JS_GetPropertyStr(ctx, stubs, name);

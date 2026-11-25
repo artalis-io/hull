@@ -50,7 +50,8 @@
 #include "hull/cap/audit.h"
 #include "hull/cap/policy_seal.h"   /* hl_policy_seal_* - every build seals its policy */
 #include "hull/cap/gpu.h"           /* hl_gpu_ctx_open (cap/gpu_setup.c) */
-#include "hull/cap/gpu_helper.h"    /* the shader compile helper */
+#include "hull/cap/gpu_helper.h"
+#include "hull/cap/exec_broker.h"    /* the shader compile helper */
 #include "hull/signature.h"
 #include "hull/runtime_flags.h"
 #include "hull/cap/run_watchdog.h"   /* --max-run-ms */
@@ -341,6 +342,7 @@ static HlGpuCtx *cli_gpu;
 static void cli_gpu_close(void)
 {
     hl_gpu_helper_stop();
+    hl_exec_broker_stop();
     hl_gpu_ctx_close(cli_gpu);
     cli_gpu = NULL;
 }
@@ -404,6 +406,9 @@ int hull_serve(int argc, char **argv)
      * Before any argument parsing or app loading. */
     if (argc >= 2 && strcmp(argv[1], HL_GPU_HELPER_ARGV1) == 0)
         return hl_gpu_helper_main(argc >= 3 ? argv[2] : NULL);
+    /* The command broker (cap/exec_broker.c), the same way. */
+    if (argc >= 2 && strcmp(argv[1], HL_EXEC_BROKER_ARGV1) == 0)
+        return hl_exec_broker_main();
 
     /* No agent sidecars here: the dev session nonce is not the app's to read
      * (audit 36). */
@@ -594,6 +599,9 @@ int hull_serve(int argc, char **argv)
                      "WGSL source (gpu.dynamic_shaders) will be refused");
     }
 
+    /* The command broker, as serve.c starts it (before phase 1). */
+    (void)hl_exec_broker_start();
+
     /* Phase 1 sandbox: block exec/proc/fork before loading user code.
      * No-op on macOS (seatbelt is a single irreversible phase-2 profile). */
     if (!no_sandbox) {
@@ -709,6 +717,13 @@ int hull_serve(int argc, char **argv)
     if (!hl_gpu_manifest_dynamic_shaders(&manifest,
                                          rt->module_set))
         hl_gpu_helper_stop();
+
+    /* The declared commands: the one POLICY frame, before the phase-2
+     * sandbox. The app context refused an unusable section already. */
+    if (hl_exec_broker_apply(manifest.exec.data,
+                             manifest.exec.data ? manifest.exec.len : 0,
+                             allow_degraded_sandbox, no_sandbox) != 0)
+        return cli_fail(ctx, rt, be, async_ctx, pool, &manifest, NULL, NULL);
 
     /* Seal the manifest, exactly as serve.c does for the server build.
      *

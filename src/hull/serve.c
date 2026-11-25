@@ -107,6 +107,7 @@
 #endif
 #include "hull/cap/gpu.h"
 #include "hull/cap/gpu_helper.h"
+#include "hull/cap/exec_broker.h"
 #include "hull/runtime/cache_common.h"   /* hl_runtime_cache_code_off */
 
 #include <keel/http_cors.h>
@@ -1632,6 +1633,12 @@ static int hl_serve_init_app_context(HlServerState *s)
                      "WGSL source (gpu.dynamic_shaders) will be refused");
     }
 
+    /* The command broker (docs/design/exec_broker.md): spawned now for the
+     * same reason as the compile helper (phase 1 forbids spawning, the
+     * manifest is not known yet), and stopped once the manifest is applied
+     * if it declares no commands. A host without one is handled then. */
+    (void)hl_exec_broker_start();
+
     /* Phase 1 sandbox (exec/proc/fork blocked) before the context runs any
      * of the app's SQL or code; after the WAMR / GPU device init above. */
     if (!s->cfg.no_sandbox) {
@@ -2428,6 +2435,13 @@ static int hl_serve_wire_caps(HlServerState *s)
         hl_gpu_helper_stop();
     }
 
+    /* The declared commands: the one POLICY frame, from the sealed copy,
+     * before the phase-2 sandbox (exec_broker.h). */
+    if (hl_exec_broker_apply(s->manifest.exec.data,
+                             s->manifest.exec.data ? s->manifest.exec.len : 0,
+                             s->cfg.allow_degraded_sandbox, s->cfg.no_sandbox) != 0)
+        return -1;
+
     /* Wire fs_cfg from manifest (if app declares fs.read OR fs.write
      * paths - both blob.* and fs.mmap need the cfg). The fs.read/fs.write grants
      * are COMPILED into the path-authorization policy (sec. 6): the
@@ -3108,6 +3122,10 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
      * so code resumed now cannot submit to a pool being freed, and is marked
      * shutting down first, so a cancelled timer handler is not rescheduled
      * onto a loop that is going away (audit 16). */
+    /* The command broker while the loop is alive (its watcher is on it):
+     * it kills its children; a pending exec.run is cancelled below with its
+     * connection or detached op (design §7, step 1). */
+    hl_exec_broker_stop();
     if (s->thread_pool) {
         HlRuntime *rt = s->app ? hl_app_context_runtime(s->app) : NULL;
         if (rt) { rt->thread_pool = NULL; rt->shutting_down = 1; }
@@ -3207,6 +3225,7 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
      * #ifdef-gated or the GPU context leaks on shutdown. hl_cap_gpu_destroy
      * lives in base-resident gpu.c and is NULL-safe + idempotent. */
     hl_gpu_helper_stop();
+    hl_exec_broker_stop();
     if (gpu_ctx_ok) {
         hl_gpu_ctx_close(gpu_ctx);
         gpu_ctx = NULL;
@@ -3499,6 +3518,9 @@ int hull_serve(int argc, char **argv)
      * before any argument parsing or app loading. */
     if (argc >= 2 && strcmp(argv[1], HL_GPU_HELPER_ARGV1) == 0)
         return hl_gpu_helper_main(argc >= 3 ? argv[2] : NULL);
+    /* The command broker (cap/exec_broker.c), the same way. */
+    if (argc >= 2 && strcmp(argv[1], HL_EXEC_BROKER_ARGV1) == 0)
+        return hl_exec_broker_main();
 
     HlServerState s;
     memset(&s, 0, sizeof(s));

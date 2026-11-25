@@ -2689,6 +2689,39 @@ manifest string's U+009B as a raw CSI). `tool.escape` still puts app text on one
 taken from the working directory (`./build/wamrc`, `./build/libhull_platform*.a`,
 `./build/platform.sig`); `hull build --platform-sig PATH` names a platform.sig explicitly.
 
+**Declared commands: the command broker (`hull/exec`, docs/design/exec_broker.md).** The app
+process never gains exec / fork / clone. A command the manifest's `exec` section declares (a path,
+fixed argv, slots matched by `cap/exec.c`'s one matcher, `hl_exec_check_call`; the section encoded
+once by both extractors and sealed with the manifest) is run by a broker: this binary with argv[1]
+`HL_EXEC_BROKER_ARGV1` (`cap/exec_broker.c`), spawned by both runners before phase 1 like the GPU
+compile helper, sent ONE `POLICY` frame by `hl_exec_broker_apply` once the manifest is applied and
+checked (before phase 2), and stopped when it declares no commands. The broker validates and loads
+the policy (realpath, ELF only - a `#!` script is refused - every directory root-owned and writable
+by its owner only, no setuid / setgid, no file capabilities, dev / ino recorded), refuses to start
+on Landlock below ABI 6 unless `--allow-degraded-sandbox` (one `exec: degraded:` line per missing
+right), then locks itself: NO_NEW_PRIVS, a Landlock domain with EXECUTE only on the declared
+binaries and their `PT_INTERP`, and a seccomp filter that is the CEILING every child inherits (it
+admits `AF_UNIX` sockets for `systemctl`; a later filter can only narrow). Each RUN is admitted and
+matched again by the broker (in-flight cap, per-command concurrency, live ids, 32 MiB of reserved
+output held until delivered - the binding's checks are only a fast path), the binary re-opened and
+re-checked (a replaced inode is `ESTALE`: restart the app), and the child set up between fork and
+exec: `PR_SET_PDEATHSIG(SIGKILL)` + a `getppid` check, `setsid`, `/dev/null` stdin, capped pipes,
+a fixed environment, rlimits, its own narrower Landlock domain (device ioctls on its own `fs.write`
+devices only), and a stacked seccomp filter refusing process creation (`fork` / `vfork`, `clone`
+without `CLONE_THREAD`, `clone3` as ENOSYS), every credential change and `PR_SET_PDEATHSIG`, and
+`AF_UNIX` unless `unix_sockets`; then `execveat` of the checked descriptor. No child can create a
+process, so PDEATHSIG covers the whole job, and a broker killed with SIGKILL takes its children
+with it. `exec.run` parks like `hull.sleep` (attached or detached `HlAsyncCtx`, `hl_exec_op_start`);
+the op's free sends `KILL`, so every cancel path stops the child; a broker lost while serving fails
+the waiting calls, and teardown stops it in step (1) while the loop is alive. Under `hull test` only
+stubs answer. Windows is refused at start; a host with no broker is refused unless
+`--allow-degraded-sandbox` (exec.run then fails). **A new process-creating call site (`fork`,
+`exec*`, `posix_spawn*`, `system`, `popen`, or a raw syscall number of one) must be in a file that
+already spawns, else reviewed (INV-16); a new path that starts a declared command must match it
+through `hl_exec_check_call` first, and nothing else calls `hl_exec_slot_match` (INV-17).** Tests:
+`tests/e2e_exec.sh` (`make e2e-exec`), `tests/e2e_exec_broker.sh` (needs `make HL_EXEC_TEST_HOOKS=1`,
+CI job `exec-broker`), `test_exec`, `fuzz_exec_policy`, `fuzz_exec_slot`.
+
 **A cosmo APE only gets a kernel sandbox on Linux and OpenBSD.** Cosmopolitan's
 `pledge()`/`unveil()` enforce where the host gives them a mechanism (seccomp-bpf
 + Landlock on Linux, the native syscalls on OpenBSD); on Windows, macOS and the
@@ -2942,7 +2975,7 @@ Key findings to be aware of:
 - Keel's router stores the method / pattern pointers (and middleware / ws-upgrade config pointers) it is given **without copying**: everything handed to `kl_http_router_add*` / `_use` / `_use_post` / `kl_http_server_route*` / `_use*` / `_ws_upgrade` must be Hull-owned and outlive the server - never a `JS_ToCString` / `lua_tostring` result (the route contexts `HlJSRoute` / `HlLuaRoute` own copies, ws / sse routes a `path[256]`; audit 11 H1). Every registration failure (allocation, conversion, a Keel refusal) fails the wiring so the app refuses to start; a dropped middleware must never fail open
 - Public Hull functions prefixed with `hl_` (capabilities: `hl_cap_*`, tools: `hl_tool_*`, commands: `hl_cmd_*`)
 - Keel functions prefixed with `kl_` (see vendor/keel/CLAUDE.md)
-- **Invariants are linted.** `make check-invariants` (`scripts/check_invariants.py`, CI job `invariants`, also in `make lint`) checks INV-1..INV-15: bindings are registered with the binding dispatcher (`hl_lua_setfuncs` / `hl_lua_newlib` / `hl_lua_pushcfunction`, `hl_js_set_function_list`), no `sqlite3_*` outside `cap/`, JS parking ops call `hl_js_db_refuse_wait`, JS entries end through `hl_js_entry_end_txn_check`, disk loaders check `hl_vfs_embedded`, terminal output goes through the escapers, no `JS_RunGC` outside `hl_js_gc_for_retry`, SQLite opens register with `hl_db_live_file_add` first, Lua resumes pass the resumer, vendored-engine changes carry a documented `HULL PATCH NNNN`, Windows app-path checks use the shared predicate, GPU contexts open through `hl_gpu_ctx_open`, GPU device mutexes are taken through `dev_lock`, development disk loaders consult the pipeline generation overlay first, a JS class whose `close()` clears its opaque never reads `this` with `JS_GetOpaque2`. Justified exceptions go in `scripts/invariants_allowlist.txt` with a reason (a stale entry fails too). **Any new "a new X must Y" statement added to this file must add a lint rule, with good / bad fixtures under `tests/invariants/fixtures/`, in the same PR** ([docs/invariants/README.md](docs/invariants/README.md)). Audit fixes follow [docs/audit_process.md](docs/audit_process.md): the A1 / A2 / A3 rubric, a `<area>_audit<N>.<case>` test that fails on the pre-fix code, an independent review pass, the batch cap.
+- **Invariants are linted.** `make check-invariants` (`scripts/check_invariants.py`, CI job `invariants`, also in `make lint`) checks INV-1..INV-17: bindings are registered with the binding dispatcher (`hl_lua_setfuncs` / `hl_lua_newlib` / `hl_lua_pushcfunction`, `hl_js_set_function_list`), no `sqlite3_*` outside `cap/`, JS parking ops call `hl_js_db_refuse_wait`, JS entries end through `hl_js_entry_end_txn_check`, disk loaders check `hl_vfs_embedded`, terminal output goes through the escapers, no `JS_RunGC` outside `hl_js_gc_for_retry`, SQLite opens register with `hl_db_live_file_add` first, Lua resumes pass the resumer, vendored-engine changes carry a documented `HULL PATCH NNNN`, Windows app-path checks use the shared predicate, GPU contexts open through `hl_gpu_ctx_open`, GPU device mutexes are taken through `dev_lock`, development disk loaders consult the pipeline generation overlay first, a JS class whose `close()` clears its opaque never reads `this` with `JS_GetOpaque2`, processes are created only by the files that already spawn, and every declared-command start is matched by `hl_exec_check_call`. Justified exceptions go in `scripts/invariants_allowlist.txt` with a reason (a stale entry fails too). **Any new "a new X must Y" statement added to this file must add a lint rule, with good / bad fixtures under `tests/invariants/fixtures/`, in the same PR** ([docs/invariants/README.md](docs/invariants/README.md)). Audit fixes follow [docs/audit_process.md](docs/audit_process.md): the A1 / A2 / A3 rubric, a `<area>_audit<N>.<case>` test that fails on the pre-fix code, an independent review pass, the batch cap.
 
 ## App-facing API reference (stdlib, middleware, compute, GPU)
 

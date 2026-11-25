@@ -1061,6 +1061,14 @@ HL_GPU_HELPER_TEST_HOOKS ?= 0
 ifeq ($(HL_GPU_HELPER_TEST_HOOKS),1)
   CFLAGS += -DHL_GPU_HELPER_TEST_HOOKS
 endif
+# The command broker's test hooks (cap/exec_broker.c): a binary owned by
+# this user passes the root-ownership check (no sudo in a test run), the
+# broker's pid and a probe's readiness are logged. Only with
+# `make HL_EXEC_TEST_HOOKS=1` (tests/e2e_exec_broker.sh); never in a release.
+HL_EXEC_TEST_HOOKS ?= 0
+ifeq ($(HL_EXEC_TEST_HOOKS),1)
+  CFLAGS += -DHL_EXEC_TEST_HOOKS
+endif
 # host_match is a domain-free leaf util (src/hull/utils/host_match.c) shared by
 # the db / http / smtp host allowlists. Its link footprint is coextensive with
 # the cap layer that calls it, so it rides in CAP_OBJS (which also feeds
@@ -2254,6 +2262,7 @@ BUILD_FINGERPRINT := \
   WASM=$(HL_ENABLE_WASM)|\
   GPU=$(HL_ENABLE_GPU)|\
   GPU_HELPER_HOOKS=$(HL_GPU_HELPER_TEST_HOOKS)|\
+  EXEC_HOOKS=$(HL_EXEC_TEST_HOOKS)|\
   TUI=$(HL_ENABLE_TUI)|\
   TUI_TC=$(HL_TUI_TOOLCHAIN)|\
   IMAGE=$(HL_ENABLE_IMAGE)|\
@@ -3873,7 +3882,7 @@ check-module-deps-selftest:                 ## prove the dep gate bites, then go
 # checks the vendored-engine diff against INVARIANTS_BASE (default: the
 # merge-base with origin/main, skipped when that ref is absent).
 .PHONY: check-invariants check-invariants-selftest
-check-invariants:                           ## gate: INV-1..INV-15 invariant lint
+check-invariants:                           ## gate: INV-1..INV-17 invariant lint
 	@python3 scripts/check_invariants.py $(if $(INVARIANTS_BASE),--base $(INVARIANTS_BASE))
 check-invariants-selftest:                  ## prove each invariant rule bites on its fixtures
 	@sh tests/check_invariants_selftest.sh

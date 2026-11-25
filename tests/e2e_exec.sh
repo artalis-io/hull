@@ -2,9 +2,8 @@
 # e2e_exec.sh: hull/exec PR 1 (docs/design/exec_broker.md) - the manifest's
 # `exec` section, the argument matcher and the hull test stubs, both runtimes.
 #
-# There is no command broker yet: a declared command is answered only by a
-# test.exec_stub / test.execStub stub, after the full match; elsewhere the
-# call fails naming the missing broker. Checked here:
+# Under hull test a declared command is answered only by a test.exec_stub /
+# test.execStub stub, after the full match. Checked here:
 #   - under hull test: a stub answers, its output cut to stdout_max; a stub
 #     function gets a copy of the arguments; option injection, a byte outside
 #     the slot's class, too few / too many values and an undeclared name are
@@ -13,7 +12,9 @@
 #   - at load: an unusable section refuses the app (sha256, an unknown key, a
 #     typo inside a slot, a non-integer, a bad name, `repeat` on a non-last
 #     entry, fs.write outside /dev /run /tmp), and hull/exec needs a section;
-#   - outside hull test: exec.run fails, naming the missing broker.
+#   - outside hull test: on Linux the broker runs the command; elsewhere the
+#     app is refused at start, or with --allow-degraded-sandbox exec.run
+#     fails.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -280,31 +281,48 @@ refuse "hull/exec without an exec section" "requires an \`exec\` section" "" ""
 
 # ── Outside hull test ─────────────────────────────────────────────────
 
-echo "== outside hull test =="
-d="$TMPDIR/run_lua"
-mkdir -p "$d"
-cat > "$d/app.lua" <<'EOF'
+# On Linux the command broker runs the declared command (tests/
+# e2e_exec_broker.sh covers it in depth); on a host without one the app is
+# refused at start, and with --allow-degraded-sandbox exec.run fails.
+echo "== outside hull test"
+mkdir -p "$TMPDIR/run_lua" "$TMPDIR/run_js"
+cat > "$TMPDIR/run_lua/app.lua" <<'APP'
 app.manifest({ modules = { "hull/exec@1" }, exec = { a = { path = "/bin/true" } } })
 local exec = require("hull.exec")
 app.main(function()
-  local ok, err = pcall(exec.run, "a")
-  if ok then return 3 end
-  return tostring(err):find("no command broker yet", 1, true) and 0 or 4
+  local ok, r = pcall(exec.run, "a")
+  if ok then return r.status == 0 and 0 or 5 end
+  return tostring(r):find("broker is not running", 1, true) and 7 or 4
 end)
-EOF
-if (cd "$d" && "$HULL" app.lua >/dev/null 2>&1); then pass "lua: no broker yet"; else fail "lua: no broker yet"; fi
-d="$TMPDIR/run_js"
-mkdir -p "$d"
-cat > "$d/app.js" <<'EOF'
+APP
+cat > "$TMPDIR/run_js/app.js" <<'APP'
 import { app } from "hull:app";
 import { exec } from "hull:exec";
 app.manifest({ modules: ["hull/exec@1"], exec: { a: { path: "/bin/true" } } });
-app.main(() => {
-  try { exec.run("a"); return 3; }
-  catch (e) { return String(e).includes("no command broker yet") ? 0 : 4; }
+app.main(async () => {
+  try { const r = await exec.run("a"); return r.status === 0 ? 0 : 5; }
+  catch (e) { return String(e).includes("broker is not running") ? 7 : 4; }
 });
-EOF
-if (cd "$d" && "$HULL" app.js >/dev/null 2>&1); then pass "js: no broker yet"; else fail "js: no broker yet"; fi
+APP
+for rt in lua js; do
+    entry="app.$rt"
+    if [ "$(uname -s)" = Linux ]; then
+        flags=""
+        abi=$(python3 -c 'import ctypes; print(ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1))' 2>/dev/null || echo 0)
+        [ "$abi" -lt 6 ] 2>/dev/null && flags="--allow-degraded-sandbox"
+        rc=0; out=$(cd "$TMPDIR/run_$rt" && "$HULL" $flags "$entry" 2>&1) || rc=$?
+        if [ "$rc" = 0 ]; then pass "$rt: the broker runs a declared command"
+        else fail "$rt: the broker runs a declared command (rc=$rc)" "$out"; fi
+    else
+        rc=0; out=$(cd "$TMPDIR/run_$rt" && "$HULL" "$entry" 2>&1) || rc=$?
+        if [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -qF "has no command broker"; then
+            pass "$rt: no broker on this host: refused at start"
+        else fail "$rt: no broker on this host: refused at start (rc=$rc)" "$out"; fi
+        rc=0; out=$(cd "$TMPDIR/run_$rt" && "$HULL" --allow-degraded-sandbox "$entry" 2>&1) || rc=$?
+        if [ "$rc" = 7 ]; then pass "$rt: --allow-degraded-sandbox starts, exec.run fails"
+        else fail "$rt: --allow-degraded-sandbox starts, exec.run fails (rc=$rc)" "$out"; fi
+    fi
+done
 
 echo
 echo "e2e_exec: $PASS passed, $FAIL failed"
