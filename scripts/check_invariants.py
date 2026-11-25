@@ -1123,7 +1123,8 @@ def inv15(tree, ctx):
 # How it decides (docs/design/exec_broker.md section 11): a process is
 # created or replaced only by the files that already do it - the tool
 # runner, the dev / check supervisors, the child channel, the generation
-# builder, and the command broker. Any `fork` / `vfork` / `exec*` /
+# builder, and the command broker (its portable core and its two host
+# backends, which hold the exec itself). Any `fork` / `vfork` / `exec*` /
 # `fexecve` / `posix_spawn*` / `system` / `popen` call, or a raw syscall
 # number of one (__NR_* / SYS_* for execve, execveat, fork, vfork, clone,
 # clone3), in src/hull/ outside them is a finding: a new spawn site is a new
@@ -1135,6 +1136,7 @@ INV16_SPAWNERS = {
     "src/hull/cap/tool.c", "src/hull/commands/dev.c", "src/hull/commands/check.c",
     "src/hull/shared/child_channel.c", "src/hull/shared/generation.c",
     "src/hull/cap/gpu_helper.c", "src/hull/cap/exec_broker.c",
+    "src/hull/cap/exec_broker_linux.c", "src/hull/cap/exec_broker_macos.c",
 }
 INV16_CALL = re.compile(
     r"\b(fork|vfork|execve|execveat|execv|execvp|execvpe|execl|execlp|execle|"

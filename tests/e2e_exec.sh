@@ -353,7 +353,7 @@ done
 echo "== outside hull test"
 mkdir -p "$TMPDIR/run_lua" "$TMPDIR/run_js"
 cat > "$TMPDIR/run_lua/app.lua" <<'APP'
-app.manifest({ modules = { "hull/exec@1" }, exec = { a = { path = "/bin/true" } } })
+app.manifest({ modules = { "hull/exec@1" }, exec = { a = { path = "/usr/bin/true" } } })
 local exec = require("hull.exec")
 app.main(function()
   local ok, r = pcall(exec.run, "a")
@@ -364,7 +364,7 @@ APP
 cat > "$TMPDIR/run_js/app.js" <<'APP'
 import { app } from "hull:app";
 import { exec } from "hull:exec";
-app.manifest({ modules: ["hull/exec@1"], exec: { a: { path: "/bin/true" } } });
+app.manifest({ modules: ["hull/exec@1"], exec: { a: { path: "/usr/bin/true" } } });
 app.main(async () => {
   try { const r = await exec.run("a"); return r.status === 0 ? 0 : 5; }
   catch (e) { return String(e).includes("broker is not running") ? 7 : 4; }
@@ -372,10 +372,13 @@ app.main(async () => {
 APP
 for rt in lua js; do
     entry="app.$rt"
-    if [ "$(uname -s)" = Linux ]; then
+    os=$(uname -s)
+    if [ "$os" = Linux ] || [ "$os" = Darwin ]; then
         flags=""
-        abi=$(python3 -c 'import ctypes; print(ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1))' 2>/dev/null || echo 0)
-        [ "$abi" -lt 6 ] 2>/dev/null && flags="--allow-degraded-sandbox"
+        if [ "$os" = Linux ]; then
+            abi=$(python3 -c 'import ctypes; print(ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1))' 2>/dev/null || echo 0)
+            [ "$abi" -lt 6 ] 2>/dev/null && flags="--allow-degraded-sandbox"
+        fi
         rc=0; out=$(cd "$TMPDIR/run_$rt" && "$HULL" $flags "$entry" 2>&1) || rc=$?
         if [ "$rc" = 0 ]; then pass "$rt: the broker runs a declared command"
         else fail "$rt: the broker runs a declared command (rc=$rc)" "$out"; fi

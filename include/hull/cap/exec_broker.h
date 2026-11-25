@@ -7,11 +7,11 @@
  * exactly one POLICY frame once the manifest is applied and checked, and
  * from then on only asks it to RUN a declared command by name with
  * arguments; the broker matches them again (the same hl_exec_check_call),
- * forks the child under its own Landlock domain and seccomp filter, and
+ * forks the child under the host's confinement (exec_platform.h), and
  * answers DONE with the output. The app process itself keeps no
  * exec / fork / clone.
  *
- * Supported on native Linux. Elsewhere hl_exec_broker_start returns -1 and
+ * Supported on native Linux and macOS. Elsewhere hl_exec_broker_start returns -1 and
  * an app with an `exec` section is refused at start (unless
  * --allow-degraded-sandbox on a host that is not Windows, where exec.run
  * then fails).
@@ -27,7 +27,9 @@
 
 #define HL_EXEC_BROKER_ARGV1 "__hull_exec_broker"
 
-#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+/* The hosts with a backend (hull/cap/exec_platform.h): native Linux
+ * (cap/exec_broker_linux.c) and macOS (cap/exec_broker_macos.c). */
+#if (defined(__linux__) || defined(__APPLE__)) && !defined(__COSMOPOLITAN__)
 #define HL_EXEC_BROKER_SUPPORTED 1
 #endif
 
