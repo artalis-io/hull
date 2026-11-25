@@ -188,7 +188,7 @@ local function main()
                 parts[#parts + 1] = "len " .. tostring(s.min or 1) .. ".." .. tostring(s.max or 256)
                 local rep = s["repeat"]
                 if type(rep) == "table" then
-                    parts[#parts + 1] = "x" .. (rep.min or 1) .. ".." .. (rep.max or "?")
+                    parts[#parts + 1] = "x" .. tostring(rep.min or 1) .. ".." .. tostring(rep.max or "?")
                 end
                 if s.allow_dash or s.allowDash then parts[#parts + 1] = "[!] may start with '-'" end
                 return "<" .. table.concat(parts, ", ") .. ">"
@@ -231,7 +231,7 @@ local function main()
                                       or esc(string.format("%q", tostring(a)))
                 end
                 if #argv > 0 then print("    argv: " .. table.concat(argv, " ")) end
-                local function num(v, d) return type(v) == "number" and v or d end
+                local function num(v, d) return math.tointeger(v) or d end
                 local t = num(c.timeout_ms or c.timeoutMs, 5000)
                 local so = num(c.stdout_max or c.stdoutMax, 65536)
                 local se = num(c.stderr_max or c.stderrMax, 16384)

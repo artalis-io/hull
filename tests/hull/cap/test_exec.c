@@ -1066,4 +1066,32 @@ UTEST(exec_child_audit53, unwalkable_root_containment_is_refused)
     rm_list(root, made);
 }
 
+/* Review of the audit 53 fix: the walk needs only the search right, as a
+ * path lookup does, so an app under a directory the service account may pass
+ * through but not list (mode 0711) still gets its directory grants. */
+UTEST(exec_child_audit53, a_search_only_ancestor_is_walked)
+{
+    if (geteuid() == 0) { UTEST_SKIP("root ignores the directory mode"); }
+    char root[] = "/tmp/hull-exec-a53s-XXXXXX";
+    ASSERT_TRUE(mkdtemp(root) != NULL);
+    char top[PATH_MAX], app[PATH_MAX + 16], st[PATH_MAX + 16], why[192];
+    snprintf(top, sizeof top, "%s/top", root);
+    mk(root, "top", 1);
+    mk(top, "app", 1);
+    mk(top, "app/out", 1);
+    mk(top, "st", 1);
+    snprintf(app, sizeof app, "%s/app", top);
+    snprintf(st, sizeof st, "%s/st", top);
+    ASSERT_EQ(0, chmod(top, 0311));             /* search, no read */
+    HlExecChildRoots r = { app, st, NULL, 0 };
+    HlExecChildGrant g;
+    int rc = hl_exec_child_grant_open(&r, "out/", 1, &g, why, sizeof why);
+    if (rc == 0) close(g.fd);
+    (void)chmod(top, 0700);
+    EXPECT_EQ(0, rc);
+    if (rc != 0) printf("        refused: %s\n", why);
+    static const char *const made[] = { "top/app/out", "top/app", "top/st", "top", NULL };
+    rm_list(root, made);
+}
+
 UTEST_MAIN()

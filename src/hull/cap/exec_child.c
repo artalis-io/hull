@@ -155,8 +155,12 @@ static int id_eq(const Id *a, const struct stat *st)
  * exist) or DC_UNKNOWN (a step failed, or the walk ran past its depth): an
  * answer it cannot give is never "no" (audit 53). */
 enum { DC_NO = 0, DC_YES = 1, DC_ABSENT = 2, DC_UNKNOWN = 3 };
-#ifdef O_PATH
-#define DC_OPEN (O_PATH | O_DIRECTORY | O_CLOEXEC)   /* no read right needed */
+/* Only the search right is needed, as for a path lookup: an ancestor the
+ * service account may pass through but not list (mode 0711) is walked. */
+#if defined(O_PATH)
+#define DC_OPEN (O_PATH | O_DIRECTORY | O_CLOEXEC)
+#elif defined(O_SEARCH)
+#define DC_OPEN (O_SEARCH | O_CLOEXEC)               /* macOS: O_EXEC | O_DIRECTORY */
 #else
 #define DC_OPEN (O_RDONLY | O_DIRECTORY | O_CLOEXEC)
 #endif
@@ -429,7 +433,8 @@ int hl_exec_child_grant_open(const HlExecChildRoots *r, const char *raw, int wri
             }
             if (dc != DC_NO) {
                 snprintf(why, why_size, "cannot be checked against the %s directory "
-                         "(it could not be walked); refused", k ? "state" : "app");
+                         "(%s); refused", k ? "state" : "app",
+                         dc == DC_ABSENT ? "it does not exist" : "it could not be walked");
                 goto done;
             }
         }

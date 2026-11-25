@@ -501,7 +501,7 @@ else
     pass "exec_inspect_audit53.forge: a newline in a grant stays on its line"
 fi
 cat > "$d/package.sig" <<'SIG'
-{"manifest":{"modules":["hull/exec@1"],"exec":{"bad":{"path":"/bin/cat","manifest":{"fs":{"read":[{}]}},"host":{"read":[1,"/etc"]},"argv":[{"enum":[{}]}]}}}}
+{"manifest":{"modules":["hull/exec@1"],"exec":{"bad":{"path":"/bin/cat","manifest":{"fs":{"read":[{}]}},"host":{"read":[1,"/etc"]},"argv":[{"enum":[{}]},{"repeat":{"min":{},"max":[]}}],"timeout_ms":1.5}}}}
 SIG
 out=$("$HULL" inspect "$d" 2>&1) && rc=0 || rc=$?
 if printf '%s\n' "$out" | grep -q "invalid value\|attempt to"; then

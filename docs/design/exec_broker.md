@@ -229,7 +229,8 @@ take; not this section.)
   to be it is removed). Also a directory that is either root or an ancestor of one (a state
   directory inside the app directory, or the reverse). That check walks up from the root by
   `..` comparing inodes; a walk it cannot finish (a directory it cannot search, no descriptor
-  left, past 256 levels) refuses the grant rather than reading as "not contained" (audit 53);
+  left, past 256 levels), or a root that does not exist, refuses the grant rather than reading
+  as "not contained" (audit 53);
 - a grant holding a control character (it would be quoted in the broker's report and the
   start error);
 - for a write grant, any database file the app's registry would open by name - the default
