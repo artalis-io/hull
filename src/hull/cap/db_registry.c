@@ -617,33 +617,26 @@ int hl_db_registry_file_paths(HlDbRegistry *reg, char (*out)[PATH_MAX], int max)
         for (int i = 0; i < reg->manifest->databases.named_count && nn < 66; i++)
             if (reg->manifest->databases.named[i].name)
                 names[nn++] = reg->manifest->databases.named[i].name;
-    for (int i = 0; i < nn && n < max; i++) {
+    int total = 0;
+    for (int i = 0; i < nn; i++) {
         const char *err = NULL;
         char buf[PATH_MAX + 64];
         const char *dsn = lookup_dsn(reg, names[i], &err, buf, sizeof buf);
         if (!dsn) continue;
         const char *f = hl_dsn_file_path(dsn);          /* NULL: network, :memory: */
         if (!f || !f[0] || strcmp(f, ":memory:") == 0) continue;
-        /* The file itself when it exists (a symbolic link to it resolved),
-         * else its directory resolved plus its name. */
+        /* The file's real path, or - its directory not made yet on a first
+         * start - its nearest existing ancestor's real path plus the rest:
+         * the database must be protected before it exists. */
         char real[PATH_MAX];
-        if (!realpath(f, real)) {
-            char dir[PATH_MAX];
-            snprintf(dir, sizeof dir, "%s", f);
-            char *sl = strrchr(dir, '/');
-            const char *base = sl ? sl + 1 : f;
-            if (sl) *sl = '\0'; else snprintf(dir, sizeof dir, ".");
-            char rdir[PATH_MAX];
-            if (!realpath(dir[0] ? dir : "/", rdir) ||
-                snprintf(real, sizeof real, "%s/%s", strcmp(rdir, "/") ? rdir : "",
-                         base) >= (int)sizeof real)
-                continue;
-        }
+        if (hl_path_resolve_partial(f, real) != 0) return -1;
         int dup = 0;
         for (int k = 0; k < n; k++) dup |= strcmp(out[k], real) == 0;
-        if (!dup) snprintf(out[n++], PATH_MAX, "%s", real);
+        if (dup) continue;
+        total++;
+        if (n < max) snprintf(out[n++], PATH_MAX, "%s", real);
     }
-    return n;
+    return total;
 }
 
 static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,

@@ -8,6 +8,8 @@
 #include "utest.h"
 #include "hull/cap/exec.h"
 #include "hull/cap/exec_child.h"
+#include "hull/cap/exec_broker.h"
+#include "hull/shared/fs_util.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -947,6 +949,72 @@ UTEST(exec_child, review_broad_root_nested_hull_db_and_binding)
     static const char *const made[] = { "app/data2/app.db", "app/data2/app.db-shm",
         "app/data2/f.txt", "app/data2", "app/data", "app/st/.hull/internal.db",
         "app/st/.hull", "app/st", "app/st2", "app/.hull", "app", NULL };
+    rm_list(root, made);
+}
+
+/* Final review: a first start, an unresolvable app directory, DuckDB. */
+UTEST(exec_child, final_first_start_unresolvable_root_and_duckdb)
+{
+    char root[] = "/tmp/hull-exec-final-XXXXXX";
+    ASSERT_TRUE(mkdtemp(root) != NULL);
+    char app[PATH_MAX], rapp[PATH_MAX], why[192];
+    snprintf(app, sizeof app, "%s/app", root);
+    mk(root, "app", 1);
+    ASSERT_TRUE(realpath(app, rapp) != NULL);
+
+    /* First start: the database's directory does not exist yet. The server
+     * sends the path it will have; the broker refuses a write grant that
+     * would hold it, by path, before the database is ever opened. */
+    char fresh[PATH_MAX + 32];
+    snprintf(fresh, sizeof fresh, "%s/data/sub/other.db", rapp);
+    const char *p1[1] = { fresh };
+    HlExecChildRoots r1 = { app, NULL, p1, 1 };
+    HlExecChildGrant g;
+    EXPECT_EQ(-1, hl_exec_child_grant_open(&r1, "data/", 1, &g, why, sizeof why));
+    EXPECT_TRUE(strstr(why, "contains the app's database") != NULL);
+    /* the same check from the path the server computes */
+    char resolved[PATH_MAX];
+    char rel[PATH_MAX + 32];
+    snprintf(rel, sizeof rel, "%s/nope/sub/x.db", app);
+    ASSERT_EQ(0, hl_path_resolve_partial(rel, resolved));
+    char want[PATH_MAX + 32];
+    snprintf(want, sizeof want, "%s/nope/sub/x.db", rapp);
+    EXPECT_STREQ(want, resolved);
+    snprintf(rel, sizeof rel, "%s/nope/../x.db", app);
+    EXPECT_EQ(-1, hl_path_resolve_partial(rel, resolved));
+
+    /* DuckDB: its .wal and its .tmp directory are the database's too */
+    mk(app, "duck", 1);
+    mk(app, "duck/app.duckdb", 0);
+    mk(app, "duck/app.duckdb.wal", 0);
+    mk(app, "duck/app.duckdb.tmp", 1);
+    char duck[PATH_MAX + 32];
+    snprintf(duck, sizeof duck, "%s/duck/app.duckdb", rapp);
+    const char *p2[1] = { duck };
+    HlExecChildRoots r2 = { app, NULL, p2, 1 };
+    EXPECT_EQ(-1, hl_exec_child_grant_open(&r2, "duck/app.duckdb.wal", 1, &g, why,
+                                           sizeof why));
+    EXPECT_EQ(-1, hl_exec_child_grant_open(&r2, "duck/app.duckdb.tmp/", 1, &g, why,
+                                           sizeof why));
+
+    /* An app directory that cannot be resolved: refused before any broker
+     * (none runs in this test), when a command has an app-relative grant. */
+    HlExecBuf b;
+    hl_exec_b_init(&b, NULL);
+    hl_exec_b_cmd(&b, S("c"), S("/bin/cat"), -1, -1, -1, -1, 0, -1, NULL, 0);
+    for (int k = 0; k < 4; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    hl_exec_b_app_fs(&b);
+    size_t m = hl_exec_b_count_begin(&b);
+    hl_exec_b_str(&b, S("data/"));
+    hl_exec_b_count_end(&b, m, 1);
+    hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    ASSERT_EQ(0, hl_exec_b_finish(&b));
+    EXPECT_EQ(-1, hl_exec_broker_apply(b.data, b.len, 1, 0, "/nonexistent-hull-app-dir",
+                                       NULL, NULL, NULL));
+    hl_exec_buf_free(&b);
+
+    static const char *const made[] = { "app/duck/app.duckdb.tmp", "app/duck/app.duckdb.wal",
+        "app/duck/app.duckdb", "app/duck", "app/data", "app", NULL };
     rm_list(root, made);
 }
 

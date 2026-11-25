@@ -3112,10 +3112,11 @@ A command's grant is its own, not a share of the app's: it need not lie inside t
 grants (both are declared in the same signed manifest). Also refused at start: a relative
 grant in a tool run from `/` or the home (use `@state/` there), a grant that reaches either
 root's `.hull` or holds the other root, and a write grant to the app's database or its
-`-wal` / `-shm` / `-journal` (the default, `databases.named` and the internal database; not a
-`db.open` file). A grant covers the object it named at start on Linux (that inode); on macOS it
-covers that PATH for the app's life, so whatever is renamed into it later is covered. A hard
-link to a granted file is the same file. A write grant
+sidecars (the default, `databases.named` and the internal database, even before their
+directory exists; not a `db.open` file; at most 16 such files when a command can write). A
+grant covers the object it named at start on Linux (that inode); on macOS it covers that PATH
+for the app's life, so whatever is renamed into it later is covered, and a hard link at
+another pathname is not reachable through it. A write grant
 never deletes or renames.
 
 What a child grant means also depends on the platform: on Linux each command gets exactly its

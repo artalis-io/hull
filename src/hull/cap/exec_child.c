@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strncasecmp */
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -194,10 +195,26 @@ static int same_file(const struct stat *a, const char *path)
  * command truncating the live -shm kills the app with SIGBUS. The app's own
  * fs layer refuses such a write (`database_file_in_use`); a command has no
  * such layer. */
-static int reaches_db(const struct stat *g, const HlExecChildRoots *r, char *why,
-                      size_t why_size)
+/* @p a is @p dir or below it (both real paths; without case on macOS,
+ * whose default file system ignores it). */
+static int path_under(const char *a, const char *dir)
 {
-    static const char *const SIDE[] = { "", "-wal", "-shm", "-journal" };
+    size_t n = strlen(dir);
+#ifdef __APPLE__
+    int eq = strncasecmp(a, dir, n) == 0;
+#else
+    int eq = strncmp(a, dir, n) == 0;
+#endif
+    return eq && (a[n] == '/' || a[n] == '\0');
+}
+
+static int reaches_db(const struct stat *g, const char *gpath, const HlExecChildRoots *r,
+                      char *why, size_t why_size)
+{
+    /* SQLite's sidecars, then DuckDB's (its .wal family and .tmp directory) */
+    static const char *const SIDE[] = { "", "-wal", "-shm", "-journal", ".wal",
+                                        ".wal.checkpoint", ".wal.recovery", ".tmp" };
+    enum { N_SIDE = sizeof SIDE / sizeof SIDE[0] };
     for (int i = 0; r->protect && i < r->n_protect; i++) {
         const char *db = r->protect[i];
         if (!db || !db[0]) continue;
@@ -215,14 +232,16 @@ static int reaches_db(const struct stat *g, const HlExecChildRoots *r, char *why
             char *sl = strrchr(dir, '/');
             if (sl == dir) dir[1] = '\0';
             else if (sl) *sl = '\0';
-            if (dir_contains(g, dir)) {
+            /* By inode when the database's directory exists, and by path for
+             * one not made yet (a first start): the server sends the real
+             * path it will have. */
+            if (dir_contains(g, dir) || path_under(abs, gpath)) {
                 snprintf(why, why_size, "contains the app's database (%s): a command "
-                         "may not write it or its -wal / -shm / -journal", db);
+                         "may not write it or its sidecars", db);
                 return 1;
             }
-            continue;
         }
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < N_SIDE; k++) {
             char side[PATH_MAX + 16];
             snprintf(side, sizeof side, "%s%s", abs, SIDE[k]);
             if (same_file(g, side)) {
@@ -376,7 +395,7 @@ int hl_exec_child_grant_open(const HlExecChildRoots *r, const char *raw, int wri
             }
         }
     }
-    if (write && reaches_db(&st, r, why, why_size)) goto done;
+    if (write && reaches_db(&st, path, r, why, why_size)) goto done;
 #ifdef F_GETPATH
     {
         char real[PATH_MAX];

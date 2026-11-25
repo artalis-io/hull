@@ -296,8 +296,11 @@ const char *hl_db_registry_dsn_for(HlDbRegistry *reg, const HlDbHandle *h);
  * databases.named entry - confined exactly as an open confines them,
  * resolved to real paths (a symbolic link to the file followed; a file not
  * made yet as its directory's real path plus its name). Network and
- * in-memory databases are skipped. Writes up to @p max into @p out; returns
- * the count. For the command broker: a command's write grant may not reach
+ * in-memory databases are skipped; a file not made yet (its directory
+ * neither) is its nearest existing ancestor's real path plus the rest.
+ * Writes up to @p max into @p out and returns how many there are (more than
+ * @p max: some not written), or -1 when one cannot be resolved. For the
+ * command broker: a command's write grant may not reach
  * these (docs/design/exec_broker.md §3.1). */
 int hl_db_registry_file_paths(HlDbRegistry *reg, char (*out)[PATH_MAX], int max);
 

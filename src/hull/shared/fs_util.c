@@ -12,6 +12,8 @@
 #include <limits.h>
 #include <string.h>
 #include <strings.h>   /* strncasecmp */
+#include <stdlib.h>    /* realpath */
+#include <unistd.h>    /* getcwd */
 #include <sys/stat.h>
 
 int hl_ensure_dir(const char *path, mode_t mode)
@@ -123,4 +125,51 @@ const char *hl_dsn_file_path(const char *dsn)
     if (*path == '\0' || strcmp(path, ":memory:") == 0)
         return NULL;
     return path;
+}
+
+int hl_path_resolve_partial(const char *path, char *out)
+{
+    if (!path || !path[0] || !out) return -1;
+    char abs[PATH_MAX];
+    if (path[0] == '/') {
+        if (snprintf(abs, sizeof abs, "%s", path) >= (int)sizeof abs) return -1;
+    } else {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof cwd) ||
+            snprintf(abs, sizeof abs, "%s/%s", cwd, path) >= (int)sizeof abs)
+            return -1;
+    }
+    if (realpath(abs, out)) return 0;
+    /* The longest existing prefix, then the rest as written. */
+    size_t len = strlen(abs);
+    for (size_t k = len; k > 0; k--) {
+        if (abs[k - 1] != '/' && k != len) continue;
+        size_t cut = (k == len) ? len : k - 1;
+        char prefix[PATH_MAX];
+        memcpy(prefix, abs, cut);
+        prefix[cut] = '\0';
+        char real[PATH_MAX];
+        if (!realpath(cut ? prefix : "/", real)) continue;
+        size_t at = strcmp(real, "/") == 0 ? 0 : strlen(real);
+        memcpy(out, real, at);
+        out[at] = '\0';
+        const char *p = abs + cut;
+        while (*p) {
+            while (*p == '/') p++;
+            if (!*p) break;
+            const char *c = p;
+            while (*p && *p != '/') p++;
+            size_t cl = (size_t)(p - c);
+            if (cl == 1 && c[0] == '.') continue;
+            if (cl == 2 && c[0] == '.' && c[1] == '.') return -1;
+            if (at + 1 + cl + 1 > PATH_MAX) return -1;
+            out[at++] = '/';
+            memcpy(out + at, c, cl);
+            at += cl;
+            out[at] = '\0';
+        }
+        if (at == 0) { out[0] = '/'; out[1] = '\0'; }
+        return 0;
+    }
+    return -1;
 }

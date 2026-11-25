@@ -97,6 +97,17 @@ static int has_app_relative_grant(const uint8_t *policy, size_t len)
     return 0;
 }
 
+/* Does any command have a manifest.fs write grant? */
+static int has_app_write_grant(const uint8_t *policy, size_t len)
+{
+    int n = hl_exec_policy_count(policy, len);
+    for (int i = 0; i < n; i++) {
+        HlExecCmd c;
+        if (hl_exec_policy_at(policy, len, i, &c) != 0 || c.n_app_write > 0) return 1;
+    }
+    return 0;
+}
+
 int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
                          int no_sandbox, const char *app_dir, const char *state_dir,
                          HlDbRegistry *dbreg, const char *default_db)
@@ -113,6 +124,70 @@ int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
         hl_exec_broker_stop();
         return -1;
     }
+    /* "/" or the home is not an app directory (a built tool run from
+     * there): a relative child grant would name the user's own files. Judged
+     * here, with this process's $HOME (the broker has only LANG and TZ), and
+     * before the broker creates any directory. */
+    char rapp[PATH_MAX];
+    if (has_app_relative_grant(policy, len)) {
+        if (!app_dir || !realpath(app_dir, rapp)) {
+            log_error("[hull:c] exec: a command's manifest.fs names a path under the "
+                      "app directory, which cannot be resolved (%s); refusing to start",
+                      app_dir ? strerror(errno) : "none");
+            hl_exec_broker_stop();
+            return -1;
+        }
+        if (strcmp(rapp, "/") == 0 || hl_host_path_too_broad(rapp)) {
+            log_error("[hull:c] exec: a command's manifest.fs names a path under the "
+                      "app directory, but the app directory is %s (/ or the home); "
+                      "use \"@state/\" for a tool run from anywhere; refusing to "
+                      "start", rapp);
+            hl_exec_broker_stop();
+            return -1;
+        }
+    }
+    /* The app's SQLite files: no command may write them (the -shm truncated
+     * under the app is a SIGBUS). */
+    /* Every database must be protected before the first command runs; one
+     * that cannot be (unresolvable, or past the limit) refuses the start. */
+    static char dbs[HL_EXEC_MAX_PROTECT][PATH_MAX];
+    int n_dbs = 0;
+    int writes = has_app_write_grant(policy, len);
+#ifdef HL_ENABLE_DB
+    if (dbreg && writes) n_dbs = hl_db_registry_file_paths(dbreg, dbs, HL_EXEC_MAX_PROTECT);
+#else
+    (void)dbreg;
+#endif
+    if (writes && n_dbs >= 0 && default_db && default_db[0]) {
+        const char *f = hl_dsn_file_path(default_db);
+        if (f && f[0] && strcmp(f, ":memory:") != 0) {
+            char real[PATH_MAX];
+            if (hl_path_resolve_partial(f, real) != 0) {
+                n_dbs = -1;
+            } else {
+                int dup = 0;
+                for (int k = 0; k < n_dbs && k < HL_EXEC_MAX_PROTECT; k++)
+                    dup |= strcmp(dbs[k], real) == 0;
+                if (!dup) {
+                    if (n_dbs < HL_EXEC_MAX_PROTECT) snprintf(dbs[n_dbs], PATH_MAX, "%s", real);
+                    n_dbs++;
+                }
+            }
+        }
+    }
+    if (n_dbs < 0) {
+        log_error("[hull:c] exec: a database's path cannot be resolved, so the "
+                  "commands' write grants cannot be kept off it; refusing to start");
+        hl_exec_broker_stop();
+        return -1;
+    }
+    if (n_dbs > HL_EXEC_MAX_PROTECT) {
+        log_error("[hull:c] exec: the app has %d database files; the command broker "
+                  "protects at most %d from the commands' write grants; refusing to "
+                  "start", n_dbs, HL_EXEC_MAX_PROTECT);
+        hl_exec_broker_stop();
+        return -1;
+    }
     /* Constant only in a build with no broker (the stubs below). */
     // cppcheck-suppress knownConditionTrueFalse
     if (!hl_exec_broker_spawned()) {
@@ -125,38 +200,6 @@ int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
                   "commands cannot be confined; refusing to start (pass "
                   "--allow-degraded-sandbox to start with exec.run failing)");
         return -1;
-    }
-    /* "/" or the home is not an app directory (a built tool run from
-     * there): a relative child grant would name the user's own files. Judged
-     * here, with this process's $HOME (the broker has only LANG and TZ), and
-     * before the broker creates any directory. */
-    char rapp[PATH_MAX];
-    if (app_dir && realpath(app_dir, rapp) &&
-        (strcmp(rapp, "/") == 0 || hl_host_path_too_broad(rapp)) &&
-        has_app_relative_grant(policy, len)) {
-        log_error("[hull:c] exec: a command's manifest.fs names a path under the app "
-                  "directory, but the app directory is %s (/ or the home); use "
-                  "\"@state/\" for a tool run from anywhere; refusing to start", rapp);
-        hl_exec_broker_stop();
-        return -1;
-    }
-    /* The app's SQLite files: no command may write them (the -shm truncated
-     * under the app is a SIGBUS). */
-    static char dbs[HL_EXEC_MAX_PROTECT][PATH_MAX];
-    int n_dbs = 0;
-#ifdef HL_ENABLE_DB
-    if (dbreg) n_dbs = hl_db_registry_file_paths(dbreg, dbs, HL_EXEC_MAX_PROTECT);
-#else
-    (void)dbreg;
-#endif
-    if (default_db && default_db[0] && n_dbs < HL_EXEC_MAX_PROTECT) {
-        char real[PATH_MAX];
-        const char *f = hl_dsn_file_path(default_db);
-        if (f && strcmp(f, ":memory:") != 0 && realpath(f, real)) {
-            int dup = 0;
-            for (int k = 0; k < n_dbs; k++) dup |= strcmp(dbs[k], real) == 0;
-            if (!dup) snprintf(dbs[n_dbs++], PATH_MAX, "%s", real);
-        }
     }
     unsigned flags = (allow_degraded ? HL_EXEC_POLICY_DEGRADED_OK : 0) |
                      (no_sandbox ? HL_EXEC_POLICY_NO_SANDBOX : 0);

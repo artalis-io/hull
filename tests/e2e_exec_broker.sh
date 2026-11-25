@@ -258,6 +258,24 @@ app.main(function() return 0 end)
 EOF
 )
 check_line "a write grant holding a named database is refused at start" "contains the app's database"
+# A first start: the database's directory does not exist yet.
+out=$(run_main "$FIX/cm5" <<EOF
+app.manifest({ modules = { "hull/exec@1", "hull/db@1" },
+  fs = { write = { "data/" } },
+  databases = { named = { other = "data/sub/other.db" } },
+  exec = { a = { path = "/bin/cat", manifest = { fs = { write = { "data/" } } } } } })
+app.main(function() return 0 end)
+EOF
+)
+check_line "a first start (the database directory not made yet) is refused" "contains the app's database"
+out=$(run_main "$FIX/cm6" <<EOF
+app.manifest({ modules = { "hull/exec@1", "hull/db@1" },
+  databases = { named = { d1 = "dbs/d1.db", d2 = "dbs/d2.db", d3 = "dbs/d3.db", d4 = "dbs/d4.db", d5 = "dbs/d5.db", d6 = "dbs/d6.db", d7 = "dbs/d7.db", d8 = "dbs/d8.db", d9 = "dbs/d9.db", d10 = "dbs/d10.db", d11 = "dbs/d11.db", d12 = "dbs/d12.db", d13 = "dbs/d13.db", d14 = "dbs/d14.db", d15 = "dbs/d15.db", d16 = "dbs/d16.db", d17 = "dbs/d17.db" } },
+  exec = { a = { path = "/bin/cat", manifest = { fs = { write = { "out/" } } } } } })
+app.main(function() return 0 end)
+EOF
+)
+check_line "17 databases with a command write grant: refused, naming the limit" "protects at most 16"
 out=$(run_main "$FIX/cm2" <<EOF
 app.manifest({ modules = { "hull/exec@1" }, exec = {
   a = { path = "/bin/cat", manifest = { fs = { read = { "data/gone.txt" } } } } } })

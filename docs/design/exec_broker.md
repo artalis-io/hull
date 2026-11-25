@@ -228,13 +228,19 @@ take; not this section.)
   code point is `.hull` itself, and may not exist yet at load; a directory made that turns out
   to be it is removed). Also a directory that is either root or an ancestor of one (a state
   directory inside the app directory, or the reverse);
-- for a write grant, any SQLite file the app's registry would open by name - the default
-  (`-d` or the manifest's), `databases.named`, the internal database - or its `-wal` /
-  `-shm` / `-journal`, or a directory holding one: truncating a live `-shm` kills the app with
-  SIGBUS, which the app's own fs layer refuses (`database_file_in_use`) and a command has no
-  layer to refuse. The server resolves each to its real path (`hl_db_registry_file_paths`: a
-  symbolic link followed, a relative `-d` against its own working directory) and the broker
-  compares by inode. Not covered: a `db.open` file (its DSN is chosen at run time), a hard link
+- for a write grant, any database file the app's registry would open by name - the default
+  (`-d` or the manifest's), `databases.named`, the internal database - or its sidecars
+  (SQLite's `-wal` / `-shm` / `-journal`; DuckDB's `.wal`, `.wal.checkpoint`,
+  `.wal.recovery` and `.tmp` directory), or a directory holding one: truncating a live `-shm`
+  kills the app with SIGBUS, which the app's own fs layer refuses (`database_file_in_use`) and
+  a command has no layer to refuse. The server resolves each to its real path
+  (`hl_db_registry_file_paths`: a symbolic link followed, a relative `-d` against its own
+  working directory, and a file whose directory is not made yet - a first start - as its
+  nearest existing ancestor's real path plus the rest), and the broker compares by inode and,
+  for a directory grant, also by path (the database's directory may not exist yet). A path
+  that cannot be resolved refuses the start, and so does an app with more than
+  `HL_EXEC_MAX_PROTECT` (16) database files when a command has a `manifest.fs` write grant.
+  Not covered: a `db.open` file (its DSN is chosen at run time), a hard link
   to a database file planted under another name inside a granted directory after start (a
   command cannot make one; another local principal with write access to the tree could), and a
   `host.write` path under `/tmp` naming a database there (the operator's absolute path, as in
@@ -257,9 +263,10 @@ the broker's whole life, whatever directory or file is renamed into that path is
 the original is not once it moves away. A symbolic link put at the path gains nothing
 (Seatbelt matches the resolved target). Doing that needs write access to the directory above
 the grant, i.e. to the app or state tree, and the same limit already applies to the `host`
-grants and to the app's own Seatbelt profile. On both, a grant covers its inode, so a hard link to that file
-elsewhere is the same file, and a hard link placed inside a granted directory is reachable
-through it (a child cannot make one: Linux grants no REFER, macOS refuses the link). A write
+grants and to the app's own Seatbelt profile. On Linux a grant covers its inode, so a hard
+link to a granted file at another pathname is reachable too; on macOS a grant on one pathname
+does not by itself grant access through a hard link at another pathname. On both, a hard link
+placed inside a granted directory is reachable through it (a child cannot make one: Linux grants no REFER, macOS refuses the link). A write
 grant gives write, truncate and create, never read, delete or rename, on both (macOS
 `file-write-data file-write-create`).
 
