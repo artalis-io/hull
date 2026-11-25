@@ -358,7 +358,7 @@ UTEST(exec_macos, the_broker_sees_its_server_go)
     struct pollfd pf = { pp[0], POLLIN, 0 };
     ASSERT_EQ(1, poll(&pf, 1, 10000));
     ASSERT_EQ(1, (int)read(pp[0], &res, 1));
-    EXPECT_EQ('y', res);
+    EXPECT_TRUE(res == 'y');
     close(pp[0]);
 }
 

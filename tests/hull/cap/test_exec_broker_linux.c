@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,7 +79,7 @@ UTEST(exec_linux, a_system_binary_is_an_elf_with_its_loader)
     ASSERT_TRUE(realpath("/usr/bin/true", real) != NULL);
     ASSERT_EQ(0, check_file(real, why, sizeof why, interp));
     /* Dynamically linked on every distribution CI runs: a loader path. */
-    EXPECT_EQ('/', interp[0]);
+    EXPECT_TRUE(interp[0] == '/');
 }
 
 UTEST(exec_linux, scripts_and_foreign_files_are_refused)
