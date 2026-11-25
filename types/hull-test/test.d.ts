@@ -132,11 +132,13 @@ declare namespace Hull {
         runMain(args?: string[], opts?: TestRunMainOptions): TestRunMainResult;
         /**
          * Answer `exec.run(name, ...)` in this file's tests: a result object, or
-         * a function `(args, name) => result`; null removes the stub. The call
-         * is still matched against the declared command first.
+         * a function `(args, name, stdin) => result` (`stdin` the call's stdin
+         * as an ArrayBuffer, or undefined); null removes the stub. The call is
+         * still matched against the declared command first.
          */
         execStub(name: string,
-                 result: TestExecStubResult | ((args: string[], name: string) => TestExecStubResult)
+                 result: TestExecStubResult
+                       | ((args: string[], name: string, stdin?: ArrayBuffer) => TestExecStubResult)
                        | null): void;
         /** Run a build plugin's transform once against a stub host. */
         runTransform(spec?: TestTransformSpec): Promise<TestTransformResult>;

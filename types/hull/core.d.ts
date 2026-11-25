@@ -320,6 +320,11 @@ declare namespace Hull {
          */
         unixSockets?: boolean;
         /**
+         * The bytes a call may write to the command's stdin (`exec.run`'s
+         * `stdin` option), 1..1048576. Without it the command reads /dev/null.
+         */
+        stdinMax?: number;
+        /**
          * SHA-256 of the main executable, 64 hex characters. The broker checks it
          * at start and before every call.
          */

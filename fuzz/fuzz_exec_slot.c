@@ -50,7 +50,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     HlExecBuf b;
     hl_exec_b_init(&b, NULL);
-    hl_exec_b_cmd(&b, "c", 1, "/usr/bin/t", 10, -1, -1, -1, -1, 0, NULL, 0);
+    hl_exec_b_cmd(&b, "c", 1, "/usr/bin/t", 10, -1, -1, -1, -1, 0, -1, NULL, 0);
     for (int k = 0; k < 3; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
     size_t m = hl_exec_b_count_begin(&b);
     int dash = flags & 1, repeat = (flags >> 1) & 1, chars = (flags >> 2) & 1;

@@ -75,7 +75,7 @@ for spec in $(tr "," "\n" < "$WORK/mods.json" | sed -n 's/.*"name": *"\(hull\/[^
     flags=""
     # A host with no command broker (macOS, a cosmo APE) refuses an exec
     # section at start; the inventory only lists exports, so degraded is fine.
-    [ "$spec" = hull/exec ] && extra="exec: { probe: { path: \"/bin/true\" } }," &&
+    [ "$spec" = hull/exec ] && extra="exec: { probe: { path: \"/usr/bin/true\" } }," &&
         flags="--allow-degraded-sandbox"
     run_app "$name" "$extra" "\"$spec@1\"" "import * as M from \"$name\";" "$flags"
 done

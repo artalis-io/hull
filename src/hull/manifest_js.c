@@ -212,7 +212,7 @@ static int read_js_port_array(JSContext *ctx, JSValueConst obj, int *out)
 static const char *const MX_CMD_KEYS[] = {
     "path", "argv", "timeoutMs", "timeout_ms", "stdoutMax", "stdout_max",
     "stderrMax", "stderr_max", "env", "concurrency", "fs", "unixSockets",
-    "unix_sockets", "sha256", NULL };
+    "unix_sockets", "stdinMax", "stdin_max", "sha256", NULL };
 static const char *const MX_SLOT_KEYS[] = {
     "enum", "prefix", "suffix", "chars", "min", "max", "repeat", "allowDash",
     "allow_dash", NULL };
@@ -432,10 +432,11 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     int64_t se = mx_int(ctx, t, "stderrMax", "stderr_max", b, where);
     int64_t conc = mx_int(ctx, t, "concurrency", NULL, b, where);
     int unix_sockets = mx_bool(ctx, t, "unixSockets", "unix_sockets", b, where);
+    int64_t stdin_max = mx_int(ctx, t, "stdinMax", "stdin_max", b, where);
     size_t hl;
     const char *pin = mx_str(ctx, t, "sha256", &hl, b, where);
     hl_exec_b_cmd(b, name, strlen(name), path, pl, timeout, so, se, conc,
-                  unix_sockets, pin, hl);
+                  unix_sockets, stdin_max, pin, hl);
     if (pin) JS_FreeCString(ctx, pin);
     if (path) JS_FreeCString(ctx, path);
 

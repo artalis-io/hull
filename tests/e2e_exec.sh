@@ -51,6 +51,7 @@ app.manifest({
       argv = { "--query-gpu=index,name", "--format=csv,noheader,nounits" },
       fs = { read = { "/dev/nvidiactl" }, write = { "/dev/nvidiactl" } },
     },
+    ["key-import"] = { path = "/bin/cat", stdin_max = 8 },
   },
 })
 local exec = require("hull.exec")
@@ -105,6 +106,8 @@ test("refused before the stub", function()
                                               "hs-c.service", "hs-d.service" }) end, "takes 1..3")
   refused(function() exec.run("unit-state", { 42 }) end, "must be a string")
   refused(function() exec.run("nope") end, "not declared")
+  refused(function() exec.run("unit-state", { string.rep("a", 70000) }) end,
+          "longer than 65536 bytes")
 end)
 test("a call inside a transaction is refused coded wait_refused", function()
   local conn = require("hull.db").default()
@@ -113,6 +116,22 @@ test("a call inside a transaction is refused coded wait_refused", function()
   conn.exec("ROLLBACK")
   test.eq(ok, false)
   test.ok(tostring(err):find("[hull:wait_refused]", 1, true) == 1, tostring(err))
+end)
+test("stdin reaches the stub, within the command's stdin_max", function()
+  local got
+  test.exec_stub("key-import", function(args, name, stdin)
+    got = stdin
+    return { stdout = stdin }
+  end)
+  test.eq(exec.run("key-import", {}, { stdin = "a\0b" }).stdout, "a\0b")
+  test.eq(got, "a\0b")
+  exec.run("key-import")
+  test.eq(got, nil)
+  refused(function() exec.run("key-import", {}, { stdin = "123456789" }) end,
+          "stdin is 9 bytes; the command's stdin_max is 8")
+  refused(function() exec.run("gpu-query", {}, { stdin = "x" }) end, "takes no stdin")
+  refused(function() exec.run("key-import", {}, { stdn = "x" }) end, "unknown option")
+  refused(function() exec.run("key-import", {}, { stdin = 5 }) end, "stdin must be a string")
 end)
 test("a removed stub, or one for an undeclared name, is refused", function()
   test.exec_stub("gpu-query", nil)
@@ -139,6 +158,7 @@ app.manifest({
       argv: ["--query-gpu=index,name", "--format=csv,noheader,nounits"],
       fs: { read: ["/dev/nvidiactl"], write: ["/dev/nvidiactl"] },
     },
+    "key-import": { path: "/bin/cat", stdinMax: 8 },
   },
 });
 app.get("/state", async (req, res) => {
@@ -202,6 +222,25 @@ test("a call inside a transaction is refused coded wait_refused", () => {
   conn.exec("ROLLBACK");
   test.eq(code, "wait_refused");
 });
+test("stdin reaches the stub, within the command's stdinMax", async () => {
+  let got;
+  test.execStub("key-import", (args, name, stdin) => {
+    got = stdin;
+    return { stdout: stdin };
+  });
+  const r = await exec.run("key-import", [], { stdin: new Uint8Array([97, 0, 255]) });
+  test.eq(Array.from(new Uint8Array(r.stdoutBytes)).join(","), "97,0,255");
+  test.eq(got instanceof ArrayBuffer, true);
+  await exec.run("key-import", [], { stdin: "é" });       /* UTF-8: 2 bytes */
+  test.eq(got.byteLength, 2);
+  await exec.run("key-import");
+  test.eq(got, undefined);
+  refused(() => exec.run("key-import", [], { stdin: "123456789" }),
+          "stdin is 9 bytes; the command's stdinMax is 8");
+  refused(() => exec.run("gpu-query", [], { stdin: "x" }), "takes no stdin");
+  refused(() => exec.run("key-import", [], { stdn: "x" }), "unknown option");
+  refused(() => exec.run("key-import", [], { stdin: 5 }), "stdin must be a string");
+});
 test("a removed stub, or one for an undeclared name, is refused", () => {
   test.execStub("gpu-query", null);
   refused(() => exec.run("gpu-query"), "no stub for 'gpu-query'");
@@ -212,8 +251,8 @@ EOF
 for rt in lua js; do
     echo "== hull test ($rt) =="
     out=$(cd "$TMPDIR/$rt" && "$HULL" test . 2>&1) && rc=0 || rc=$?
-    if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q "6/6 tests passed"; then
-        pass "$rt: stubs, matching, refusals (6 cases)"
+    if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q "7/7 tests passed"; then
+        pass "$rt: stubs, matching, stdin, refusals (7 cases)"
     else
         fail "$rt: hull test" "$out"
     fi
@@ -247,6 +286,9 @@ refuse() {
 }
 
 echo "== load-time refusals =="
+refuse "a stdin_max over the ceiling" "stdin_max must be 1..1048576" \
+    'exec = { a = { path = "/bin/true", stdin_max = 1048577 } }' \
+    'exec: { a: { path: "/bin/true", stdinMax: 1048577 } }'
 refuse "a short sha256 pin" "sha256 must be 64 hex characters" \
     'exec = { a = { path = "/bin/true", sha256 = "00" } }' \
     'exec: { a: { path: "/bin/true", sha256: "00" } }'

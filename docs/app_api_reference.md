@@ -3061,19 +3061,24 @@ local exec = require("hull.exec")
 local r = exec.run("unit-state", { "hs-api.service" })
 -- r = { status, signal, stdout, stderr, timed_out, stdout_truncated,
 --       stderr_truncated, duration_ms }
+-- a command declared with stdin_max takes bytes on its stdin:
+local r = exec.run("key-import", {}, { stdin = record })
 ```
 
-JS: `import { exec } from "hull:exec"`; `await exec.run(name, args)` resolves to `{ status,
+JS: `import { exec } from "hull:exec"`; `await exec.run(name, args, { stdin })` resolves to `{ status,
 signal, stdout, stderr, stdoutBytes, timedOut, stdoutTruncated, stderrTruncated, durationMs }`
 (`stdout` / `stderr` are byte strings, one code unit per byte); the manifest keys are
-`timeoutMs`, `stdoutMax`, `stderrMax`, `unixSockets`, `allowDash` (snake_case is read too).
+`timeoutMs`, `stdoutMax`, `stderrMax`, `stdinMax`, `unixSockets`, `allowDash` (snake_case is
+read too). A JS `stdin` is a string (sent as UTF-8) or an ArrayBuffer / typed array.
 
 **A command:** `path` (absolute, no `.` / `..` / empty component), `argv` (fixed strings and
 slots, at most 64, 16 KiB of fixed text), `timeout_ms` (100..60000, default 5000),
 `stdout_max` (up to 16 MiB, default 64 KiB), `stderr_max` (up to 1 MiB, default 16 KiB),
 `concurrency` (1..8, default 2), `env` (literal values only; `LD_*`, `DYLD_*`, `PATH`, `IFS`,
 `ENV`, `BASH_ENV` refused), `fs` (`read` / `write` paths the command's own sandbox grants;
-`write` only under `/dev`, `/run`, `/tmp`), `unix_sockets` (default false), `sha256` (optional,
+`write` only under `/dev`, `/run`, `/tmp`), `unix_sockets` (default false), `stdin_max` (the
+bytes a call may write to the command's stdin, 1..1 MiB; without it the command reads
+`/dev/null`), `sha256` (optional,
 64 hex characters: the digest of the main executable). At most 32 commands, each named
 `[a-z0-9][a-z0-9-]{0,63}`.
 
@@ -3084,6 +3089,14 @@ that rewrites the binary in place stops the command until the pin is updated. It
 main executable only, not its loader or shared libraries, and it is checked on top of the
 ownership and mode checks, never instead of them. Get the value with `sha256sum`. A pinned
 binary over 512 MiB is refused.
+
+**stdin is the channel for secrets and records.** Arguments show in the process listing and
+are what an audit record names; `stdin` is neither, and Hull never logs it. A call's `stdin` must
+fit the command's `stdin_max`, checked by the binding and again by the broker; an empty one
+counts as none. The broker writes it as the command reads it, and drops the rest when the
+command exits or closes its stdin first. `opts` takes no other key (a typo is refused, never
+ignored). In `hull test`, a stub function gets the stdin as its third argument (Lua a string,
+JS an ArrayBuffer; nil / undefined when there is none).
 
 **A slot** is a conjunction of linear checks, no regex: `enum` (one of these values,
 excluding the rest), `prefix` / `suffix` (literal), `chars` (the allowed bytes between them,

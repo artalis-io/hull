@@ -52,7 +52,7 @@ static int pol_make(Pol *p, const Spec *specs, int n)
     for (int i = 0; i < n; i++) {
         const Spec *s = &specs[i];
         hl_exec_b_cmd(&p->b, s->name, strlen(s->name), s->path, strlen(s->path),
-                      -1, -1, -1, -1, s->unix_sockets, NULL, 0);
+                      -1, -1, -1, -1, s->unix_sockets, -1, NULL, 0);
         hl_exec_b_count_end(&p->b, hl_exec_b_count_begin(&p->b), 0);       /* env */
         size_t m = hl_exec_b_count_begin(&p->b);
         if (s->fs_read) hl_exec_b_str(&p->b, s->fs_read, strlen(s->fs_read));

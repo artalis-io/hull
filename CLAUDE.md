@@ -2706,7 +2706,8 @@ matched again by the broker (in-flight cap, per-command concurrency, live ids, 3
 output held until delivered - the binding's checks are only a fast path), the binary re-opened and
 re-checked (a replaced inode is `ESTALE`: restart the app; an optional manifest `sha256` pin is
 hashed from the same descriptor, at load and before every call), and the child set up between fork and
-exec: `PR_SET_PDEATHSIG(SIGKILL)` + a `getppid` check, `setsid`, `/dev/null` stdin, capped pipes,
+exec: `PR_SET_PDEATHSIG(SIGKILL)` + a `getppid` check, `setsid`, `/dev/null` stdin (or a pipe the
+broker fills with the call's `stdin`, only for a command declaring `stdin_max`), capped pipes,
 a fixed environment, rlimits, its own narrower Landlock domain (device ioctls on its own `fs.write`
 devices only), and a stacked seccomp filter refusing process creation (`fork` / `vfork`, `clone`
 without `CLONE_THREAD`, `clone3` as ENOSYS), every credential change and `PR_SET_PDEATHSIG`, and

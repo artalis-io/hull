@@ -13,6 +13,8 @@
 #   - unix_sockets: AF_UNIX refused without it, allowed with it;
 #   - a timeout kills the child (SIGKILL, timed_out); output is cut at the
 #     caps while the child is drained to its end;
+#   - stdin: 900 KiB round-trips through cat, a command that never reads it
+#     ends, and one that never reads it and sleeps times out cleanly;
 #   - a real `systemctl show` against the running system manager;
 #   - a sha256 pin: a match runs, a mismatch refuses the start, a binary
 #     rewritten in place (same inode) fails the next call;
@@ -151,6 +153,35 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
 else
     echo "  (no running systemd here: systemctl check skipped)"
 fi
+
+# ── stdin ─────────────────────────────────────────────────────────────
+
+echo "== stdin"
+out=$(run_main "$FIX/in1" <<EOF
+app.manifest({
+  modules = { "hull/exec@1" },
+  exec = {
+    cat = { path = "/bin/cat", stdin_max = 1048576, stdout_max = 1048576 },
+    ["true"] = { path = "/usr/bin/true", stdin_max = 1048576 },
+    slowin = { path = "$PROBE", argv = { "sleep" }, stdin_max = 1048576, timeout_ms = 300 },
+  },
+})
+local exec = require("hull.exec")
+app.main(function()
+  local big = string.rep("0123456789abcdef", 57600)   -- 900 KiB: many pipe buffers
+  local r = exec.run("cat", {}, { stdin = big })
+  print(("cat: status=%d len=%d same=%s"):format(r.status, #r.stdout, tostring(r.stdout == big)))
+  r = exec.run("true", {}, { stdin = big })
+  print(("unread: status=%d timed_out=%s"):format(r.status, tostring(r.timed_out)))
+  r = exec.run("slowin", {}, { stdin = big })
+  print(("slowin: timed_out=%s signal=%s"):format(tostring(r.timed_out), tostring(r.signal)))
+  return 0
+end)
+EOF
+)
+check_line "900 KiB of stdin reaches the command intact" "cat: status=0 len=921600 same=true"
+check_line "a command that never reads its stdin still ends" "unread: status=0 timed_out=false"
+check_line "a command that never reads its stdin times out cleanly" "slowin: timed_out=true signal=SIGKILL"
 
 # ── Binary checks ────────────────────────────────────────────────────
 

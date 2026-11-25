@@ -12,6 +12,7 @@
  *   4. past the buffered-output cap, held by an unread 16 MB reply -> BUSY
  *   5. arguments the slot does not admit        -> REFUSED
  *   6. a second POLICY                          -> the broker exits
+ *   7. stdin past the command's stdin_max      -> REFUSED
  *
  * Usage: e2e_exec_frames <path to hull> [degraded]
  *
@@ -121,12 +122,12 @@ static int read_frame(int fd, uint32_t *type, uint32_t *id, uint8_t **buf,
 /* A policy of one command. */
 static HlExecBuf policy_one(const char *name, const char *path,
                             const char *const *fixed, int nfixed, int slot,
-                            int64_t stdout_max, int64_t conc)
+                            int64_t stdout_max, int64_t conc, int64_t stdin_max)
 {
     HlExecBuf b;
     hl_exec_b_init(&b, NULL);
     hl_exec_b_cmd(&b, name, strlen(name), path, strlen(path), 60000, stdout_max,
-                  -1, conc, 0, NULL, 0);
+                  -1, conc, 0, stdin_max, NULL, 0);
     for (int k = 0; k < 3; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
     size_t m = hl_exec_b_count_begin(&b);
     for (int i = 0; i < nfixed; i++) hl_exec_b_fixed(&b, fixed[i], strlen(fixed[i]));
@@ -179,7 +180,9 @@ static void broker_end(Broker *b)
     waitpid(b->pid, &st, 0);
 }
 
-static void run(int fd, uint32_t id, const char *name, const char *arg)
+/* RUN with @p arg (NULL = none) and @p in on stdin (NULL = none). */
+static void run_in(int fd, uint32_t id, const char *name, const char *arg,
+                   const char *in)
 {
     uint8_t p[256];
     size_t nl = strlen(name), off = 0;
@@ -190,7 +193,14 @@ static void run(int fd, uint32_t id, const char *name, const char *arg)
         put32(p + off, (uint32_t)strlen(arg)); off += 4;
         memcpy(p + off, arg, strlen(arg)); off += strlen(arg);
     }
-    send_frame(fd, RUN, id, p, off, NULL, 0);
+    size_t il = in ? strlen(in) : 0;
+    put32(p + off, (uint32_t)il); off += 4;
+    send_frame(fd, RUN, id, p, off, in, il);
+}
+
+static void run(int fd, uint32_t id, const char *name, const char *arg)
+{
+    run_in(fd, id, name, arg, NULL);
 }
 
 /* The first frame for @p want_id within @p ms (others skipped). */
@@ -221,7 +231,7 @@ int main(int argc, char **argv)
     char msg[512];
 
     /* 1. a request id already in use */
-    HlExecBuf p = policy_one("sl", SLEEP_BIN, thirty, 1, 0, -1, 8);
+    HlExecBuf p = policy_one("sl", SLEEP_BIN, thirty, 1, 0, -1, 8, -1);
     Broker b = broker_start(&p);
     run(b.fd, 7, "sl", NULL);
     run(b.fd, 7, "sl", NULL);
@@ -241,7 +251,7 @@ int main(int argc, char **argv)
     hl_exec_buf_free(&p);
 
     /* 3. past a command's concurrency */
-    p = policy_one("sl", SLEEP_BIN, thirty, 1, 0, -1, 2);
+    p = policy_one("sl", SLEEP_BIN, thirty, 1, 0, -1, 2, -1);
     b = broker_start(&p);
     run(b.fd, 1, "sl", NULL);
     run(b.fd, 2, "sl", NULL);
@@ -257,7 +267,7 @@ int main(int argc, char **argv)
     /* stdout_max at its 16 MiB ceiling + the 16 KiB stderr default: two
      * calls reserve 33,587,200 bytes, past HL_EXEC_MAX_BUFFERED (32 MiB). */
     const char *zero[] = { "-c", "16777216", "/dev/zero" };
-    p = policy_one("z", "/usr/bin/head", zero, 3, 0, 16777216, 8);
+    p = policy_one("z", "/usr/bin/head", zero, 3, 0, 16777216, 8, -1);
     b = broker_start(&p);
     run(b.fd, 1, "z", NULL);
     usleep(1500000);                         /* it ran; its reply is stuck */
@@ -269,7 +279,7 @@ int main(int argc, char **argv)
     hl_exec_buf_free(&p);
 
     /* 5. arguments the slot does not admit (no binding in the way) */
-    p = policy_one("e", "/bin/echo", NULL, 0, 1, -1, 2);
+    p = policy_one("e", "/bin/echo", NULL, 0, 1, -1, 2, -1);
     b = broker_start(&p);
     run(b.fd, 1, "e", "--host=evil");
     r = expect(b.fd, 1, &t, msg, sizeof msg, 3000);
@@ -278,6 +288,10 @@ int main(int argc, char **argv)
     run(b.fd, 2, "e", "ok");
     r = expect(b.fd, 2, &t, msg, sizeof msg, 3000);
     CHECK(r == 1 && t == DONE, "an admitted value runs");
+    run_in(b.fd, 3, "e", "ok", "x");
+    r = expect(b.fd, 3, &t, msg, sizeof msg, 3000);
+    CHECK(r == 1 && t == REFUSED && strstr(msg, "takes no stdin"),
+          "stdin to a command with no stdin_max is refused (%s)", msg);
 
     /* 6. a second POLICY ends the broker */
     uint8_t f4[4];
@@ -286,6 +300,19 @@ int main(int argc, char **argv)
     uint32_t id; uint8_t *buf; size_t len;
     r = read_frame(b.fd, &t, &id, &buf, &len, 3000);
     CHECK(r == -1, "a second POLICY ends the broker");
+    broker_end(&b);
+    hl_exec_buf_free(&p);
+
+    /* 7. stdin past the command's stdin_max (no binding in the way) */
+    p = policy_one("c", "/bin/cat", NULL, 0, 0, -1, 2, 4);
+    b = broker_start(&p);
+    run_in(b.fd, 1, "c", NULL, "hello");
+    r = expect(b.fd, 1, &t, msg, sizeof msg, 3000);
+    CHECK(r == 1 && t == REFUSED && strstr(msg, "longer than its stdin_max"),
+          "stdin past stdin_max is refused by the broker (%s)", msg);
+    run_in(b.fd, 2, "c", NULL, "abcd");
+    r = expect(b.fd, 2, &t, msg, sizeof msg, 3000);
+    CHECK(r == 1 && t == DONE, "stdin within stdin_max runs");
     broker_end(&b);
     hl_exec_buf_free(&p);
 

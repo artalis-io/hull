@@ -92,11 +92,14 @@ typedef void (*HlExecDoneFn)(void *ud, HlExecReply *r);
 
 void hl_exec_reply_free(HlExecReply *r);
 
-/* Ask the broker to run @p name with @p args. @p fn runs on the loop
- * thread with the reply, exactly once, unless the call is cancelled first.
- * 0 with *id_out set, or -1 (no broker: @p why says so). */
+/* Ask the broker to run @p name with @p args, writing @p in (@p in_len
+ * bytes, at most HL_EXEC_STDIN_CEIL; 0 = the child reads /dev/null) to its
+ * stdin. @p fn runs on the loop thread with the reply, exactly once, unless
+ * the call is cancelled first. 0 with *id_out set, or -1 (no broker: @p why
+ * says so). */
 int hl_exec_submit(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
                    const char *const *args, const size_t *lens, size_t n,
+                   const void *in, size_t in_len,
                    HlExecDoneFn fn, void *ud, uint32_t *id_out,
                    char *why, size_t why_size);
 
@@ -125,6 +128,7 @@ typedef struct HlExecOp {
 int hl_exec_op_start(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop,
                      const char *name, size_t name_len,
                      const char *const *args, const size_t *lens, size_t n,
+                     const void *in, size_t in_len,
                      uint32_t timeout_ms, char *why, size_t why_size);
 
 /* Calls in flight (the binding's fast admission check). */

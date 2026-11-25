@@ -6,7 +6,7 @@
  *
  *   server -> broker   POLICY  u32 flags, the encoded policy (cap/exec.h)
  *                      RUN     id; u16 name_len, name, u16 n,
- *                              (u32 len, bytes) * n
+ *                              (u32 len, bytes) * n, u32 stdin_len, stdin
  *                      KILL    id
  *   broker -> server   READY   text: one report line per '\n'
  *                      REFUSED id (0 = the policy); text
@@ -53,7 +53,8 @@
 #define HX_REFUSED 7u
 #define HX_PROBE   8u
 
-#define HX_RUN_MAX    (HL_EXEC_MAX_ARG_BYTES + 4u * HL_EXEC_MAX_CALL_ARGS + 128u)
+#define HX_RUN_MAX    (HL_EXEC_MAX_ARG_BYTES + 4u * HL_EXEC_MAX_CALL_ARGS + \
+                       HL_EXEC_STDIN_CEIL + 128u)
 #define HX_REPLY_MAX  (HL_EXEC_STDOUT_CEIL + HL_EXEC_STDERR_CEIL + 64u)
 
 /* Log a report, one record per line. */
@@ -375,6 +376,8 @@ typedef struct {
     pid_t    pid;               /* 0 once reaped */
     int      pidfd;             /* readable once it exits; -1 = none */
     int      out_fd, err_fd;    /* -1 once closed */
+    int      in_fd;             /* the child's stdin pipe, -1 once written */
+    uint8_t *in;   size_t in_len, in_off;
     uint8_t *out;  size_t out_len;  int out_cut;
     uint8_t *err;  size_t err_len;  int err_cut;
     uint64_t start_ms, deadline;
@@ -435,6 +438,8 @@ static void queue_small(uint32_t type, uint32_t id, const char *text)
 static void job_free(Job *j)
 {
     if (j->pidfd >= 0) close(j->pidfd);
+    if (j->in_fd >= 0) close(j->in_fd);
+    free(j->in);
     if (j->out_fd >= 0) close(j->out_fd);
     if (j->err_fd >= 0) close(j->err_fd);
     free(j->out);
@@ -443,7 +448,7 @@ static void job_free(Job *j)
     if (j->ci >= 0 && g_cmds[j->ci].running > 0) g_cmds[j->ci].running--;
     g_reserved -= j->reserved;
     memset(j, 0, sizeof *j);
-    j->out_fd = j->err_fd = j->pidfd = -1;
+    j->out_fd = j->err_fd = j->pidfd = j->in_fd = -1;
     j->ci = -1;
 }
 
@@ -507,12 +512,13 @@ static void kill_all(void)
 /* ── One call ──────────────────────────────────────────────────────── */
 
 /* The child, between fork and exec. Allocates nothing; reports a failure
- * through @p ep (stage byte + errno) and _exit(126). The host's steps are
+ * through @p ep (stage byte + errno) and _exit(126). Its stdin is @p in_r
+ * (the call's bytes), or /dev/null when it is -1. The host's steps are
  * hl_exec_plat_child_* (exec_platform.h); the order matters: die with the
  * broker before anything else, confine before stdio moves, the syscall
  * filter last. */
-static void child_run(const Cmd *cmd, int bfd, int out_w, int err_w, int ep,
-                      char *const argv[], char *const envp[], pid_t broker)
+static void child_run(const Cmd *cmd, int bfd, int in_r, int out_w, int err_w,
+                      int ep, char *const argv[], char *const envp[], pid_t broker)
 {
     unsigned char stage = 0;
     int e = 0, st;
@@ -527,7 +533,7 @@ static void child_run(const Cmd *cmd, int bfd, int out_w, int err_w, int ep,
         if (s != SIGKILL && s != SIGSTOP) signal(s, SIG_DFL);
     if ((st = hl_exec_plat_child_confine(cmd, g_flags)) != 0) FAIL(st);
     /* stdio: move every source above 10 first, so no dup2 clobbers one. */
-    int hi_null = fcntl(g_devnull, F_DUPFD, 10), hi_out = fcntl(out_w, F_DUPFD, 10),
+    int hi_null = fcntl(in_r >= 0 ? in_r : g_devnull, F_DUPFD, 10), hi_out = fcntl(out_w, F_DUPFD, 10),
         hi_err = fcntl(err_w, F_DUPFD, 10), hi_bin = fcntl(bfd, F_DUPFD, 10),
         hi_ep = fcntl(ep, F_DUPFD_CLOEXEC, 10);
     if (hi_null < 0 || hi_out < 0 || hi_err < 0 || hi_bin < 0 || hi_ep < 0)
@@ -596,7 +602,8 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
         return;
     }
 
-    /* Decode: u16 name_len, name, u16 n, (u32 len, bytes) * n */
+    /* Decode: u16 name_len, name, u16 n, (u32 len, bytes) * n,
+     * u32 stdin_len, stdin */
     const char *args[HL_EXEC_MAX_CALL_ARGS];
     size_t lens[HL_EXEC_MAX_CALL_ARGS];
     if (len < 4) { queue_small(HX_REFUSED, id, "exec: malformed RUN"); return; }
@@ -619,7 +626,11 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
         lens[i] = al;
         off += al;
     }
-    if (off != len) { queue_small(HX_REFUSED, id, "exec: malformed RUN"); return; }
+    if (off + 4 > len) { queue_small(HX_REFUSED, id, "exec: malformed RUN"); return; }
+    size_t in_len = hl_chan_get32(p + off);
+    off += 4;
+    if (in_len != len - off) { queue_small(HX_REFUSED, id, "exec: malformed RUN"); return; }
+    const uint8_t *in = p + off;
 
     HlExecCmd c;
     char err[256], msg[320];
@@ -634,11 +645,21 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
         if (strcmp(g_cmds[i].c.name, c.name) == 0) { ci = i; break; }
     if (ci < 0) { queue_small(HX_REFUSED, id, "exec: unknown command"); return; }
     Cmd *cmd = &g_cmds[ci];
+    /* stdin: the command's own cap, checked here too (the binding's check is
+     * only a fast path). */
+    if (in_len > cmd->c.stdin_max) {
+        snprintf(msg, sizeof msg, cmd->c.stdin_max
+                 ? "exec.%s: stdin is longer than its stdin_max"
+                 : "exec.%s: takes no stdin (it declares no stdin_max)", cmd->c.name);
+        queue_small(HX_REFUSED, id, msg);
+        return;
+    }
     if (cmd->running >= cmd->c.concurrency) {
         queue_small(HX_BUSY, id, "exec: the command's concurrency is reached");
         return;
     }
-    size_t reserve = (size_t)cmd->c.stdout_max + cmd->c.stderr_max;
+    /* Its output caps and its stdin, held until the reply is delivered. */
+    size_t reserve = (size_t)cmd->c.stdout_max + cmd->c.stderr_max + in_len;
     if (reserve > HL_EXEC_MAX_BUFFERED - g_reserved) {
         queue_small(HX_BUSY, id, "exec: too much output held for delivery");
         return;
@@ -701,11 +722,13 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     envp[ne] = NULL;
 
     int op[2] = { -1, -1 }, epp[2] = { -1, -1 }, ep[2] = { -1, -1 };
+    int ip[2] = { -1, -1 };              /* stdin, only when the call sends some */
     pid_t pid = -1;
-    if (pipe_cloexec(op) == 0 && pipe_cloexec(epp) == 0 && pipe_cloexec(ep) == 0)
+    if (pipe_cloexec(op) == 0 && pipe_cloexec(epp) == 0 && pipe_cloexec(ep) == 0 &&
+        (in_len == 0 || pipe_cloexec(ip) == 0))
         pid = fork();
     if (pid == 0)
-        child_run(cmd, bfd, op[1], epp[1], ep[1], argv, envp, getppid());
+        child_run(cmd, bfd, ip[0], op[1], epp[1], ep[1], argv, envp, getppid());
     int fork_errno = errno;
     close(bfd);
     for (size_t i = 0; i < no; i++) free(owned[i]);
@@ -713,7 +736,9 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     if (op[1] >= 0) close(op[1]);
     if (epp[1] >= 0) close(epp[1]);
     if (ep[1] >= 0) close(ep[1]);
+    if (ip[0] >= 0) close(ip[0]);
     if (pid < 0) {
+        if (ip[1] >= 0) close(ip[1]);
         if (op[0] >= 0) close(op[0]);
         if (epp[0] >= 0) close(epp[0]);
         if (ep[0] >= 0) close(ep[0]);
@@ -731,6 +756,7 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     if (got == (ssize_t)sizeof em) {
         int e = em[1] | (em[2] << 8) | (em[3] << 16) | (em[4] << 24);
         waitpid(pid, NULL, 0);
+        if (ip[1] >= 0) close(ip[1]);
         close(op[0]);
         close(epp[0]);
         snprintf(msg, sizeof msg, "exec.%s: could not start (%s): %s", cmd->c.name,
@@ -756,12 +782,20 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     hl_chan_set_nonblock(j->err_fd);
     j->out = malloc(cmd->c.stdout_max ? cmd->c.stdout_max : 1);
     j->err = malloc(cmd->c.stderr_max ? cmd->c.stderr_max : 1);
+    j->in_fd = ip[1];
+    if (in_len) {
+        /* Written as the pipe takes it (the main loop); a command that exits
+         * or closes its stdin first just leaves the rest unwritten. */
+        hl_chan_set_nonblock(j->in_fd);
+        j->in = malloc(in_len);
+        if (j->in) { memcpy(j->in, in, in_len); j->in_len = in_len; }
+    }
     j->start_ms = hl_chan_mono_ms();
     j->deadline = j->start_ms + cmd->c.timeout_ms;
     j->reserved = reserve;
     g_reserved += reserve;
     cmd->running++;
-    if (!j->out || !j->err) { kill(-pid, SIGKILL); j->discard = 1; }
+    if (!j->out || !j->err || (in_len && !j->in)) { kill(-pid, SIGKILL); j->discard = 1; }
 }
 
 static void kill_call(uint32_t id)
@@ -806,6 +840,23 @@ static void drain(int *fd, uint8_t *buf, size_t *len, size_t cap, int *cut)
     }
 }
 
+/* Write what the child's stdin pipe takes; close it once everything is
+ * written, or when the child stopped reading (EPIPE: SIGPIPE is ignored). */
+static void feed(Job *j)
+{
+    while (j->in_off < j->in_len) {
+        ssize_t w = write(j->in_fd, j->in + j->in_off, j->in_len - j->in_off);
+        if (w > 0) { j->in_off += (size_t)w; continue; }
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        break;
+    }
+    close(j->in_fd);
+    j->in_fd = -1;
+    free(j->in);
+    j->in = NULL;
+}
+
 static void reap(void)
 {
     for (;;) {
@@ -816,6 +867,7 @@ static void reap(void)
             Job *j = &g_jobs[i];
             if (!j->used || j->pid != p) continue;
             j->pid = 0;
+            if (j->in_fd >= 0) { close(j->in_fd); j->in_fd = -1; }   /* nobody reads it */
             if (WIFEXITED(st)) { j->status = WEXITSTATUS(st); j->signo = 0; }
             else if (WIFSIGNALED(st)) { j->status = 0; j->signo = WTERMSIG(st); }
         }
@@ -877,7 +929,7 @@ int hl_exec_broker_main(void)
     (void)fcntl(g_chan, F_SETFD, FD_CLOEXEC);
     hl_chan_set_nonblock(g_chan);
     for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
-        g_jobs[i].out_fd = g_jobs[i].err_fd = g_jobs[i].pidfd = -1;
+        g_jobs[i].out_fd = g_jobs[i].err_fd = g_jobs[i].pidfd = g_jobs[i].in_fd = -1;
         g_jobs[i].ci = -1;
     }
 
@@ -895,8 +947,8 @@ int hl_exec_broker_main(void)
 
     rd.max = HX_RUN_MAX;
     for (;;) {
-        struct pollfd pf[2 + 3 * HL_EXEC_MAX_INFLIGHT];
-        int map[2 + 3 * HL_EXEC_MAX_INFLIGHT];
+        struct pollfd pf[2 + 4 * HL_EXEC_MAX_INFLIGHT];
+        int map[2 + 4 * HL_EXEC_MAX_INFLIGHT];
         int np = 0;
         short cev = (g_outq_n < HX_OUTQ - 2) ? POLLIN : 0;   /* backpressure */
         if (g_order_n > 0) cev |= POLLOUT;
@@ -914,6 +966,7 @@ int hl_exec_broker_main(void)
             if (j->out_fd >= 0) { pf[np] = (struct pollfd){ j->out_fd, POLLIN, 0 }; map[np++] = i; }
             if (j->err_fd >= 0) { pf[np] = (struct pollfd){ j->err_fd, POLLIN, 0 }; map[np++] = i; }
             if (j->pidfd >= 0 && j->pid > 0) { pf[np] = (struct pollfd){ j->pidfd, POLLIN, 0 }; map[np++] = i; }
+            if (j->in_fd >= 0) { pf[np] = (struct pollfd){ j->in_fd, POLLOUT, 0 }; map[np++] = i; }
             int t = -1;
             if (j->pid > 0 && !j->timed_out) t = j->deadline > now ? (int)(j->deadline - now) : 0;
             else if (j->pid > 0) t = 50;                   /* killed: reap soon */
@@ -939,11 +992,12 @@ int hl_exec_broker_main(void)
             }
         }
         for (int k = 1; k < np; k++) {
-            if (!(pf[k].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+            if (!(pf[k].revents & (POLLIN | POLLOUT | POLLHUP | POLLERR))) continue;
             if (map[k] == -2) goto out;       /* the server is gone */
             Job *j = &g_jobs[map[k]];
             Cmd *cmd = &g_cmds[j->ci];
             if (pf[k].fd == j->pidfd) continue;   /* reap() below */
+            if (pf[k].fd == j->in_fd) { feed(j); continue; }
             if (pf[k].fd == j->out_fd)
                 drain(&j->out_fd, j->out, &j->out_len, cmd->c.stdout_max, &j->out_cut);
             else if (pf[k].fd == j->err_fd)
@@ -1233,6 +1287,7 @@ static void on_readable(int fd, unsigned ready, void *user)
 
 int hl_exec_submit(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
                    const char *const *args, const size_t *lens, size_t n,
+                   const void *in, size_t in_len,
                    HlExecDoneFn fn, void *ud, uint32_t *id_out,
                    char *why, size_t why_size)
 {
@@ -1255,7 +1310,12 @@ int hl_exec_submit(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
         snprintf(why, why_size, "exec: too many calls in flight");
         return -1;
     }
-    size_t total = 4 + name_len;
+    if (in_len > HL_EXEC_STDIN_CEIL) {
+        snprintf(why, why_size, "exec: stdin is longer than %u bytes",
+                 (unsigned)HL_EXEC_STDIN_CEIL);
+        return -1;
+    }
+    size_t total = 4 + name_len + 4;
     for (size_t i = 0; i < n; i++) total += 4 + lens[i];
     uint8_t *buf = malloc(total);
     if (!buf) { snprintf(why, why_size, "exec: out of memory"); return -1; }
@@ -1272,10 +1332,12 @@ int hl_exec_submit(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
         if (lens[i]) memcpy(buf + off, args[i], lens[i]);
         off += lens[i];
     }
+    hl_chan_put32(buf + off, (uint32_t)in_len);   /* the stdin follows, uncopied */
+    off += 4;
     uint32_t id = g_next_id++;
     if (g_next_id == 0) g_next_id = 1;
-    int rc = hl_chan_write_frame(g_fd, HX_MAGIC, HX_RUN, id, buf, off, NULL, 0,
-                                 hl_chan_mono_ms() + 1000);
+    int rc = hl_chan_write_frame(g_fd, HX_MAGIC, HX_RUN, id, buf, off,
+                                 in_len ? in : NULL, in_len, hl_chan_mono_ms() + 1000);
     free(buf);
     if (rc != 0) {
         snprintf(why, why_size, "exec: the command broker is not answering");
@@ -1345,11 +1407,12 @@ static void exec_op_deadline(KlAsyncOp *kop, void *user_data)
 int hl_exec_op_start(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop,
                      const char *name, size_t name_len,
                      const char *const *args, const size_t *lens, size_t n,
+                     const void *in, size_t in_len,
                      uint32_t timeout_ms, char *why, size_t why_size)
 {
     HlExecOp *op = calloc(1, sizeof *op);
     if (!op) { snprintf(why, why_size, "exec: out of memory"); return -1; }
-    if (hl_exec_submit(loop, name, name_len, args, lens, n, exec_op_done, ctx,
+    if (hl_exec_submit(loop, name, name_len, args, lens, n, in, in_len, exec_op_done, ctx,
                        &op->id, why, why_size) != 0) {
         free(op);
         return -1;
@@ -1396,11 +1459,12 @@ int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
 }
 int hl_exec_submit(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
                    const char *const *args, const size_t *lens, size_t n,
+                   const void *in, size_t in_len,
                    HlExecDoneFn fn, void *ud, uint32_t *id_out,
                    char *why, size_t why_size)
 {
     (void)loop; (void)name; (void)name_len; (void)args; (void)lens; (void)n;
-    (void)fn; (void)ud; (void)id_out;
+    (void)in; (void)in_len; (void)fn; (void)ud; (void)id_out;
     snprintf(why, why_size, "exec: this host has no command broker");
     return -1;
 }
@@ -1408,10 +1472,11 @@ void hl_exec_cancel(uint32_t id) { (void)id; }
 int hl_exec_op_start(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop,
                      const char *name, size_t name_len,
                      const char *const *args, const size_t *lens, size_t n,
+                     const void *in, size_t in_len,
                      uint32_t timeout_ms, char *why, size_t why_size)
 {
     (void)ctx; (void)loop; (void)name; (void)name_len; (void)args; (void)lens;
-    (void)n; (void)timeout_ms;
+    (void)n; (void)in; (void)in_len; (void)timeout_ms;
     snprintf(why, why_size, "exec: this host has no command broker");
     return -1;
 }

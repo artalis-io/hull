@@ -211,6 +211,10 @@ local function main()
                     if c.fs.read then print("    fs.read:  " .. table.concat(c.fs.read, ", ")) end
                     if c.fs.write then print("    fs.write: " .. table.concat(c.fs.write, ", ")) end
                 end
+                local smax = c.stdin_max or c.stdinMax
+                if smax and smax ~= 0 then
+                    print(string.format("    stdin: up to %d bytes from the app", smax))
+                end
                 if c.unix_sockets or c.unixSockets then
                     print("    local IPC: may connect to any pathname unix socket the service account")
                     print("               can reach (not limited to the one it needs)")

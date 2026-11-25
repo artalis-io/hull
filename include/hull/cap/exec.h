@@ -56,9 +56,11 @@ void   hl_exec_b_fail(HlExecBuf *b, const char *fmt, ...)
 void   hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
                      const char *path, size_t path_len,
                      int64_t timeout_ms, int64_t stdout_max, int64_t stderr_max,
-                     int64_t concurrency, int unix_sockets,
+                     int64_t concurrency, int unix_sockets, int64_t stdin_max,
                      const char *sha256_hex, size_t sha256_len);
-/* `sha256_hex` NULL = no pin; otherwise exactly 64 hex characters (either
+/* `stdin_max` -1 or 0 = the command reads /dev/null; otherwise the bytes a
+ * call may send it (1..HL_EXEC_STDIN_CEIL, checked by validation).
+ * `sha256_hex` NULL = no pin; otherwise exactly 64 hex characters (either
  * case), the digest of the main executable the broker checks (§6.1). */
 /* A count of what follows (env pairs, fs paths, argv entries, enum values),
  * written as a placeholder and filled in by hl_exec_b_count_end. */
@@ -93,6 +95,7 @@ int hl_exec_policy_validate(const uint8_t *data, size_t len,
 
 #define HL_EXEC_CMD_UNIX_SOCKETS 0x01u
 #define HL_EXEC_CMD_SHA256       0x02u   /* 32 digest bytes follow the flags */
+#define HL_EXEC_CMD_STDIN        0x04u   /* u32 stdin_max follows (after the pin) */
 
 #define HL_EXEC_SLOT_ALLOW_DASH  0x01u
 #define HL_EXEC_SLOT_HAS_CHARS   0x02u
@@ -110,6 +113,7 @@ typedef struct HlExecCmd {
     uint8_t        concurrency;
     uint8_t        flags;            /* HL_EXEC_CMD_* */
     const uint8_t *sha256;           /* 32 bytes, NULL = no pin */
+    uint32_t       stdin_max;        /* bytes a call may send; 0 = /dev/null */
     uint16_t       n_env;
     uint16_t       n_fs_read;
     uint16_t       n_fs_write;
