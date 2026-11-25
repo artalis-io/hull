@@ -6,6 +6,8 @@
   lint) implemented. OpenBSD is not supported (§6.4, §9). Review rounds 1-3
   folded in: seccomp inheritance, child process creation, broker-side admission, required
   Landlock rights, file identity vs content, `unix_sockets` scope, `sha256` until enforced.
+  Released in v0.26.0. §15 is a design review of per-executable authority (proposed, not
+  implemented).
 - **Motivation:** hsctl needs to read node state that only a system tool reports: `nvidia-smi`
   for GPUs, `systemctl show` for its own `hs-*` units. Today an app cannot run any program: the
   app sandbox has no `exec` / `proc` / `fork`, and `hl_tool_spawn` exists only in tool mode.
@@ -355,8 +357,11 @@ The child runs these steps in order. Each is async-signal-safe and allocates not
      `setreuid`, `setregid`, `setresuid`, `setresgid`, `setfsuid`, `setfsgid`, `setgroups`,
      `capset`, and `prctl(PR_SET_PDEATHSIG, ...)`. An unprivileged status tool has no use for
      them; they fail with `EPERM` as they would for any unprivileged caller;
-   - the broker-only calls it no longer needs (`kill` of other pids, `wait4`, the Landlock
-     calls).
+   - NOT the Landlock calls, `kill` or `wait4`. An earlier draft listed them; the shipped
+     filter (`seccomp_child`, `cap/exec_broker_linux.c`) leaves them, and that is the better
+     rule: a Landlock domain can only narrow, the ABI 6 signal scope already keeps `kill`
+     inside the child's own domain, and a child that is itself a Hull binary needs the
+     Landlock calls to apply its own sandbox (§15.4).
 
    `PR_SET_NO_NEW_PRIVS` is already set from the broker, so a setuid binary gains nothing; a
    setuid binary is refused anyway (§6.1).
@@ -761,3 +766,347 @@ and `exec: degraded` when it applies.
 - **Privilege.** Nothing here can raise privilege: NNP plus the setuid refusal. A command that
   needs root (`systemctl restart`) is not in reach by design. Changing system state belongs to
   a separate root-owned agent the app talks to over a socket, not to this.
+
+## 15. Addendum: the authority of every executable the broker runs (design review)
+
+- **Status:** proposal, not implemented. Everything in §1-§14 shipped in v0.26.0 (#1210-#1214).
+  In this section **shipped** means v0.26.0 code, **proposed** means new work, and syntax marked
+  `-- proposed` does not parse today: `cap/exec.c` refuses an unknown command key at load.
+- **Question reviewed:** should each executable the broker launches carry a manifest in Hull's
+  own vocabulary, so the broker confines it to that manifest, a Hull callee can run its own
+  declared commands, and an operator can approve the whole command tree in one place?
+- **Running example:** `hs-gateway -> hs-wifi -> nmcli`. The gateway may ask for a Wi-Fi scan
+  through hs-wifi; hs-wifi may run the approved `nmcli` operation; the gateway has no direct
+  route to `nmcli` and not the OS permission `nmcli` uses.
+
+### 15.1 Verdict
+
+One capability vocabulary: yes. One manifest per executable: only for Hull executables, and
+not yet in the shape proposed. Five corrections:
+
+1. **The OS-permission goal cannot be met inside one broker.** Every job runs as the app's
+   uid, with NO_NEW_PRIVS and every credential change refused (§5.3, §14). NetworkManager
+   authorises a scan by polkit, per uid, so `nmcli` under the gateway's broker uses the
+   *gateway's* rights. Worse, a gateway that declares outbound `hosts` holds pledge `unix` on
+   Linux (`sandbox.c`, phase 2: "nsswitch IPC"), and Landlock does not mediate pathname
+   sockets, so a natively compromised gateway process can speak D-Bus to NetworkManager
+   without `nmcli` at all. Only a separate uid gives "the gateway lacks the permission". That
+   is a separate hs-wifi service, which v0.26.0 can already deploy (§15.7). The broker tree
+   can give "the gateway process has no exec route to `nmcli`"; it cannot give more.
+2. **A Hull binary does not run as a declared command today** (§15.4): the child starts in
+   `/`, which a built Hull app refuses as its app directory unless it is rootless; it cannot
+   spawn its own broker; on macOS it cannot apply its own sandbox at all. Making a Hull callee
+   work is the prerequisite for everything else here, and it is Linux-only.
+3. **No sidecar for native binaries.** The inline declaration already is a digest-bound,
+   signed, reviewed policy (§15.2). A sidecar adds a second place to review and is trusted
+   only as far as whoever can write it, the same party who can replace the binary.
+4. **Nested calls are a protocol change, not a policy merge** (§15.5). Folding descendants
+   into the broker's one command table would let the gateway request `nmcli` directly. The
+   broker must bind each request to the job that sent it, by channel.
+5. **No field promises what a backend cannot enforce** (§15.6). There is no network for any
+   child (the broker's ceiling refuses every socket family but `AF_UNIX`), no hostname rule
+   anywhere in the kernel layer, `unix_sockets` cannot be narrowed to one socket, and macOS
+   gives every command the union of grants. A callee manifest asking for any of these is
+   refused at start, never accepted and silently weakened.
+
+### 15.2 Manifest reuse
+
+**A Hull executable** already has a signed manifest: `package.sig`, which `hull build --sign`
+writes BESIDE the binary (`stdlib/cli/lua/hull/build.lua`, "Write package.sig"). Its Ed25519
+signature, under the developer key named in the same file, covers `binary_hash` (SHA-256 of
+the built binary), `manifest`, `modules_resolved`, `files`, `platform`, `build` and
+`trampoline_hash` (`stdlib/cli/lua/hull/app_sig.lua`). So the broker can consume it as is,
+with two limits:
+
+- it is not inside the executable (it cannot be: it hashes the executable), so it needs a
+  location: **proposed** `<real path>.sig`, held to the same root-owned `safe_path` rule as the
+  binary (§6.1). `hull build -o` and `hull deploy` would write it there;
+- its key is whatever `public_key` the file names. Self-consistency proves nothing about who
+  signed it; the caller must pin the key (§15.3). `hull inspect` today checks the signature
+  only against the key in the same file, and never hashes the binary
+  (`stdlib/cli/lua/hull/inspect.lua`); `hull verify --binary` does hash it.
+
+No schema change is needed for Hull callees: their `fs`, `state`, `databases`, `hosts`,
+`exec`, ... are already the vocabulary. What is new is a translation from that vocabulary to a
+broker domain (§15.4), and the refusal of the parts the broker cannot give.
+
+**A native executable** keeps the shipped inline declaration. Compared with a digest-bound
+sidecar:
+
+| | inline (shipped) | sidecar (proposed by the question) |
+|---|---|---|
+| who writes the grants | the caller's developer | whoever installs the sidecar |
+| who signs them | the caller's `package.sig` | nobody, unless a new signing step |
+| what makes the digest trustworthy | it is inside the signed caller manifest | the sidecar's file ownership (root) |
+| where the operator reviews it | `hull inspect <caller>`, one place | the caller, plus every sidecar |
+| what it buys | | sharing one tool's grants across several callers |
+
+The trust row decides it: a sidecar binds the binary's digest to the grants, but the expected
+digest is only as trusted as the sidecar, and the party who can rewrite the sidecar (root)
+can replace the binary too. It authenticates nothing the `safe_path` rule does not. Sharing
+grants across callers is real but small (a handful of `fs` paths) and can be had later with a
+build-time include, without a runtime file. **Drop the native sidecar.**
+
+### 15.3 Identity and updates
+
+| Pin | Establishes | On a rebuild | Shipped? |
+|---|---|---|---|
+| `sha256` | these exact main-executable bytes | every rebuild fails the start (and a replace after start fails the call) | yes |
+| signer (**proposed** `signer`) | some binary signed by this key | any rebuild by the key passes, whatever it now requests | no |
+| authority (**proposed** `manifest_sha256`) | the callee's signed `manifest` hashes to this value | a rebuild with the same manifest passes; any change to its authority fails the start | no |
+| app identity | nothing yet: no signed field names the app (`state.name` is optional and means a directory) | | no |
+
+A signer pin alone is not enough. Two tools signed by one key are interchangeable at the
+callee's path, and a signed rebuild that asks for more would be accepted silently. The
+smallest predictable policy for a Hull callee, all **proposed**:
+
+- `signer` is required: no callee manifest is read without a pinned key;
+- plus `sha256` (exact bytes; the shipped behaviour, unchanged), or `manifest_sha256` (any code
+  that the key signed with exactly this authority). Neither is refused at load;
+- `manifest_sha256` is SHA-256 of the canonical JSON of `package.sig.manifest`, encoded as
+  `hull.app_sig` encodes the payload, and printed by `hull inspect` so it is copied, never
+  computed by hand.
+
+Outcomes:
+
+- **Two tools under one key:** a different tool at the path is refused unless its manifest is
+  byte-identical, in which case it has exactly the approved authority. Pin `sha256` when that
+  residue matters.
+- **A signed rebuild asking for more** (or less) fails app START, at broker policy load,
+  naming the command, the expected and found digests, and the line to re-run (`hull inspect`).
+  Never a call-time surprise.
+- **A change between inspection and launch:** inspection is advisory, launch is authoritative.
+  At policy load the broker opens the binary, verifies the sidecar under the pinned key,
+  hashes the descriptor it will exec against `binary_hash`, and checks `manifest_sha256`. On
+  every call it re-checks `(st_dev, st_ino)` and re-hashes, as the `sha256` pin does today
+  (§6.1; a Hull binary is a few MB, an estimated 10 ms of SHA-256 per call, to be measured).
+- **Existing deployments:** a command without `signer` behaves exactly as in v0.26.0. The
+  broker reads no sidecar for it, and `sha256` keeps its meaning.
+
+The approval lives in the CALLER's signed manifest: `signer` plus `manifest_sha256` name the
+callee's identity and authority, and the callee's grants live once, in its own `package.sig`.
+Re-approving a broader callee means rebuilding the caller with the new digest. Hull has no
+operator-side policy file, and adding one is not justified by one tree.
+
+### 15.4 A Hull executable as a command (direct calls)
+
+What stops it today, from the code:
+
+| Obstacle | Where | Fix (**proposed**) |
+|---|---|---|
+| the child runs in `/`; a built Hull binary takes its working directory as its app directory and refuses `/` unless rootless | `exec_broker.c` `chdir("/")`; `sandbox.c` `hl_sandbox_manifest_rootless_ok` | require the callee to be ROOTLESS (built, `app.main` only, `state` declared, every `fs` and file database under `@state/`), the existing rule, no new one |
+| it writes nowhere but `/dev`, `/run`, `/tmp`; `RLIMIT_FSIZE` is 0 without `fs.write` | §3, §5.3 | derive a write grant for the callee's state directory (`$XDG_STATE_HOME` is unset in the child, so `<passwd home>/.local/state/<name>`, resolved by the same `hl_state_dir_resolve`) |
+| it cannot open `AF_INET` / `AF_INET6` | broker ceiling, `seccomp_broker` | refuse at start a callee with `hosts`, a network database, or any module that listens or dials (`http-server`, `http-client`, `smtp`, ...) |
+| it cannot spawn its own broker or GPU helper (`clone` without `CLONE_THREAD` is `EPERM`) | `seccomp_child`; `serve_cli.c` ignores the failed broker spawn | refuse a callee with `exec` (until §15.5), `gpu`, `tui` |
+| `--verify-sig` looks for `package.sig` next to the entry, i.e. `/package.sig` | `signature.c` | none needed: the broker verifies the sidecar itself, before the exec |
+| macOS refuses a second sandbox, and Hull's own Seatbelt `sandbox_init` failure is fatal | §6.4; `sandbox.c` | refuse a `signer` command on macOS at start, even with `--allow-degraded-sandbox` (as Windows: no setting produces the guarantee) |
+
+On Linux the callee then runs inside TWO confinements, and both are real: the broker's
+per-child Landlock domain and seccomp filter (outer, from the derived grants), and the
+callee's own phase-2 sandbox from its own manifest (inner; Landlock and seccomp stack, and the
+shipped child filter leaves the Landlock calls, §5.3). Whether that stack starts cleanly is
+**untested**: the acceptance below must show it.
+
+The derived grants are the callee's manifest translated, never widened: the default read set,
+its state directory read-write, no sockets, its `stdin_max` and limits from the CALLER's
+declaration (the caller owns its call's timeout and output caps).
+
+### 15.5 Delegation and nested calls
+
+Three separate things, for each process:
+
+- **direct authority:** what its own sandbox lets it do (its manifest, enforced by its own
+  kernel sandbox; for a job, also the broker's per-child domain);
+- **invocable operations:** the command shapes its OWN manifest declares;
+- **delegation bound:** nothing a callee does widens its caller's direct authority, and a
+  callee's operations are the callee's, never the caller's.
+
+The proposal to reuse ONE broker for the tree, keeping process creation unavailable inside
+every job, holds up. It is the only shape that keeps §7's lifetime guarantee, because the
+broker stays the only process that forks, so PDEATHSIG and "no grandchild" still cover every
+job. But a global command table loses the third rule. Merged, the broker would accept
+`RUN nm-scan` from the gateway's channel. The design must instead be:
+
+- **Policy is a tree.** The single `POLICY` frame carries the root's commands, and for each
+  Hull command the callee's commands (from its verified `package.sig`) as a child node.
+  Depth bounded (4 proposed); the whole tree's binaries are checked at load.
+- **Identity is the channel, not the pid.** When the broker forks a Hull job whose node has
+  commands, it creates a socketpair for it and passes one end at a fixed fd with a broker-set
+  environment value (`HULL_EXEC_CHANNEL=4`, **proposed**). The callee's runtime adopts that
+  channel instead of spawning a broker and sends no `POLICY`. A `RUN` on that channel is
+  matched against that node only. A pid (`SO_PEERCRED`) would be reusable and racy; a
+  channel is a capability the job either holds or does not.
+- **Lifetime and admission are per tree.** Killing a job kills its sub-jobs first; a
+  sub-call's timeout is clamped to what is left of its parent's; the in-flight and
+  buffered-output caps are the tree's, not each node's.
+- **Layer 3 of §1 weakens per caller.** The broker's Landlock `EXECUTE` set becomes the
+  tree's union, so a broker bug could exec `nmcli` for the gateway. The per-channel match is
+  the boundary there, and §1's claim must say so.
+
+This is a new frame layout, a runtime path that adopts an inherited channel, and job-tree
+bookkeeping. It stays out of the first slice. It is also refused on macOS, where every
+command of the tree would share one profile.
+
+**Can the argument policy express "scan"?** Yes, with fixed arguments and no slot:
+
+```lua
+["nm-scan"] = {
+  path = "/usr/bin/nmcli",
+  argv = { "--terse", "--fields", "SSID,SIGNAL,SECURITY", "device", "wifi", "list",
+           "--rescan", "yes" },
+  unix_sockets = true,   -- nmcli reaches NetworkManager over the system D-Bus socket
+  timeout_ms = 20000, stdout_max = 65536,
+},
+```
+
+The argument shape fixes what `nmcli` is asked, but not what the job could reach: under
+`unix_sockets = true` the job can connect to any pathname socket the uid can (§3). A
+per-interface variant cannot be one command with an optional `ifname <name>` pair, because
+only the last entry may `repeat`, so a `min = 0` slot after a fixed `ifname` would leave
+`ifname` dangling. Declare a second command that always takes it.
+
+**Walk-through, nested model (Linux, proposed):**
+
+| Step | Allowed scan | Direct gateway -> `nmcli` |
+|---|---|---|
+| app code | gateway `exec.run("wifi-scan")`: the binding matches it against the gateway's node | `exec.run("nm-scan")`: not in the gateway's manifest, an error before any frame |
+| a compromised gateway sends a raw frame | `RUN wifi-scan` on the gateway's channel: admitted | `RUN nm-scan` on the gateway's channel: `REFUSED` (not in that node) |
+| broker | checks hs-wifi (owner, `(st_dev, st_ino)`, hash vs signed `binary_hash`), forks it with its derived domain and a job channel | nothing forked |
+| hs-wifi | its own sandbox applies; its `exec.run("nm-scan")` goes out on ITS channel | n/a |
+| broker | matches `nm-scan` against hs-wifi's node, forks `nmcli` with `unix_sockets` | n/a |
+| kernel | `nmcli`: execute only `nmcli` and its loader, `AF_UNIX` only, no process creation | the gateway process has no exec at all; the BROKER's domain does execute `nmcli` (layer 3 is per tree, not per caller) |
+| OS | polkit: the gateway's uid must be allowed `wifi.scan` | a gateway with pledge `unix` can call NetworkManager over D-Bus with that same uid's rights |
+
+The last row is correction 1 again.
+
+### 15.6 What each field can promise
+
+| Field | Linux (per child) | macOS | Native command | Hull callee |
+|---|---|---|---|---|
+| `fs.read` / `fs.write` | Landlock, per child | union of all commands | inline (shipped) | derived from `@state/` only |
+| device ioctls | ABI 5, per child | `file-ioctl`, union | inline `fs.write` under `/dev` | refused (no `gpu`) |
+| `unix_sockets` | seccomp, per child; any pathname socket the uid reaches | union | boolean (shipped) | refused |
+| network, `hosts` | none: the broker's ceiling refuses every family but `AF_UNIX`; Landlock filters TCP ports, never names | none | refused (shipped: no field) | refused at start |
+| own sandbox | stacks under the broker's | impossible (nested `sandbox_init` is `EPERM`) | n/a | Linux only |
+| nested `exec` | §15.5 | refused (union) | n/a | refused until §15.5 |
+
+The explicit behaviour when isolation is unavailable: **refuse at start**. A weaker but
+well-defined guarantee may run under `--allow-degraded-sandbox`, one `exec: degraded:` line
+per guarantee lost (§6.5's rule). Never accept a field and enforce less.
+
+**The macOS union deserves the same rule.** Today it is logged (`exec: limit:`) and runs.
+That is a guarantee §6.3 makes on Linux and macOS silently lacks, which is §6.5's definition of
+degraded. Proposed: when the commands' grants DIFFER (`fs`, `unix_sockets`), a macOS start is
+refused unless `--allow-degraded-sandbox`; identical grants need nothing, since the union then
+loses nothing. That reuses the existing operator flag rather than adding one. The cost is that
+an app with differing grants, released on macOS in v0.26.0, needs the flag after the change.
+That is a breaking change for that case only: note it in the CHANGELOG, and the macOS e2e's
+union case passes the flag.
+
+### 15.7 The running example without new runtime work
+
+The property the example asks for (the gateway lacks the OS permission) needs a second uid,
+and v0.26.0 already has the parts:
+
+- **hs-wifi** is its own service (a systemd unit, `User=hs-wifi`), a Hull app with
+  `http-server` bound to `127.0.0.1`, and a direct `exec` of `nm-scan` (§15.5's declaration).
+  A polkit rule grants `org.freedesktop.NetworkManager.wifi.scan` to `hs-wifi` alone.
+- **hs-gateway** declares `hosts = { "127.0.0.1" }` and a shared token in `secrets`, calls
+  `http.fetch("http://127.0.0.1:<port>/scan", ...)`, and has no `exec` of `nmcli` and no
+  NetworkManager rights.
+- The gap is the loopback port, which any local process can reach, hence the token. A Unix
+  socket with peer credentials would close it, but Hull has neither a Unix-socket listener nor
+  a client today. That is the one feature worth adding for this example.
+
+### 15.8 Worked example (direct call, slice 1)
+
+`hs-wifi` here is a leaf (it reads hardware state from `/sys`, runs nothing). `nmcli`
+belongs to §15.5/§15.7.
+
+```lua
+-- hs-gateway/app.lua (signed by the gateway's key)
+app.manifest({
+  modules = { "hull/exec@1", "hull/http-server@1" },
+  exec = {
+    ["wifi-status"] = {
+      path = "/opt/hs/bin/hs-wifi",
+      argv = { "status", "--", { chars = "a-z0-9", max = 15 } },   -- interface name
+      timeout_ms = 10000, stdout_max = 65536,
+      signer = "3f9c...e1",              -- proposed: the hs release key
+      manifest_sha256 = "a41b...07",     -- proposed: printed by hull inspect
+    },
+  },
+})
+```
+
+```lua
+-- hs-wifi/app.lua (built with hull build --sign; package.sig installed as hs-wifi.sig)
+app.manifest({
+  modules = { "hull/json@1", "hull/fs@1" },
+  state = { name = "hs-wifi" },
+  fs = { write = { "@state/last.json" } },
+})
+app.main(function(ctx) ... end)
+```
+
+Effective authority (Linux):
+
+| Process | Direct | May invoke | Bounded by |
+|---|---|---|---|
+| hs-gateway (app process) | its own manifest; no exec / fork / clone | `wifi-status` with one interface-shaped argument | its signed manifest; the broker's match |
+| hs-wifi (job) | outer: execute its binary and loader, the default read set, `~hs/.local/state/hs-wifi` read-write, no sockets, no process creation; inner: its own sandbox, `@state/last.json` | nothing | `signer` + `manifest_sha256` in the gateway's manifest; refused at start if its manifest asks for more than §15.6 allows |
+
+What `hull inspect` should show (**proposed**; today it prints the command, path, argv and
+slot rules only):
+
+```
+Commands (exec):
+  wifi-status  /opt/hs/bin/hs-wifi  status -- <a-z0-9, 1..15>
+    callee:    Hull app, signer 3f9c...e1 (pinned)      signature VALID
+    binary:    sha256 9d02...c4 matches the signed binary_hash
+    authority: manifest sha256 a41b...07 matches the pin
+    grants:    state dir (read-write), no network, no sockets, no commands
+```
+
+A missing sidecar, a different key, a binary that does not hash to `binary_hash`, or a
+manifest that does not match prints `UNVERIFIED: <reason>` on that line. The same check runs
+at app start, where it is fatal.
+
+### 15.9 Slices, compatibility, acceptance
+
+**Order.** The evidence changes the order the question proposed. The running example's
+security goal is met by §15.7 today, and nested calls need a Hull callee that runs at all. So:
+
+1. **Slice 0 (smallest, independently useful):** the macOS union becomes a degraded
+   guarantee (§15.6), plus a §1 note that layer 3 is per broker, not per caller. Code: a
+   grant comparison in `exec_broker_macos.c` and a `--allow-degraded-sandbox` check. Accept:
+   two commands with identical grants start on macOS; differing grants are refused, and start
+   with the flag, logging one `exec: degraded:` line; Linux is unchanged.
+2. **Slice 1: a Hull leaf callee, Linux only (§15.4, §15.3).** `signer` and
+   `manifest_sha256` (new command keys; a new command flag in the policy encoding, as
+   `stdin_max` was, so existing encodings and the fuzz corpus stay valid); the sidecar check
+   at policy load and the per-call re-hash; derived grants; the refusals of §15.6; `hull
+   inspect` verification. Worth building only once a real callee fits the rootless,
+   no-network, no-command class; otherwise wait for one.
+3. **Slice 2: nested calls (§15.5),** Linux only.
+
+**Compatibility.** A manifest without the new keys encodes and behaves byte-for-byte as in
+v0.26.0. A manifest WITH them is refused by v0.26.0 (unknown key), which fails closed. Slice 0
+breaks one case: macOS, several commands, differing grants, now needs
+`--allow-degraded-sandbox`.
+
+**Slice 1 acceptance** (CI, `make HL_EXEC_TEST_HOOKS=1`; root-owned fixtures as §8):
+
+- a built rootless Hull tool runs as a declared command and returns its output; its own
+  `[sandbox] applied` line is present (the two layers stack);
+- start is refused, naming the reason, for each of: no sidecar, a bad signature, another
+  key, a binary that does not hash to `binary_hash`, a `manifest_sha256` mismatch, a callee
+  declaring `hosts`, `exec`, `gpu`, `tui` or a non-`@state/` grant, and any `signer` command
+  on macOS;
+- a signed rebuild with the same manifest starts with no change to the caller, and one with
+  a widened `fs.write` does not;
+- the callee's job writes its state directory and nothing else (probe), and opens no socket;
+- replaced binary: `ESTALE`; rewritten in place: the per-call hash refuses the call;
+- `hull inspect` prints VERIFIED only after hashing the binary, and `UNVERIFIED: <reason>`
+  for each start-refusal case above;
+- a v0.26.0 manifest's policy encoding is unchanged (a golden test).
