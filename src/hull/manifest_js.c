@@ -9,6 +9,7 @@
  */
 
 #include "hull/manifest.h"
+#include "hull/cap/exec_child.h"         /* the child manifest's rules */
 #include "hull/shared/state_dir.h"   /* hl_state_dir_name_valid */
 #include "hull/utils/alloc.h"
 #include "manifest_internal.h"
@@ -211,8 +212,12 @@ static int read_js_port_array(JSContext *ctx, JSValueConst obj, int *out)
 /* Each row: the accepted spellings of one key (NULL-terminated pairs). */
 static const char *const MX_CMD_KEYS[] = {
     "path", "argv", "timeoutMs", "timeout_ms", "stdoutMax", "stdout_max",
-    "stderrMax", "stderr_max", "env", "concurrency", "fs", "unixSockets",
-    "unix_sockets", "stdinMax", "stdin_max", "sha256", NULL };
+    "stderrMax", "stderr_max", "env", "concurrency", "host", "manifest",
+    "stdinMax", "stdin_max", "sha256",
+    "fs", "unixSockets", "unix_sockets",   /* v0.26.0 spellings of host's fields */
+    NULL };
+static const char *const MX_HOST_KEYS[] = { "read", "write", "unixSockets",
+                                            "unix_sockets", NULL };
 static const char *const MX_SLOT_KEYS[] = {
     "enum", "prefix", "suffix", "chars", "min", "max", "repeat", "allowDash",
     "allow_dash", NULL };
@@ -416,6 +421,100 @@ static void mx_slot(JSContext *ctx, JSValueConst t, HlExecBuf *b, const char *wh
     mx_str_list(ctx, t, "enum", b, where);
 }
 
+/* manifest.fs.<list>: each entry checked as a command's app grant; written
+ * only when @p write >= 0 (the first pass only checks). */
+static size_t mx_child_list(JSContext *ctx, JSValueConst fs, const char *list,
+                            const char *cmd, HlExecBuf *b, int write)
+{
+    size_t n = 0;
+    JSValue arr = mjs_own(ctx, fs, list);
+    if (JS_IsArray(ctx, arr) > 0) {
+        int32_t len = mjs_len(ctx, arr);
+        for (int32_t i = 0; i < len && !b->failed; i++) {
+            JSValue e = mjs_elem(ctx, arr, (uint32_t)i);
+            size_t sl = 0;
+            const char *sv = JS_IsString(e) ? JS_ToCStringLen(ctx, &sl, e) : NULL;
+            if (JS_IsString(e) && !sv) {
+                JS_FreeValue(ctx, JS_GetException(ctx));
+                hl_exec_b_fail(b, "exec: out of memory");
+            } else if (!sv) {
+                hl_exec_b_fail(b, "exec.%s.manifest.fs.%s[%d] must be a string",
+                               cmd, list, (int)i + 1);
+            } else if (hl_exec_child_grant_entry(b, cmd, list, (unsigned)i + 1, sv,
+                                                 sl) == 0 && write >= 0) {
+                hl_exec_b_str(b, sv, sl);
+            }
+            if (sv) JS_FreeCString(ctx, sv);
+            JS_FreeValue(ctx, e);
+            n++;
+        }
+    } else if (!JS_IsUndefined(arr) && !JS_IsNull(arr)) {
+        hl_exec_b_fail(b, "exec.%s.manifest.fs.%s must be an array of strings",
+                       cmd, list);
+    }
+    JS_FreeValue(ctx, arr);
+    return n;
+}
+
+/* manifest: { fs: { read, write } }: a strict subset of the app manifest,
+ * appended after the argv only when it grants something (§3). */
+static void mx_child_manifest(JSContext *ctx, JSValueConst t, const char *cmd,
+                              HlExecBuf *b)
+{
+    if (b->failed) return;
+    JSValue m = mjs_own(ctx, t, "manifest");
+    if (JS_IsUndefined(m) || JS_IsNull(m)) { JS_FreeValue(ctx, m); return; }
+    if (!mjs_is_obj(ctx, m)) {
+        hl_exec_b_fail(b, "exec.%s.manifest must be an object (a subset of the app "
+                       "manifest)", cmd);
+        JS_FreeValue(ctx, m);
+        return;
+    }
+    uint32_t nk;
+    JSPropertyEnum *tab = mx_own_keys(ctx, m, &nk);
+    for (uint32_t i = 0; i < nk && !b->failed; i++) {
+        const char *k = JS_AtomToCString(ctx, tab[i].atom);
+        if (!k) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            hl_exec_b_fail(b, "exec.%s.manifest: a key is not a string", cmd);
+        } else {
+            (void)hl_exec_child_key(b, cmd, k);
+            JS_FreeCString(ctx, k);
+        }
+    }
+    if (tab) JS_FreePropertyEnum(ctx, tab, nk);
+    JSValue fs = b->failed ? JS_UNDEFINED : mjs_own(ctx, m, "fs");
+    if (!JS_IsUndefined(fs) && !JS_IsNull(fs)) {
+        char fw[128];
+        snprintf(fw, sizeof fw, "exec.%s.manifest.fs", cmd);
+        if (!mjs_is_obj(ctx, fs)) {
+            hl_exec_b_fail(b, "exec.%s.manifest.fs must be an object { read, write }",
+                           cmd);
+        } else if (mx_keys(ctx, fs, MX_FS_KEYS, b, fw) == 0) {
+            size_t nr = mx_child_list(ctx, fs, "read", cmd, b, -1);
+            size_t nw = mx_child_list(ctx, fs, "write", cmd, b, -1);
+            if (!b->failed && nr + nw > 0) {
+                hl_exec_b_app_fs(b);
+                size_t mark = hl_exec_b_count_begin(b);
+                hl_exec_b_count_end(b, mark, mx_child_list(ctx, fs, "read", cmd, b, 0));
+                mark = hl_exec_b_count_begin(b);
+                hl_exec_b_count_end(b, mark, mx_child_list(ctx, fs, "write", cmd, b, 1));
+            }
+        }
+    }
+    JS_FreeValue(ctx, fs);
+    JS_FreeValue(ctx, m);
+}
+
+/* Whether an own property is present under either spelling. */
+static int mx_present(JSContext *ctx, JSValueConst obj, const char *key, const char *alt)
+{
+    JSValue v = mx_own2(ctx, obj, key, alt);
+    int p = !JS_IsUndefined(v) && !JS_IsNull(v);
+    JS_FreeValue(ctx, v);
+    return p;
+}
+
 static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *b)
 {
     char where[96];
@@ -431,7 +530,34 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     int64_t so = mx_int(ctx, t, "stdoutMax", "stdout_max", b, where);
     int64_t se = mx_int(ctx, t, "stderrMax", "stderr_max", b, where);
     int64_t conc = mx_int(ctx, t, "concurrency", NULL, b, where);
-    int unix_sockets = mx_bool(ctx, t, "unixSockets", "unix_sockets", b, where);
+    /* host: { read, write, unixSockets }; the v0.26.0 spellings fs and
+     * unixSockets map onto it, never both for one grant. */
+    JSValue host = mjs_own(ctx, t, "host");
+    int host_obj = mjs_is_obj(ctx, host);
+    if (!host_obj && !JS_IsUndefined(host) && !JS_IsNull(host))
+        hl_exec_b_fail(b, "%s: host must be an object { read, write, unixSockets }",
+                       where);
+    else if (host_obj) {
+        char hw[192];
+        snprintf(hw, sizeof hw, "%s.host", where);
+        (void)mx_keys(ctx, host, MX_HOST_KEYS, b, hw);
+    }
+    int legacy_fs = mx_present(ctx, t, "fs", NULL);
+    int legacy_unix = mx_present(ctx, t, "unixSockets", "unix_sockets");
+    int host_rw = host_obj && (mx_present(ctx, host, "read", NULL) ||
+                               mx_present(ctx, host, "write", NULL));
+    int host_unix = host_obj && mx_present(ctx, host, "unixSockets", "unix_sockets");
+    if (legacy_fs && host_rw)
+        hl_exec_b_fail(b, "%s: fs and host.read / host.write both given; fs is the "
+                       "v0.26.0 spelling of host = { read, write }: keep host", where);
+    if (legacy_unix && host_unix)
+        hl_exec_b_fail(b, "%s: unix_sockets and host.unix_sockets both given; keep "
+                       "host.unix_sockets", where);
+    if (legacy_fs) hl_exec_legacy_note(name, "fs", "host");
+    if (legacy_unix) hl_exec_legacy_note(name, "unix_sockets", "host.unix_sockets");
+    int unix_sockets = legacy_unix
+        ? mx_bool(ctx, t, "unixSockets", "unix_sockets", b, where)
+        : host_obj ? mx_bool(ctx, host, "unixSockets", "unix_sockets", b, where) : 0;
     int64_t stdin_max = mx_int(ctx, t, "stdinMax", "stdin_max", b, where);
     size_t hl;
     const char *pin = mx_str(ctx, t, "sha256", &hl, b, where);
@@ -476,22 +602,24 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     JS_FreeValue(ctx, env);
     hl_exec_b_count_end(b, mark, n_env < 0 ? 0 : (size_t)n_env);
 
-    /* fs: { read: [...], write: [...] } */
-    JSValue fs = mjs_own(ctx, t, "fs");
+    /* The host grants: absolute paths (host.read / host.write, or the
+     * v0.26.0 fs: { read, write }), encoded as before. */
+    JSValue fs = legacy_fs ? mjs_own(ctx, t, "fs") : JS_DupValue(ctx, host);
     if (mjs_is_obj(ctx, fs)) {
         char fw[192];
-        snprintf(fw, sizeof fw, "%s.fs", where);
-        if (mx_keys(ctx, fs, MX_FS_KEYS, b, fw) == 0) {
+        snprintf(fw, sizeof fw, "%s.%s", where, legacy_fs ? "fs" : "host");
+        if (!legacy_fs || mx_keys(ctx, fs, MX_FS_KEYS, b, fw) == 0) {
             mx_str_list(ctx, fs, "read", b, fw);
             mx_str_list(ctx, fs, "write", b, fw);
         }
     } else {
-        if (!JS_IsUndefined(fs) && !JS_IsNull(fs))
+        if (legacy_fs)
             hl_exec_b_fail(b, "%s: fs must be an object { read, write }", where);
         hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
         hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
     }
     JS_FreeValue(ctx, fs);
+    JS_FreeValue(ctx, host);
 
     /* argv: ["fixed", { slot }, ...] */
     mark = hl_exec_b_count_begin(b);
@@ -522,6 +650,7 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     }
     JS_FreeValue(ctx, argv);
     hl_exec_b_count_end(b, mark, n_argv);
+    mx_child_manifest(ctx, t, name, b);
 }
 
 static void mx_exec(JSContext *ctx, JSValueConst manifest, HlManifest *out,

@@ -18,6 +18,8 @@
 #include "hull/sandbox.h"
 #include "hull/shared/cache_dir.h"
 #include "hull/cap/fs_policy.h"    /* hl_fs_grant_is_state */
+#include "hull/cap/exec.h"
+#include "hull/shared/fs_util.h"  /* hl_dsn_file_path */         /* a command's manifest.fs (rootless) */
 #include "hull/shared/host.h"   /* hl_host_path_too_broad */
 #include "hull/limits/gpu.h"     /* HL_GPU_MAX_DEVICES */
 #include "log.h"
@@ -2017,29 +2019,7 @@ int hl_sandbox_dsn_is_network(const char *dsn)
  * then reached unveil and the sandbox's log lines; audit 10). */
 const char *hl_sandbox_db_path(const char *dsn)
 {
-    if (!dsn) return NULL;
-    const char *sep = strstr(dsn, "://");
-    if (!sep) return dsn;   /* scheme-less: unchanged existing behavior */
-    size_t n = (size_t)(sep - dsn);
-    /* A "://" not preceded by a URI scheme (RFC 3986: a letter, then letters,
-     * digits, '+', '-', '.') is part of a scheme-less path. */
-    int scheme = n > 0 && isalpha((unsigned char)dsn[0]);
-    for (size_t i = 1; scheme && i < n; i++) {
-        unsigned char c = (unsigned char)dsn[i];
-        scheme = isalnum(c) || c == '+' || c == '-' || c == '.';
-    }
-    if (!scheme) return dsn;
-    /* Only file backends have a local file to sandbox. */
-    if (!((n == 6 && strncasecmp(dsn, "sqlite", 6) == 0) ||
-          (n == 4 && strncasecmp(dsn, "file",   4) == 0) ||
-          (n == 6 && strncasecmp(dsn, "duckdb", 6) == 0)))
-        return NULL;
-    /* The target follows "://". An in-memory or empty target needs no file
-     * gating. */
-    const char *path = sep + 3;
-    if (*path == '\0' || strcmp(path, ":memory:") == 0)
-        return NULL;
-    return path;
+    return hl_dsn_file_path(dsn);   /* shared/fs_util.c: one parser, cap/ uses it too */
 }
 
 /* A KV dynamic scheme that dials the network (all of them: Valkey/Redis are
@@ -2064,6 +2044,20 @@ int hl_sandbox_manifest_rootless_ok(const HlManifest *m)
         if (!hl_fs_grant_is_state(m->fs_read[i])) return 0;
     for (int i = 0; i < m->fs_write_count; i++)
         if (!hl_fs_grant_is_state(m->fs_write[i])) return 0;
+    /* A declared command's own manifest.fs counts too: an app-relative grant
+     * there names the app directory, which a rootless tool does not have
+     * (docs/design/exec_broker.md §3.1). */
+    int nc = m->exec.data ? hl_exec_policy_count(m->exec.data, m->exec.len) : 0;
+    for (int i = 0; i < nc; i++) {
+        HlExecCmd c;
+        if (hl_exec_policy_at(m->exec.data, m->exec.len, i, &c) != 0) return 0;
+        const uint8_t *cur = c.app_read;
+        for (unsigned k = 0; k < c.n_app_read; k++)
+            if (!hl_fs_grant_is_state(hl_exec_next_str(&cur, NULL))) return 0;
+        cur = c.app_write;
+        for (unsigned k = 0; k < c.n_app_write; k++)
+            if (!hl_fs_grant_is_state(hl_exec_next_str(&cur, NULL))) return 0;
+    }
     /* A file DSN must be under the state root; a network DSN, an env
      * reference (resolved to one at open, confined then) or :memory: needs
      * no directory. hl_sandbox_db_path gives a file DSN's path. */

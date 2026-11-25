@@ -63,6 +63,17 @@ function M.lint(m)
         local c = exec[name]
         local function warn(msg) out[#out + 1] = { cmd = name, msg = msg } end
         if type(c) == "table" then
+            -- The v0.26.0 spellings: taken until 0.28.0, named here with
+            -- their replacement (docs/design/exec_broker.md §3).
+            if c.fs ~= nil then
+                warn("fs is the v0.26.0 spelling of host = { read, write } (absolute "
+                     .. "paths); rename it - it is refused from 0.28.0. An app-relative "
+                     .. "grant goes in manifest = { fs = { ... } }")
+            end
+            if c.unix_sockets ~= nil or c.unixSockets ~= nil then
+                warn("unix_sockets is the v0.26.0 spelling of host.unix_sockets; "
+                     .. "rename it - it is refused from 0.28.0")
+            end
             local path = type(c.path) == "string" and c.path or ""
             local base = path:match("([^/]+)$") or path
             if GENERAL[family(base)] then

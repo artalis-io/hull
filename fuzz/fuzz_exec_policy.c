@@ -45,6 +45,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             for (unsigned k = 0; k < c.n_fs_read; k++) (void)hl_exec_next_str(&cur, NULL);
             cur = c.fs_write;
             for (unsigned k = 0; k < c.n_fs_write; k++) (void)hl_exec_next_str(&cur, NULL);
+            cur = c.app_read;
+            for (unsigned k = 0; k < c.n_app_read; k++) (void)hl_exec_next_str(&cur, NULL);
+            cur = c.app_write;
+            for (unsigned k = 0; k < c.n_app_write; k++) (void)hl_exec_next_str(&cur, NULL);
             for (size_t na = 0; na <= 4; na++)
                 (void)hl_exec_check_call(buf, size, c.name, strlen(c.name),
                                          vals, lens, na, NULL, err, sizeof err);

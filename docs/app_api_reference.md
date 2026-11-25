@@ -3023,7 +3023,7 @@ arguments, and the few slots the app fills, each with a shape its value must mat
 arguments reach the program exactly as matched.
 
 > **Where it runs.** Native Linux and macOS, through the command broker (below). On macOS every
-> command of an app gets the union of their `fs` and `unix_sockets` grants (macOS refuses a
+> command of an app gets the union of their `host` and `manifest.fs` grants (macOS refuses a
 > second sandbox in a sandboxed process, so a child cannot narrow itself), and a broker killed
 > with `SIGKILL` leaves its running commands until they exit (no parent-death signal; they
 > cannot fork); the broker logs both at start as `exec: limit:` lines. A command cannot be
@@ -3037,9 +3037,9 @@ arguments reach the program exactly as matched.
 > again, re-checks the binary (root-owned path, no setuid / setgid or file capabilities; a binary
 > replaced since start fails with "restart the app (ESTALE)"), and starts the child with its own
 > Landlock domain (execute only its binary and loader, read only `/usr /lib /lib64 /etc /proc
-> /sys /dev` plus its `fs.read`, write only `/dev/null` plus its `fs.write`) and a seccomp filter
-> that refuses creating processes (threads work), changing credentials, and any socket but
-> `AF_UNIX` with `unix_sockets`. The child is killed (SIGKILL to its group) at `timeout_ms`, and
+> /sys /dev` plus its `host.read` and `manifest.fs.read`, write only `/dev/null` plus its
+> `host.write` and `manifest.fs.write`) and a seccomp filter that refuses creating processes
+> (threads work), changing credentials, and any socket but `AF_UNIX` with `host.unix_sockets`. The child is killed (SIGKILL to its group) at `timeout_ms`, and
 > it dies with the broker, which dies with the app, even on SIGKILL. Below Landlock ABI 6 the
 > app is refused at start unless `--allow-degraded-sandbox`, which logs each missing guarantee.
 
@@ -3052,8 +3052,15 @@ app.manifest({
       argv = { "show", "--no-pager", "-p", "ActiveState,NRestarts", "--",
                { prefix = "hs-", suffix = ".service", chars = "a-z0-9-", max = 64,
                  ["repeat"] = { min = 1, max = 32 } } },
-      unix_sockets = true,   -- systemctl connects to systemd over a pathname socket
+      host = { unix_sockets = true },   -- systemctl connects to systemd over a pathname socket
       timeout_ms = 5000, stdout_max = 262144,
+    },
+    ["gpu-query"] = {
+      path = "/usr/bin/nvidia-smi",
+      sha256 = "<64 hex>",                         -- the pin: on the entry
+      argv = { "--query-gpu=index,name", "--format=csv,noheader" },
+      host = { read = { "/dev/nvidiactl" }, write = { "/dev/nvidiactl", "/dev/nvidia0" } },
+      manifest = { fs = { read = { "data/gpu-ids" } } },   -- the app's own fs syntax
     },
   },
 })
@@ -3068,19 +3075,59 @@ local r = exec.run("key-import", {}, { stdin = record })
 JS: `import { exec } from "hull:exec"`; `await exec.run(name, args, { stdin })` resolves to `{ status,
 signal, stdout, stderr, stdoutBytes, timedOut, stdoutTruncated, stderrTruncated, durationMs }`
 (`stdout` / `stderr` are byte strings, one code unit per byte); the manifest keys are
-`timeoutMs`, `stdoutMax`, `stderrMax`, `stdinMax`, `unixSockets`, `allowDash` (snake_case is
-read too). A JS `stdin` is a string (sent as UTF-8) or an ArrayBuffer / typed array.
+`timeoutMs`, `stdoutMax`, `stderrMax`, `stdinMax`, `host.unixSockets`, `allowDash`
+(snake_case is read too). A JS `stdin` is a string (sent as UTF-8) or an ArrayBuffer / typed array.
 
 **A command:** `path` (absolute, no `.` / `..` / empty component), `argv` (fixed strings and
 slots, at most 64, 16 KiB of fixed text), `timeout_ms` (100..60000, default 5000),
 `stdout_max` (up to 16 MiB, default 64 KiB), `stderr_max` (up to 1 MiB, default 16 KiB),
 `concurrency` (1..8, default 2), `env` (literal values only; `LD_*`, `DYLD_*`, `PATH`, `IFS`,
-`ENV`, `BASH_ENV` refused), `fs` (`read` / `write` paths the command's own sandbox grants;
-`write` only under `/dev`, `/run`, `/tmp`), `unix_sockets` (default false), `stdin_max` (the
+`ENV`, `BASH_ENV` refused), `host` (the grants an app manifest has no field for: `read` /
+`write` absolute paths, `write` only under `/dev`, `/run`, `/tmp`, device ioctls included;
+`unix_sockets`, default false), `manifest` (the command's own manifest, below), `stdin_max` (the
 bytes a call may write to the command's stdin, 1..1 MiB; without it the command reads
 `/dev/null`), `sha256` (optional,
 64 hex characters: the digest of the main executable). At most 32 commands, each named
 `[a-z0-9][a-z0-9-]{0,63}`.
+
+**`manifest`: the command's own manifest.** A strict subset of the app manifest, with the
+same field names, nesting and meaning. Today it takes `fs` only: `read` / `write` paths under
+the app directory, or under `"@state/"`, written exactly as the app writes its own grants and
+checked by the same parser (no absolute path, no `..`, not `.hull`). Every other app field is
+refused naming the command and field (`exec.report.manifest.hosts: an app capability a
+command cannot be given`), and so is a command-entry field put inside it
+(`exec.report.manifest.sha256: ... it belongs on the command entry (exec.report.sha256)`).
+`path`, the `sha256` pin, `argv`, `host` and the call limits stay on the entry. Three things
+valid for an app are refused for a command, because a command has no capability layer to
+narrow its kernel grant the way an app's is narrowed in process:
+
+- `.` or `@state` (the whole directory): the grant would include its `.hull`;
+- a pattern (`logs/*.log`): the kernel grants files and directories, not patterns;
+- a path that does not exist when the app starts (`data/` with a trailing slash is a
+  directory, created if absent): the broker grants the exact file or directory each entry
+  names, resolved without following a symbolic link, and a write grant gives write and create,
+  not read (as for the app).
+
+A command's grant is its own, not a share of the app's: it need not lie inside the app's `fs`
+grants (both are declared in the same signed manifest). Also refused at start: a relative
+grant in a tool run from `/` or the home (use `@state/` there), a grant that reaches either
+root's `.hull` or holds the other root, and a write grant to the app's database or its
+sidecars (the default, `databases.named` and the internal database, even before their
+directory exists; not a `db.open` file; at most 16 such files when a command can write). A
+grant covers the object it named at start on Linux (that inode); on macOS it covers that PATH
+for the app's life, so whatever is renamed into it later is covered, and a hard link at
+another pathname is not reachable through it. A write grant
+never deletes or renames.
+
+What a child grant means also depends on the platform: on Linux each command gets exactly its
+own grants; on macOS all commands of an app share one sandbox, so each gets the union of every
+command's `host` and `manifest.fs` grants (logged at start as `exec: limit:`). Every command
+also reads the system trees (`/usr /lib /lib64 /etc /proc /sys /dev` on Linux).
+
+**The v0.26.0 spelling** `fs = { read, write }` and `unix_sockets` on the entry is taken as
+`host = { read, write }` / `host.unix_sockets`, never as app-relative paths, with one WARN at
+start; `hull check` names each use. Giving both spellings for one grant is refused. The old
+spelling is refused from 0.28.0.
 
 **`sha256` pins the main executable's bytes.** The broker hashes the file from the descriptor
 it will exec: at start (a mismatch refuses the app) and before every call (a mismatch fails the
@@ -3121,8 +3168,10 @@ section is refused by the resolver. The section is part of the signed manifest.
 **Lint.** `hull build` and `hull check` print a WARN (never a failure) for a command whose
 binary is a general-purpose program (a shell, an interpreter, `env`, `find`, `xargs`, `ssh`,
 `curl`, `sudo`, `systemd-run`, `git`, `tar`, ...), whose path is outside `/usr`, `/bin`,
-`/sbin` and `/opt`, or that has a slot with no `chars` or `enum`, a slot with `allow_dash`, or a
-slot after fixed arguments with no `--` before it. `hull inspect` shows each command's pin.
+`/sbin` and `/opt`, or that has a slot with no `chars` or `enum`, a slot with `allow_dash`, a
+slot after fixed arguments with no `--` before it, or a v0.26.0 `fs` / `unix_sockets`.
+`hull inspect` shows each command's pin and its whole authority: `host.read`, `host.write`,
+`manifest.fs.read`, `manifest.fs.write` and the scope of `host.unix_sockets`.
 
 **Errors and refusals.** An undeclared name or an argument a slot does not admit raises (Lua)
 / throws a TypeError synchronously (JS), naming the argument and the rule, before anything

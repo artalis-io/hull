@@ -6,10 +6,14 @@
 
 #include "hull/shared/fs_util.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <limits.h>
 #include <string.h>
+#include <strings.h>   /* strncasecmp */
+#include <stdlib.h>    /* realpath */
+#include <unistd.h>    /* getcwd */
 #include <sys/stat.h>
 
 int hl_ensure_dir(const char *path, mode_t mode)
@@ -90,4 +94,82 @@ int hl_default_db_path_check(const char *path, char *err, size_t err_sz)
         }
     }
     return 0;
+}
+
+/* The local file a database DSN names (hl_sandbox_db_path's parser, kept
+ * here so the capability layer can use it without the sandbox): a
+ * scheme-less DSN is the path itself; sqlite:// file:// duckdb:// give what
+ * follows; a network scheme, an empty target or :memory: gives NULL. */
+const char *hl_dsn_file_path(const char *dsn)
+{
+    if (!dsn) return NULL;
+    const char *sep = strstr(dsn, "://");
+    if (!sep) return dsn;   /* scheme-less: unchanged existing behavior */
+    size_t n = (size_t)(sep - dsn);
+    /* A "://" not preceded by a URI scheme (RFC 3986: a letter, then letters,
+     * digits, '+', '-', '.') is part of a scheme-less path. */
+    int scheme = n > 0 && isalpha((unsigned char)dsn[0]);
+    for (size_t i = 1; scheme && i < n; i++) {
+        unsigned char c = (unsigned char)dsn[i];
+        scheme = isalnum(c) || c == '+' || c == '-' || c == '.';
+    }
+    if (!scheme) return dsn;
+    /* Only file backends have a local file to sandbox. */
+    if (!((n == 6 && strncasecmp(dsn, "sqlite", 6) == 0) ||
+          (n == 4 && strncasecmp(dsn, "file",   4) == 0) ||
+          (n == 6 && strncasecmp(dsn, "duckdb", 6) == 0)))
+        return NULL;
+    /* The target follows "://". An in-memory or empty target needs no file
+     * gating. */
+    const char *path = sep + 3;
+    if (*path == '\0' || strcmp(path, ":memory:") == 0)
+        return NULL;
+    return path;
+}
+
+int hl_path_resolve_partial(const char *path, char *out)
+{
+    if (!path || !path[0] || !out) return -1;
+    char abs[PATH_MAX];
+    if (path[0] == '/') {
+        if (snprintf(abs, sizeof abs, "%s", path) >= (int)sizeof abs) return -1;
+    } else {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof cwd) ||
+            snprintf(abs, sizeof abs, "%s/%s", cwd, path) >= (int)sizeof abs)
+            return -1;
+    }
+    if (realpath(abs, out)) return 0;
+    /* The longest existing prefix, then the rest as written. */
+    size_t len = strlen(abs);
+    for (size_t k = len; k > 0; k--) {
+        if (abs[k - 1] != '/' && k != len) continue;
+        size_t cut = (k == len) ? len : k - 1;
+        char prefix[PATH_MAX];
+        memcpy(prefix, abs, cut);
+        prefix[cut] = '\0';
+        char real[PATH_MAX];
+        if (!realpath(cut ? prefix : "/", real)) continue;
+        size_t at = strcmp(real, "/") == 0 ? 0 : strlen(real);
+        memcpy(out, real, at);
+        out[at] = '\0';
+        const char *p = abs + cut;
+        while (*p) {
+            while (*p == '/') p++;
+            if (!*p) break;
+            const char *c = p;
+            while (*p && *p != '/') p++;
+            size_t cl = (size_t)(p - c);
+            if (cl == 1 && c[0] == '.') continue;
+            if (cl == 2 && c[0] == '.' && c[1] == '.') return -1;
+            if (at + 1 + cl + 1 > PATH_MAX) return -1;
+            out[at++] = '/';
+            memcpy(out + at, c, cl);
+            at += cl;
+            out[at] = '\0';
+        }
+        if (at == 0) { out[0] = '/'; out[1] = '\0'; }
+        return 0;
+    }
+    return -1;
 }

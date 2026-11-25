@@ -207,19 +207,72 @@ local function main()
                 local se = c.stderr_max or c.stderrMax or 16384
                 print(string.format("    limits: %d ms, stdout %d, stderr %d, %d at once",
                                     t, so, se, c.concurrency or 2))
-                if type(c.fs) == "table" then
-                    if c.fs.read then print("    fs.read:  " .. table.concat(c.fs.read, ", ")) end
-                    if c.fs.write then print("    fs.write: " .. table.concat(c.fs.write, ", ")) end
+                -- Its whole authority: the host grants (absolute paths; the
+                -- v0.26.0 fs / unix_sockets are their old spelling) and its
+                -- child manifest (the app's own fs vocabulary).
+                local host = type(c.host) == "table" and c.host
+                             or (type(c.fs) == "table" and c.fs) or {}
+                local function list(l) return type(l) == "table" and table.concat(l, ", ") or nil end
+                if list(host.read) then print("    host.read:  " .. list(host.read)) end
+                if list(host.write) then print("    host.write: " .. list(host.write)) end
+                local cm = type(c.manifest) == "table" and c.manifest or {}
+                local cfs = type(cm.fs) == "table" and cm.fs or {}
+                if list(cfs.read) then
+                    print("    manifest.fs.read:  " .. list(cfs.read) .. "  (under the app dir / @state)")
+                end
+                if list(cfs.write) then
+                    print("    manifest.fs.write: " .. list(cfs.write) .. "  (under the app dir / @state)")
                 end
                 local smax = c.stdin_max or c.stdinMax
                 if smax and smax ~= 0 then
                     print(string.format("    stdin: up to %d bytes from the app", smax))
                 end
-                if c.unix_sockets or c.unixSockets then
+                local hu = type(c.host) == "table" and (c.host.unix_sockets or c.host.unixSockets)
+                if hu or c.unix_sockets or c.unixSockets then
                     print("    local IPC: may connect to any pathname unix socket the service account")
                     print("               can reach (not limited to the one it needs)")
                 end
             end
+            -- Effective authority (docs/design/exec_broker.md §3.1, §6.4): what
+            -- each command can actually reach, per platform, not only what it
+            -- declares.
+            local u = { exec = {}, hr = {}, hw = {}, mr = {}, mw = {}, unix = false }
+            local function add(set, l)
+                for _, v in ipairs(type(l) == "table" and l or {}) do set[#set + 1] = v end
+            end
+            for _, name in ipairs(names) do
+                local c = m.exec[name]
+                u.exec[#u.exec + 1] = tostring(c.path)
+                local h = type(c.host) == "table" and c.host or (type(c.fs) == "table" and c.fs) or {}
+                add(u.hr, h.read); add(u.hw, h.write)
+                local cf = type(c.manifest) == "table" and type(c.manifest.fs) == "table"
+                           and c.manifest.fs or {}
+                add(u.mr, cf.read); add(u.mw, cf.write)
+                if (type(c.host) == "table" and (c.host.unix_sockets or c.host.unixSockets))
+                   or c.unix_sockets or c.unixSockets then u.unix = true end
+            end
+            local function show(label, l)
+                if #l > 0 then print("      " .. label .. table.concat(l, ", ")) end
+            end
+            print("  Effective authority:")
+            print("    Linux: each command exactly as listed above, plus reads of /usr /lib")
+            print("      /lib64 /etc /proc /sys /dev.")
+            print("    macOS: ONE sandbox for all commands. EVERY command gets all of:")
+            show("exec:              ", u.exec)
+            print("                         (a command that execs one of these itself is not held")
+            print("                         to that command's argv)")
+            show("host.read:         ", u.hr)
+            show("host.write:        ", u.hw)
+            show("manifest.fs.read:  ", u.mr)
+            show("manifest.fs.write: ", u.mw)
+            print("      unix sockets:      " .. (u.unix and "yes (any pathname socket)" or "no"))
+            print("      plus: the metadata (stat, readlink) of EVERY path; reads of / /usr /bin")
+            print("      /sbin /System /private/etc, dyld's cache, /Library/Preferences/Logging,")
+            print("      /dev/urandom /dev/random /dev/zero; sysctl reads; user lookups")
+            print("    Both: host.write also reads and issues ioctls on its paths;")
+            print("      manifest.fs.write writes, truncates and creates, but neither reads")
+            print("      nor deletes; an exact-file grant covers that file's inode (a hard")
+            print("      link to it anywhere is the same file)")
             print("")
         end
     end
