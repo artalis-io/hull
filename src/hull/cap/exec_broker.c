@@ -86,6 +86,8 @@ int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
         hl_exec_broker_stop();
         return -1;
     }
+    /* Constant only in a build with no broker (the stubs below). */
+    // cppcheck-suppress knownConditionTrueFalse
     if (!hl_exec_broker_spawned()) {
         if (allow_degraded) {
             log_warn("[hull:c] exec: no command broker on this host "
@@ -101,7 +103,9 @@ int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
                      (no_sandbox ? HL_EXEC_POLICY_NO_SANDBOX : 0);
     char report[4096];
     int rc = hl_exec_broker_policy(policy, len, flags, report, sizeof report);
+    // cppcheck-suppress knownConditionTrueFalse
     log_report(report, rc != 0);
+    // cppcheck-suppress knownConditionTrueFalse
     if (rc != 0) log_error("[hull:c] exec: refusing to start");
     return rc;
 }
