@@ -65,8 +65,14 @@ int hl_exec_child_grant_entry(HlExecBuf *b, const char *cmd, const char *list,
 {
     char why[160];
     if (hl_exec_child_grant_check(raw, n, why, sizeof why) == 0) return 0;
-    hl_exec_b_fail(b, "exec.%s.manifest.fs.%s[%u] '%.*s' %s", cmd, list, idx,
-                   (int)(n > 64 ? 64 : n), raw, why);
+    int quotable = 1;
+    for (size_t i = 0; i < n; i++)
+        if ((unsigned char)raw[i] < 0x20 || raw[i] == 0x7f) quotable = 0;
+    if (quotable)
+        hl_exec_b_fail(b, "exec.%s.manifest.fs.%s[%u] '%.*s' %s", cmd, list, idx,
+                       (int)(n > 64 ? 64 : n), raw, why);
+    else                                     /* never quote a control byte */
+        hl_exec_b_fail(b, "exec.%s.manifest.fs.%s[%u] %s", cmd, list, idx, why);
     return -1;
 }
 
@@ -82,6 +88,15 @@ void hl_exec_legacy_note(const char *cmd, const char *legacy, const char *replac
 
 int hl_exec_child_grant_check(const char *raw, size_t n, char *why, size_t why_size)
 {
+    /* A control byte has no place in a file name a command is granted, and
+     * the broker's report quotes the name in a log line (audit 53). */
+    for (size_t i = 0; raw && i < n; i++) {
+        unsigned char ch = (unsigned char)raw[i];
+        if (ch < 0x20 || ch == 0x7f) {
+            snprintf(why, why_size, "holds a control character");
+            return -1;
+        }
+    }
     HlFsGrant g = HL_FS_GRANT_INIT;
     const char *e = NULL;
     if (hl_fs_grant_parse(raw, n, NULL, &g, &e) != 0) {
@@ -135,28 +150,39 @@ static int id_eq(const Id *a, const struct stat *st)
 
 /* Is the directory @p dir the same as, or an ancestor of, @p target? Walks up
  * from @p target by "..", comparing inodes, so no name alias (a case
- * variant, an HFS+ ignorable spelling, a nested root) can hide it. */
+ * variant, an HFS+ ignorable spelling, a nested root) can hide it.
+ * Returns DC_YES, DC_NO (the walk reached "/"), DC_ABSENT (@p target does not
+ * exist) or DC_UNKNOWN (a step failed, or the walk ran past its depth): an
+ * answer it cannot give is never "no" (audit 53). */
+enum { DC_NO = 0, DC_YES = 1, DC_ABSENT = 2, DC_UNKNOWN = 3 };
+#ifdef O_PATH
+#define DC_OPEN (O_PATH | O_DIRECTORY | O_CLOEXEC)   /* no read right needed */
+#else
+#define DC_OPEN (O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+#endif
 static int dir_contains(const struct stat *dir, const char *target)
 {
-    int fd = open(target, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) return 0;
-    int hit = 0;
+    int fd = open(target, DC_OPEN);
+    if (fd < 0) return (errno == ENOENT || errno == ENOTDIR) ? DC_ABSENT : DC_UNKNOWN;
+    int res = DC_UNKNOWN;                             /* past the depth: unknown */
     for (int depth = 0; depth < 256; depth++) {
         struct stat st;
         if (fstat(fd, &st) != 0) break;
-        if (st.st_dev == dir->st_dev && st.st_ino == dir->st_ino) { hit = 1; break; }
-        int up = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (st.st_dev == dir->st_dev && st.st_ino == dir->st_ino) { res = DC_YES; break; }
+        int up = openat(fd, "..", DC_OPEN);
+        if (up < 0) break;
         struct stat ust;
-        if (up < 0 || fstat(up, &ust) != 0 ||
-            (ust.st_dev == st.st_dev && ust.st_ino == st.st_ino)) {
-            if (up >= 0) close(up);
-            break;                                    /* reached "/" */
+        if (fstat(up, &ust) != 0) { close(up); break; }
+        if (ust.st_dev == st.st_dev && ust.st_ino == st.st_ino) {
+            close(up);
+            res = DC_NO;                              /* reached "/" */
+            break;
         }
         close(fd);
         fd = up;
     }
     close(fd);
-    return hit;
+    return res;
 }
 
 /* The .hull of a root, by inode (unset when it does not exist). */
@@ -235,7 +261,13 @@ static int reaches_db(const struct stat *g, const char *gpath, const HlExecChild
             /* By inode when the database's directory exists, and by path for
              * one not made yet (a first start): the server sends the real
              * path it will have. */
-            if (dir_contains(g, dir) || path_under(abs, gpath)) {
+            int dc = dir_contains(g, dir);
+            if (dc == DC_UNKNOWN) {
+                snprintf(why, why_size, "cannot be checked against the app's database "
+                         "(%s): its directory could not be walked", db);
+                return 1;
+            }
+            if (dc == DC_YES || path_under(abs, gpath)) {
                 snprintf(why, why_size, "contains the app's database (%s): a command "
                          "may not write it or its sidecars", db);
                 return 1;
@@ -388,9 +420,16 @@ int hl_exec_child_grant_open(const HlExecChildRoots *r, const char *raw, int wri
     if (S_ISDIR(st.st_mode)) {
         const char *roots[2] = { r->app_dir, r->state_dir };
         for (int k = 0; k < 2; k++) {
-            if (roots[k] && roots[k][0] && dir_contains(&st, roots[k])) {
+            if (!roots[k] || !roots[k][0]) continue;
+            int dc = dir_contains(&st, roots[k]);
+            if (dc == DC_YES) {
                 snprintf(why, why_size, "holds the %s directory, whose .hull no "
                          "command may be given", k ? "state" : "app");
+                goto done;
+            }
+            if (dc != DC_NO) {
+                snprintf(why, why_size, "cannot be checked against the %s directory "
+                         "(it could not be walked); refused", k ? "state" : "app");
                 goto done;
             }
         }

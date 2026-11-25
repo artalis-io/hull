@@ -227,7 +227,11 @@ take; not this section.)
   with that root's `.hull` as it is right after any `mkdirat` (on HFS+ a name with an ignorable
   code point is `.hull` itself, and may not exist yet at load; a directory made that turns out
   to be it is removed). Also a directory that is either root or an ancestor of one (a state
-  directory inside the app directory, or the reverse);
+  directory inside the app directory, or the reverse). That check walks up from the root by
+  `..` comparing inodes; a walk it cannot finish (a directory it cannot search, no descriptor
+  left, past 256 levels) refuses the grant rather than reading as "not contained" (audit 53);
+- a grant holding a control character (it would be quoted in the broker's report and the
+  start error);
 - for a write grant, any database file the app's registry would open by name - the default
   (`-d` or the manifest's), `databases.named`, the internal database - or its sidecars
   (SQLite's `-wal` / `-shm` / `-journal`; DuckDB's `.wal`, `.wal.checkpoint`,
@@ -237,8 +241,12 @@ take; not this section.)
   (`hl_db_registry_file_paths`: a symbolic link followed, a relative `-d` against its own
   working directory, and a file whose directory is not made yet - a first start - as its
   nearest existing ancestor's real path plus the rest), and the broker compares by inode and,
-  for a directory grant, also by path (the database's directory may not exist yet). A path
-  that cannot be resolved refuses the start, and so does an app with more than
+  for a directory grant, also by path (the database's directory may not exist yet); a database
+  directory that exists but cannot be walked refuses the grant. A path that cannot be resolved
+  refuses the start, so does a file database whose DSN the registry refuses (a planted
+  symbolic link where its file or a sidecar should be: it could not be protected, and a later
+  `db.connect` would open it once the link is gone; an unset `"$VAR"` names no file), and so
+  does an app with more than
   `HL_EXEC_MAX_PROTECT` (16) database files when a command has a `manifest.fs` write grant.
   Not covered: a `db.open` file (its DSN is chosen at run time), a hard link
   to a database file planted under another name inside a granted directory after start (a

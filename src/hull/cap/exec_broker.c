@@ -50,6 +50,11 @@
 #include <string.h>
 
 #define HX_MAGIC   0x43455848u   /* "HXEC" little-endian */
+/* The POLICY frame's head before the policy: u32 flags, two roots and up to
+ * HL_EXEC_MAX_PROTECT database paths (u16 length + bytes each), u16 count.
+ * The sender sizes its buffer and the broker its read limit from this one
+ * value (audit 53: the read limit had stayed at the policy + 4). */
+#define HX_POLICY_HEAD_MAX (4 + 2 + (2 + HL_EXEC_MAX_PROTECT) * (2 + PATH_MAX))
 #define HX_POLICY  1u
 #define HX_READY   2u
 #define HX_RUN     3u
@@ -1066,9 +1071,10 @@ static int policy_load(const uint8_t *p, size_t len, char *report, size_t rsz)
     if (!bad) {
         if (end - q < 2) bad = 1;
         else {
-            g_n_dbs = q[0] | (q[1] << 8);
+            int nd = q[0] | (q[1] << 8);
             q += 2;
-            bad = g_n_dbs > HL_EXEC_MAX_PROTECT;
+            bad = nd > HL_EXEC_MAX_PROTECT;
+            g_n_dbs = bad ? 0 : nd;
             for (int i = 0; !bad && i < g_n_dbs; i++) bad = root_take(&q, end, g_dbs[i]) != 0;
         }
     }
@@ -1138,7 +1144,7 @@ int hl_exec_broker_main(void)
         g_jobs[i].ci = -1;
     }
 
-    HlChanFrame rd = { .magic = HX_MAGIC, .max = HL_EXEC_POLICY_MAX_BYTES + 4 };
+    HlChanFrame rd = { .magic = HX_MAGIC, .max = HL_EXEC_POLICY_MAX_BYTES + HX_POLICY_HEAD_MAX };
     int rc = hl_chan_frame_read(g_chan, &rd, 0);
     if (rc != HL_CHAN_DONE) return rc == HL_CHAN_EOF ? 0 : 1;   /* no exec section */
     if (rd.type != HX_POLICY) return 1;
@@ -1367,8 +1373,7 @@ int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
         snprintf(report, report_size, "exec: the app or state path is too long");
         return -1;
     }
-    static uint8_t head[4 + 2 + 2 * (2 + PATH_MAX) +
-                        HL_EXEC_MAX_PROTECT * (2 + PATH_MAX)];
+    static uint8_t head[HX_POLICY_HEAD_MAX];
     size_t hn = 0;
     hl_chan_put32(head, flags);
     hn = 4;

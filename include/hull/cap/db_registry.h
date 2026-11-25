@@ -299,7 +299,8 @@ const char *hl_db_registry_dsn_for(HlDbRegistry *reg, const HlDbHandle *h);
  * in-memory databases are skipped; a file not made yet (its directory
  * neither) is its nearest existing ancestor's real path plus the rest.
  * Writes up to @p max into @p out and returns how many there are (more than
- * @p max: some not written), or -1 when one cannot be resolved. For the
+ * @p max: some not written), or -1 when one cannot be resolved or its DSN
+ * is refused (a file that could not be protected). For the
  * command broker: a command's write grant may not reach
  * these (docs/design/exec_broker.md §3.1). */
 int hl_db_registry_file_paths(HlDbRegistry *reg, char (*out)[PATH_MAX], int max);

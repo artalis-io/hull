@@ -13,6 +13,7 @@
  *   5. arguments the slot does not admit        -> REFUSED
  *   6. a second POLICY                          -> the broker exits
  *   7. stdin past the command's stdin_max      -> REFUSED
+ *   8. a full POLICY head before a near-limit policy -> read, then judged
  *
  * Usage: e2e_exec_frames <path to hull> [degraded]
  *
@@ -23,6 +24,7 @@
 #include "hull/cap/exec.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -317,6 +319,52 @@ int main(int argc, char **argv)
     CHECK(r == 1 && t == DONE, "stdin within stdin_max runs");
     broker_end(&b);
     hl_exec_buf_free(&p);
+
+    /* 8. exec_frames_audit53.full_head: a POLICY whose head carries both
+     * roots and HL_EXEC_MAX_PROTECT database paths of PATH_MAX - 1 bytes, in
+     * front of a policy near HL_EXEC_POLICY_MAX_BYTES, is READ and judged
+     * (refused here: the policy bytes are not a policy). The broker's read
+     * limit had stayed at the policy + 4, so it dropped the frame and exited
+     * without a word. */
+    {
+        size_t one = 2 + (PATH_MAX - 1);
+        size_t hn = 4 + 2 + 2 + 2 + (size_t)HL_EXEC_MAX_PROTECT * one;
+        size_t pn = HL_EXEC_POLICY_MAX_BYTES - 64;
+        uint8_t *head = calloc(1, hn), *junk = calloc(1, pn);
+        if (!head || !junk) { fprintf(stderr, "out of memory\n"); return 2; }
+        put32(head, g_flags);
+        size_t at = 4 + 2 + 2;               /* two empty roots */
+        head[at++] = HL_EXEC_MAX_PROTECT; head[at++] = 0;
+        for (int i = 0; i < HL_EXEC_MAX_PROTECT; i++) {
+            size_t l = PATH_MAX - 1;
+            head[at++] = (uint8_t)l; head[at++] = (uint8_t)(l >> 8);
+            head[at] = '/';
+            memset(head + at + 1, 'a' + i, l - 1);
+            at += l;
+        }
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { perror("socketpair"); return 2; }
+        pid_t pid = fork();
+        if (pid == 0) {
+            if (sv[0] != 3) close(sv[0]);
+            if ((sv[1] == 3 ? 3 : dup2(sv[1], 3)) != 3) _exit(126);
+            if (sv[1] != 3) close(sv[1]);
+            execl(g_hull, g_hull, "__hull_exec_broker", (char *)NULL);
+            _exit(127);
+        }
+        close(sv[1]);
+        (void)send_frame(sv[0], POLICY, 0, head, at, junk, pn);
+        uint32_t id8; uint8_t *buf8 = NULL; size_t len8;
+        r = read_frame(sv[0], &t, &id8, &buf8, &len8, 5000);
+        CHECK(r == 1 && t == REFUSED,
+              "a POLICY with a full head and a near-limit policy is read and judged "
+              "(r %d, type %u)", r, r == 1 ? t : 0);
+        free(buf8);
+        Broker b8 = { sv[0], pid };
+        broker_end(&b8);
+        free(head);
+        free(junk);
+    }
 
     printf("e2e_exec_frames: %s\n", g_fail ? "FAILED" : "ok");
     return g_fail ? 1 : 0;
