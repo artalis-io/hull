@@ -8,6 +8,28 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Changed
+
+- **`hull/exec`: a command entry has its own `manifest`, a strict subset of the app manifest.**
+  `exec.<name>.manifest = { fs = { read, write } }` uses the app's own `fs` syntax and meaning
+  (paths under the app directory or `"@state/"`, the same parser), and every other app field
+  there is refused naming the command and field (`exec.report.manifest.hosts: an app capability
+  a command cannot be given`; a pin there: `it belongs on the command entry`). The broker grants
+  each entry as exactly the file or directory it names: `.`, `@state`, a pattern and a path that
+  does not exist at start are refused for a command, because its kernel grant is its whole
+  boundary (an app's own is narrowed again in process). `path`, the `sha256` pin, `argv` and the
+  new `host` stay on the entry; `host = { read, write, unix_sockets }` holds the absolute grants
+  and local sockets no app field names. On macOS every command still gets the union of all
+  commands' grants. `hull inspect` shows a command's `host` and `manifest.fs` grants together,
+  and `hull agent overview` lists them.
+
+### Deprecated
+
+- **`hull/exec`: `fs` and `unix_sockets` on a command entry** (the v0.26.0 spelling) are read as
+  `host = { read, write }` and `host.unix_sockets`, unchanged in meaning, with one WARN at
+  start; `hull check` names each use. Both spellings for one grant are refused. They are refused
+  from 0.28.0.
+
 ## [0.26.0] - 2026-11-25
 
 `hull/exec`: an app runs the commands its manifest declares, through a command broker on Linux

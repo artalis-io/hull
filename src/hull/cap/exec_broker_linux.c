@@ -55,6 +55,7 @@
 #define LL_READ_FILE   (1ull << 2)
 #define LL_READ_DIR    (1ull << 3)
 #define LL_REMOVE_FILE (1ull << 5)
+#define LL_MAKE_DIR    (1ull << 7)
 #define LL_MAKE_REG    (1ull << 8)
 #define LL_TRUNCATE    (1ull << 14)
 #define LL_IOCTL_DEV   (1ull << 15)
@@ -146,6 +147,15 @@ static int ll_grant_cmd(int rs, const HlExecBrokerCmd *cmd)
         rc |= ll_allow(rs, hl_exec_next_str(&cur, NULL),
                        LL_READ_FILE | LL_WRITE_FILE | LL_TRUNCATE | LL_IOCTL_DEV |
                        LL_READ_DIR | LL_MAKE_REG | LL_REMOVE_FILE);
+    /* The child manifest's fs (resolved at policy load to the exact file or
+     * directory each entry names): an app's fs.read reads, an app's fs.write
+     * writes and creates - and does not read, as in the app (fs_policy.c).
+     * No device ioctls: those are host grants. */
+    for (unsigned i = 0; i < cmd->n_app_read; i++)
+        rc |= ll_allow(rs, hl_exec_cmd_app_path(cmd, i), LL_READ_FILE | LL_READ_DIR);
+    for (unsigned i = 0; i < cmd->n_app_write; i++)
+        rc |= ll_allow(rs, hl_exec_cmd_app_path(cmd, cmd->n_app_read + i),
+                       LL_WRITE_FILE | LL_TRUNCATE | LL_MAKE_REG | LL_MAKE_DIR);
     return rc;
 }
 

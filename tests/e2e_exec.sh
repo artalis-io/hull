@@ -37,21 +37,28 @@ mkdir -p "$TMPDIR/lua/tests" "$TMPDIR/js/tests"
 cat > "$TMPDIR/lua/app.lua" <<'EOF'
 app.manifest({
   modules = { "hull/exec@1", "hull/http-server@1", "hull/db@1" },
+  fs = { read = { "data/" } },
   exec = {
     ["unit-state"] = {
       path = "/usr/bin/systemctl",
       argv = { "show", "--no-pager", "-p", "ActiveState,NRestarts", "--",
                { prefix = "hs-", suffix = ".service", chars = "a-z0-9-", max = 64,
                  ["repeat"] = { min = 1, max = 3 } } },
-      unix_sockets = true,
+      host = { unix_sockets = true },
       timeout_ms = 5000, stdout_max = 16,
     },
     ["gpu-query"] = {
       path = "/usr/bin/nvidia-smi",
       argv = { "--query-gpu=index,name", "--format=csv,noheader,nounits" },
-      fs = { read = { "/dev/nvidiactl" }, write = { "/dev/nvidiactl" } },
+      host = { read = { "/dev/nvidiactl" }, write = { "/dev/nvidiactl" } },
     },
     ["key-import"] = { path = "/bin/cat", stdin_max = 8 },
+    -- the app's own grant, in identical syntax, and a pin on the entry
+    report = {
+      path = "/bin/cat",
+      sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      manifest = { fs = { read = { "data/" } } },
+    },
   },
 })
 local exec = require("hull.exec")
@@ -69,6 +76,10 @@ test.exec_stub("unit-state", function(args, name)
   return { stdout = "ActiveState=active " .. name, duration_ms = 3 }
 end)
 test.exec_stub("gpu-query", { stdout = "0, NVIDIA A100\n", status = 0 })
+test.exec_stub("report", { stdout = "rows" })
+test("a command with a child manifest and a pin loads and runs", function()
+  test.eq(exec.run("report").stdout, "rows")
+end)
 
 local function refused(fn, pat)
   local ok, err = pcall(fn)
@@ -145,20 +156,27 @@ import { app } from "hull:app";
 import { exec } from "hull:exec";
 app.manifest({
   modules: ["hull/exec@1", "hull/http-server@1", "hull/db@1"],
+  fs: { read: ["data/"] },
   exec: {
     "unit-state": {
       path: "/usr/bin/systemctl",
       argv: ["show", "--no-pager", "-p", "ActiveState,NRestarts", "--",
              { prefix: "hs-", suffix: ".service", chars: "a-z0-9-", max: 64,
                repeat: { min: 1, max: 3 } }],
-      unixSockets: true, timeoutMs: 5000, stdoutMax: 16,
+      host: { unixSockets: true }, timeoutMs: 5000, stdoutMax: 16,
     },
     "gpu-query": {
       path: "/usr/bin/nvidia-smi",
       argv: ["--query-gpu=index,name", "--format=csv,noheader,nounits"],
-      fs: { read: ["/dev/nvidiactl"], write: ["/dev/nvidiactl"] },
+      host: { read: ["/dev/nvidiactl"], write: ["/dev/nvidiactl"] },
     },
     "key-import": { path: "/bin/cat", stdinMax: 8 },
+    // the app's own grant, in identical syntax, and a pin on the entry
+    report: {
+      path: "/bin/cat",
+      sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      manifest: { fs: { read: ["data/"] } },
+    },
   },
 });
 app.get("/state", async (req, res) => {
@@ -176,6 +194,10 @@ test.execStub("unit-state", (args, name) => {
   return { stdout: "ActiveState=active " + name, durationMs: 3 };
 });
 test.execStub("gpu-query", { stdout: "0, NVIDIA A100\n", status: 0 });
+test.execStub("report", { stdout: "rows" });
+test("a command with a child manifest and a pin loads and runs", async () => {
+  test.eq((await exec.run("report")).stdout, "rows");
+});
 
 function refused(fn, pat) {
   let msg = "";
@@ -251,8 +273,8 @@ EOF
 for rt in lua js; do
     echo "== hull test ($rt) =="
     out=$(cd "$TMPDIR/$rt" && "$HULL" test . 2>&1) && rc=0 || rc=$?
-    if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q "7/7 tests passed"; then
-        pass "$rt: stubs, matching, stdin, refusals (7 cases)"
+    if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q "8/8 tests passed"; then
+        pass "$rt: stubs, matching, stdin, refusals, child manifest (8 cases)"
     else
         fail "$rt: hull test" "$out"
     fi
@@ -327,11 +349,94 @@ refuse "a refused env name" "env may not set LD_PRELOAD" \
     'exec: { a: { path: "/bin/true", env: { LD_PRELOAD: "/x.so" } } }'
 refuse "hull/exec without an exec section" "requires an \`exec\` section" "" ""
 
+echo "== the child manifest (exec.<name>.manifest) =="
+refuse "an app-only capability inside a child manifest" \
+    "exec.a.manifest.hosts: an app capability a command cannot be given" \
+    'exec = { a = { path = "/bin/true", manifest = { hosts = { "api.example.com" } } } }' \
+    'exec: { a: { path: "/bin/true", manifest: { hosts: ["api.example.com"] } } }'
+refuse "a pin inside a child manifest" \
+    "exec.a.manifest.sha256: not a manifest field; it belongs on the command entry (exec.a.sha256)" \
+    'exec = { a = { path = "/bin/true", manifest = { sha256 = string.rep("0", 64) } } }' \
+    'exec: { a: { path: "/bin/true", manifest: { sha256: "0".repeat(64) } } }'
+refuse "the app's env allowlist inside a child manifest" "exec.a.manifest.env:" \
+    'exec = { a = { path = "/bin/true", manifest = { env = { "HOME" } } } }' \
+    'exec: { a: { path: "/bin/true", manifest: { env: ["HOME"] } } }'
+refuse "an unknown key inside a child manifest" "exec.a.manifest: unknown key 'fss'" \
+    'exec = { a = { path = "/bin/true", manifest = { fss = {} } } }' \
+    'exec: { a: { path: "/bin/true", manifest: { fss: {} } } }'
+refuse "the whole app directory for a command" "grants the whole app directory" \
+    'exec = { a = { path = "/bin/true", manifest = { fs = { read = { "." } } } } }' \
+    'exec: { a: { path: "/bin/true", manifest: { fs: { read: ["."] } } } }'
+refuse "a pattern for a command" "is a pattern, which a command cannot be given" \
+    'exec = { a = { path = "/bin/true", manifest = { fs = { read = { "logs/*.log" } } } } }' \
+    'exec: { a: { path: "/bin/true", manifest: { fs: { read: ["logs/*.log"] } } } }'
+refuse "an absolute path in a child manifest" "is not an fs grant" \
+    'exec = { a = { path = "/bin/true", manifest = { fs = { read = { "/etc" } } } } }' \
+    'exec: { a: { path: "/bin/true", manifest: { fs: { read: ["/etc"] } } } }'
+refuse "fs and host.read for one grant" "fs and host.read / host.write both given" \
+    'exec = { a = { path = "/bin/true", fs = { read = { "/etc" } }, host = { read = { "/usr" } } } }' \
+    'exec: { a: { path: "/bin/true", fs: { read: ["/etc"] }, host: { read: ["/usr"] } } }'
+refuse "unix_sockets and host.unix_sockets" "unix_sockets and host.unix_sockets both given" \
+    'exec = { a = { path = "/bin/true", unix_sockets = true, host = { unix_sockets = true } } }' \
+    'exec: { a: { path: "/bin/true", unixSockets: true, host: { unixSockets: true } } }'
+refuse "host.write outside /dev, /run, /tmp" "must be under /dev, /run or /tmp" \
+    'exec = { a = { path = "/bin/true", host = { write = { "/etc/x" } } } }' \
+    'exec: { a: { path: "/bin/true", host: { write: ["/etc/x"] } } }'
+
+# The v0.26.0 spellings: still taken (as host), with ONE warning per process
+# naming the replacement, until 0.28.0.
+for rt in lua js; do
+    d="$TMPDIR/legacy_$rt"
+    rm -rf "$d"; mkdir -p "$d/tests"
+    if [ "$rt" = lua ]; then
+        cat > "$d/app.lua" <<'APP'
+app.manifest({ modules = { "hull/exec@1" }, exec = {
+  a = { path = "/bin/cat", fs = { read = { "/etc" } } },
+  b = { path = "/bin/cat", unix_sockets = true } } })
+app.main(function() return 0 end)
+APP
+        printf 'local exec = require("hull.exec")\ntest.exec_stub("a", { stdout = "x" })\ntest("legacy runs", function() test.eq(exec.run("a").stdout, "x") end)\n' \
+            > "$d/tests/test_legacy.lua"
+    else
+        cat > "$d/app.js" <<'APP'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/exec@1"], exec: {
+  a: { path: "/bin/cat", fs: { read: ["/etc"] } },
+  b: { path: "/bin/cat", unixSockets: true } } });
+app.main(() => 0);
+APP
+        printf 'import { exec } from "hull:exec";\ntest.execStub("a", { stdout: "x" });\ntest("legacy runs", async () => { test.eq((await exec.run("a")).stdout, "x"); });\n' \
+            > "$d/tests/test_legacy.js"
+    fi
+    out=$(cd "$d" && "$HULL" test . 2>&1) && rc=0 || rc=$?
+    warns=$(printf '%s\n' "$out" | grep -c "is the v0.26.0 spelling" || true)
+    if [ "$rc" = 0 ] && [ "$warns" = 1 ] && printf '%s\n' "$out" | grep -q "removed in 0.28.0"; then
+        pass "$rt: the v0.26.0 fs / unix_sockets still load, with one warning"
+    else
+        fail "$rt: v0.26.0 spellings (rc=$rc, warnings=$warns)" "$out"
+    fi
+done
+
 # ── Outside hull test ─────────────────────────────────────────────────
 
 # On Linux the command broker runs the declared command (tests/
 # e2e_exec_broker.sh covers it in depth); on a host without one the app is
 # refused at start, and with --allow-degraded-sandbox exec.run fails.
+echo "== hull inspect shows a command's whole authority =="
+d="$TMPDIR/inspect"
+rm -rf "$d"; mkdir -p "$d"
+cat > "$d/package.sig" <<'SIG'
+{"manifest":{"modules":["hull/exec@1"],"exec":{"gpu-query":{"path":"/usr/bin/nvidia-smi","host":{"read":["/dev/nvidiactl"],"write":["/dev/nvidiactl"]},"manifest":{"fs":{"read":["data/gpu-ids"],"write":["out/"]}}},"old":{"path":"/bin/cat","fs":{"read":["/etc"]},"unix_sockets":true}}}}
+SIG
+out=$("$HULL" inspect "$d" 2>&1) || true
+for want in "host.read:  /dev/nvidiactl" "host.write: /dev/nvidiactl" \
+            "manifest.fs.read:  data/gpu-ids" "manifest.fs.write: out/" \
+            "host.read:  /etc" "local IPC: may connect to any pathname unix socket" \
+            "each gets the union of all"; do
+    if printf '%s\n' "$out" | grep -qF -- "$want"; then pass "inspect: $want"
+    else fail "inspect: $want" "$out"; fi
+done
+
 echo "== the hull check lint =="
 # hull check (and hull build) warn about risky declared commands; a warning
 # never fails the step. The import step must also resolve an app that

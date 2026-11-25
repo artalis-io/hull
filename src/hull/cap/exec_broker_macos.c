@@ -185,6 +185,13 @@ int hl_exec_macos_profile(const HlExecBrokerCmd *cmds, int n, const char *self,
         for (unsigned j = 0; j < c->c.n_fs_write; j++)
             p_grant(&p, "file-read* file-write* file-ioctl", "W", i, (int)j,
                     hl_exec_next_str(&cur, NULL));
+        /* The child manifest's fs, resolved to the exact paths. On macOS
+         * every command shares one profile, so these join the union (§6.4). */
+        for (unsigned j = 0; j < c->n_app_read; j++)
+            p_grant(&p, "file-read*", "AR", i, (int)j, hl_exec_cmd_app_path(c, j));
+        for (unsigned j = 0; j < c->n_app_write; j++)
+            p_grant(&p, "file-write*", "AW", i, (int)j,
+                    hl_exec_cmd_app_path(c, c->n_app_read + j));
         if (c->c.flags & HL_EXEC_CMD_UNIX_SOCKETS) unix_sockets = 1;
     }
     if (unix_sockets)

@@ -295,6 +295,9 @@ declare namespace Hull {
         allowDash?: boolean;
     }
 
+    /** A declared command's manifest: the app manifest's fields a command can be given. */
+    type ExecChildManifest = Pick<Manifest, "fs">;
+
     /** One declared command (`exec: { name: {...} }`). Unknown keys refuse the app. */
     interface ManifestExecCommand {
         /** Absolute path of the binary. */
@@ -311,13 +314,32 @@ declare namespace Hull {
         env?: Record<string, string>;
         /** Runs at once, 1..8 (default 2). */
         concurrency?: number;
-        /** Extra paths the command's own sandbox grants. */
-        fs?: { read?: string[]; write?: string[] };
         /**
-         * The command may connect to local unix sockets: ANY pathname socket
-         * the service account can reach (systemd, D-Bus, a database's), not
-         * only the one it needs.
+         * Host grants with no app-manifest equivalent: absolute paths
+         * (`write` only under /dev, /run or /tmp) and local unix sockets.
          */
+        host?: {
+            /** Absolute paths the command may read. */
+            read?: string[];
+            /** Absolute paths it may write (device ioctls included). */
+            write?: string[];
+            /**
+             * The command may connect to local unix sockets: ANY pathname socket
+             * the service account can reach (systemd, D-Bus, a database's), not
+             * only the one it needs.
+             */
+            unixSockets?: boolean;
+        };
+        /**
+         * The command's own manifest: a strict subset of the app manifest, with
+         * the same names and meaning (today `fs` only, app-directory or
+         * `@state/` relative; not `.`, a pattern, or a path that does not
+         * exist at start).
+         */
+        manifest?: ExecChildManifest;
+        /** @deprecated v0.26.0 spelling of `host: { read, write }`; refused from 0.28.0. */
+        fs?: { read?: string[]; write?: string[] };
+        /** @deprecated v0.26.0 spelling of `host.unixSockets`; refused from 0.28.0. */
         unixSockets?: boolean;
         /**
          * The bytes a call may write to the command's stdin (`exec.run`'s

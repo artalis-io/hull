@@ -2708,10 +2708,18 @@ re-checked (a replaced inode is `ESTALE`: restart the app; an optional manifest 
 hashed from the same descriptor, at load and before every call), and the child set up between fork and
 exec: `PR_SET_PDEATHSIG(SIGKILL)` + a `getppid` check, `setsid`, `/dev/null` stdin (or a pipe the
 broker fills with the call's `stdin`, only for a command declaring `stdin_max`), capped pipes,
-a fixed environment, rlimits, its own narrower Landlock domain (device ioctls on its own `fs.write`
+a fixed environment, rlimits, its own narrower Landlock domain (device ioctls on its own `host.write`
 devices only), and a stacked seccomp filter refusing process creation (`fork` / `vfork`, `clone`
 without `CLONE_THREAD`, `clone3` as ENOSYS), every credential change and `PR_SET_PDEATHSIG`, and
-`AF_UNIX` unless `unix_sockets`; then `execveat` of the checked descriptor. No child can create a
+`AF_UNIX` unless `host.unix_sockets`; then `execveat` of the checked descriptor. A command entry
+is `path`, `sha256`, `argv`, `host` (absolute grants and `unix_sockets`, which no app field
+names) and `manifest`, the command's own manifest: a strict subset of the app manifest (today
+`fs` only, app-root / `@state/` relative, same parser), every other app field refused naming the
+command and field (`cap/exec_child.c`, called by both extractors). The broker grants each
+`manifest.fs` entry as exactly the file or directory it names (`hl_exec_child_grant_resolve`: no
+symlink, must exist, never `.`, `@state` or a pattern), since a command has no capability layer
+to narrow a wider kernel grant the way the app's own is narrowed. The v0.26.0 `fs` /
+`unix_sockets` on the entry are read as `host`, with one WARN, until 0.28.0. No child can create a
 process, so PDEATHSIG covers the whole job, and a broker killed with SIGKILL takes its children
 with it. That is the Linux backend (`cap/exec_broker_linux.c`); every host-specific step - the
 broker's death-with-the-server setup, the extra leaf check, the binary format, the lock, the exit

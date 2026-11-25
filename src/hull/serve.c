@@ -2439,7 +2439,8 @@ static int hl_serve_wire_caps(HlServerState *s)
      * before the phase-2 sandbox (exec_broker.h). */
     if (hl_exec_broker_apply(s->manifest.exec.data,
                              s->manifest.exec.data ? s->manifest.exec.len : 0,
-                             s->cfg.allow_degraded_sandbox, s->cfg.no_sandbox) != 0)
+                             s->cfg.allow_degraded_sandbox, s->cfg.no_sandbox,
+                             s->app_dir, s->state_dir[0] ? s->state_dir : NULL) != 0)
         return -1;
 
     /* Wire fs_cfg from manifest (if app declares fs.read OR fs.write

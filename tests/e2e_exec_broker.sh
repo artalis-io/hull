@@ -183,6 +183,61 @@ check_line "900 KiB of stdin reaches the command intact" "cat: status=0 len=9216
 check_line "a command that never reads its stdin still ends" "unread: status=0 timed_out=false"
 check_line "a command that never reads its stdin times out cleanly" "slowin: timed_out=true signal=SIGKILL"
 
+# ── The child manifest (exec.<name>.manifest, §3) ─────────────────────
+
+# The command's grant is written exactly as the app's own fs grant (app-root
+# relative), and the broker grants exactly the path it names.
+echo "== child manifest"
+CM="$FIX/cm"
+mkdir -p "$CM/data" "$CM/secret" "$CM/out"
+echo "granted-bytes" > "$CM/data/msg.txt"
+echo "not-granted" > "$CM/secret/x.txt"
+CMR=$(cd "$CM" && pwd -P)
+out=$(run_main "$CM" <<EOF
+app.manifest({
+  modules = { "hull/exec@1", "hull/fs@1" },
+  fs = { read = { "data/msg.txt" } },
+  exec = {
+    show = { path = "/bin/cat", argv = { "$CMR/data/msg.txt" },
+             manifest = { fs = { read = { "data/msg.txt" } } } },
+    peek = { path = "/bin/cat", argv = { "$CMR/secret/x.txt" },
+             manifest = { fs = { read = { "data/msg.txt" } } } },
+    save = { path = "/usr/bin/tee", argv = { "$CMR/out/w.txt" }, stdin_max = 64,
+             manifest = { fs = { write = { "out/" } } } },
+  },
+})
+local exec = require("hull.exec")
+local fs = require("hull.fs")
+app.main(function()
+  print("app: " .. fs.read("data/msg.txt"))
+  local r = exec.run("show")
+  print(("show: status=%d out=%s"):format(r.status, r.stdout))
+  r = exec.run("peek")
+  print(("peek: status=%d"):format(r.status))
+  r = exec.run("save", {}, { stdin = "written-by-child" })
+  print(("save: status=%d"):format(r.status))
+  return 0
+end)
+EOF
+)
+check_line "the app reads its own grant" "app: granted-bytes"
+check_line "the command reads the same grant, written the same way" "show: status=0 out=granted-bytes"
+check_line "a file beside the grant is not reachable" "peek: status=1"
+check_line "a directory write grant lets the command create a file in it" "save: status=0"
+if [ "$(cat "$CM/out/w.txt" 2>/dev/null)" = "written-by-child" ]; then
+    pass "the file holds what the command wrote"
+else
+    fail "the file holds what the command wrote" "$out"
+fi
+out=$(run_main "$FIX/cm2" <<EOF
+app.manifest({ modules = { "hull/exec@1" }, exec = {
+  a = { path = "/bin/cat", manifest = { fs = { read = { "data/gone.txt" } } } } } })
+app.main(function() return 0 end)
+EOF
+)
+check_line "a missing grant refuses the start, naming the field" \
+    "exec.a.manifest.fs.read[1] 'data/gone.txt' does not exist"
+
 # ── Binary checks ────────────────────────────────────────────────────
 
 echo "== binary checks"

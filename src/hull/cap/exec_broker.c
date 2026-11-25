@@ -30,6 +30,7 @@
 
 #include "hull/cap/exec_broker.h"
 #include "hull/cap/exec.h"
+#include "hull/cap/exec_child.h"   /* the child manifest's grants */
 #include "hull/cap/crypto.h"   /* the sha256 pin */
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
@@ -75,7 +76,7 @@ static void log_report(const char *report, int as_error)
 }
 
 int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
-                         int no_sandbox)
+                         int no_sandbox, const char *app_dir, const char *state_dir)
 {
     if (!policy || hl_exec_policy_count(policy, len) <= 0) {
         hl_exec_broker_stop();          /* no commands: nothing to run */
@@ -105,7 +106,8 @@ int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
     unsigned flags = (allow_degraded ? HL_EXEC_POLICY_DEGRADED_OK : 0) |
                      (no_sandbox ? HL_EXEC_POLICY_NO_SANDBOX : 0);
     char report[4096];
-    int rc = hl_exec_broker_policy(policy, len, flags, report, sizeof report);
+    int rc = hl_exec_broker_policy(policy, len, flags, app_dir, state_dir, report,
+                                   sizeof report);
     // cppcheck-suppress knownConditionTrueFalse
     log_report(report, rc != 0);
     // cppcheck-suppress knownConditionTrueFalse
@@ -183,6 +185,8 @@ static size_t   g_policy_len;
 static Cmd      g_cmds[HL_EXEC_MAX_COMMANDS];
 static int      g_ncmds;
 static unsigned g_flags;
+static char     g_app_dir[PATH_MAX];     /* the roots of the child manifests */
+static char     g_state_dir[PATH_MAX];   /* "" = the app declares no state */
 static int      g_devnull = -1;
 
 /* Is @p st owned and only writable by root (or, in a test build, by this
@@ -322,6 +326,41 @@ static int open_checked(const Cmd *cmd, char *why, size_t why_size)
 }
 
 /* Resolve and check one command at policy load. */
+/* Resolve the command's child manifest (manifest.fs) against the app's
+ * roots, exactly as named: the kernel grant is the whole boundary for a
+ * command (exec_child.h). Refused here, at policy load, so the app does not
+ * start with a grant that means something else. */
+static int app_grants_load(Cmd *cmd, char *why, size_t why_size)
+{
+    unsigned total = (unsigned)cmd->c.n_app_read + cmd->c.n_app_write;
+    if (total == 0) return 0;
+    char *buf = malloc((size_t)total * PATH_MAX);
+    if (!buf) { snprintf(why, why_size, "exec: out of memory"); return -1; }
+    size_t at = 0;
+    for (int w = 0; w < 2; w++) {
+        const uint8_t *cur = w ? cmd->c.app_write : cmd->c.app_read;
+        unsigned n = w ? cmd->c.n_app_write : cmd->c.n_app_read;
+        for (unsigned i = 0; i < n; i++) {
+            const char *raw = hl_exec_next_str(&cur, NULL);
+            char real[PATH_MAX], r[160];
+            if (hl_exec_child_grant_resolve(g_app_dir, g_state_dir[0] ? g_state_dir : NULL,
+                                            raw, real, sizeof real, r, sizeof r) != 0) {
+                snprintf(why, why_size, "exec.%s.manifest.fs.%s[%u] '%s' %s",
+                         cmd->c.name, w ? "write" : "read", i + 1, raw, r);
+                free(buf);
+                return -1;
+            }
+            size_t l = strlen(real) + 1;
+            memcpy(buf + at, real, l);
+            at += l;
+        }
+    }
+    cmd->app_paths = buf;
+    cmd->n_app_read = cmd->c.n_app_read;
+    cmd->n_app_write = cmd->c.n_app_write;
+    return 0;
+}
+
 static int cmd_load(Cmd *cmd, char *why, size_t why_size)
 {
     if (!realpath(cmd->c.path, cmd->real)) {
@@ -364,7 +403,7 @@ static int cmd_load(Cmd *cmd, char *why, size_t why_size)
         }
         close(ifd);
     }
-    return 0;
+    return app_grants_load(cmd, why, why_size);
 }
 
 /* ── Jobs ──────────────────────────────────────────────────────────── */
@@ -552,7 +591,7 @@ static void child_run(const Cmd *cmd, int bfd, int in_r, int out_w, int err_w,
     setrlimit(RLIMIT_CPU, &rcpu);
     struct rlimit nofile = { 256, 256 };
     setrlimit(RLIMIT_NOFILE, &nofile);
-    if (cmd->c.n_fs_write == 0) {
+    if (cmd->c.n_fs_write == 0 && cmd->n_app_write == 0) {
         struct rlimit fsz = { 0, 0 };
         setrlimit(RLIMIT_FSIZE, &fsz);
     }
@@ -874,20 +913,39 @@ static void reap(void)
     }
 }
 
+/* One root of the POLICY frame (u16 length + bytes) into @p out. */
+static int root_take(const uint8_t **p, const uint8_t *end, char *out)
+{
+    if (end - *p < 2) return -1;
+    size_t n = (size_t)(*p)[0] | ((size_t)(*p)[1] << 8);
+    *p += 2;
+    if (n >= PATH_MAX || (size_t)(end - *p) < n || memchr(*p, 0, n)) return -1;
+    memcpy(out, *p, n);
+    out[n] = '\0';
+    *p += n;
+    return 0;
+}
+
 static int policy_load(const uint8_t *p, size_t len, char *report, size_t rsz)
 {
     report[0] = '\0';
     if (len < 4) { snprintf(report, rsz, "exec: malformed POLICY"); return -1; }
     g_flags = hl_chan_get32(p);
+    const uint8_t *q = p + 4, *end = p + len;
+    if (root_take(&q, end, g_app_dir) != 0 || root_take(&q, end, g_state_dir) != 0) {
+        snprintf(report, rsz, "exec: malformed POLICY");
+        return -1;
+    }
+    size_t plen = (size_t)(end - q);
     char err[256];
-    if (hl_exec_policy_validate(p + 4, len - 4, err, sizeof err) != 0) {
+    if (hl_exec_policy_validate(q, plen, err, sizeof err) != 0) {
         snprintf(report, rsz, "%s", err);
         return -1;
     }
-    g_policy = malloc(len - 4);
+    g_policy = malloc(plen);
     if (!g_policy) { snprintf(report, rsz, "exec: out of memory"); return -1; }
-    memcpy(g_policy, p + 4, len - 4);
-    g_policy_len = len - 4;
+    memcpy(g_policy, q, plen);
+    g_policy_len = plen;
     g_ncmds = hl_exec_policy_count(g_policy, g_policy_len);
     size_t at = 0;
     for (int i = 0; i < g_ncmds; i++) {
@@ -1146,6 +1204,7 @@ void hl_exec_broker_stop(void)
 }
 
 int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
+                          const char *app_dir, const char *state_dir,
                           char *report, size_t report_size)
 {
     report[0] = '\0';
@@ -1153,10 +1212,25 @@ int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
         snprintf(report, report_size, "exec: the command broker is not running");
         return -1;
     }
-    uint8_t f4[4];
-    hl_chan_put32(f4, flags);
+    /* u32 flags, then the two roots (u16 length + bytes, "" = none), then
+     * the policy. */
+    size_t al = app_dir ? strlen(app_dir) : 0, sl = state_dir ? strlen(state_dir) : 0;
+    if (al >= PATH_MAX || sl >= PATH_MAX) {
+        snprintf(report, report_size, "exec: the app or state directory is too long");
+        return -1;
+    }
+    uint8_t head[4 + 2 + PATH_MAX + 2 + PATH_MAX];
+    size_t hn = 0;
+    hl_chan_put32(head, flags);
+    hn = 4;
+    head[hn++] = (uint8_t)al; head[hn++] = (uint8_t)(al >> 8);
+    if (al) memcpy(head + hn, app_dir, al);
+    hn += al;
+    head[hn++] = (uint8_t)sl; head[hn++] = (uint8_t)(sl >> 8);
+    if (sl) memcpy(head + hn, state_dir, sl);
+    hn += sl;
     uint64_t deadline = hl_chan_mono_ms() + 10000;
-    if (hl_chan_write_frame(g_fd, HX_MAGIC, HX_POLICY, 0, f4, 4, policy, len,
+    if (hl_chan_write_frame(g_fd, HX_MAGIC, HX_POLICY, 0, head, hn, policy, len,
                             deadline) != 0) {
         snprintf(report, report_size, "exec: the command broker did not take its policy");
         hl_exec_broker_stop();
@@ -1451,9 +1525,10 @@ int hl_exec_broker_running(void) { return 0; }
 int hl_exec_broker_spawned(void) { return 0; }
 void hl_exec_broker_stop(void) {}
 int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
+                          const char *app_dir, const char *state_dir,
                           char *report, size_t report_size)
 {
-    (void)policy; (void)len; (void)flags;
+    (void)policy; (void)len; (void)flags; (void)app_dir; (void)state_dir;
     snprintf(report, report_size, "exec: this host has no command broker");
     return -1;
 }

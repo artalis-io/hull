@@ -7,9 +7,14 @@
 
 #include "utest.h"
 #include "hull/cap/exec.h"
+#include "hull/cap/exec_child.h"
 
+#include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
 
@@ -654,6 +659,194 @@ UTEST(exec_stdin, a_truncated_stdin_max_is_refused)
     for (size_t cut = at; cut < at + 4; cut++)
         EXPECT_EQ(-1, hl_exec_policy_validate(b.data, cut, NULL, 0));
     hl_exec_buf_free(&b);
+}
+
+/* ── The child manifest (exec.<name>.manifest, §3) ─────────────────── */
+
+/* gpu-query as v0.26.0 encodes it (host fs + unix_sockets, no child
+ * manifest): captured from the v0.26.0 cap/exec.o. A command with no child
+ * manifest must encode to exactly these bytes, so a signed v0.26.0 policy
+ * still means what it meant. */
+static const uint8_t V026_GPU_QUERY[] = {
+    0x48, 0x58, 0x50, 0x31, 0x01, 0x00, 0x09, 0x00, 0x67, 0x70, 0x75, 0x2d,
+    0x71, 0x75, 0x65, 0x72, 0x79, 0x00, 0x13, 0x00, 0x2f, 0x75, 0x73, 0x72,
+    0x2f, 0x62, 0x69, 0x6e, 0x2f, 0x6e, 0x76, 0x69, 0x64, 0x69, 0x61, 0x2d,
+    0x73, 0x6d, 0x69, 0x00, 0x88, 0x13, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x00, 0x40, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00, 0x0e, 0x00,
+    0x2f, 0x64, 0x65, 0x76, 0x2f, 0x6e, 0x76, 0x69, 0x64, 0x69, 0x61, 0x63,
+    0x74, 0x6c, 0x00, 0x01, 0x00, 0x0e, 0x00, 0x2f, 0x64, 0x65, 0x76, 0x2f,
+    0x6e, 0x76, 0x69, 0x64, 0x69, 0x61, 0x63, 0x74, 0x6c, 0x00, 0x01, 0x00,
+    0x00, 0x0c, 0x00, 0x2d, 0x2d, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x3d,
+    0x63, 0x73, 0x76, 0x00,
+};
+
+static int build_gpu_query(HlExecBuf *b, int child)
+{
+    hl_exec_b_init(b, NULL);
+    hl_exec_b_cmd(b, S("gpu-query"), S("/usr/bin/nvidia-smi"), 5000, 65536, -1, -1,
+                  1, -1, NULL, 0);
+    hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);              /* env */
+    size_t m = hl_exec_b_count_begin(b);                              /* host.read */
+    hl_exec_b_str(b, S("/dev/nvidiactl"));
+    hl_exec_b_count_end(b, m, 1);
+    m = hl_exec_b_count_begin(b);                                     /* host.write */
+    hl_exec_b_str(b, S("/dev/nvidiactl"));
+    hl_exec_b_count_end(b, m, 1);
+    m = hl_exec_b_count_begin(b);                                     /* argv */
+    hl_exec_b_fixed(b, S("--format=csv"));
+    hl_exec_b_count_end(b, m, 1);
+    if (child) {                                                      /* manifest.fs */
+        hl_exec_b_app_fs(b);
+        m = hl_exec_b_count_begin(b);
+        hl_exec_b_str(b, S("data/gpu-ids"));
+        hl_exec_b_str(b, S("@state/cache/"));
+        hl_exec_b_count_end(b, m, 2);
+        m = hl_exec_b_count_begin(b);
+        hl_exec_b_str(b, S("out/"));
+        hl_exec_b_count_end(b, m, 1);
+    }
+    return hl_exec_b_finish(b);
+}
+
+UTEST(exec_child, no_child_manifest_encodes_as_v0_26_0)
+{
+    HlExecBuf b;
+    ASSERT_EQ(0, build_gpu_query(&b, 0));
+    ASSERT_EQ(sizeof V026_GPU_QUERY, b.len);
+    EXPECT_EQ(0, memcmp(V026_GPU_QUERY, b.data, b.len));
+    /* and v0.26.0's bytes still validate and read the same */
+    HlExecCmd c;
+    ASSERT_EQ(0, hl_exec_policy_validate(V026_GPU_QUERY, sizeof V026_GPU_QUERY, NULL, 0));
+    ASSERT_EQ(0, hl_exec_policy_at(V026_GPU_QUERY, sizeof V026_GPU_QUERY, 0, &c));
+    EXPECT_TRUE(c.flags & HL_EXEC_CMD_UNIX_SOCKETS);
+    EXPECT_FALSE(c.flags & HL_EXEC_CMD_APP_FS);
+    EXPECT_EQ(1, c.n_fs_read);
+    EXPECT_EQ(0, c.n_app_read);
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_child, manifest_fs_is_encoded_and_read_back)
+{
+    HlExecBuf b;
+    HlExecCmd c;
+    ASSERT_EQ(0, build_gpu_query(&b, 1));
+    ASSERT_EQ(0, hl_exec_policy_find(b.data, b.len, S("gpu-query"), &c));
+    EXPECT_TRUE(c.flags & HL_EXEC_CMD_APP_FS);
+    EXPECT_EQ(1, c.n_fs_read);             /* the host grants are unchanged */
+    EXPECT_EQ(1, c.n_argv);
+    ASSERT_EQ(2, c.n_app_read);
+    ASSERT_EQ(1, c.n_app_write);
+    const uint8_t *cur = c.app_read;
+    EXPECT_STREQ("data/gpu-ids", hl_exec_next_str(&cur, NULL));
+    EXPECT_STREQ("@state/cache/", hl_exec_next_str(&cur, NULL));
+    cur = c.app_write;
+    EXPECT_STREQ("out/", hl_exec_next_str(&cur, NULL));
+    /* every truncation inside the child lists is refused */
+    for (size_t cut = sizeof V026_GPU_QUERY; cut < b.len; cut++)
+        EXPECT_EQ(-1, hl_exec_policy_validate(b.data, cut, NULL, 0));
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_child, an_absolute_child_entry_is_refused_by_validation)
+{
+    HlExecBuf b;
+    hl_exec_b_init(&b, NULL);
+    hl_exec_b_cmd(&b, S("c"), S("/bin/cat"), -1, -1, -1, -1, 0, -1, NULL, 0);
+    for (int k = 0; k < 4; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    hl_exec_b_app_fs(&b);
+    size_t m = hl_exec_b_count_begin(&b);
+    hl_exec_b_str(&b, S("/etc/passwd"));
+    hl_exec_b_count_end(&b, m, 1);
+    hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    EXPECT_EQ(-1, hl_exec_b_finish(&b));
+    EXPECT_TRUE(strstr(b.err, "manifest.fs.read entry 1") != NULL);
+}
+
+UTEST(exec_child, grants_a_command_may_take)
+{
+    char why[160];
+    static const char *const ok[] = { "data/gpu-ids", "data/", "./data/x.csv",
+                                      "@state/cache", "@state/cache/", NULL };
+    for (int i = 0; ok[i]; i++)
+        EXPECT_EQ(0, hl_exec_child_grant_check(ok[i], strlen(ok[i]), why, sizeof why));
+    /* valid for an app, refused for a command, each with its reason */
+    static const struct { const char *g, *why; } bad[] = {
+        { ".", "whole app directory" },
+        { "./", "whole app directory" },
+        { "@state", "whole state directory" },
+        { "data/*.csv", "pattern" },
+        { "*.log", "pattern" },
+        /* invalid anywhere */
+        { "/etc/passwd", "not an fs grant" },
+        { "../x", "not an fs grant" },
+        { "data/../../x", "not an fs grant" },
+        { ".hull/internal.db", "reserved" },
+        { "@other/x", "reserved" },
+        { NULL, NULL } };
+    for (int i = 0; bad[i].g; i++) {
+        EXPECT_EQ(-1, hl_exec_child_grant_check(bad[i].g, strlen(bad[i].g), why,
+                                                sizeof why));
+        EXPECT_TRUE(strstr(why, bad[i].why) != NULL);
+    }
+}
+
+UTEST(exec_child, resolve_names_exactly_what_the_entry_names)
+{
+    char root[] = "/tmp/hull-exec-child-XXXXXX";
+    ASSERT_TRUE(mkdtemp(root) != NULL);
+    char app[PATH_MAX], state[PATH_MAX], p[PATH_MAX + 64], out[PATH_MAX], why[160];
+    snprintf(app, sizeof app, "%s/app", root);
+    snprintf(state, sizeof state, "%s/state", root);
+    ASSERT_EQ(0, mkdir(app, 0700));
+    ASSERT_EQ(0, mkdir(state, 0700));
+    snprintf(p, sizeof p, "%s/data", app);
+    ASSERT_EQ(0, mkdir(p, 0700));
+    snprintf(p, sizeof p, "%s/data/f.txt", app);
+    FILE *f = fopen(p, "w");
+    ASSERT_TRUE(f != NULL);
+    fclose(f);
+    snprintf(p, sizeof p, "%s/link", app);
+    ASSERT_EQ(0, symlink("/etc", p));
+
+    char real_app[PATH_MAX], want[PATH_MAX + 64];
+    ASSERT_TRUE(realpath(app, real_app) != NULL);
+    /* a file: the file itself, never its parent */
+    ASSERT_EQ(0, hl_exec_child_grant_resolve(app, NULL, "data/f.txt", out, sizeof out,
+                                             why, sizeof why));
+    snprintf(want, sizeof want, "%s/data/f.txt", real_app);
+    EXPECT_STREQ(want, out);
+    /* a directory to create (trailing slash), as the app's sandbox does */
+    ASSERT_EQ(0, hl_exec_child_grant_resolve(app, NULL, "out/", out, sizeof out,
+                                             why, sizeof why));
+    struct stat st;
+    snprintf(p, sizeof p, "%s/out", app);
+    EXPECT_EQ(0, stat(p, &st));
+    /* refused: a missing file, a symbolic link, @state with no state, a pattern */
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, NULL, "data/missing.txt", out,
+                                              sizeof out, why, sizeof why));
+    EXPECT_TRUE(strstr(why, "does not exist") != NULL);
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, NULL, "link/passwd", out,
+                                              sizeof out, why, sizeof why));
+    EXPECT_TRUE(strstr(why, "symbolic link") != NULL);
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, NULL, "@state/x/", out, sizeof out,
+                                              why, sizeof why));
+    EXPECT_TRUE(strstr(why, "no state directory") != NULL);
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, NULL, "data/*.txt", out, sizeof out,
+                                              why, sizeof why));
+    /* @state/ resolves under the state root */
+    ASSERT_EQ(0, hl_exec_child_grant_resolve(app, state, "@state/cache/", out,
+                                             sizeof out, why, sizeof why));
+    EXPECT_TRUE(strstr(out, "/state/cache") != NULL);
+
+    /* Remove exactly what the test made, deepest first. */
+    static const char *const made[] = { "app/data/f.txt", "app/link", "app/data",
+                                        "app/out", "state/cache", "app", "state", NULL };
+    for (int i = 0; made[i]; i++) {
+        snprintf(p, sizeof p, "%s/%s", root, made[i]);
+        struct stat ls;
+        if (lstat(p, &ls) == 0) EXPECT_EQ(0, S_ISDIR(ls.st_mode) ? rmdir(p) : unlink(p));
+    }
+    EXPECT_EQ(0, rmdir(root));
 }
 
 UTEST_MAIN()

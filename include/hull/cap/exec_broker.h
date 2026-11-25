@@ -56,11 +56,14 @@ void hl_exec_broker_stop(void);
 #define HL_EXEC_POLICY_DEGRADED_OK 0x1u   /* --allow-degraded-sandbox */
 #define HL_EXEC_POLICY_NO_SANDBOX  0x2u   /* --no-sandbox */
 
-/* Send the one POLICY frame and wait for READY. 0: the broker took it and
+/* Send the one POLICY frame and wait for READY. @p app_dir and @p state_dir
+ * (NULL = none) are the roots a command's child manifest (`manifest.fs`) is
+ * resolved against, as the app's own grants are (exec_child.h). 0: the broker took it and
  * locked itself down; @p report gets its startup lines (resolved paths, and
  * any guarantee it does not hold), one per line. -1: refused or lost;
  * @p report says why. Either way the policy can never be sent again. */
 int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
+                          const char *app_dir, const char *state_dir,
                           char *report, size_t report_size);
 
 /* What an entry point does once its manifest is applied and checked, before
@@ -69,7 +72,7 @@ int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
  * else send the policy, logging the broker's report. 0, or -1 (logged:
  * refuse to start). */
 int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
-                         int no_sandbox);
+                         int no_sandbox, const char *app_dir, const char *state_dir);
 
 /* One reply. Owned by the callee of HlExecDoneFn; free with
  * hl_exec_reply_free. */

@@ -207,19 +207,35 @@ local function main()
                 local se = c.stderr_max or c.stderrMax or 16384
                 print(string.format("    limits: %d ms, stdout %d, stderr %d, %d at once",
                                     t, so, se, c.concurrency or 2))
-                if type(c.fs) == "table" then
-                    if c.fs.read then print("    fs.read:  " .. table.concat(c.fs.read, ", ")) end
-                    if c.fs.write then print("    fs.write: " .. table.concat(c.fs.write, ", ")) end
+                -- Its whole authority: the host grants (absolute paths; the
+                -- v0.26.0 fs / unix_sockets are their old spelling) and its
+                -- child manifest (the app's own fs vocabulary).
+                local host = type(c.host) == "table" and c.host
+                             or (type(c.fs) == "table" and c.fs) or {}
+                local function list(l) return type(l) == "table" and table.concat(l, ", ") or nil end
+                if list(host.read) then print("    host.read:  " .. list(host.read)) end
+                if list(host.write) then print("    host.write: " .. list(host.write)) end
+                local cm = type(c.manifest) == "table" and c.manifest or {}
+                local cfs = type(cm.fs) == "table" and cm.fs or {}
+                if list(cfs.read) then
+                    print("    manifest.fs.read:  " .. list(cfs.read) .. "  (under the app dir / @state)")
+                end
+                if list(cfs.write) then
+                    print("    manifest.fs.write: " .. list(cfs.write) .. "  (under the app dir / @state)")
                 end
                 local smax = c.stdin_max or c.stdinMax
                 if smax and smax ~= 0 then
                     print(string.format("    stdin: up to %d bytes from the app", smax))
                 end
-                if c.unix_sockets or c.unixSockets then
+                local hu = type(c.host) == "table" and (c.host.unix_sockets or c.host.unixSockets)
+                if hu or c.unix_sockets or c.unixSockets then
                     print("    local IPC: may connect to any pathname unix socket the service account")
                     print("               can reach (not limited to the one it needs)")
                 end
             end
+            print("  Every command also reads the system trees (/usr /lib /etc /proc /sys /dev on")
+            print("  Linux). On macOS the commands share ONE sandbox: each gets the union of all")
+            print("  their grants above.")
             print("")
         end
     end

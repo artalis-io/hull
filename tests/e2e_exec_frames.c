@@ -157,9 +157,11 @@ static Broker broker_start(const HlExecBuf *pol)
         _exit(127);
     }
     close(sv[1]);
-    uint8_t f4[4];
+    /* u32 flags, then the two roots of the child manifests (u16 length +
+     * bytes; none here). */
+    uint8_t f4[8] = { 0 };
     put32(f4, g_flags);
-    send_frame(sv[0], POLICY, 0, f4, 4, pol->data, pol->len);
+    send_frame(sv[0], POLICY, 0, f4, 8, pol->data, pol->len);
     uint32_t t, id; uint8_t *buf; size_t len;
     int r = read_frame(sv[0], &t, &id, &buf, &len, 5000);
     if (r != 1 || t != READY) {
@@ -294,9 +296,9 @@ int main(int argc, char **argv)
           "stdin to a command with no stdin_max is refused (%s)", msg);
 
     /* 6. a second POLICY ends the broker */
-    uint8_t f4[4];
+    uint8_t f4[8] = { 0 };
     put32(f4, g_flags);
-    send_frame(b.fd, POLICY, 0, f4, 4, p.data, p.len);
+    send_frame(b.fd, POLICY, 0, f4, 8, p.data, p.len);
     uint32_t id; uint8_t *buf; size_t len;
     r = read_frame(b.fd, &t, &id, &buf, &len, 3000);
     CHECK(r == -1, "a second POLICY ends the broker");
