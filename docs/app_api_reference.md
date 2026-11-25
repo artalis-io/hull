@@ -3022,10 +3022,15 @@ arguments, and the few slots the app fills, each with a shape its value must mat
 ([docs/design/exec_broker.md](design/exec_broker.md)). There is no shell anywhere; the
 arguments reach the program exactly as matched.
 
-> **Where it runs.** Native Linux, through the command broker (below). macOS and OpenBSD are
-> planned; on a host with no broker an app with an `exec` section is refused at start, unless
-> `--allow-degraded-sandbox` (then `exec.run` fails). Windows is refused at start always: its
-> processes re-split their one command line, so a matched value could become several arguments.
+> **Where it runs.** Native Linux and macOS, through the command broker (below). On macOS every
+> command of an app gets the union of their `fs` and `unix_sockets` grants (macOS refuses a
+> second sandbox in a sandboxed process, so a child cannot narrow itself), and a broker killed
+> with `SIGKILL` leaves its running commands until they exit (no parent-death signal; they
+> cannot fork); the broker logs both at start as `exec: limit:` lines. A command cannot be
+> this hull binary itself on macOS. On a host with no broker (OpenBSD, FreeBSD, a cosmo APE) an
+> app with an `exec` section is refused at start, unless `--allow-degraded-sandbox` (then
+> `exec.run` fails). Windows is refused at start always: its processes re-split their one
+> command line, so a matched value could become several arguments.
 >
 > **How a command runs.** A small broker process (this binary in a hidden mode) is spawned
 > before the sandbox, given the policy once, and then runs each call: it matches the arguments

@@ -10,6 +10,18 @@ release-artifact layout).
 
 ### Added
 
+- **`hull/exec` on macOS** (docs/design/exec_broker.md, part 3). The command broker now runs
+  on macOS under one Seatbelt profile: deny by default, `exec` only of the declared binaries,
+  the fork right limited to the broker's own image (so a command gets `EPERM` from `fork`,
+  `vfork` and `posix_spawn`), reads of the system trees and each command's `fs.read`, writes of
+  `/dev/null` and `fs.write`, `AF_UNIX` only with `unix_sockets`, no other network. Two limits
+  macOS imposes, logged at start as `exec: limit:` lines: every command gets the union of the
+  app's grants (no nested sandbox), and a broker killed with `SIGKILL` leaves its running
+  commands until they exit (no parent-death signal; a server killed with `SIGKILL` still takes
+  them). A command may not be the hull binary itself there. The host-specific code now sits
+  behind `hull/cap/exec_platform.h` (`cap/exec_broker_linux.c`, `cap/exec_broker_macos.c`),
+  each with its own unit test; the Linux broker is unchanged. OpenBSD is not supported.
+
 - **`hull/exec`: the `sha256` pin and the command lint** (docs/design/exec_broker.md, part 4).
   A declared command may set `sha256` (64 hex characters): the broker hashes the main
   executable from the descriptor it execs, at start (a mismatch refuses the app) and before

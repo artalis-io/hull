@@ -2912,6 +2912,28 @@ jobs:
         timeout-minutes: 5
         run: HULL_REQUIRE_EXEC_BROKER=1 sh tests/e2e_exec_broker.sh
 
+  exec-broker-macos:
+    needs: [classify]
+    if: needs.classify.outputs.run_core_common == 'true'
+    name: Command broker (macOS, hull/exec)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+          submodules: true
+      # As on Linux: the hooks let a binary this user owns pass the
+      # root-ownership check and log the broker's pid and a probe's
+      # readiness; a release build never has them.
+      - name: Build with the broker's test hooks
+        run: make -j"$(sysctl -n hw.ncpu)" HL_EXEC_TEST_HOOKS=1
+      - name: Broker backend unit tests (Seatbelt profile)
+        timeout-minutes: 3
+        run: make -j"$(sysctl -n hw.ncpu)" HL_EXEC_TEST_HOOKS=1 build/test_exec_broker_macos && ./build/test_exec_broker_macos
+      - name: Command broker E2E (Seatbelt, deaths, admission)
+        timeout-minutes: 5
+        run: HULL_REQUIRE_EXEC_BROKER=1 sh tests/e2e_exec_broker_macos.sh
+
   postgres-feature:
     needs: [classify]
     if: needs.classify.outputs.run_db_postgres == 'true'
@@ -3390,6 +3412,7 @@ jobs:
       - gpu-feature
       - tui-feature
       - exec-broker
+      - exec-broker-macos
       - postgres-feature
       - mysql-feature
       - db-shared-feature

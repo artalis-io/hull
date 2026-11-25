@@ -1,8 +1,9 @@
 # Design: declared commands through a spawn broker (`hull/exec`)
 
 - **Status:** PR 1 (#1210: manifest section, matcher, stubs), PR 2 (#1211: the native Linux
-  broker) and PR 4 (the `sha256` pin and the `hull build` / `hull check` lint) implemented;
-  macOS / OpenBSD (PR 3) planned. Review rounds 1-3
+  broker), PR 3 (the host backends split behind `hull/cap/exec_platform.h`, and the macOS
+  Seatbelt backend) and PR 4 (#1212: the `sha256` pin and the `hull build` / `hull check`
+  lint) implemented. OpenBSD is not supported (§6.4, §9). Review rounds 1-3
   folded in: seccomp inheritance, child process creation, broker-side admission, required
   Landlock rights, file identity vs content, `unix_sockets` scope, `sha256` until enforced.
 - **Motivation:** hsctl needs to read node state that only a system tool reports: `nvidia-smi`
@@ -13,8 +14,12 @@
   the phase-1 sandbox and stopped once the manifest shows it is not needed. Also builds on
   `include/hull/shared/child_channel.h`, the framed-socket channel the helper and the build
   plugin runner already share.
-- **New code (planned):** `src/hull/cap/exec.c` (the policy, the shared argv matcher, the app
-  side), `src/hull/cap/exec_broker.c` (the broker), `include/hull/cap/exec.h`,
+- **Code:** `src/hull/cap/exec.c` (the policy, the shared argv matcher, the app side),
+  `src/hull/cap/exec_broker.c` (the broker's portable core: frames, admission, jobs, the
+  owner / mode / identity / pin checks, the fork, the child's common setup, the server's
+  side), the host backends behind `include/hull/cap/exec_platform.h`
+  (`src/hull/cap/exec_broker_linux.c`, `src/hull/cap/exec_broker_macos.c`, each with its own
+  unit test, `tests/hull/cap/test_exec_broker_{linux,macos}.c`), `include/hull/cap/exec.h`,
   `include/hull/limits/exec.h`, `runtime/{lua,js}/mod_exec.c`, and module `hull/exec@1`.
 
 ## 1. Problem and principle
@@ -48,7 +53,7 @@ of it in `tool.spawn` with a compiler allowlist.
 | Child | Forked by the broker. It gets `setsid`, closed fds, stdin from `/dev/null`, capped stdout / stderr pipes, a fixed environment, rlimits, `PR_SET_PDEATHSIG`, its own narrower Landlock domain, and a seccomp filter that **refuses process creation** (threads allowed). It runs the binary through `execveat(fd, "", ..., AT_EMPTY_PATH)` on the descriptor that was checked. |
 | Seccomp | Filters are inherited and can only narrow, so the broker's filter admits the union of what the broker AND the supported commands need (`socket` for `AF_UNIX` only, for `systemctl`). Each child then adds a filter removing what its command does not need (§6.2). |
 | Admission | **The broker is authoritative** for the in-flight cap, per-command concurrency, live request ids and aggregate buffered output. The binding checks the same caps only to answer `busy` fast (§5.2). |
-| Kernel | Linux: Landlock `EXECUTE` on the declared binaries and their `PT_INTERP` only, with a defined minimum ABI per guarantee (§6.5). OpenBSD and macOS: **planned** (§6.4). Windows: **not supported** (§9). |
+| Kernel | Linux: Landlock `EXECUTE` on the declared binaries and their `PT_INTERP` only, with a defined minimum ABI per guarantee (§6.5). macOS: one Seatbelt profile, the union of the commands' grants (§6.4). OpenBSD and Windows: **not supported** (§9). |
 | No kernel mechanism, or a required right missing | `exec` is refused at app load, unless `--allow-degraded-sandbox` is given, which names each guarantee that is unavailable. This is the existing rule for an incomplete backend. |
 | App API | Async only: `exec.run(name, args?)` returns a result table (Lua parks the coroutine, JS returns a Promise). It goes through the wait gate and carries refusal codes. |
 | Result | `{ status, signal, stdout, stderr, timed_out, stdout_truncated, stderr_truncated, duration_ms }` |
@@ -187,10 +192,18 @@ it for a precise error, and the broker calls it again as the authority.
      │  fd: socketpair (child_channel frames, magic "HXEC")
      ▼
  exec broker  (__hull_exec_broker; no VM; single thread)
-     │  fork + execveat(checked fd)
+     │  fork + execveat(checked fd)          (macOS: execve(checked path))
      ▼
  child  (setsid; own Landlock domain; NNP; rlimits; PDEATHSIG; no process creation)
+        (macOS: the broker's Seatbelt profile, inherited; no process creation)
 ```
+
+Everything that differs between kernels is behind one internal interface,
+`hull/cap/exec_platform.h`, one translation unit per host: the broker's death-with-the-server
+setup, the extra leaf check, the binary format check (ELF / Mach-O), the lock-down, the exit
+watch (pidfd / kqueue), and the child's four steps (die with the broker, confine, the syscall
+filter, the exec). `cap/exec_broker.c` holds everything else and is the same on every host. A
+new backend is one more `exec_broker_<host>.c` and its unit test.
 
 ### 5.1 Start, policy, lock-down
 
@@ -360,7 +373,7 @@ These checks are mandatory. A `sha256` pin is added on top of them, never instea
   capabilities (no `security.capability` extended attribute, read with `fgetxattr` on the
   descriptor). Both kinds would raise privilege without NNP, and an exec of either clears
   PDEATHSIG (§5.3).
-- Its first bytes are the host's native executable magic (ELF on Linux and OpenBSD), so a
+- Its first bytes are the host's native executable magic (ELF on Linux, a 64-bit Mach-O on macOS), so a
   `#!` script is refused. A script would bring its interpreter, and the Landlock grant would
   have to include `bash`.
 - Every component of the real path is owned by root and is not group- or world-writable (the
@@ -464,29 +477,54 @@ The bound that matters most is reads. A child runs as the app's user and reads w
 domain allows, so the default read set leaves out `/home`, `/root`, `/srv`, `/var` and the app
 directory. A command that legitimately needs one of them names it in `fs.read`.
 
-### 6.4 OpenBSD and macOS (planned)
+### 6.4 macOS (Seatbelt), and why not OpenBSD
 
-Neither backend is designed in detail or demonstrated yet; PR 3 does that. Known so far:
+**macOS** (`cap/exec_broker_macos.c`). Measured on macOS 26 (arm64):
 
-- **OpenBSD:**
-  - The broker calls `unveil(bin, "x")` and `unveil(interp, "x")` for each binary, plus `r` for
-    the read set, then `unveil(NULL, NULL)`.
-  - It pledges `stdio proc exec` with `execpromises` set to `stdio rpath wpath tty`, plus
-    `inet` only if a later version ever needs it.
-  - `execpromises` constrains the child itself, which Linux cannot express.
-  - The child-side narrowing of §6.3 is not available. The union applies.
-- **macOS:**
-  - The broker applies a Seatbelt profile before `READY`. It is deny-default, with
-    `process-fork` allowed, `(allow process-exec (literal "<bin>"))` for each binary,
-    `file-read*` on the read set, and `file-write*` only on `/dev/null` and `fs.write`.
-  - Children inherit it. There is no per-child narrowing (`sandbox_init` once per process), so
-    the union applies.
-  - There is no `execveat` either, so the check-then-exec window is the `safe_path` ownership
-    rule's job: only root can swap a file under a root-owned path.
-  - There is no `PR_SET_PDEATHSIG`, and nothing that refuses a child's `fork`, so the
-    abrupt-death guarantee of §7 does not carry over as it stands. PR 3 must close that or
-    say so in the platform table.
-  - The binary check takes Mach-O (thin or fat), not ELF, and the loader is `dyld`.
+- **One profile, the union.** macOS refuses a second sandbox in a sandboxed process:
+  `sandbox_init` fails with `EPERM`. So a child cannot narrow itself after fork as on Linux
+  (§6.3). The broker applies ONE Seatbelt profile to itself before `READY`, and every child
+  inherits it:
+  - deny by default; `file-read-metadata`;
+  - reads of `/` itself (dyld reads it to find the shared cache, and a child aborts at start
+    without it), `/usr`, `/bin`, `/sbin`, `/System`, `/private/etc`, `/private/var/db/dyld`,
+    `/Library/Preferences/Logging`, `/dev/urandom`, `/dev/random`, `/dev/zero`; executable
+    maps of `/System` and `/usr/lib`; `/dev/null` read and write; `sysctl-read`; the
+    `opendirectoryd.libinfo` lookup (getpwuid, so `id` and `ls -l` work);
+  - per command: `process-exec`, `file-read*` and `file-map-executable` of its binary by its
+    real path (a parameter, never text in the profile), `file-read*` of each `fs.read`,
+    `file-read* file-write* file-ioctl` of each `fs.write` (resolved: Seatbelt matches the
+    real path; a path that does not exist is skipped, as on Linux);
+  - `AF_UNIX` (`system-socket` of that domain, `network-outbound` to a unix socket) only when
+    some command sets `unix_sockets`; no other network.
+
+  So one command sees another's `fs.read`, `fs.write` and `unix_sockets`. The broker says so
+  at start (`exec: limit: macOS cannot narrow each command`) when the app declares more than
+  one command.
+- **No process creation, kept.** `(allow process-fork (process-path (param "SELF")))`: the
+  fork right is filtered to the broker's own image. The broker forks; anything it execs gets
+  `EPERM` from `fork`, `vfork` and `posix_spawn` (measured, and asserted by
+  `test_exec_broker_macos` and `e2e_exec_broker_macos.sh` through `time(1)`). A command whose
+  real path IS this hull binary would run with that right, so it is refused at start.
+- **No `execveat` / `fexecve`.** The child execs the checked path. The descriptor check (owner,
+  mode, set-ID, dev / ino, the pin) runs just before, and the window is the `safe_path` rule's
+  job (§6.1): only root can swap a file under a root-owned path.
+- **No file capabilities** to refuse. The binary check takes a 64-bit Mach-O, thin or
+  universal (a Java class file starts with the universal magic; its "count" is a version
+  number, so a count over 16 is refused), and refuses a 32-bit or foreign-order one, a script
+  and anything else. Every dynamic Mach-O's loader is `/usr/lib/dyld`, checked like a
+  `PT_INTERP`.
+- **No PR_SET_PDEATHSIG.** See §7: the broker watches the server's pid with kqueue
+  (`EVFILT_PROC`, `NOTE_EXIT`) on top of the channel's EOF, and each child's exit with a
+  kqueue in place of a pidfd.
+
+**OpenBSD: not supported.** Linux's pledge / unveil polyfill does not stand in for it: the
+Linux broker uses Landlock and seccomp directly, since the polyfill cannot express per-binary
+execute grants on the inode checked, a per-child filter on top of the broker's, or per-child
+`fs.write` devices. An OpenBSD backend would be a third `exec_broker_openbsd.c` (unveil `x`
+per binary and loader, `pledge("stdio proc exec", "stdio rpath wpath tty")`, the union of
+grants as on macOS). No CI runner or deployment uses OpenBSD, and an untested sandbox backend
+is worse than a refusal, so it is refused like FreeBSD (§9) until one does.
 
 ### 6.5 Required rights (Linux)
 
@@ -541,6 +579,21 @@ on its own abrupt death the children's PDEATHSIG does the same. Teardown order: 
 stops in step (1), next to the thread pool. Each in-flight op's cancel_fn releases its
 continuation, as `hl_async_ctx_drop_unrun` does today.
 
+**macOS** has no `PR_SET_PDEATHSIG`, so the first fact does not carry over, and the guarantee
+there is narrower:
+
+- the second fact holds: no child can create a process (§6.4), so a job is one process, and
+  killing its process group kills all of it;
+- every end of the broker that runs code kills each job's process group first: EOF on the
+  channel, `hl_exec_broker_stop()`, and the server's exit, which the broker sees through a
+  kqueue `EVFILT_PROC` / `NOTE_EXIT` watch on the server's pid as well as through the EOF
+  (`hl_exec_plat_broker_init`). A server killed with `SIGKILL` therefore takes its commands;
+- a **broker** killed with `SIGKILL` runs no code, and its running commands live on until
+  they exit. That is at most one process per call in flight (`HL_EXEC_MAX_INFLIGHT`), still
+  under its `RLIMIT_CPU`, unable to fork, inside the Seatbelt profile. The waiting calls fail
+  with "the command broker is gone". The broker reports it at start (`exec: limit: no
+  parent-death signal on macOS`), and `e2e_exec_broker_macos.sh` asserts both sides of it.
+
 `--vm-thread`: the channel is watched by the loop thread, and the result is delivered as an
 async resume (an offloaded entry), so nothing new crosses threads.
 
@@ -593,8 +646,16 @@ async resume (an offloaded entry), so nothing new crosses threads.
   - `gpu-query` on an NVIDIA node, run under the service account hsctl will use.
 
   hsctl adopts `exec` only after both pass, alongside the abrupt-death and admission tests.
-- **Unit:** `test_exec` covers the slot matcher (every rule, boundary lengths, `repeat`), the
-  policy codec over untrusted bytes, and the ELF / `PT_INTERP` reader.
+- **macOS e2e** (`tests/e2e_exec_broker_macos.sh`, `make e2e-exec-broker-macos`, CI job
+  `exec-broker-macos`): the same cases through `tests/fixtures/exec_probe_macos.c`, plus the
+  union of grants, the `exec: limit:` lines, this binary refused as a command, and the broker's
+  `SIGKILL` leaving the command (§7). The raw-frames admission test runs on both hosts.
+- **Unit:** `test_exec` covers the slot matcher (every rule, boundary lengths, `repeat`) and
+  the policy codec over untrusted bytes. Each host backend has its own suite:
+  `test_exec_broker_linux` (the ELF / `PT_INTERP` reader, file capabilities, the child filter,
+  PDEATHSIG, the broker's lock, the pidfd) and `test_exec_broker_macos` (the Mach-O check, the
+  profile text and parameters, the profile applied in a child: undeclared exec, fork, the home
+  directory and the network refused; the kqueue watches). Each skips on the other host.
 - **Fuzz:** `fuzz_exec_policy` (frames to the broker parser) and `fuzz_exec_slot`.
 
 ## 9. Platforms
@@ -607,8 +668,8 @@ row's guarantees are a plan, not a claim.
 | Linux, native, Landlock ABI 6+ | PR 2 | Landlock + seccomp (raw syscalls) | every row of §6.5: `tests/e2e_exec_broker.sh` on x86_64 (ABI 10) and aarch64 (ABI 8); §8 acceptance passed on spark-7468 (GB10, `hs-metrics`, 2026-11-25) |
 | Linux, cosmo APE | planned | as native, once the APE build carries the broker | none; refused at start (no broker) unless `--allow-degraded-sandbox` |
 | Linux, Landlock below ABI 6 | PR 2 | as above, minus the missing rights | refused unless `--allow-degraded-sandbox`, which names what is missing |
-| OpenBSD | **planned** (PR 3) | unveil `x` + pledge `execpromises` | none; union of grants, no per-child narrowing |
-| macOS | **planned** (PR 3) | Seatbelt `process-exec literal` | none; union of grants, no `execveat`, no PDEATHSIG |
+| macOS | PR 3 | one Seatbelt profile (§6.4) | `tests/e2e_exec_broker_macos.sh` and `test_exec_broker_macos` on macOS 26 (arm64) and the `macos-15` runner: no process creation, exec only of the declared binaries, no home directory or network; the union of grants and a broker killed with `SIGKILL` leaving its commands (§7) are limits, reported at start |
+| OpenBSD | not supported (§6.4) | none (an OpenBSD backend is not written) | refused unless `--allow-degraded-sandbox` |
 | Windows (cosmo APE) | not supported | none | **refused at app load**, even with `--allow-degraded-sandbox` |
 | FreeBSD / NetBSD | not supported | none (no kernel sandbox Hull uses) | refused unless `--allow-degraded-sandbox` |
 
@@ -639,7 +700,9 @@ and fixtures in the same PR:
 - **INV-16:**
   - `fork`, `vfork`, `execve*`, `posix_spawn*` and `fexecve` appear only in the files that
     already spawn: `cap/tool.c`, `compiler.c`, `sandbox_tool.c`, `shared/child_channel.c`,
-    `shared/generation.c`, `commands/dev.c` and `cap/gpu_helper.c`, plus `cap/exec_broker.c`.
+    `shared/generation.c`, `commands/dev.c` and `cap/gpu_helper.c`, plus `cap/exec_broker.c`
+    and its host backends `cap/exec_broker_linux.c` and `cap/exec_broker_macos.c` (which hold
+    the exec itself).
   - Any other spawn site needs an allowlist entry with a reason.
 - **INV-17:** the slot matcher is called from one place on each side: `hl_exec_slot_match` in
   the binding path and in the broker. Neither side has a second matcher.
@@ -667,7 +730,9 @@ and `exec: degraded` when it applies.
    per-child seccomp filters, PDEATHSIG, broker-side admission, `execveat`), `e2e_exec.sh`,
    INV-16 / 17 and the CLAUDE.md paragraph. Done when the §8 acceptance runs pass; hsctl
    adopts it then, not before.
-3. **PR 3:** macOS Seatbelt, then OpenBSD.
+3. **PR 3 (done):** the host backends split behind `hull/cap/exec_platform.h` (Linux moved
+   unchanged into `cap/exec_broker_linux.c`), and the macOS Seatbelt backend with its own unit
+   test and e2e. OpenBSD dropped: not supported (§6.4).
 4. **PR 4 (done):** the optional `sha256` pin (the broker verifies it, and only then does the
    manifest accept the field), and the `hull build` / `hull check` lint.
 

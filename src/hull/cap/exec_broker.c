@@ -23,7 +23,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-/* O_PATH, AT_EMPTY_PATH, pipe2, memmem (glibc); before any header. */
+/* memmem (glibc); before any header. */
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
@@ -65,7 +65,8 @@ static void log_report(const char *report, int as_error)
         int n = e ? (int)(e - p) : (int)strlen(p);
         if (n > 0) {
             if (as_error) log_error("[hull:c] %.*s", n, p);
-            else if (strncmp(p, "exec: degraded", 14) == 0) log_warn("[hull:c] %.*s", n, p);
+            else if (strncmp(p, "exec: degraded", 14) == 0 ||
+                     strncmp(p, "exec: limit", 11) == 0) log_warn("[hull:c] %.*s", n, p);
             else log_info("[hull:c] %.*s", n, p);
         }
         p += n + (e ? 1 : 0);
@@ -121,129 +122,60 @@ void hl_exec_reply_free(HlExecReply *r)
 
 #ifdef HL_EXEC_BROKER_SUPPORTED
 
-#include <dirent.h>
-#include <elf.h>
+#include "hull/cap/exec_platform.h"
+
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stddef.h>
-#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <sys/xattr.h>
 #include <unistd.h>
-#include <linux/audit.h>
-#include <linux/filter.h>
-#include <linux/seccomp.h>
-#include <linux/sched.h>
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0      /* macOS: the broker ignores SIGPIPE */
+#endif
 
 /* ═════════════════════════════════════════════════════════════════════
  * The broker process
  * ═════════════════════════════════════════════════════════════════════ */
 
-/* ── Landlock (raw syscalls: no header dependency on the build host) ── */
+/* The host's part (Landlock + seccomp, Seatbelt, ...) is behind
+ * hull/cap/exec_platform.h: cap/exec_broker_linux.c, cap/exec_broker_macos.c. */
 
-#ifndef __NR_landlock_create_ruleset
-#define __NR_landlock_create_ruleset 444
-#define __NR_landlock_add_rule       445
-#define __NR_landlock_restrict_self  446
-#endif
+/* ── The report ────────────────────────────────────────────────────── */
 
-#define LL_EXECUTE     (1ull << 0)
-#define LL_WRITE_FILE  (1ull << 1)
-#define LL_READ_FILE   (1ull << 2)
-#define LL_READ_DIR    (1ull << 3)
-#define LL_REMOVE_FILE (1ull << 5)
-#define LL_MAKE_REG    (1ull << 8)
-#define LL_TRUNCATE    (1ull << 14)
-#define LL_IOCTL_DEV   (1ull << 15)
-#define LL_FILE_RIGHTS (LL_EXECUTE | LL_WRITE_FILE | LL_READ_FILE | LL_TRUNCATE | \
-                        LL_IOCTL_DEV)
-#define LL_NET_BIND_TCP    (1ull << 0)
-#define LL_NET_CONNECT_TCP (1ull << 1)
-#define LL_SCOPE_ABSTRACT_UNIX (1ull << 0)
-#define LL_SCOPE_SIGNAL        (1ull << 1)
-
-struct ll_ruleset_attr {
-    uint64_t handled_access_fs;
-    uint64_t handled_access_net;
-    uint64_t scoped;
-};
-
-struct ll_path_beneath {
-    uint64_t allowed_access;
-    int32_t  parent_fd;
-} __attribute__((packed));
-
-static int g_ll_abi;            /* 0 = none */
-static uint64_t g_ll_fs_mask;   /* every fs right this ABI knows */
-
-static void ll_probe(void)
+void hl_exec_report_line(HlExecReport *r, const char *fmt, ...)
 {
-    long abi = syscall(__NR_landlock_create_ruleset, NULL, 0, 1u);
-    g_ll_abi = abi > 0 ? (int)abi : 0;
-    g_ll_fs_mask = 0;
-    if (g_ll_abi >= 1) g_ll_fs_mask = (1ull << 13) - 1;
-    if (g_ll_abi >= 2) g_ll_fs_mask |= 1ull << 13;     /* REFER */
-    if (g_ll_abi >= 3) g_ll_fs_mask |= LL_TRUNCATE;
-    if (g_ll_abi >= 5) g_ll_fs_mask |= LL_IOCTL_DEV;
+    if (r->at >= r->size) return;
+    char line[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    if (w < 0) return;
+    int k = snprintf(r->buf + r->at, r->size - r->at, "%s\n", line);
+    if (k > 0 && (size_t)k < r->size - r->at) r->at += (size_t)k;
+    else r->buf[r->at] = '\0';           /* a line that does not fit is dropped */
 }
 
-static int ll_ruleset(void)
+void hl_exec_report_set(HlExecReport *r, const char *fmt, ...)
 {
-    struct ll_ruleset_attr a = { g_ll_fs_mask, 0, 0 };
-    size_t sz = sizeof a.handled_access_fs;
-    if (g_ll_abi >= 4) {
-        a.handled_access_net = LL_NET_BIND_TCP | LL_NET_CONNECT_TCP;
-        sz = 2 * sizeof(uint64_t);
-    }
-    if (g_ll_abi >= 6) {
-        a.scoped = LL_SCOPE_ABSTRACT_UNIX | LL_SCOPE_SIGNAL;
-        sz = sizeof a;
-    }
-    return (int)syscall(__NR_landlock_create_ruleset, &a, sz, 0u);
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(r->buf, r->size, fmt, ap);
+    va_end(ap);
+    r->at = strlen(r->buf);
 }
-
-/* Grant @p access under @p path (a file gets the file rights only). A path
- * that does not exist is skipped. 0, or -1 when the rule was refused. */
-static int ll_allow(int rs, const char *path, uint64_t access)
-{
-    int fd = open(path, O_PATH | O_CLOEXEC);
-    if (fd < 0) return errno == ENOENT ? 0 : -1;
-    struct stat st;
-    if (fstat(fd, &st) != 0) { close(fd); return -1; }
-    if (!S_ISDIR(st.st_mode)) access &= LL_FILE_RIGHTS;
-    access &= g_ll_fs_mask;
-    int rc = 0;
-    if (access) {
-        struct ll_path_beneath pb = { access, fd };
-        rc = (int)syscall(__NR_landlock_add_rule, rs, 1 /* PATH_BENEATH */, &pb, 0u);
-    }
-    close(fd);
-    return rc;
-}
-
-/* The trees every command may read (§6.2); never the home directories, the
- * app directory, /srv or /var. */
-static const char *const READ_SET[] = { "/usr", "/lib", "/lib64", "/etc",
-                                        "/proc", "/sys", "/dev", NULL };
 
 /* ── Commands ──────────────────────────────────────────────────────── */
 
-typedef struct {
-    HlExecCmd c;
-    char      real[PATH_MAX];       /* realpath of c.path */
-    char      interp[PATH_MAX];     /* realpath of its PT_INTERP, "" = static */
-    dev_t     dev;
-    ino_t     ino;
-    int       ll_fd;                /* the child's ruleset, -1 = none */
-    int       running;
-} Cmd;
+typedef HlExecBrokerCmd Cmd;
 
 static uint8_t *g_policy;
 static size_t   g_policy_len;
@@ -305,58 +237,7 @@ static int leaf_ok(int fd, const char *real, struct stat *st, char *why,
         snprintf(why, why_size, "%s is not executable", real);
         return -1;
     }
-    /* File capabilities raise privilege without NNP and clear PDEATHSIG on
-     * exec (§5.3). */
-    if (fgetxattr(fd, "security.capability", NULL, 0) >= 0) {
-        snprintf(why, why_size, "%s carries file capabilities", real);
-        return -1;
-    }
-    return 0;
-}
-
-/* The ELF header and, when present, the PT_INTERP path. 0 / -1. */
-static int elf_read(int fd, const char *real, char *interp, size_t isz,
-                    char *why, size_t why_size)
-{
-    interp[0] = '\0';
-    unsigned char id[EI_NIDENT];
-    if (pread(fd, id, sizeof id, 0) != (ssize_t)sizeof id ||
-        memcmp(id, ELFMAG, SELFMAG) != 0) {
-        snprintf(why, why_size, "%s is not an ELF executable (a script would "
-                 "bring its interpreter)", real);
-        return -1;
-    }
-    if (id[EI_CLASS] != ELFCLASS64 || id[EI_DATA] != ELFDATA2LSB) {
-        snprintf(why, why_size, "%s is not a 64-bit little-endian ELF", real);
-        return -1;
-    }
-    Elf64_Ehdr eh;
-    if (pread(fd, &eh, sizeof eh, 0) != (ssize_t)sizeof eh ||
-        eh.e_phentsize != sizeof(Elf64_Phdr) || eh.e_phnum > 256) {
-        snprintf(why, why_size, "%s has a malformed ELF header", real);
-        return -1;
-    }
-    for (unsigned i = 0; i < eh.e_phnum; i++) {
-        Elf64_Phdr ph;
-        if (pread(fd, &ph, sizeof ph, (off_t)(eh.e_phoff + i * sizeof ph)) !=
-            (ssize_t)sizeof ph) {
-            snprintf(why, why_size, "%s has a malformed program header", real);
-            return -1;
-        }
-        if (ph.p_type != PT_INTERP) continue;
-        if (ph.p_filesz < 2 || ph.p_filesz >= isz) {
-            snprintf(why, why_size, "%s has a malformed PT_INTERP", real);
-            return -1;
-        }
-        if (pread(fd, interp, ph.p_filesz, (off_t)ph.p_offset) != (ssize_t)ph.p_filesz ||
-            interp[ph.p_filesz - 1] != '\0' || interp[0] != '/') {
-            snprintf(why, why_size, "%s has a malformed PT_INTERP", real);
-            interp[0] = '\0';
-            return -1;
-        }
-        return 0;
-    }
-    return 0;
+    return hl_exec_plat_leaf_check(fd, real, why, why_size);
 }
 
 /* The sha256 pin (§6.1): the bytes of the main executable, read from the
@@ -456,8 +337,8 @@ static int cmd_load(Cmd *cmd, char *why, size_t why_size)
     struct stat st;
     char raw_interp[PATH_MAX];
     int rc = leaf_ok(fd, cmd->real, &st, why, why_size);
-    if (rc == 0) rc = elf_read(fd, cmd->real, raw_interp, sizeof raw_interp,
-                               why, why_size);
+    if (rc == 0) rc = hl_exec_plat_binary_check(fd, cmd->real, raw_interp,
+                                                sizeof raw_interp, why, why_size);
     if (rc == 0) rc = pin_check(cmd, fd, why, why_size);
     close(fd);
     if (rc != 0) return -1;
@@ -483,152 +364,6 @@ static int cmd_load(Cmd *cmd, char *why, size_t why_size)
         close(ifd);
     }
     return 0;
-}
-
-/* The grants one command needs (§6.3). */
-static int ll_grant_cmd(int rs, const Cmd *cmd)
-{
-    int rc = 0;
-    rc |= ll_allow(rs, cmd->real, LL_EXECUTE | LL_READ_FILE);
-    if (cmd->interp[0]) rc |= ll_allow(rs, cmd->interp, LL_EXECUTE | LL_READ_FILE);
-    for (int i = 0; READ_SET[i]; i++)
-        rc |= ll_allow(rs, READ_SET[i], LL_READ_FILE | LL_READ_DIR);
-    rc |= ll_allow(rs, "/dev/null", LL_READ_FILE | LL_WRITE_FILE);
-    const uint8_t *cur = cmd->c.fs_read;
-    for (unsigned i = 0; i < cmd->c.n_fs_read; i++)
-        rc |= ll_allow(rs, hl_exec_next_str(&cur, NULL), LL_READ_FILE | LL_READ_DIR);
-    cur = cmd->c.fs_write;
-    for (unsigned i = 0; i < cmd->c.n_fs_write; i++)
-        rc |= ll_allow(rs, hl_exec_next_str(&cur, NULL),
-                       LL_READ_FILE | LL_WRITE_FILE | LL_TRUNCATE | LL_IOCTL_DEV |
-                       LL_READ_DIR | LL_MAKE_REG | LL_REMOVE_FILE);
-    return rc;
-}
-
-/* ── seccomp ───────────────────────────────────────────────────────── */
-
-#if defined(__x86_64__)
-#define HX_AUDIT_ARCH AUDIT_ARCH_X86_64
-#elif defined(__aarch64__)
-#define HX_AUDIT_ARCH AUDIT_ARCH_AARCH64
-#endif
-
-#define F_LD_NR   BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr))
-#define F_LD_ARG0 BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0]))
-#define F_RET(v)  BPF_STMT(BPF_RET | BPF_K, (v))
-#define F_ALLOW   F_RET(SECCOMP_RET_ALLOW)
-#define F_EPERM   F_RET(SECCOMP_RET_ERRNO | EPERM)
-
-#define HX_CLONE_NS (CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC | \
-                     CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)
-
-typedef struct { struct sock_filter f[96]; unsigned n; } Prog;
-
-static void p_add(Prog *p, struct sock_filter s) { if (p->n < 96) p->f[p->n++] = s; }
-
-/* nr == x -> return @p ret (the accumulator holds nr). */
-static void p_nr_ret(Prog *p, uint32_t nr, uint32_t ret)
-{
-    p_add(p, (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, 1));
-    p_add(p, (struct sock_filter)F_RET(ret));
-}
-
-static void p_head(Prog *p)
-{
-#ifdef HX_AUDIT_ARCH
-    p_add(p, (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
-                                          offsetof(struct seccomp_data, arch)));
-    p_add(p, (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, HX_AUDIT_ARCH, 1, 0));
-    p_add(p, (struct sock_filter)F_EPERM);              /* another ABI */
-#endif
-    p_add(p, (struct sock_filter)F_LD_NR);
-#if defined(__x86_64__)
-    p_add(p, (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000u, 0, 1));
-    p_add(p, (struct sock_filter)F_EPERM);              /* x32 */
-#endif
-}
-
-/* An argument-0 test for syscall @p nr: reload nr afterwards. */
-static void p_arg0(Prog *p, uint32_t nr, int jset, uint32_t k, int match_on,
-                   uint32_t ret)
-{
-    /* if (nr != NR) skip the block */
-    p_add(p, (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, 4));
-    p_add(p, (struct sock_filter)F_LD_ARG0);
-    if (jset)
-        p_add(p, (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, k,
-                                              match_on ? 0 : 1, match_on ? 1 : 0));
-    else
-        p_add(p, (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, k,
-                                              match_on ? 0 : 1, match_on ? 1 : 0));
-    p_add(p, (struct sock_filter)F_RET(ret));
-    p_add(p, (struct sock_filter)F_LD_NR);
-}
-
-static int p_install(Prog *p)
-{
-    p_add(p, (struct sock_filter)F_ALLOW);
-    if (p->n >= 96) return -1;
-    struct sock_fprog fp = { (unsigned short)p->n, p->f };
-    return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &fp) == 0 ? 0 : -1;
-}
-
-/* The broker's filter: the CEILING every child inherits (§6.2), so it
- * admits what the supported commands need - AF_UNIX sockets included. */
-static int seccomp_broker(void)
-{
-    Prog p = { .n = 0 };
-    p_head(&p);
-    static const uint32_t refused[] = {
-        __NR_ptrace, __NR_process_vm_readv, __NR_process_vm_writev,
-        __NR_io_uring_setup, __NR_io_uring_enter, __NR_io_uring_register,
-        __NR_bpf, __NR_userfaultfd, __NR_perf_event_open, __NR_kexec_load,
-#ifdef __NR_kexec_file_load
-        __NR_kexec_file_load,
-#endif
-        __NR_mount, __NR_umount2, __NR_pivot_root, __NR_unshare, __NR_setns,
-        __NR_keyctl, __NR_add_key, __NR_request_key, __NR_open_by_handle_at,
-        __NR_init_module, __NR_finit_module, __NR_delete_module,
-#ifdef __NR_fsopen
-        __NR_fsopen, __NR_fsmount, __NR_move_mount, __NR_open_tree, __NR_fsconfig,
-#endif
-    };
-    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
-        p_nr_ret(&p, refused[i], SECCOMP_RET_ERRNO | EPERM);
-    /* clone3 keeps its flags in memory no filter can read: ENOSYS makes
-     * glibc fall back to clone, whose flags it can. */
-    p_nr_ret(&p, __NR_clone3, SECCOMP_RET_ERRNO | ENOSYS);
-    /* clone with a namespace flag */
-    p_arg0(&p, __NR_clone, 1, HX_CLONE_NS, 1, SECCOMP_RET_ERRNO | EPERM);
-    /* socket: AF_UNIX only */
-    p_arg0(&p, __NR_socket, 0, AF_UNIX, 0, SECCOMP_RET_ERRNO | EACCES);
-    return p_install(&p);
-}
-
-/* A child's own filter, stacked on the broker's (§5.3): it only removes. */
-static int seccomp_child(int unix_sockets)
-{
-    Prog p = { .n = 0 };
-    p_head(&p);
-    /* No process creation: a grandchild would escape PDEATHSIG. Threads
-     * (clone with CLONE_THREAD) stay. */
-#ifdef __NR_fork
-    p_nr_ret(&p, __NR_fork, SECCOMP_RET_ERRNO | EPERM);
-#endif
-#ifdef __NR_vfork
-    p_nr_ret(&p, __NR_vfork, SECCOMP_RET_ERRNO | EPERM);
-#endif
-    p_arg0(&p, __NR_clone, 1, CLONE_THREAD, 0, SECCOMP_RET_ERRNO | EPERM);
-    /* Nothing that clears or replaces PDEATHSIG (§5.3 step 1). */
-    static const uint32_t creds[] = {
-        __NR_setuid, __NR_setgid, __NR_setreuid, __NR_setregid, __NR_setresuid,
-        __NR_setresgid, __NR_setfsuid, __NR_setfsgid, __NR_setgroups, __NR_capset,
-    };
-    for (size_t i = 0; i < sizeof creds / sizeof creds[0]; i++)
-        p_nr_ret(&p, creds[i], SECCOMP_RET_ERRNO | EPERM);
-    p_arg0(&p, __NR_prctl, 0, PR_SET_PDEATHSIG, 1, SECCOMP_RET_ERRNO | EPERM);
-    if (!unix_sockets) p_nr_ret(&p, __NR_socket, SECCOMP_RET_ERRNO | EACCES);
-    return p_install(&p);
 }
 
 /* ── Jobs ──────────────────────────────────────────────────────────── */
@@ -772,35 +507,37 @@ static void kill_all(void)
 /* ── One call ──────────────────────────────────────────────────────── */
 
 /* The child, between fork and exec. Allocates nothing; reports a failure
- * through @p ep (stage byte + errno) and _exit(126). */
+ * through @p ep (stage byte + errno) and _exit(126). The host's steps are
+ * hl_exec_plat_child_* (exec_platform.h); the order matters: die with the
+ * broker before anything else, confine before stdio moves, the syscall
+ * filter last. */
 static void child_run(const Cmd *cmd, int bfd, int out_w, int err_w, int ep,
                       char *const argv[], char *const envp[], pid_t broker)
 {
     unsigned char stage = 0;
-    int e = 0;
+    int e = 0, st;
 #define FAIL(s) do { stage = (s); e = errno; goto fail; } while (0)
-    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) FAIL(1);
+    if (hl_exec_plat_child_death() != 0) FAIL(HL_EXEC_STAGE_DEATH);
     if (getppid() != broker) _exit(127);           /* the broker died already */
-    if (setsid() < 0) FAIL(2);
+    if (setsid() < 0) FAIL(HL_EXEC_STAGE_SETSID);
     sigset_t none;
     sigemptyset(&none);
     sigprocmask(SIG_SETMASK, &none, NULL);
     for (int s = 1; s < 32; s++)
         if (s != SIGKILL && s != SIGSTOP) signal(s, SIG_DFL);
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) FAIL(3);
-    if (!(g_flags & HL_EXEC_POLICY_NO_SANDBOX) && cmd->ll_fd >= 0 &&
-        syscall(__NR_landlock_restrict_self, cmd->ll_fd, 0u) != 0) FAIL(4);
+    if ((st = hl_exec_plat_child_confine(cmd, g_flags)) != 0) FAIL(st);
     /* stdio: move every source above 10 first, so no dup2 clobbers one. */
     int hi_null = fcntl(g_devnull, F_DUPFD, 10), hi_out = fcntl(out_w, F_DUPFD, 10),
         hi_err = fcntl(err_w, F_DUPFD, 10), hi_bin = fcntl(bfd, F_DUPFD, 10),
         hi_ep = fcntl(ep, F_DUPFD_CLOEXEC, 10);
-    if (hi_null < 0 || hi_out < 0 || hi_err < 0 || hi_bin < 0 || hi_ep < 0) FAIL(5);
+    if (hi_null < 0 || hi_out < 0 || hi_err < 0 || hi_bin < 0 || hi_ep < 0)
+        FAIL(HL_EXEC_STAGE_STDIO);
     ep = hi_ep;
     if (dup2(hi_null, 0) < 0 || dup2(hi_out, 1) < 0 || dup2(hi_err, 2) < 0 ||
-        dup2(hi_bin, 3) < 0) FAIL(5);
+        dup2(hi_bin, 3) < 0) FAIL(HL_EXEC_STAGE_STDIO);
     (void)fcntl(3, F_SETFD, FD_CLOEXEC);           /* the binary is not inherited */
     for (int fd = 4; fd < 1024; fd++) if (fd != ep) close(fd);
-    if (chdir("/") != 0) FAIL(6);
+    if (chdir("/") != 0) FAIL(HL_EXEC_STAGE_CHDIR);
     umask(077);
     struct rlimit core = { 0, 0 };
     setrlimit(RLIMIT_CORE, &core);
@@ -813,10 +550,9 @@ static void child_run(const Cmd *cmd, int bfd, int out_w, int err_w, int ep,
         struct rlimit fsz = { 0, 0 };
         setrlimit(RLIMIT_FSIZE, &fsz);
     }
-    if (!(g_flags & HL_EXEC_POLICY_NO_SANDBOX) &&
-        seccomp_child(cmd->c.flags & HL_EXEC_CMD_UNIX_SOCKETS) != 0) FAIL(7);
-    syscall(__NR_execveat, 3, "", argv, envp, AT_EMPTY_PATH);
-    FAIL(8);
+    if (hl_exec_plat_child_filter(cmd, g_flags) != 0) FAIL(HL_EXEC_STAGE_FILTER);
+    hl_exec_plat_child_exec(cmd, 3, argv, envp);
+    FAIL(HL_EXEC_STAGE_EXEC);
 fail:;
     unsigned char msg[5] = { stage, (unsigned char)e, (unsigned char)(e >> 8),
                              (unsigned char)(e >> 16), (unsigned char)(e >> 24) };
@@ -825,9 +561,19 @@ fail:;
 #undef FAIL
 }
 
-static const char *const STAGE[] = { "", "PDEATHSIG", "setsid", "no_new_privs",
-                                     "landlock", "stdio", "chdir", "seccomp",
-                                     "exec" };
+static const char *const STAGE[] = { "", "parent-death signal", "setsid",
+                                     "no_new_privs", "sandbox", "stdio", "chdir",
+                                     "syscall filter", "exec" };
+
+/* A close-on-exec pipe (pipe2 is not on every host; the broker is single-
+ * threaded, so nothing can fork between the two calls). */
+static int pipe_cloexec(int fds[2])
+{
+    if (pipe(fds) != 0) return -1;
+    (void)fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+}
 
 /* RUN: admit, match, check, fork. A reply is queued when it is refused. */
 static void run_call(uint32_t id, const uint8_t *p, size_t len)
@@ -956,8 +702,7 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
 
     int op[2] = { -1, -1 }, epp[2] = { -1, -1 }, ep[2] = { -1, -1 };
     pid_t pid = -1;
-    if (pipe2(op, O_CLOEXEC) == 0 && pipe2(epp, O_CLOEXEC) == 0 &&
-        pipe2(ep, O_CLOEXEC) == 0)
+    if (pipe_cloexec(op) == 0 && pipe_cloexec(epp) == 0 && pipe_cloexec(ep) == 0)
         pid = fork();
     if (pid == 0)
         child_run(cmd, bfd, op[1], epp[1], ep[1], argv, envp, getppid());
@@ -1004,12 +749,9 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     j->pid = pid;
     j->out_fd = op[0];
     j->err_fd = epp[0];
-#ifndef __NR_pidfd_open
-#define __NR_pidfd_open 434
-#endif
     /* Readable the moment it exits, so the reply goes out then rather than
-     * at the next reap tick (Linux 5.3+; else the 50 ms tick). */
-    j->pidfd = (int)syscall(__NR_pidfd_open, pid, 0u);
+     * at the next reap tick (else the 50 ms tick). */
+    j->pidfd = hl_exec_plat_exit_watch(pid);
     hl_chan_set_nonblock(j->out_fd);
     hl_chan_set_nonblock(j->err_fd);
     j->out = malloc(cmd->c.stdout_max ? cmd->c.stdout_max : 1);
@@ -1099,7 +841,7 @@ static int policy_load(const uint8_t *p, size_t len, char *report, size_t rsz)
     for (int i = 0; i < g_ncmds; i++) {
         Cmd *cmd = &g_cmds[i];
         memset(cmd, 0, sizeof *cmd);
-        cmd->ll_fd = -1;
+        cmd->plat = -1;
         (void)hl_exec_policy_at(g_policy, g_policy_len, i, &cmd->c);
         if (cmd_load(cmd, err, sizeof err) != 0) {
             snprintf(report, rsz, "%s", err);
@@ -1110,88 +852,26 @@ static int policy_load(const uint8_t *p, size_t len, char *report, size_t rsz)
         if (w > 0 && (size_t)w < rsz - at) at += (size_t)w;
     }
 
-    /* The rights each guarantee needs (§6.5). */
-    ll_probe();
-    int sandbox = !(g_flags & HL_EXEC_POLICY_NO_SANDBOX);
-    if (sandbox) {
-        static const struct { int abi; const char *what; } need[] = {
-            { 1, "no Landlock: exec is not confined to the declared binaries" },
-            { 2, "no REFER (ABI 2): rename / link out of a granted tree not refused" },
-            { 3, "no TRUNCATE (ABI 3): truncation outside fs.write not refused" },
-            { 5, "no IOCTL_DEV (ABI 5): device ioctls not narrowed per command" },
-            { 6, "no scopes (ABI 6): signals and abstract sockets not scoped" },
-        };
-        int missing = 0;
-        for (size_t k = 0; k < sizeof need / sizeof need[0]; k++) {
-            if (g_ll_abi >= need[k].abi) continue;
-            missing = 1;
-            int w = snprintf(report + at, rsz - at, "exec: degraded: %s\n", need[k].what);
-            if (w > 0 && (size_t)w < rsz - at) at += (size_t)w;
-        }
-        if (missing && !(g_flags & HL_EXEC_POLICY_DEGRADED_OK)) {
-            char tmp[1024];
-            snprintf(tmp, sizeof tmp, "exec: this kernel's Landlock (ABI %d) lacks a "
-                     "right the exec sandbox needs (ABI 6); pass "
-                     "--allow-degraded-sandbox to run without it\n%s", g_ll_abi, report);
-            snprintf(report, rsz, "%s", tmp);
-            return -1;
-        }
-        /* One ruleset per command, prepared before the broker locks itself. */
-        if (g_ll_abi >= 1) {
-            for (int i = 0; i < g_ncmds; i++) {
-                int rs = ll_ruleset();
-                if (rs < 0 || ll_grant_cmd(rs, &g_cmds[i]) != 0) {
-                    if (rs >= 0) close(rs);
-                    snprintf(report, rsz, "exec.%s: its Landlock ruleset could not "
-                             "be built: %s", g_cmds[i].c.name, strerror(errno));
-                    return -1;
-                }
-                (void)fcntl(rs, F_SETFD, FD_CLOEXEC);
-                g_cmds[i].ll_fd = rs;
-            }
-        }
-    } else {
-        /* The last line: nothing is appended after it. */
-        (void)snprintf(report + at, rsz - at, "exec: no sandbox (--no-sandbox)\n");
-    }
-
     g_devnull = open("/dev/null", O_RDWR | O_CLOEXEC);
     if (g_devnull < 0) { snprintf(report, rsz, "exec: /dev/null: %s", strerror(errno)); return -1; }
 
-    /* Lock down (§6.2): NNP, the broker's domain (the union of the
-     * commands' grants), the inherited seccomp ceiling. */
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
-        snprintf(report, rsz, "exec: no_new_privs: %s", strerror(errno));
+    /* The host's lock (§6.2 - §6.5): each child's confinement prepared, the
+     * broker confined to the union of the commands' grants. */
+    char self_raw[PATH_MAX], self[PATH_MAX];
+    if (hl_chan_self_exe(self_raw, sizeof self_raw) != 0 || !realpath(self_raw, self)) {
+        snprintf(report, rsz, "exec: cannot resolve the broker's own path");
         return -1;
     }
-    if (sandbox) {
-        if (g_ll_abi >= 1) {
-            int rs = ll_ruleset();
-            int bad = rs < 0;
-            for (int i = 0; i < g_ncmds && !bad; i++)
-                bad = ll_grant_cmd(rs, &g_cmds[i]) != 0;
-            if (bad || syscall(__NR_landlock_restrict_self, rs, 0u) != 0) {
-                snprintf(report, rsz, "exec: the broker's Landlock domain could "
-                         "not be applied: %s", strerror(errno));
-                if (rs >= 0) close(rs);
-                return -1;
-            }
-            close(rs);
-        }
-        if (seccomp_broker() != 0) {
-            snprintf(report, rsz, "exec: the broker's seccomp filter could not be "
-                     "applied: %s", strerror(errno));
-            return -1;
-        }
-    }
-    return 0;
+    HlExecReport r = { report, rsz, at };
+    return hl_exec_plat_lock(g_cmds, g_ncmds, g_flags, self, &r);
 }
 
 int hl_exec_broker_main(void)
 {
-    /* Die with the server (it spawned this from its main thread, before
-     * any other thread existed). */
-    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() == 1) return 1;
+    /* Go when the server does: the kernel ends this process (Linux), or a
+     * descriptor turns readable (macOS), on top of the channel's EOF. */
+    int server_gone = -1;
+    if (hl_exec_plat_broker_init(&server_gone) != 0) return 1;
     signal(SIGPIPE, SIG_IGN);
     signal(SIGCHLD, SIG_DFL);
     (void)fcntl(g_chan, F_SETFD, FD_CLOEXEC);
@@ -1215,13 +895,17 @@ int hl_exec_broker_main(void)
 
     rd.max = HX_RUN_MAX;
     for (;;) {
-        struct pollfd pf[1 + 3 * HL_EXEC_MAX_INFLIGHT];
-        int map[1 + 3 * HL_EXEC_MAX_INFLIGHT];
+        struct pollfd pf[2 + 3 * HL_EXEC_MAX_INFLIGHT];
+        int map[2 + 3 * HL_EXEC_MAX_INFLIGHT];
         int np = 0;
         short cev = (g_outq_n < HX_OUTQ - 2) ? POLLIN : 0;   /* backpressure */
         if (g_order_n > 0) cev |= POLLOUT;
         pf[np] = (struct pollfd){ g_chan, cev, 0 };
         map[np++] = -1;
+        if (server_gone >= 0) {
+            pf[np] = (struct pollfd){ server_gone, POLLIN, 0 };
+            map[np++] = -2;
+        }
         uint64_t now = hl_chan_mono_ms();
         int timeout = -1;
         for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
@@ -1256,6 +940,7 @@ int hl_exec_broker_main(void)
         }
         for (int k = 1; k < np; k++) {
             if (!(pf[k].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+            if (map[k] == -2) goto out;       /* the server is gone */
             Job *j = &g_jobs[map[k]];
             Cmd *cmd = &g_cmds[j->ci];
             if (pf[k].fd == j->pidfd) continue;   /* reap() below */
@@ -1346,7 +1031,10 @@ int hl_exec_broker_start(void)
     char exe[PATH_MAX];
     if (hl_chan_self_exe(exe, sizeof exe) != 0) return -1;
     int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0) return -1;
+    /* No SOCK_CLOEXEC on macOS; this runs before any thread exists. */
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return -1;
+    (void)fcntl(sv[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(sv[1], F_SETFD, FD_CLOEXEC);
     char a1[] = HL_EXEC_BROKER_ARGV1;
     char *argv[] = { exe, a1, NULL };
     pid_t pid = hl_chan_spawn(exe, argv, sv[1], env_allowed);
