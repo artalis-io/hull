@@ -6,8 +6,9 @@
   lint) implemented. OpenBSD is not supported (§6.4, §9). Review rounds 1-3
   folded in: seccomp inheritance, child process creation, broker-side admission, required
   Landlock rights, file identity vs content, `unix_sockets` scope, `sha256` until enforced.
-  Released in v0.26.0. §15 is a design review of per-executable authority (proposed, not
-  implemented).
+  Released in v0.26.0. A command's own manifest (§3.1, #1217) implemented after v0.26.0.
+  §15 is the design review of per-executable authority that led to §3.1; its remaining
+  proposals (Hull callees, nested calls) are not implemented.
 - **Motivation:** hsctl needs to read node state that only a system tool reports: `nvidia-smi`
   for GPUs, `systemctl show` for its own `hs-*` units. Today an app cannot run any program: the
   app sandbox has no `exec` / `proc` / `fork`, and `hl_tool_spawn` exists only in tool mode.
@@ -941,9 +942,14 @@ and `exec: degraded` when it applies.
 
 ## 15. Addendum: the authority of every executable the broker runs (design review)
 
-- **Status:** proposal, not implemented. Everything in §1-§14 shipped in v0.26.0 (#1210-#1214).
-  In this section **shipped** means v0.26.0 code, **proposed** means new work, and syntax marked
-  `-- proposed` does not parse today: `cap/exec.c` refuses an unknown command key at load.
+- **Status:** partly implemented. §1-§14 shipped in v0.26.0 (#1210-#1214). The native-command
+  part of this review is implemented as §3.1 (#1217): each command has a nested `manifest`, a
+  strict subset of the app manifest (`fs` today, resolved like the app's own), beside `path`,
+  `sha256`, `argv` and `host` (absolute host grants and `unix_sockets`). Hull callees (§15.3,
+  §15.4), an intersection with a callee's own authority, and nested calls (§15.5) remain
+  proposals. In this section **shipped** means code on main, **proposed** means new work, and
+  syntax marked `-- proposed` does not parse today: `cap/exec.c` refuses an unknown command key
+  at load.
 - **Question reviewed:** should each executable the broker launches carry a manifest in Hull's
   own vocabulary, so the broker confines it to that manifest, a Hull callee can run its own
   declared commands, and an operator can approve the whole command tree in one place?
@@ -972,6 +978,8 @@ not yet in the shape proposed. Five corrections:
 3. **No sidecar for native binaries.** The inline declaration already is a digest-bound,
    signed, reviewed policy (§15.2). A sidecar adds a second place to review and is trusted
    only as far as whoever can write it, the same party who can replace the binary.
+   **Implemented** (§3.1): the native child manifest is inline, `exec.<name>.manifest`, with
+   independent authority: a command's grant need not lie inside the app's own.
 4. **Nested calls are a protocol change, not a policy merge** (§15.5). Folding descendants
    into the broker's one command table would let the gateway request `nmcli` directly. The
    broker must bind each request to the job that sent it, by channel.
@@ -1002,8 +1010,9 @@ No schema change is needed for Hull callees: their `fs`, `state`, `databases`, `
 `exec`, ... are already the vocabulary. What is new is a translation from that vocabulary to a
 broker domain (§15.4), and the refusal of the parts the broker cannot give.
 
-**A native executable** keeps the shipped inline declaration. Compared with a digest-bound
-sidecar:
+**A native executable** keeps an inline declaration: since #1217, `manifest.fs` (relative
+to the app root or `@state/`) and `host` (absolute paths, `unix_sockets`), §3.1. Compared with
+a digest-bound sidecar:
 
 | | inline (shipped) | sidecar (proposed by the question) |
 |---|---|---|
@@ -1079,7 +1088,8 @@ callee's own phase-2 sandbox from its own manifest (inner; Landlock and seccomp 
 shipped child filter leaves the Landlock calls, §5.3). Whether that stack starts cleanly is
 **untested**: the acceptance below must show it.
 
-The derived grants are the callee's manifest translated, never widened: the default read set,
+The derived grants are the callee's manifest translated, never widened, into the §3.1
+child-manifest shape (`manifest.fs` under `@state/`, no `host`): the default read set,
 its state directory read-write, no sockets, its `stdin_max` and limits from the CALLER's
 declaration (the caller owns its call's timeout and output caps).
 
@@ -1126,13 +1136,13 @@ command of the tree would share one profile.
   path = "/usr/bin/nmcli",
   argv = { "--terse", "--fields", "SSID,SIGNAL,SECURITY", "device", "wifi", "list",
            "--rescan", "yes" },
-  unix_sockets = true,   -- nmcli reaches NetworkManager over the system D-Bus socket
+  host = { unix_sockets = true },   -- nmcli reaches NetworkManager over the system D-Bus socket
   timeout_ms = 20000, stdout_max = 65536,
 },
 ```
 
 The argument shape fixes what `nmcli` is asked, but not what the job could reach: under
-`unix_sockets = true` the job can connect to any pathname socket the uid can (§3). A
+`host.unix_sockets = true` the job can connect to any pathname socket the uid can (§3). A
 per-interface variant cannot be one command with an optional `ifname <name>` pair, because
 only the last entry may `repeat`, so a `min = 0` slot after a fixed `ifname` would leave
 `ifname` dangling. Declare a second command that always takes it.
@@ -1155,9 +1165,9 @@ The last row is correction 1 again.
 
 | Field | Linux (per child) | macOS | Native command | Hull callee |
 |---|---|---|---|---|
-| `fs.read` / `fs.write` | Landlock, per child | union of all commands | inline (shipped) | derived from `@state/` only |
+| `fs.read` / `fs.write` | Landlock, per child | union of all commands | `manifest.fs` (app-relative, `@state/`) and `host.read` / `host.write` (absolute), shipped §3.1 | derived from `@state/` only |
 | device ioctls | ABI 5, per child | `file-ioctl`, union | inline `fs.write` under `/dev` | refused (no `gpu`) |
-| `unix_sockets` | seccomp, per child; any pathname socket the uid reaches | union | boolean (shipped) | refused |
+| `unix_sockets` | seccomp, per child; any pathname socket the uid reaches | union | `host.unix_sockets`, boolean (shipped) | refused |
 | network, `hosts` | none: the broker's ceiling refuses every family but `AF_UNIX`; Landlock filters TCP ports, never names | none | refused (shipped: no field) | refused at start |
 | own sandbox | stacks under the broker's | impossible (nested `sandbox_init` is `EPERM`) | n/a | Linux only |
 | nested `exec` | §15.5 | refused (union) | n/a | refused until §15.5 |
@@ -1166,7 +1176,11 @@ The explicit behaviour when isolation is unavailable: **refuse at start**. A wea
 well-defined guarantee may run under `--allow-degraded-sandbox`, one `exec: degraded:` line
 per guarantee lost (§6.5's rule). Never accept a field and enforce less.
 
-**The macOS union deserves the same rule.** Today it is logged (`exec: limit:`) and runs.
+**The macOS union deserves the same rule.** It is documented as a shared trust domain (§3.1,
+§6.4: one profile, so every command reaches every command's grants and may exec every
+declared binary), shown by `hull inspect` and logged at start (`exec: limit:`), and it runs.
+Per-command isolation on macOS is tracked in issue #1218; the proposal below is one option
+there.
 That is a guarantee §6.3 makes on Linux and macOS silently lacks, which is §6.5's definition of
 degraded. Proposed: when the commands' grants DIFFER (`fs`, `unix_sockets`), a macOS start is
 refused unless `--allow-degraded-sandbox`; identical grants need nothing, since the union then
@@ -1228,8 +1242,9 @@ Effective authority (Linux):
 | hs-gateway (app process) | its own manifest; no exec / fork / clone | `wifi-status` with one interface-shaped argument | its signed manifest; the broker's match |
 | hs-wifi (job) | outer: execute its binary and loader, the default read set, `~hs/.local/state/hs-wifi` read-write, no sockets, no process creation; inner: its own sandbox, `@state/last.json` | nothing | `signer` + `manifest_sha256` in the gateway's manifest; refused at start if its manifest asks for more than §15.6 allows |
 
-What `hull inspect` should show (**proposed**; today it prints the command, path, argv and
-slot rules only):
+What `hull inspect` should show for a Hull callee (**proposed**; for a native command it
+already prints path, argv, slot rules, `host` and `manifest` grants and the effective
+authority per platform, §3.1):
 
 ```
 Commands (exec):
@@ -1249,8 +1264,12 @@ at app start, where it is fatal.
 **Order.** The evidence changes the order the question proposed. The running example's
 security goal is met by §15.7 today, and nested calls need a Hull callee that runs at all. So:
 
-1. **Slice 0 (smallest, independently useful):** the macOS union becomes a degraded
-   guarantee (§15.6), plus a §1 note that layer 3 is per broker, not per caller. Code: a
+0. **Done (#1217):** native child manifests (§3.1): `manifest.fs` with app-relative and
+   `@state/` grants opened by descriptor, `host` for absolute grants, independent authority,
+   the legacy `fs` / `unix_sockets` keys read as `host` through 0.27.x, and `hull inspect`
+   showing both sets and the effective authority per platform.
+1. **Slice 0 (smallest, independently useful; issue #1218):** the macOS union becomes a
+   degraded guarantee (§15.6), plus a §1 note that layer 3 is per broker, not per caller. Code: a
    grant comparison in `exec_broker_macos.c` and a `--allow-degraded-sandbox` check. Accept:
    two commands with identical grants start on macOS; differing grants are refused, and start
    with the flag, logging one `exec: degraded:` line; Linux is unchanged.
@@ -1263,7 +1282,8 @@ security goal is met by §15.7 today, and nested calls need a Hull callee that r
 3. **Slice 2: nested calls (§15.5),** Linux only.
 
 **Compatibility.** A manifest without the new keys encodes and behaves byte-for-byte as in
-v0.26.0. A manifest WITH them is refused by v0.26.0 (unknown key), which fails closed. Slice 0
+v0.26.0 (§3.1 keeps that: a command with no `manifest` encodes to the v0.26.0 bytes, and the
+legacy `fs` / `unix_sockets` keys are read as `host` until 0.28.0). A manifest WITH them is refused by v0.26.0 (unknown key), which fails closed. Slice 0
 breaks one case: macOS, several commands, differing grants, now needs
 `--allow-degraded-sandbox`.
 
