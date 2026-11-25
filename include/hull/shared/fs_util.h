@@ -47,4 +47,8 @@ int hl_mkdir_p(const char *path, mode_t mode);
  */
 int hl_default_db_path_check(const char *path, char *err, size_t err_sz);
 
+/* The local file a database DSN names, or NULL (network, :memory:, empty).
+ * hl_sandbox_db_path is this. */
+const char *hl_dsn_file_path(const char *dsn);
+
 #endif /* HL_SHARED_FS_UTIL_H */

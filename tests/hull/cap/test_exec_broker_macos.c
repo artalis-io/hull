@@ -240,7 +240,7 @@ static int locked_broker(void *arg)
         return 10;
     }
     if (!strstr(rep, "exec: limit: no parent-death signal")) return 11;
-    if (!strstr(rep, "exec: limit: macOS cannot narrow")) return 12;
+    if (!strstr(rep, "exec: limit: macOS runs every command in ONE shared sandbox")) return 12;
     /* The broker forks, and a declared binary runs. */
     char *echo[] = { "/bin/echo", "x", NULL };
     if (run_quiet("/bin/echo", echo) != 0) return 20;

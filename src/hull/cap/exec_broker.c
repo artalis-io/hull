@@ -31,6 +31,11 @@
 #include "hull/cap/exec_broker.h"
 #include "hull/cap/exec.h"
 #include "hull/cap/exec_child.h"   /* the child manifest's grants */
+#include "hull/cap/fs_policy.h"    /* hl_fs_grant_is_state */
+#include "hull/shared/fs_util.h"   /* hl_dsn_file_path */
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db_registry.h"  /* hl_db_registry_file_paths */
+#endif
 #include "hull/cap/crypto.h"   /* the sha256 pin */
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
@@ -75,9 +80,26 @@ static void log_report(const char *report, int as_error)
     }
 }
 
+/* Does any command have an app-relative (not "@state/") manifest.fs grant? */
+static int has_app_relative_grant(const uint8_t *policy, size_t len)
+{
+    int n = hl_exec_policy_count(policy, len);
+    for (int i = 0; i < n; i++) {
+        HlExecCmd c;
+        if (hl_exec_policy_at(policy, len, i, &c) != 0) return 1;
+        const uint8_t *cur = c.app_read;
+        for (unsigned k = 0; k < c.n_app_read; k++)
+            if (!hl_fs_grant_is_state(hl_exec_next_str(&cur, NULL))) return 1;
+        cur = c.app_write;
+        for (unsigned k = 0; k < c.n_app_write; k++)
+            if (!hl_fs_grant_is_state(hl_exec_next_str(&cur, NULL))) return 1;
+    }
+    return 0;
+}
+
 int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
                          int no_sandbox, const char *app_dir, const char *state_dir,
-                         const char *db_path)
+                         HlDbRegistry *dbreg, const char *default_db)
 {
     if (!policy || hl_exec_policy_count(policy, len) <= 0) {
         hl_exec_broker_stop();          /* no commands: nothing to run */
@@ -104,10 +126,43 @@ int hl_exec_broker_apply(const uint8_t *policy, size_t len, int allow_degraded,
                   "--allow-degraded-sandbox to start with exec.run failing)");
         return -1;
     }
+    /* "/" or the home is not an app directory (a built tool run from
+     * there): a relative child grant would name the user's own files. Judged
+     * here, with this process's $HOME (the broker has only LANG and TZ), and
+     * before the broker creates any directory. */
+    char rapp[PATH_MAX];
+    if (app_dir && realpath(app_dir, rapp) &&
+        (strcmp(rapp, "/") == 0 || hl_host_path_too_broad(rapp)) &&
+        has_app_relative_grant(policy, len)) {
+        log_error("[hull:c] exec: a command's manifest.fs names a path under the app "
+                  "directory, but the app directory is %s (/ or the home); use "
+                  "\"@state/\" for a tool run from anywhere; refusing to start", rapp);
+        hl_exec_broker_stop();
+        return -1;
+    }
+    /* The app's SQLite files: no command may write them (the -shm truncated
+     * under the app is a SIGBUS). */
+    static char dbs[HL_EXEC_MAX_PROTECT][PATH_MAX];
+    int n_dbs = 0;
+#ifdef HL_ENABLE_DB
+    if (dbreg) n_dbs = hl_db_registry_file_paths(dbreg, dbs, HL_EXEC_MAX_PROTECT);
+#else
+    (void)dbreg;
+#endif
+    if (default_db && default_db[0] && n_dbs < HL_EXEC_MAX_PROTECT) {
+        char real[PATH_MAX];
+        const char *f = hl_dsn_file_path(default_db);
+        if (f && strcmp(f, ":memory:") != 0 && realpath(f, real)) {
+            int dup = 0;
+            for (int k = 0; k < n_dbs; k++) dup |= strcmp(dbs[k], real) == 0;
+            if (!dup) snprintf(dbs[n_dbs++], PATH_MAX, "%s", real);
+        }
+    }
     unsigned flags = (allow_degraded ? HL_EXEC_POLICY_DEGRADED_OK : 0) |
                      (no_sandbox ? HL_EXEC_POLICY_NO_SANDBOX : 0);
     char report[4096];
-    int rc = hl_exec_broker_policy(policy, len, flags, app_dir, state_dir, db_path,
+    int rc = hl_exec_broker_policy(policy, len, flags, app_dir, state_dir,
+                                   (const char (*)[PATH_MAX])dbs, n_dbs,
                                    report, sizeof report);
     // cppcheck-suppress knownConditionTrueFalse
     log_report(report, rc != 0);
@@ -188,7 +243,8 @@ static int      g_ncmds;
 static unsigned g_flags;
 static char     g_app_dir[PATH_MAX];     /* the roots of the child manifests */
 static char     g_state_dir[PATH_MAX];   /* "" = the app declares no state */
-static char     g_db_path[PATH_MAX];     /* the default database, "" = none */
+static char     g_dbs[HL_EXEC_MAX_PROTECT][PATH_MAX];   /* the app's databases */
+static int      g_n_dbs;
 static int      g_devnull = -1;
 
 /* Is @p st owned and only writable by root (or, in a test build, by this
@@ -336,6 +392,17 @@ static int app_grants_load(Cmd *cmd, char *why, size_t why_size)
 {
     unsigned total = (unsigned)cmd->c.n_app_read + cmd->c.n_app_write;
     if (total == 0) return 0;
+    /* Every grant's descriptor stays open until the lock is applied: up to
+     * 32 commands x 32 grants, past macOS's default soft limit of 256. */
+    static int nofile_raised;
+    if (!nofile_raised) {
+        struct rlimit nl;
+        if (getrlimit(RLIMIT_NOFILE, &nl) == 0 && nl.rlim_cur < 4096) {
+            nl.rlim_cur = nl.rlim_max < 4096 ? nl.rlim_max : 4096;
+            (void)setrlimit(RLIMIT_NOFILE, &nl);
+        }
+        nofile_raised = 1;
+    }
     char *buf = malloc((size_t)total * PATH_MAX);
     int *fds = malloc((size_t)total * sizeof *fds);
     if (!buf || !fds) {
@@ -344,9 +411,10 @@ static int app_grants_load(Cmd *cmd, char *why, size_t why_size)
         snprintf(why, why_size, "exec: out of memory");
         return -1;
     }
-    const char *protect[1] = { g_db_path };
+    const char *protect[HL_EXEC_MAX_PROTECT];
+    for (int i = 0; i < g_n_dbs; i++) protect[i] = g_dbs[i];
     HlExecChildRoots roots = { g_app_dir, g_state_dir[0] ? g_state_dir : NULL,
-                               protect, g_db_path[0] ? 1 : 0 };
+                               protect, g_n_dbs };
     size_t at = 0;
     unsigned k = 0;
     for (int w = 0; w < 2; w++) {
@@ -948,8 +1016,17 @@ static int policy_load(const uint8_t *p, size_t len, char *report, size_t rsz)
     if (len < 4) { snprintf(report, rsz, "exec: malformed POLICY"); return -1; }
     g_flags = hl_chan_get32(p);
     const uint8_t *q = p + 4, *end = p + len;
-    if (root_take(&q, end, g_app_dir) != 0 || root_take(&q, end, g_state_dir) != 0 ||
-        root_take(&q, end, g_db_path) != 0) {
+    int bad = root_take(&q, end, g_app_dir) != 0 || root_take(&q, end, g_state_dir) != 0;
+    if (!bad) {
+        if (end - q < 2) bad = 1;
+        else {
+            g_n_dbs = q[0] | (q[1] << 8);
+            q += 2;
+            bad = g_n_dbs > HL_EXEC_MAX_PROTECT;
+            for (int i = 0; !bad && i < g_n_dbs; i++) bad = root_take(&q, end, g_dbs[i]) != 0;
+        }
+    }
+    if (bad) {
         snprintf(report, rsz, "exec: malformed POLICY");
         return -1;
     }
@@ -1229,22 +1306,23 @@ void hl_exec_broker_stop(void)
 
 int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
                           const char *app_dir, const char *state_dir,
-                          const char *db_path, char *report, size_t report_size)
+                          const char (*dbs)[PATH_MAX], int n_dbs,
+                          char *report, size_t report_size)
 {
     report[0] = '\0';
     if (g_fd < 0) {
         snprintf(report, report_size, "exec: the command broker is not running");
         return -1;
     }
-    /* u32 flags, then the two roots and the protected database (u16 length
-     * + bytes each, "" = none), then the policy. */
+    /* u32 flags, the two roots (u16 length + bytes, "" = none), u16 count
+     * and that many protected databases (u16 length + bytes), the policy. */
     size_t al = app_dir ? strlen(app_dir) : 0, sl = state_dir ? strlen(state_dir) : 0;
-    size_t dl = db_path ? strlen(db_path) : 0;
-    if (al >= PATH_MAX || sl >= PATH_MAX || dl >= PATH_MAX) {
-        snprintf(report, report_size, "exec: the app, state or database path is too long");
+    if (al >= PATH_MAX || sl >= PATH_MAX || n_dbs < 0 || n_dbs > HL_EXEC_MAX_PROTECT) {
+        snprintf(report, report_size, "exec: the app or state path is too long");
         return -1;
     }
-    uint8_t head[4 + 3 * (2 + PATH_MAX)];
+    static uint8_t head[4 + 2 + 2 * (2 + PATH_MAX) +
+                        HL_EXEC_MAX_PROTECT * (2 + PATH_MAX)];
     size_t hn = 0;
     hl_chan_put32(head, flags);
     hn = 4;
@@ -1254,9 +1332,13 @@ int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
     head[hn++] = (uint8_t)sl; head[hn++] = (uint8_t)(sl >> 8);
     if (sl) memcpy(head + hn, state_dir, sl);
     hn += sl;
-    head[hn++] = (uint8_t)dl; head[hn++] = (uint8_t)(dl >> 8);
-    if (dl) memcpy(head + hn, db_path, dl);
-    hn += dl;
+    head[hn++] = (uint8_t)n_dbs; head[hn++] = 0;
+    for (int i = 0; i < n_dbs; i++) {
+        size_t dl = strnlen(dbs[i], PATH_MAX - 1);
+        head[hn++] = (uint8_t)dl; head[hn++] = (uint8_t)(dl >> 8);
+        memcpy(head + hn, dbs[i], dl);
+        hn += dl;
+    }
     uint64_t deadline = hl_chan_mono_ms() + 10000;
     if (hl_chan_write_frame(g_fd, HX_MAGIC, HX_POLICY, 0, head, hn, policy, len,
                             deadline) != 0) {
@@ -1554,9 +1636,11 @@ int hl_exec_broker_spawned(void) { return 0; }
 void hl_exec_broker_stop(void) {}
 int hl_exec_broker_policy(const uint8_t *policy, size_t len, unsigned flags,
                           const char *app_dir, const char *state_dir,
-                          const char *db_path, char *report, size_t report_size)
+                          const char (*dbs)[PATH_MAX], int n_dbs,
+                          char *report, size_t report_size)
 {
-    (void)policy; (void)len; (void)flags; (void)app_dir; (void)state_dir; (void)db_path;
+    (void)policy; (void)len; (void)flags; (void)app_dir; (void)state_dir; (void)dbs;
+    (void)n_dbs;
     snprintf(report, report_size, "exec: this host has no command broker");
     return -1;
 }

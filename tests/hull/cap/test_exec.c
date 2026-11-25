@@ -900,6 +900,20 @@ UTEST(exec_child, review_broad_root_nested_hull_db_and_binding)
     EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, st, "st/.hull/internal.db", out,
                                               sizeof out, why, sizeof why));
     EXPECT_TRUE(strstr(why, ".hull") != NULL);
+    /* Q2 (re-review): a .hull that does not exist yet at load. The walk
+     * reaches the state root and would create its .hull: it is compared
+     * with the root's .hull as it is after the mkdirat, refused, and the
+     * directory it made is removed (on HFS+ an ignorable-code-point name is
+     * the same directory; APFS shows the same path with the plain name). */
+    mk(app, "st2", 1);
+    char st2[PATH_MAX + 8], st2h[PATH_MAX + 16];
+    snprintf(st2, sizeof st2, "%s/st2", app);
+    snprintf(st2h, sizeof st2h, "%s/.hull", st2);
+    EXPECT_EQ(-1, hl_exec_child_grant_resolve(app, st2, "st2/.hull/x/", out, sizeof out,
+                                              why, sizeof why));
+    EXPECT_TRUE(strstr(why, ".hull") != NULL);
+    struct stat gone;
+    EXPECT_NE(0, lstat(st2h, &gone));          /* not left behind */
     /* Q2: a write grant may not reach the database or its sidecars; a read may */
     const char *protect[1] = { "data/app.db" };
     HlExecChildRoots r = { app, NULL, protect, 1 };
@@ -932,7 +946,7 @@ UTEST(exec_child, review_broad_root_nested_hull_db_and_binding)
 
     static const char *const made[] = { "app/data2/app.db", "app/data2/app.db-shm",
         "app/data2/f.txt", "app/data2", "app/data", "app/st/.hull/internal.db",
-        "app/st/.hull", "app/st", "app/.hull", "app", NULL };
+        "app/st/.hull", "app/st", "app/st2", "app/.hull", "app", NULL };
     rm_list(root, made);
 }
 

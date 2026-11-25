@@ -6,10 +6,12 @@
 
 #include "hull/shared/fs_util.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <limits.h>
 #include <string.h>
+#include <strings.h>   /* strncasecmp */
 #include <sys/stat.h>
 
 int hl_ensure_dir(const char *path, mode_t mode)
@@ -90,4 +92,35 @@ int hl_default_db_path_check(const char *path, char *err, size_t err_sz)
         }
     }
     return 0;
+}
+
+/* The local file a database DSN names (hl_sandbox_db_path's parser, kept
+ * here so the capability layer can use it without the sandbox): a
+ * scheme-less DSN is the path itself; sqlite:// file:// duckdb:// give what
+ * follows; a network scheme, an empty target or :memory: gives NULL. */
+const char *hl_dsn_file_path(const char *dsn)
+{
+    if (!dsn) return NULL;
+    const char *sep = strstr(dsn, "://");
+    if (!sep) return dsn;   /* scheme-less: unchanged existing behavior */
+    size_t n = (size_t)(sep - dsn);
+    /* A "://" not preceded by a URI scheme (RFC 3986: a letter, then letters,
+     * digits, '+', '-', '.') is part of a scheme-less path. */
+    int scheme = n > 0 && isalpha((unsigned char)dsn[0]);
+    for (size_t i = 1; scheme && i < n; i++) {
+        unsigned char c = (unsigned char)dsn[i];
+        scheme = isalnum(c) || c == '+' || c == '-' || c == '.';
+    }
+    if (!scheme) return dsn;
+    /* Only file backends have a local file to sandbox. */
+    if (!((n == 6 && strncasecmp(dsn, "sqlite", 6) == 0) ||
+          (n == 4 && strncasecmp(dsn, "file",   4) == 0) ||
+          (n == 6 && strncasecmp(dsn, "duckdb", 6) == 0)))
+        return NULL;
+    /* The target follows "://". An in-memory or empty target needs no file
+     * gating. */
+    const char *path = sep + 3;
+    if (*path == '\0' || strcmp(path, ":memory:") == 0)
+        return NULL;
+    return path;
 }

@@ -249,6 +249,15 @@ app.main(function() return 0 end)
 EOF
 )
 check_line "a write grant to the app's database is refused at start" "is the app's database"
+mkdir -p "$FIX/cm4/data"
+out=$(run_main "$FIX/cm4" <<EOF
+app.manifest({ modules = { "hull/exec@1", "hull/db@1" },
+  databases = { named = { other = "data/other.db" } },
+  exec = { a = { path = "/bin/cat", manifest = { fs = { write = { "data/" } } } } } })
+app.main(function() return 0 end)
+EOF
+)
+check_line "a write grant holding a named database is refused at start" "contains the app's database"
 out=$(run_main "$FIX/cm2" <<EOF
 app.manifest({ modules = { "hull/exec@1" }, exec = {
   a = { path = "/bin/cat", manifest = { fs = { read = { "data/gone.txt" } } } } } })

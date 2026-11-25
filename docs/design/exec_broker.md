@@ -221,15 +221,24 @@ take; not this section.)
 - an app root that is `/` or the home (a built tool run from there, whose app directory is
   its working directory): the grant would name the user's own files. A tool run from anywhere
   uses `@state/`; `hl_sandbox_manifest_rootless_ok` counts a non-`@state/` `manifest.fs` entry
-  as disqualifying;
-- any component that IS either root's `.hull`, compared by inode (so a case variant or an HFS+
-  ignorable spelling cannot hide it), and a directory that is either root or an ancestor of
-  one (a state directory inside the app directory, or the reverse);
-- for a write grant, the app's default database or its `-wal` / `-shm` / `-journal`, or a
-  directory holding it: truncating the live `-shm` kills the app with SIGBUS, which the app's
-  own fs layer refuses (`database_file_in_use`) and a command has no layer to refuse. (A
-  `host.write` path under `/tmp` can still name a database there; that is the operator's
-  absolute path, unchanged from v0.26.0.)
+  as disqualifying. Judged by the SERVER (`hl_exec_broker_apply`, with its own `$HOME`; the
+  broker's environment holds only `LANG` and `TZ`) before the broker creates anything;
+- any component that IS either root's `.hull`, compared by inode, and, directly under a root,
+  with that root's `.hull` as it is right after any `mkdirat` (on HFS+ a name with an ignorable
+  code point is `.hull` itself, and may not exist yet at load; a directory made that turns out
+  to be it is removed). Also a directory that is either root or an ancestor of one (a state
+  directory inside the app directory, or the reverse);
+- for a write grant, any SQLite file the app's registry would open by name - the default
+  (`-d` or the manifest's), `databases.named`, the internal database - or its `-wal` /
+  `-shm` / `-journal`, or a directory holding one: truncating a live `-shm` kills the app with
+  SIGBUS, which the app's own fs layer refuses (`database_file_in_use`) and a command has no
+  layer to refuse. The server resolves each to its real path (`hl_db_registry_file_paths`: a
+  symbolic link followed, a relative `-d` against its own working directory) and the broker
+  compares by inode. Not covered: a `db.open` file (its DSN is chosen at run time), a hard link
+  to a database file planted under another name inside a granted directory after start (a
+  command cannot make one; another local principal with write access to the tree could), and a
+  `host.write` path under `/tmp` naming a database there (the operator's absolute path, as in
+  v0.26.0).
 
 **No window between resolving and granting.** The walk is by descriptor from the root: each
 component `fstatat(AT_SYMLINK_NOFOLLOW)`, opened `O_NOFOLLOW`, and the opened object compared
@@ -239,9 +248,16 @@ the same way, `EEXIST` included. On Linux the Landlock rule is made from the fin
 `F_GETPATH` on that descriptor, never a second `realpath`. A component swapped for a symbolic
 link between the check and the rule cannot redirect the grant.
 
-**What an exact grant binds.** Linux binds the inode opened at load: a file replaced by a
-rename afterwards is not covered. macOS binds the path for the broker's life: a replacement
-at that path is covered. On both, a grant covers its inode, so a hard link to that file
+**What an exact grant binds.** Linux binds the inode of the descriptor opened at load: a
+rename moves the grant with the object, and whatever is put at the path afterwards is not
+covered. **On macOS a command's grant is a path, not an object.** Seatbelt matches the
+resolved path at each open; the broker opens each grant without following links and records
+its real path (`F_GETPATH`), so a replacement during the walk is refused, but from then on, for
+the broker's whole life, whatever directory or file is renamed into that path is covered, and
+the original is not once it moves away. A symbolic link put at the path gains nothing
+(Seatbelt matches the resolved target). Doing that needs write access to the directory above
+the grant, i.e. to the app or state tree, and the same limit already applies to the `host`
+grants and to the app's own Seatbelt profile. On both, a grant covers its inode, so a hard link to that file
 elsewhere is the same file, and a hard link placed inside a granted directory is reachable
 through it (a child cannot make one: Linux grants no REFER, macOS refuses the link). A write
 grant gives write, truncate and create, never read, delete or rename, on both (macOS

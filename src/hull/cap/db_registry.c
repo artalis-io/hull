@@ -605,6 +605,47 @@ static const char *lookup_dsn(const HlDbRegistry *reg, const char *name,
                                 strcmp(name, INTERNAL_NAME) == 0, err);
 }
 
+int hl_db_registry_file_paths(HlDbRegistry *reg, char (*out)[PATH_MAX], int max)
+{
+    int n = 0;
+    if (!reg || !out || max <= 0) return 0;
+    const char *names[2 + 64];
+    int nn = 0;
+    names[nn++] = "default";
+    names[nn++] = INTERNAL_NAME;
+    if (reg->manifest)
+        for (int i = 0; i < reg->manifest->databases.named_count && nn < 66; i++)
+            if (reg->manifest->databases.named[i].name)
+                names[nn++] = reg->manifest->databases.named[i].name;
+    for (int i = 0; i < nn && n < max; i++) {
+        const char *err = NULL;
+        char buf[PATH_MAX + 64];
+        const char *dsn = lookup_dsn(reg, names[i], &err, buf, sizeof buf);
+        if (!dsn) continue;
+        const char *f = hl_dsn_file_path(dsn);          /* NULL: network, :memory: */
+        if (!f || !f[0] || strcmp(f, ":memory:") == 0) continue;
+        /* The file itself when it exists (a symbolic link to it resolved),
+         * else its directory resolved plus its name. */
+        char real[PATH_MAX];
+        if (!realpath(f, real)) {
+            char dir[PATH_MAX];
+            snprintf(dir, sizeof dir, "%s", f);
+            char *sl = strrchr(dir, '/');
+            const char *base = sl ? sl + 1 : f;
+            if (sl) *sl = '\0'; else snprintf(dir, sizeof dir, ".");
+            char rdir[PATH_MAX];
+            if (!realpath(dir[0] ? dir : "/", rdir) ||
+                snprintf(real, sizeof real, "%s/%s", strcmp(rdir, "/") ? rdir : "",
+                         base) >= (int)sizeof real)
+                continue;
+        }
+        int dup = 0;
+        for (int k = 0; k < n; k++) dup |= strcmp(out[k], real) == 0;
+        if (!dup) snprintf(out[n++], PATH_MAX, "%s", real);
+    }
+    return n;
+}
+
 static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
                                 const char **err);
 

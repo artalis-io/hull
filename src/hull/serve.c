@@ -2441,7 +2441,8 @@ static int hl_serve_wire_caps(HlServerState *s)
                              s->manifest.exec.data ? s->manifest.exec.len : 0,
                              s->cfg.allow_degraded_sandbox, s->cfg.no_sandbox,
                              s->app_dir, s->state_dir[0] ? s->state_dir : NULL,
-                             s->cfg.no_db ? NULL : hl_sandbox_db_path(s->cfg.db_path)) != 0)
+                             s->cfg.no_db ? NULL : rt->db_registry,
+                             s->cfg.no_db ? NULL : s->cfg.db_path) != 0)
         return -1;
 
     /* Wire fs_cfg from manifest (if app declares fs.read OR fs.write

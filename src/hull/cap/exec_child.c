@@ -172,6 +172,18 @@ static void hull_id(const char *root, Id *out)
     }
 }
 
+/* A root directory, by inode (unset when absent). */
+static void dir_id(const char *root, Id *out)
+{
+    struct stat st;
+    out->set = 0;
+    if (root && root[0] && stat(root, &st) == 0) {
+        out->dev = st.st_dev;
+        out->ino = st.st_ino;
+        out->set = 1;
+    }
+}
+
 static int same_file(const struct stat *a, const char *path)
 {
     struct stat st;
@@ -189,6 +201,10 @@ static int reaches_db(const struct stat *g, const HlExecChildRoots *r, char *why
     for (int i = 0; r->protect && i < r->n_protect; i++) {
         const char *db = r->protect[i];
         if (!db || !db[0]) continue;
+        /* The server sends each file's real path (hl_db_registry_file_paths):
+         * a symbolic link or a relative -d is resolved there, against the
+         * server's own working directory. A relative one here (a test) is
+         * taken against the app directory. */
         char abs[PATH_MAX];
         if (db[0] == '/') snprintf(abs, sizeof abs, "%s", db);
         else if (snprintf(abs, sizeof abs, "%s/%s", r->app_dir ? r->app_dir : ".", db)
@@ -254,9 +270,11 @@ int hl_exec_child_grant_open(const HlExecChildRoots *r, const char *raw, int wri
                  "\"@state/\"", rroot);
         goto done;
     }
-    Id hull_app, hull_state;
+    Id hull_app, hull_state, root_app, root_state;
     hull_id(r->app_dir, &hull_app);
     hull_id(r->state_dir, &hull_state);
+    dir_id(r->app_dir, &root_app);
+    dir_id(r->state_dir, &root_state);
 
     fd = open(rroot, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd < 0 || fstat(fd, &st) != 0) {
@@ -271,7 +289,10 @@ int hl_exec_child_grant_open(const HlExecChildRoots *r, const char *raw, int wri
      * redirect the grant. */
     for (size_t i = 0; i < g.n; i++) {
         const char *c = g.comp[i];
-        int last = i + 1 == g.n;
+        int last = i + 1 == g.n, made = 0;
+        struct stat pst;
+        int at_root = fstat(fd, &pst) == 0 &&
+                      (id_eq(&root_app, &pst) || id_eq(&root_state, &pst));
         int w = snprintf(path + at, sizeof path - at, "/%s", c);
         if (w < 0 || (size_t)w >= sizeof path - at) {
             snprintf(why, why_size, "is too long");
@@ -287,9 +308,13 @@ int hl_exec_child_grant_open(const HlExecChildRoots *r, const char *raw, int wri
             }
             /* A "dir/" grant: created, as the app's sandbox creates it, then
              * checked like any other component (it may have been replaced). */
-            if (mkdirat(fd, c, 0755) != 0 && errno != EEXIST) {
-                snprintf(why, why_size, "cannot be created: %s", strerror(errno));
-                goto done;
+            if (mkdirat(fd, c, 0755) != 0) {
+                if (errno != EEXIST) {
+                    snprintf(why, why_size, "cannot be created: %s", strerror(errno));
+                    goto done;
+                }
+            } else {
+                made = 1;
             }
             if (fstatat(fd, c, &st, AT_SYMLINK_NOFOLLOW) != 0) {
                 snprintf(why, why_size, "vanished while it was created");
@@ -300,7 +325,17 @@ int hl_exec_child_grant_open(const HlExecChildRoots *r, const char *raw, int wri
             snprintf(why, why_size, "runs through a symbolic link");
             goto done;
         }
-        if (id_eq(&hull_app, &st) || id_eq(&hull_state, &st)) {
+        /* Directly under a root, compare with that root's .hull as it is
+         * NOW, after any mkdirat: on HFS+ a name with an ignorable code point
+         * IS ".hull", so the directory just made may be the root's .hull
+         * (unset at load if it did not exist). A directory made here that
+         * turns out to be it is removed again. */
+        struct stat hst;
+        int is_hull = id_eq(&hull_app, &st) || id_eq(&hull_state, &st) ||
+                      (at_root && fstatat(fd, ".hull", &hst, AT_SYMLINK_NOFOLLOW) == 0 &&
+                       hst.st_dev == st.st_dev && hst.st_ino == st.st_ino);
+        if (is_hull) {
+            if (made) (void)unlinkat(fd, c, AT_REMOVEDIR);
             snprintf(why, why_size, "reaches a .hull directory, which no command "
                      "may be given");
             goto done;

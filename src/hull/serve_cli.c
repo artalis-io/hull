@@ -723,8 +723,8 @@ int hull_serve(int argc, char **argv)
     if (hl_exec_broker_apply(manifest.exec.data,
                              manifest.exec.data ? manifest.exec.len : 0,
                              allow_degraded_sandbox, no_sandbox, app_dir,
-                             hl_app_context_state_dir(ctx),
-                             hl_sandbox_db_path(db_path)) != 0)
+                             hl_app_context_state_dir(ctx), rt->db_registry,
+                             db_path) != 0)
         return cli_fail(ctx, rt, be, async_ctx, pool, &manifest, NULL, NULL);
 
     /* Seal the manifest, exactly as serve.c does for the server build.

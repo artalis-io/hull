@@ -18,6 +18,8 @@
 #ifndef HL_CAP_DB_REGISTRY_H
 #define HL_CAP_DB_REGISTRY_H
 
+#include <limits.h>
+
 #include "hull/cap/db_backend.h"
 
 typedef struct HlManifest  HlManifest;
@@ -288,6 +290,16 @@ HlDbHandle *hl_db_registry_get(HlDbRegistry *reg, const char *name,
  */
 #ifdef HL_ENABLE_DB
 const char *hl_db_registry_dsn_for(HlDbRegistry *reg, const HlDbHandle *h);
+
+/* The files of the SQLite databases the registry would open by name - the
+ * default (the -d DSN or the manifest's), the internal one, each
+ * databases.named entry - confined exactly as an open confines them,
+ * resolved to real paths (a symbolic link to the file followed; a file not
+ * made yet as its directory's real path plus its name). Network and
+ * in-memory databases are skipped. Writes up to @p max into @p out; returns
+ * the count. For the command broker: a command's write grant may not reach
+ * these (docs/design/exec_broker.md §3.1). */
+int hl_db_registry_file_paths(HlDbRegistry *reg, char (*out)[PATH_MAX], int max);
 
 /* The manifest's databases.dynamic policy (for db.open), or NULL if no manifest
  * is set. Borrowed; valid until the sealed manifest is torn down. */
