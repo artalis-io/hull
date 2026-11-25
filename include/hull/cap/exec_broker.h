@@ -11,8 +11,8 @@
  * answers DONE with the output. The app process itself keeps no
  * exec / fork / clone.
  *
- * Supported on native Linux and macOS. Elsewhere hl_exec_broker_start returns -1 and
- * an app with an `exec` section is refused at start (unless
+ * Supported on native Linux and macOS. Elsewhere hl_exec_broker_start returns
+ * -1 and an app with an `exec` section is refused at start (unless
  * --allow-degraded-sandbox on a host that is not Windows, where exec.run
  * then fails).
  *

@@ -32,6 +32,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef __APPLE__
+#define SLEEP_BIN "/bin/sleep"          /* macOS has no /usr/bin/sleep */
+#else
+#define SLEEP_BIN "/usr/bin/sleep"
+#endif
+
 #define MAGIC   0x43455848u
 #define POLICY  1u
 #define READY   2u
@@ -215,7 +221,7 @@ int main(int argc, char **argv)
     char msg[512];
 
     /* 1. a request id already in use */
-    HlExecBuf p = policy_one("sl", "/usr/bin/sleep", thirty, 1, 0, -1, 8);
+    HlExecBuf p = policy_one("sl", SLEEP_BIN, thirty, 1, 0, -1, 8);
     Broker b = broker_start(&p);
     run(b.fd, 7, "sl", NULL);
     run(b.fd, 7, "sl", NULL);
@@ -235,7 +241,7 @@ int main(int argc, char **argv)
     hl_exec_buf_free(&p);
 
     /* 3. past a command's concurrency */
-    p = policy_one("sl", "/usr/bin/sleep", thirty, 1, 0, -1, 2);
+    p = policy_one("sl", SLEEP_BIN, thirty, 1, 0, -1, 2);
     b = broker_start(&p);
     run(b.fd, 1, "sl", NULL);
     run(b.fd, 2, "sl", NULL);

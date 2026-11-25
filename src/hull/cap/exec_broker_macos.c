@@ -71,7 +71,7 @@ static const char PROFILE_HEAD[] =
     "    (subpath \"/System\") (subpath \"/private/etc\")\n"
     "    (subpath \"/private/var/db/dyld\")\n"
     "    (subpath \"/Library/Preferences/Logging\")\n"
-    "    (literal \"/dev/urandom\") (literal \"/dev/random\"))\n"
+    "    (literal \"/dev/urandom\") (literal \"/dev/random\") (literal \"/dev/zero\"))\n"
     "(allow file-map-executable (subpath \"/System\") (subpath \"/usr/lib\"))\n"
     "(allow file-read* file-write-data (literal \"/dev/null\")\n"
     "    (literal \"/dev/dtracehelper\"))\n"
