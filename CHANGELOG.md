@@ -8,6 +8,11 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-25
+
+`hull/exec`: an app runs the commands its manifest declares, through a command broker on Linux
+and macOS, with argument shapes, an optional `sha256` pin, stdin, and `hull test` stubs.
+
 ### Added
 
 - **`hull/exec`: stdin for a declared command.** A command that declares `stdin_max` (JS
@@ -41,17 +46,6 @@ release-artifact layout).
   a slot with `allow_dash`, a slot after fixed arguments with no `--`. `hull inspect` shows the
   pin.
 
-### Fixed
-
-- **`hull/exec` (Lua): an over-long argument list raised "invalid option '%u'"** instead of
-  saying the arguments are longer than 64 KiB together (Lua's formatter has no `%u`).
-- **`make check-types` failed on macOS** since the macOS broker: its `hull/exec` probe app
-  declared `/bin/true`, which macOS does not have; it uses `/usr/bin/true`.
-
-- **`hull check` and `hull build --sign` / `--flavor` refused every app declaring `exec`.** The
-  tool-side module resolve did not see the `exec` section, so `hull/exec` failed with "requires
-  an `exec` section". It is now passed through, as `tui` and `gpu` are.
-
 - **`hull/exec`: the command broker (Linux)** (docs/design/exec_broker.md, part 2). `exec.run`
   now runs the declared command on native Linux. A broker (this binary in a hidden mode) is
   spawned before the sandbox, given the policy once, and runs each call after matching it again
@@ -73,10 +67,22 @@ release-artifact layout).
   no regex) whose values never start with `-` unless the slot allows it. The section is
   encoded once in C by both manifest extractors, validated in full (`cap/exec.c`,
   `hl_exec_policy_validate`), sealed with the manifest, and checked by one matcher
-  (`hl_exec_check_call`). An unknown key, a value out of range, or a declared `sha256` (not
-  enforced yet) refuses the app. `exec.run(name, args)` (Lua `hull.exec`, JS `hull:exec`)
+  (`hl_exec_check_call`). An unknown key or a value out of range
+  refuses the app. `exec.run(name, args)` (Lua `hull.exec`, JS `hull:exec`)
   matches the call, and under `hull test` answers from a stub (`test.exec_stub` /
   `test.execStub`). Fuzzed by `fuzz_exec_policy` and `fuzz_exec_slot`; `make e2e-exec`.
+
+### Fixed
+
+- **`hull/exec` (Lua): an over-long argument list raised "invalid option '%u'"** instead of
+  saying the arguments are longer than 64 KiB together (Lua's formatter has no `%u`).
+
+- **`make check-types` failed on macOS** since the macOS broker: its `hull/exec` probe app
+  declared `/bin/true`, which macOS does not have; it uses `/usr/bin/true`.
+
+- **`hull check` and `hull build --sign` / `--flavor` refused every app declaring `exec`.** The
+  tool-side module resolve did not see the `exec` section, so `hull/exec` failed with "requires
+  an `exec` section". It is now passed through, as `tui` and `gpu` are.
 
 ## [0.25.0] - 2026-11-24
 
