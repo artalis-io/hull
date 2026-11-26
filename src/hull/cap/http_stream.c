@@ -293,7 +293,7 @@ int hl_http_stream_start(HlHttpStream **out, const HlHttpStreamConfig *cfg)
 
     KlUrl parsed;
     if (kl_url_parse(cfg->url, &parsed) != 0) return -1;
-    if (hl_http_check_host(cfg->http_cfg, parsed.host, parsed.host_len) != 0) {
+    if (hl_http_check_host(cfg->http_cfg, parsed.host, parsed.host_len, parsed.port) != 0) {
         ShJsonWriter w = hl_audit_begin("http.stream");
         sh_json_write_kv_string(&w, "method", cfg->method);
         char red[512];

@@ -30,14 +30,14 @@ UTEST(host, allowed)
 {
     const char *hosts[] = { "api.example.com", "example.org" };
     HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 2 };
-    ASSERT_EQ(0, hl_http_check_host(&cfg, "api.example.com", 15));
+    ASSERT_EQ(0, hl_http_check_host(&cfg, "api.example.com", 15, 443));
 }
 
 UTEST(host, denied)
 {
     const char *hosts[] = { "api.example.com" };
     HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
-    ASSERT_NE(0, hl_http_check_host(&cfg, "evil.com", 8));
+    ASSERT_NE(0, hl_http_check_host(&cfg, "evil.com", 8, 443));
 }
 
 /* Gap 3: the bindings tell a refused host from a network failure. */
@@ -69,13 +69,13 @@ UTEST(host, case_insensitive)
 {
     const char *hosts[] = { "API.Example.COM" };
     HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
-    ASSERT_EQ(0, hl_http_check_host(&cfg, "api.example.com", 15));
+    ASSERT_EQ(0, hl_http_check_host(&cfg, "api.example.com", 15, 443));
 }
 
 UTEST(host, empty_list)
 {
     HlHttpConfig cfg = { .allowed_hosts = NULL, .count = 0 };
-    ASSERT_NE(0, hl_http_check_host(&cfg, "example.com", 11));
+    ASSERT_NE(0, hl_http_check_host(&cfg, "example.com", 11, 443));
 }
 
 UTEST(host, partial_match_rejected)
@@ -83,7 +83,7 @@ UTEST(host, partial_match_rejected)
     const char *hosts[] = { "example.com" };
     HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
     /* "evil-example.com" should NOT match "example.com" */
-    ASSERT_NE(0, hl_http_check_host(&cfg, "evil-example.com", 16));
+    ASSERT_NE(0, hl_http_check_host(&cfg, "evil-example.com", 16, 443));
 }
 
 /* §2.8: the host gate now delegates to the shared glob/CIDR matcher. */
@@ -91,26 +91,26 @@ UTEST(host, wildcard_subdomain)
 {
     const char *hosts[] = { "*.example.com" };
     HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
-    ASSERT_EQ(0, hl_http_check_host(&cfg, "a.example.com", 13));
-    ASSERT_EQ(0, hl_http_check_host(&cfg, "a.b.example.com", 15));
-    ASSERT_NE(0, hl_http_check_host(&cfg, "example.com", 11));   /* apex */
-    ASSERT_NE(0, hl_http_check_host(&cfg, "evil.com", 8));
+    ASSERT_EQ(0, hl_http_check_host(&cfg, "a.example.com", 13, 443));
+    ASSERT_EQ(0, hl_http_check_host(&cfg, "a.b.example.com", 15, 443));
+    ASSERT_NE(0, hl_http_check_host(&cfg, "example.com", 11, 443));   /* apex */
+    ASSERT_NE(0, hl_http_check_host(&cfg, "evil.com", 8, 443));
 }
 
 UTEST(host, cidr_ip_literal)
 {
     const char *hosts[] = { "10.0.0.0/8" };
     HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
-    ASSERT_EQ(0, hl_http_check_host(&cfg, "10.1.2.3", 8));
-    ASSERT_NE(0, hl_http_check_host(&cfg, "11.0.0.1", 8));
-    ASSERT_NE(0, hl_http_check_host(&cfg, "host.example.com", 16)); /* no DNS */
+    ASSERT_EQ(0, hl_http_check_host(&cfg, "10.1.2.3", 8, 443));
+    ASSERT_NE(0, hl_http_check_host(&cfg, "11.0.0.1", 8, 443));
+    ASSERT_NE(0, hl_http_check_host(&cfg, "host.example.com", 16, 443)); /* no DNS */
 }
 
 UTEST(host, wildcard_any)
 {
     const char *hosts[] = { "*" };
     HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
-    ASSERT_EQ(0, hl_http_check_host(&cfg, "anything.test", 13));
+    ASSERT_EQ(0, hl_http_check_host(&cfg, "anything.test", 13, 443));
 }
 
 /* §2.8: a "$VAR" entry resolves from the environment at match time; an
@@ -121,11 +121,11 @@ UTEST(host, env_ref)
     HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
 
     setenv("HULL_TEST_ALLOWED_HOST", "api.example.com", 1);
-    ASSERT_EQ(0, hl_http_check_host(&cfg, "api.example.com", 15));
-    ASSERT_NE(0, hl_http_check_host(&cfg, "evil.com", 8));
+    ASSERT_EQ(0, hl_http_check_host(&cfg, "api.example.com", 15, 443));
+    ASSERT_NE(0, hl_http_check_host(&cfg, "evil.com", 8, 443));
 
     unsetenv("HULL_TEST_ALLOWED_HOST");
-    ASSERT_NE(0, hl_http_check_host(&cfg, "api.example.com", 15));
+    ASSERT_NE(0, hl_http_check_host(&cfg, "api.example.com", 15, 443));
 }
 
 /* ════════════════════════════════════════════════════════════════════

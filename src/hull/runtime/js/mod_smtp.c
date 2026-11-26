@@ -317,7 +317,7 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
         result = js_resolved_result(ctx, 0, "validation_failed");
         goto cleanup;
     }
-    if (hl_smtp_check_host(js->base.smtp_cfg, msg.host) != 0) {
+    if (hl_smtp_check_host(js->base.smtp_cfg, msg.host, msg.port) != 0) {
         hl_smtp_audit_denied(&msg);
         result = js_resolved_result(ctx, 0, "host_not_allowed");
         goto cleanup;

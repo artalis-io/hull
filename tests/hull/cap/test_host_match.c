@@ -7,6 +7,7 @@
 #include "utest.h"
 #include "hull/host_match.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 UTEST(host_match, exact_case_insensitive)
@@ -150,7 +151,7 @@ UTEST(host_match_audit42, noncanonical_refuses_exact_glob_any)
         EXPECT_FALSE(hl_host_match("*.0.0.1", h));
         const char *pats[] = { "$A42_UNSET_VAR", h, "*" };
         EXPECT_FALSE(hl_host_match_any_env(pats, 3, h));
-        EXPECT_FALSE(hl_host_match_any_env_n(pats, 3, h, strlen(h)));
+        EXPECT_FALSE(hl_host_match_any_env_n(pats, 3, h, strlen(h), 443));
     }
 }
 
@@ -206,6 +207,97 @@ UTEST(dsn_query_param, finds_each_occurrence_decoded)
     EXPECT_EQ(-2, hl_dsn_query_param("mysql://u@h/db?a=%zz", "a", 0, v, sizeof v));
     EXPECT_EQ(-2, hl_dsn_query_param("mysql://u@h/db?a=x%00y", "a", 0, v, sizeof v));
     EXPECT_EQ(-2, hl_dsn_query_param("mysql://u@h/db?a=0123456789", "a", 0, v, 4));
+}
+
+/* ── #1227: a pattern may name the one port it admits ─────────────── */
+
+UTEST(host_match_port, ported_pattern_admits_only_its_port)
+{
+    EXPECT_TRUE(hl_host_match_port("127.0.0.1:8081", "127.0.0.1", 8081));
+    EXPECT_FALSE(hl_host_match_port("127.0.0.1:8081", "127.0.0.1", 8082));
+    EXPECT_FALSE(hl_host_match_port("127.0.0.1:8081", "127.0.0.2", 8081));
+    EXPECT_TRUE(hl_host_match_port("API.example.com:443", "api.EXAMPLE.com", 443));
+    EXPECT_TRUE(hl_host_match_port("*.internal:9000", "a.b.internal", 9000));
+    EXPECT_FALSE(hl_host_match_port("*.internal:9000", "a.b.internal", 9001));
+    EXPECT_FALSE(hl_host_match_port("*.internal:9000", "internal", 9000));  /* apex */
+    EXPECT_TRUE(hl_host_match_port("*:443", "anything.test", 443));
+    EXPECT_FALSE(hl_host_match_port("*:443", "anything.test", 80));
+    EXPECT_TRUE(hl_host_match_port("10.0.0.0/8:5432", "10.9.8.7", 5432));
+    EXPECT_FALSE(hl_host_match_port("10.0.0.0/8:5432", "10.9.8.7", 5433));
+    EXPECT_FALSE(hl_host_match_port("10.0.0.0/8:5432", "11.0.0.1", 5432));
+}
+
+UTEST(host_match_port, ipv6_takes_a_port_only_in_brackets)
+{
+    EXPECT_TRUE(hl_host_match_port("[::1]:8081", "::1", 8081));
+    EXPECT_FALSE(hl_host_match_port("[::1]:8081", "::1", 8080));
+    EXPECT_TRUE(hl_host_match_port("[2001:db8::/32]:443", "2001:db8::5", 443));
+    EXPECT_FALSE(hl_host_match_port("[2001:db8::/32]:443", "2001:db8::5", 80));
+    /* Bare IPv6: every ':' is the address's, so no port and any port. */
+    EXPECT_TRUE(hl_host_match_port("::1", "::1", 8081));
+    EXPECT_TRUE(hl_host_match_port("2001:db8::/32", "2001:db8::5", 22));
+    /* Brackets with no port admit any port; brackets need IPv6. */
+    EXPECT_TRUE(hl_host_match_port("[::1]", "::1", 1));
+    EXPECT_FALSE(hl_host_pattern_valid("[127.0.0.1]:80"));
+}
+
+UTEST(host_match_port, bare_host_admits_every_port)
+{
+    EXPECT_TRUE(hl_host_match_port("127.0.0.1", "127.0.0.1", 1));
+    EXPECT_TRUE(hl_host_match_port("127.0.0.1", "127.0.0.1", 65535));
+    EXPECT_TRUE(hl_host_match_port("*", "x.test", 22));
+}
+
+UTEST(host_match_port, unknown_port_never_matches_a_ported_pattern)
+{
+    /* The port-less entry points (a peer address: trusted_proxies). */
+    EXPECT_FALSE(hl_host_match("127.0.0.1:8081", "127.0.0.1"));
+    EXPECT_FALSE(hl_host_match_port("127.0.0.1:8081", "127.0.0.1", 0));
+    EXPECT_TRUE(hl_host_match("127.0.0.1", "127.0.0.1"));
+}
+
+UTEST(host_match_port, malformed_ports_match_nothing)
+{
+    static const char *const bad[] = {
+        "h:", "h:0", "h:65536", "h:99999", "h:123456", "h:08", "h:8a",
+        "h:-1", "h: 80", "[::1]:", "[::1]x", "[::1", "[]:80", ":80",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        EXPECT_FALSE(hl_host_pattern_valid(bad[i]));
+        EXPECT_FALSE(hl_host_match_port(bad[i], "h", 80));
+    }
+    EXPECT_TRUE(hl_host_pattern_valid("h:1"));
+    EXPECT_TRUE(hl_host_pattern_valid("h:65535"));
+    EXPECT_TRUE(hl_host_pattern_has_port("h:65535"));
+    EXPECT_FALSE(hl_host_pattern_has_port("h"));
+    EXPECT_FALSE(hl_host_pattern_has_port("::1"));
+}
+
+UTEST(host_match_port, env_ref_value_may_name_a_port)
+{
+    setenv("HL_TEST_HM_SIDECAR", "127.0.0.1:8081", 1);
+    const char *pats[] = { "$HL_TEST_HM_SIDECAR" };
+    EXPECT_TRUE(hl_host_match_any_env_port(pats, 1, "127.0.0.1", 8081));
+    EXPECT_FALSE(hl_host_match_any_env_port(pats, 1, "127.0.0.1", 5432));
+    EXPECT_TRUE(hl_host_match_any_env_n(pats, 1, "127.0.0.1xyz", 9, 8081));
+    unsetenv("HL_TEST_HM_SIDECAR");
+}
+
+UTEST(dsn_host_port, reads_the_authority_port)
+{
+    char h[64];
+    int port = -1;
+    EXPECT_TRUE(hl_dsn_host_port("postgres://u:p@db.local:5433/app", h, sizeof h, &port));
+    EXPECT_STREQ("db.local", h);
+    EXPECT_EQ(5433, port);
+    EXPECT_TRUE(hl_dsn_host_port("valkey://cache", h, sizeof h, &port));
+    EXPECT_EQ(0, port);                        /* none: caller's default */
+    EXPECT_TRUE(hl_dsn_host_port("mysql://[::1]:3307/x", h, sizeof h, &port));
+    EXPECT_STREQ("::1", h);
+    EXPECT_EQ(3307, port);
+    EXPECT_FALSE(hl_dsn_host_port("postgres://h:0/x", h, sizeof h, &port));
+    EXPECT_FALSE(hl_dsn_host_port("postgres://h:65536/x", h, sizeof h, &port));
+    EXPECT_FALSE(hl_dsn_host_port("postgres://h:99999999999999999999/x", h, sizeof h, &port));
 }
 
 UTEST_MAIN()

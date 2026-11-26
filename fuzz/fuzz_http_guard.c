@@ -303,7 +303,7 @@ static void mode_redirect(Fields *fl, uint8_t flags)
     for (int i = 0; i < nh; i++)
         if (!ref_redirect_safe(h[i].name)) secrets = 1;
     int want = kl_url_parse(next, &n) == 0 &&
-               hl_http_check_host(&cfg, n.host, n.host_len) == 0 &&
+               hl_http_check_host(&cfg, n.host, n.host_len, n.port) == 0 &&
                !(o_ok && o.is_https && !n.is_https) &&
                (!secrets || (o_ok && ref_same_origin(&o, &n)));
     if (got != want) {

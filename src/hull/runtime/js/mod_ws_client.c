@@ -694,7 +694,7 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
      * used to skip the check, so ws.connect reached any host. */
     if (!js->base.http_cfg ||
         hl_http_check_host(js->base.http_cfg, parsed.host,
-                           parsed.host_len) != 0) {
+                           parsed.host_len, parsed.port) != 0) {
         /* Coded "denied" with an own `host` (gap 3), as http.fetch's. */
         HlHttpDenial d;
         int denied = hl_http_url_denied(js->base.http_cfg, url, &d);
@@ -704,10 +704,10 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
         if (d.unset_ref[0])
             JS_ThrowTypeError(ctx, "ws.connect: host '%s' is not in "
                               "manifest.hosts (its entry %s names an unset "
-                              "variable)", d.host, d.unset_ref);
+                              "variable)", d.shown, d.unset_ref);
         else
             JS_ThrowTypeError(ctx, "ws.connect: host '%s' is not in "
-                              "manifest.hosts", d.host);
+                              "manifest.hosts", d.shown);
         JSValue e = JS_GetException(ctx);
         JSValue h = JS_NewString(ctx, d.host);
         if (JS_IsException(h)) {

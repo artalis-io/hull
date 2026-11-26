@@ -108,15 +108,25 @@ static int scheme_is_file(const char *scheme)
            strcmp(scheme, "duckdb") == 0;
 }
 
-/* Extract the host from a network DSN authority
- * (scheme://[user[:pass]@]host[:port]/...). IPv6 literals "[::1]" are returned
- * without the brackets (so host_match's inet_pton sees a bare address). Returns
- * 1 + host in @p buf, or 0 if no host is present. */
-/* Match @p host against the policy's host patterns (exact / glob / CIDR),
- * resolving "$VAR" entries from the environment. Same matcher http/smtp use. */
-static int host_allowed(const HlManifestDbDynamic *policy, const char *host)
+/* The port a network backend dials when its DSN names none (the defaults
+ * of hl_pg_dsn_parse / hl_my_dsn_parse); 0 for a scheme with none, which a
+ * "host:port" entry never matches. */
+static int scheme_default_port(const char *scheme)
 {
-    return hl_host_match_any_env(policy->hosts, policy->host_count, host);
+    if (strcmp(scheme, "postgres") == 0 || strcmp(scheme, "postgresql") == 0)
+        return 5432;
+    if (strcmp(scheme, "mysql") == 0 || strcmp(scheme, "mariadb") == 0)
+        return 3306;
+    return 0;
+}
+
+/* Match @p host on @p port against the policy's host patterns (exact / glob /
+ * CIDR, a "host:port" entry only on that port), resolving "$VAR" entries from
+ * the environment. Same matcher http/smtp use. */
+static int host_allowed(const HlManifestDbDynamic *policy, const char *host,
+                        int port)
+{
+    return hl_host_match_any_env_port(policy->hosts, policy->host_count, host, port);
 }
 
 /* 1 when any component of @p abs below its first @p base_len bytes (the app
@@ -276,11 +286,13 @@ HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
     } else {
         /* Network backend: host must match databases.dynamic.hosts. */
         char host[256];
-        if (!hl_dsn_host(dsn, host, sizeof host)) {
+        int port = 0;
+        if (!hl_dsn_host_port(dsn, host, sizeof host, &port)) {
             if (err) *err = "db.open: DSN has no host, or one a backend could parse differently";
             return NULL;
         }
-        if (!host_allowed(policy, host)) {
+        if (port == 0) port = scheme_default_port(scheme);
+        if (!host_allowed(policy, host, port)) {
             if (err) *err = "db.open: host not allowed by databases.dynamic.hosts";
             return NULL;
         }
