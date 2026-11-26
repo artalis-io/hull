@@ -29,6 +29,8 @@
 #     documented limit) and the waiting call fails cleanly; with several
 #     commands, the router's death takes the command, and a command broker's
 #     death leaves only that command's call (the narrowed limit);
+#   - a client that hangs up mid-call takes the command, single broker
+#     and router (#1224);
 #   - admission by raw frames (tests/e2e_exec_frames.c).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
@@ -552,6 +554,49 @@ death_case2() {  # death_case2 <label> <router|sub>
 echo "== deaths, two commands"
 death_case2 "router death (kill -9) takes the command (its broker sees it go)" router
 death_case2 "a command broker's death (kill -9) leaves only that call (documented limit)" sub
+
+# A client that hangs up while its call runs takes the command (#1224):
+# Keel 3.5+ cancels a suspended request on the client's FIN, and the op's
+# free sends KILL. The command then runs again for the next client.
+new_probe() {  # new_probe <previous pid> -> a probe pid other than it, within 5 s
+    for i in $(seq 1 100); do
+        p=$(sed -n 's/.*exec probe ready pid=\([0-9]*\).*/\1/p' "$SLOG" | tail -1)
+        [ -n "$p" ] && [ "$p" != "$1" ] && { echo "$p"; return 0; }
+        sleep 0.05
+    done
+    return 1
+}
+disconnect_case() {  # disconnect_case <label> <dir> <app file> [routed]
+    start_server "$2" < "$3" || return
+    curl -s -m 30 "http://127.0.0.1:$PORT/ready" > /dev/null 2>&1 &
+    cpid=$!
+    probe=$(new_probe "") || { fail "$1: the probe never got ready" "$(cat "$SLOG")"; kill "$cpid" 2>/dev/null; kill -9 "$SPID"; return; }
+    PIDS="$PIDS $probe"
+    kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null || true
+    if gone_within "$probe"; then pass "$1"; else fail "$1" "probe $probe still alive after the client left"; kill -9 "$probe" 2>/dev/null || true; fi
+    curl -s -m 30 "http://127.0.0.1:$PORT/ready" > /dev/null 2>&1 &
+    cpid=$!
+    if probe2=$(new_probe "$probe"); then
+        PIDS="$PIDS $probe2"
+        pass "$1: the command runs again for the next client"
+        kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null || true
+        gone_within "$probe2" || { fail "$1: a second disconnect takes the command too" "probe $probe2 alive"; kill -9 "$probe2" 2>/dev/null || true; }
+    else
+        fail "$1: the command runs again for the next client" "$(cat "$SLOG")"
+        kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null || true
+    fi
+    if [ "$4" = routed ]; then
+        other=$(curl -s -m 5 "http://127.0.0.1:$PORT/other")
+        case "$other" in *'"ok":true'*) pass "$1: the other command still runs" ;;
+                         *) fail "$1: the other command still runs" "$other" ;; esac
+    fi
+    kill -TERM "$SPID" 2>/dev/null || true
+    wait "$SPID" 2>/dev/null || true
+}
+
+echo "== client disconnect"
+disconnect_case "one command: a client disconnect kills its running command" "$FIX/dc1" "$FIX/ready_app.lua"
+disconnect_case "router: a client disconnect kills its running command" "$FIX/dc2" "$FIX/ready2_app.lua" routed
 
 # ── Admission by raw frames ──────────────────────────────────────────
 

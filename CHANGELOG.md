@@ -38,6 +38,30 @@ release-artifact layout).
   `hull check` lint for the old keys and their `@deprecated` TypeScript members are gone;
   the policy encoding is unchanged.
 
+### Changed
+
+- **Keel 3.6.0** (from 3.4.0; 3.5.0 and 3.6.0 notes in `vendor/keel/CHANGELOG.md`). A client
+  that hangs up while its request is suspended on a Hull wait (`exec.run`, `http.fetch`,
+  `db.async`, `hull.sleep`, `compute.async`, ...) now cancels the wait at once: the
+  continuation is cancelled the way a teardown cancels it, and nothing is written. Before, the
+  wait ran to its own end and its response went to a closed connection. Also from Keel: a
+  graceful stop closes the listener and ends keep-alive at its start, so a load balancer fails
+  over during the drain; a request head has an absolute deadline (`header_timeout_ms`, the
+  read timeout by default; Hull's own 10 s `--header-timeout` is shorter and still applies);
+  pipelined requests and over-sent bodies close the connection instead of hanging the client;
+  multipart part headers are parsed in linear time and capped at 8 KiB; and a streamed
+  response gets nothing appended after its terminating chunk.
+
+### Fixed
+
+- **`hull/exec`: a client that disconnects mid-call takes the command** (#1224). The request's
+  op was suspended with the connection's fd off the event loop, so no hang-up reached it and a
+  declared command ran on to its `timeout_ms` (60 s in the report). Keel 3.6.0 cancels the
+  suspended request on the client's FIN or reset; the op's free sends `KILL`, so the command
+  stops within a moment, on the single broker, the macOS router and Linux alike, and the
+  command runs again for the next client. Covered by the `client disconnect` cases of
+  `tests/e2e_exec_broker.sh` and `tests/e2e_exec_broker_macos.sh`.
+
 ## [0.27.0] - 2026-11-26
 
 `hull/exec`: each declared command has its own `manifest` (a strict subset of the app manifest)
