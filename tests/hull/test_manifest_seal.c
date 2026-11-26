@@ -476,12 +476,11 @@ UTEST(manifest_host_patterns, ports_validated_at_load)
     EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
     m.hosts[0] = saved;
 
+    /* databases.dynamic is empty in the fixture: one literal entry, taken
+     * out again before the free. The other three lists hold allocated
+     * entries; each is swapped and put back. */
     m.databases.dynamic.hosts[0] = "db.local";
     m.databases.dynamic.host_count = 1;
-    m.ssh.connect.hosts[0] = "h.local";
-    m.ssh.connect.host_count = 1;
-    m.ssh.tunnel.hosts[0] = "relay.local";
-    m.ssh.tunnel.host_count = 1;
     const char **fields[] = {
         &m.databases.dynamic.hosts[0], &m.kv.dynamic.hosts[0],
         &m.ssh.connect.hosts[0], &m.ssh.tunnel.hosts[0],
@@ -501,7 +500,11 @@ UTEST(manifest_host_patterns, ports_validated_at_load)
     m.limits.trusted_proxies[0] = "10.0.0.1:443";
     EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
     EXPECT_TRUE(strstr(err, "limits.trusted_proxies") != NULL);
+    m.limits.trusted_proxies[0] = NULL;
     m.limits.trusted_proxy_count = 0;
+    m.databases.dynamic.hosts[0] = NULL;
+    m.databases.dynamic.host_count = 0;
+    hl_manifest_free(&m);
 }
 
 /* A "$VAR" reads the environment on the app's behalf, so it must name a
