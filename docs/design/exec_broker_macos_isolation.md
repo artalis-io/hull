@@ -1,6 +1,6 @@
-# Per-command isolation on macOS: one sub-broker per command (design draft)
+# Per-command isolation on macOS: one sub-broker per command
 
-- **Status:** DRAFT for review. No code. Issue #1218.
+- **Status:** design decided (2026-11-26, §10), not yet implemented. Issue #1218.
 - **Parent design:** [exec_broker.md](exec_broker.md) (§6.4 macOS backend, §7 lifetime, §15.6
   the interim proposal this replaces).
 - **Scope:** the macOS backend only. Linux is unchanged. No manifest change.
@@ -52,7 +52,7 @@ independently enforced principal on macOS too.
 | A | the server spawns one broker per command after the manifest is known | yes | yes | rejected (§3.1) |
 | B | the broker stays unsandboxed and execs a helper per call that applies the command's profile, then execs the binary | yes | **no** | rejected (§3.2) |
 | C | the broker becomes a ROUTER: at `POLICY` it spawns one sub-broker per command, each applies its own command's profile, then the router sandboxes itself | yes | yes | **recommended** (§4) |
-| D | keep the union; refuse differing grants unless `--allow-degraded-sandbox` (§15.6 interim) | no | yes | fallback only (§3.3) |
+| D | keep the union; refuse differing grants unless `--allow-degraded-sandbox` (§15.6 interim) | no | yes | rejected (§3.3) |
 
 ### 3.1 Why not A (server-spawned brokers)
 
@@ -72,13 +72,13 @@ independently enforced principal on macOS too.
 - Every call pays an extra exec of the 25 MB hull binary (about 10 ms, above), on top of the
   command's own exec.
 
-### 3.3 D as a fallback
+### 3.3 Why not D (the interim refusal)
 
 D is cheap (a grant comparison and one `--allow-degraded-sandbox` check), but it isolates
 nothing. It only makes the union opt-in, and it breaks a v0.26.0 macOS app with differing
-grants until the operator passes the flag. Ship D only if C slips past a release that must
-say something about the union. Otherwise skip it: C removes the union, and with it the reason
-for D.
+grants until the operator passes the flag. Shipping D and then C would change macOS behaviour
+twice: once to demand the flag, once to make it unnecessary. C removes the union, and with it
+the reason for D, so D is not built.
 
 ## 4. Design: router plus per-command sub-brokers
 
@@ -105,7 +105,8 @@ is the router, and the router lives in the portable `exec_broker.c`.
 
 **One command needs no router.** With `n == 1` the broker behaves exactly as today: no
 sub-broker, no extra process, no extra hop. The router starts only for `n >= 2` on macOS, the
-only case with a union to remove.
+only case with a union to remove. That leaves two code paths on macOS, and the tests run both
+(§8).
 
 ### 4.2 Start
 
@@ -117,8 +118,12 @@ At `POLICY`, the router (still unsandboxed, as today's broker is at this point):
    `HL_EXEC_BROKER_ARGV1` and the same environment allowlist (`LANG`, `TZ`). All N are spawned
    before any is waited on, so their dyld and init overlap.
 3. Sends each sub-broker a `POLICY` frame holding the same header (flags, app and state roots,
-   protected database paths) and a policy of ONE command, re-encoded from the parsed entry. A
-   sub-broker never sees another command's entry.
+   protected database paths) and a policy of ONE command. The policy is the original 6-byte
+   header with its count set to 1, followed by that command's entry bytes, sliced unchanged
+   from the server's policy (entries are stored back to back; the router records each entry's
+   start and end while it reads them). Nothing is re-encoded, so a sub-broker's command is
+   byte-for-byte the one the server sent and `hl_exec_policy_validate` accepted. A sub-broker
+   never sees another command's entry.
 4. Waits for every sub-broker's `READY` or `REFUSED`, inside the server's existing 10 s wait
    for the broker's own `READY` (`hl_exec_broker_apply`). Any `REFUSED`, early exit or timeout
    refuses the whole start, naming the command and quoting the sub-broker's report.
@@ -127,7 +132,9 @@ At `POLICY`, the router (still unsandboxed, as today's broker is at this point):
    - no `process-exec`, no `process-fork` (a router that could exec itself could start a fresh,
      unsandboxed broker and hand it any policy);
    - `(allow signal (target children))`;
-   - nothing on the file system beyond what its open descriptors already give.
+   - no file-system rule at all: everything the router uses after the lock (the server
+     channel, the sub-broker channels, its kqueue watches) is a descriptor it already holds. A
+     test checks that a router opening any path after `READY` is refused (§8).
 6. Replies `READY` to the server with the merged report: one `exec: <name> -> <real path>` line
    per command, plus the macOS limit line (§4.5).
 
@@ -208,20 +215,19 @@ domain is what stops the job itself.
 - **Per call:** one extra frame hop through the router, a `memcpy` of the reply. Small next to
   `fork` + `exec` (§5.2 charges 2 ms).
 
-If 4 MB per command proves too much, the alternative is to fork the sub-brokers from the
-unsandboxed router instead of exec'ing them. Pages are then shared copy-on-write, and there is
-no dyld cost. The price is that a forked sub-broker inherits every descriptor the router holds,
-including the server channel, other sub-brokers' channels and other commands' opened grants,
-and must close all of them before `sandbox_init`. An open descriptor bypasses Seatbelt, so one
-missed close is a grant leak. Exec gives a clean image by construction (every descriptor is
-`CLOEXEC`), so it is the default; fork is the fallback, and needs a test that lists each
-sub-broker's open descriptors.
+Forking the sub-brokers from the unsandboxed router instead of exec'ing them would share pages
+copy-on-write and skip dyld. It was rejected (§10): a forked sub-broker inherits every
+descriptor the router holds, including the server channel, other sub-brokers' channels and
+other commands' opened grants, and must close all of them before `sandbox_init`. An open
+descriptor bypasses Seatbelt, so one missed close is a grant leak. Exec gives a clean image by
+construction (every descriptor is `CLOEXEC`).
 
 ## 7. Open questions
 
 - **Q1. Start time and memory, measured.** N = 2, 8, 32 on an M-series Mac and on the macOS CI
-  runner: wall time to `READY`, and each sub-broker's footprint. Decide whether 32 is
-  acceptable or whether macOS needs a lower command cap.
+  runner: wall time to `READY`, and each sub-broker's footprint. Measured in phase 1 and
+  recorded here. The cap stays 32 (§10); revisit only if the measurement is far from the
+  estimate.
 - **Q2. Reaping a dead sub-broker's jobs.** The router could kill the process groups of a dead
   sub-broker's jobs. Each sub-broker would report `STARTED {id, pgid}`, and the router would
   `killpg` them on NOTE_EXIT of that sub-broker. Two problems:
@@ -231,8 +237,8 @@ sub-broker's open descriptors.
   - once the sub-broker is dead, nobody reaps the job. Its pid can be reused after it exits,
     so a late `killpg` can hit an unrelated group.
 
-  Proposed: not in phase 1. Keep the narrowed limit and its report line.
-- **Q3. Linux.** Should Linux adopt the router for uniformity? Proposed: no. Linux's per-child
+  Decided: not in phase 1. Keep the narrowed limit and its report line.
+- **Q3. Linux.** Should Linux adopt the router for uniformity? Decided: no. Linux's per-child
   domain is already per command, and PDEATHSIG gives the stronger lifetime guarantee. The router
   would add processes for no gain.
 
@@ -253,13 +259,17 @@ sub-broker's open descriptors.
   other commands keep working;
 - a sub-broker `REFUSED` (an unsafe path for one command) refuses the whole start, naming that
   command;
-- one command: exactly one broker process, as today;
-- the router cannot exec or fork after `READY` (a test hook that tries both, `EPERM`);
+- one command: exactly one broker process, as today; the whole suite runs once with one
+  command and once with several, so both macOS code paths are covered;
+- the test hooks' `PROBE` frames reach the server through the router (the existing probe
+  cases pass unchanged with several commands);
+- the router cannot exec, fork or open any path after `READY` (a test hook that tries each,
+  `EPERM`);
 - `hull inspect` on macOS prints per-command authority.
 
-Unit (`test_exec_broker_macos`): the one-command re-encoding of a policy entry round-trips
-through `hl_exec_policy_validate` and matches the original entry field for field; the router's
-profile text has no `process-exec` and no `process-fork`.
+Unit (`test_exec_broker_macos`): each one-command slice passes `hl_exec_policy_validate`, and
+its entry bytes are identical to that entry in the original policy; the router's profile text
+has no `process-exec`, no `process-fork` and no file rule.
 
 ## 9. Phasing and compatibility
 
@@ -267,8 +277,22 @@ profile text has no `process-exec` and no `process-fork`.
    tests above. One PR, macOS only. CHANGELOG under **Security**: on macOS each command now runs
    in its own sandbox; a command that relied on another command's grants (never documented as
    a guarantee) loses them.
-2. **Phase 2 (only if Q2 is resolved):** reaping a dead sub-broker's jobs.
+2. **Phase 2 (only if Q2 is reopened):** reaping a dead sub-broker's jobs.
 
 No manifest, frame or server change. Linux behaviour and encodings are byte-for-byte unchanged.
 `exec_broker.md` §6.4 and §7 get updated in phase 1, and §15.6's interim proposal is marked as
 superseded.
+
+## 10. Decisions (review, 2026-11-26)
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Approach | C, router plus one sub-broker per command (§4); A, B and D rejected (§3) |
+| 2 | How a sub-broker starts | exec of this binary (clean image), not fork (§6) |
+| 3 | An app with one command | keeps today's single broker; the router starts at two commands (§4.1) |
+| 4 | A SIGKILLed sub-broker's running jobs | not reaped in phase 1; documented, narrowed limit (§4.4, Q2) |
+| 5 | macOS command cap | 32, as on Linux; Q1 measures it in phase 1 |
+| 6 | Linux | unchanged (Q3) |
+| 7 | Policy given to a sub-broker | the original entry bytes behind a one-command header, never re-encoded (§4.2) |
+| 8 | Router after `READY` | no exec, no fork, no file rule; tested (§4.2, §8) |
+| 9 | Test-hook `PROBE` frames | forwarded by the router (§8) |
