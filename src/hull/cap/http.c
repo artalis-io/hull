@@ -34,14 +34,15 @@
 /* ── Host allowlist check ────────────────────────────────────────── */
 
 int hl_http_check_host(const HlHttpConfig *cfg,
-                        const char *host, size_t host_len)
+                        const char *host, size_t host_len, int port)
 {
     if (!cfg || !host)
         return -1;
     /* manifest.hosts patterns: exact (case-insensitive) + "*" + "*.suffix"
      * glob + CIDR (IP-literal hosts only) + "$VAR" env refs. Shared with
-     * ws.connect (same cfg) and smtp.send (§2.8). */
-    return hl_host_match_any_env_n(cfg->allowed_hosts, cfg->count, host, host_len)
+     * ws.connect (same cfg) and smtp.send (§2.8). A "host:port" entry
+     * admits only @p port, the one the request dials (#1227). */
+    return hl_host_match_any_env_n(cfg->allowed_hosts, cfg->count, host, host_len, port)
            ? 0 : -1;
 }
 
@@ -51,8 +52,15 @@ int hl_http_url_denied(const HlHttpConfig *cfg, const char *url,
     KlUrl parsed;
     if (!out || !url || kl_url_parse(url, &parsed) != 0)
         return 0;
-    if (cfg && hl_http_check_host(cfg, parsed.host, parsed.host_len) == 0)
+    if (cfg && hl_http_check_host(cfg, parsed.host, parsed.host_len, parsed.port) == 0)
         return 0;
+    int ported = 0;
+    char var[128];
+    for (int i = 0; cfg && i < cfg->count && !ported; i++) {
+        const char *pat = cfg->allowed_hosts[i];
+        if (pat && hl_env_ref(pat, var, sizeof var)) pat = getenv(var);
+        ported = pat && hl_host_pattern_has_port(pat);
+    }
     size_t n = parsed.host_len < sizeof out->host - 1 ? parsed.host_len
                                                        : sizeof out->host - 1;
     for (size_t i = 0; i < n; i++) {
@@ -60,8 +68,15 @@ int hl_http_url_denied(const HlHttpConfig *cfg, const char *url,
         out->host[i] = (c > 0x20 && c < 0x7f && c != '\'') ? (char)c : '?';
     }
     out->host[n] = '\0';
+    /* With a "host:port" entry, "host 'x' is not in manifest.hosts" reads
+     * false when x is listed on another port: name the port dialled. */
+    if (ported && parsed.port > 0)
+        snprintf(out->shown, sizeof out->shown,
+                 strchr(out->host, ':') ? "[%s]:%d" : "%s:%d",
+                 out->host, parsed.port);
+    else
+        snprintf(out->shown, sizeof out->shown, "%s", out->host);
     out->unset_ref[0] = '\0';
-    char var[128];
     for (int i = 0; cfg && i < cfg->count; i++) {
         const char *pat = cfg->allowed_hosts[i];
         if (!pat || !hl_env_ref(pat, var, sizeof var)) continue;
@@ -216,7 +231,7 @@ int hl_http_redirect_allowed(const char *next_url, void *data)
     const HlHttpRedirectGuard *g = (const HlHttpRedirectGuard *)data;
     KlUrl parsed;
     if (!g || !g->cfg || !next_url || kl_url_parse(next_url, &parsed) != 0 ||
-        hl_http_check_host(g->cfg, parsed.host, parsed.host_len) != 0) {
+        hl_http_check_host(g->cfg, parsed.host, parsed.host_len, parsed.port) != 0) {
         redirect_refused(next_url, "host",
                          "redirect to a host outside manifest.hosts refused");
         return -1;
@@ -345,7 +360,7 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
         return -1;
 
     /* Check host allowlist */
-    if (hl_http_check_host(cfg, parsed.host, parsed.host_len) != 0) {
+    if (hl_http_check_host(cfg, parsed.host, parsed.host_len, parsed.port) != 0) {
         ShJsonWriter w = hl_audit_begin("http.request");
         sh_json_write_kv_string(&w, "method", method);
         char red_url[512];   /* no userinfo, query or fragment (audit 17) */

@@ -16,6 +16,7 @@
  */
 
 #include "hull/manifest.h"
+#include "hull/host_match.h"
 #include "hull/utils/alloc.h"
 #include "hull/utils/env_ref.h"   /* hl_env_ref, for hl_manifest_check_env_refs */
 #include <sh_seal_arena.h>
@@ -321,6 +322,32 @@ static int check_refs(const HlManifest *m, const char *field,
     return 0;
 }
 
+/* Every literal entry of a host list must be a well-formed pattern (#1227:
+ * a "host:port" port is 1-65535, IPv6 takes one only in brackets). A
+ * malformed entry matches nothing at run time; refusing it at load says why.
+ * A "$VAR" entry is resolved, and so read, at match time. With @p no_port a
+ * port is refused too (a list matched against peer addresses). */
+static int check_patterns(const char *field, const char *const *vals, int n,
+                          int no_port, char *err, size_t err_size)
+{
+    char var[128];
+    for (int i = 0; i < n; i++) {
+        if (!vals[i] || hl_env_ref(vals[i], var, sizeof var)) continue;
+        const char *why = NULL;
+        if (!hl_host_pattern_valid(vals[i]))
+            why = "is not a host pattern (a port is 1-65535; an IPv6 address "
+                  "takes one only in brackets, \"[::1]:8081\")";
+        else if (no_port && hl_host_pattern_has_port(vals[i]))
+            why = "names a port, which a peer address has none of here";
+        if (!why) continue;
+        if (err && err_size)
+            snprintf(err, err_size, "manifest: \"%s\" in %s %s",
+                     vals[i], field, why);
+        return -1;
+    }
+    return 0;
+}
+
 int hl_manifest_check_env_refs(const HlManifest *m, char *err, size_t err_size)
 {
     if (err && err_size) err[0] = '\0';
@@ -360,6 +387,18 @@ int hl_manifest_check_env_refs(const HlManifest *m, char *err, size_t err_size)
                    m->ssh.user_count, err, err_size) != 0 ||
         check_refs(m, "ssh.tunnel.hosts", m->ssh.tunnel.hosts,
                    m->ssh.tunnel.host_count, err, err_size) != 0)
+        return -1;
+    if (check_patterns("hosts", m->hosts, m->hosts_count, 0, err, err_size) != 0 ||
+        check_patterns("databases.dynamic.hosts", m->databases.dynamic.hosts,
+                       m->databases.dynamic.host_count, 0, err, err_size) != 0 ||
+        check_patterns("kv.dynamic.hosts", m->kv.dynamic.hosts,
+                       m->kv.dynamic.host_count, 0, err, err_size) != 0 ||
+        check_patterns("ssh.connect.hosts", m->ssh.connect.hosts,
+                       m->ssh.connect.host_count, 0, err, err_size) != 0 ||
+        check_patterns("ssh.tunnel.hosts", m->ssh.tunnel.hosts,
+                       m->ssh.tunnel.host_count, 0, err, err_size) != 0 ||
+        check_patterns("limits.trusted_proxies", m->limits.trusted_proxies,
+                       m->limits.trusted_proxy_count, 1, err, err_size) != 0)
         return -1;
     return 0;
 }

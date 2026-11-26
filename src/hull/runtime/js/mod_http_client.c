@@ -293,11 +293,11 @@ static JSValue js_http_throw_denied(JSContext *ctx, const char *what,
 {
     if (d->unset_ref[0])
         JS_ThrowTypeError(ctx, "%s: host '%s' is not in manifest.hosts (its "
-                          "entry %s names an unset variable)", what, d->host,
+                          "entry %s names an unset variable)", what, d->shown,
                           d->unset_ref);
     else
         JS_ThrowTypeError(ctx, "%s: host '%s' is not in manifest.hosts",
-                          what, d->host);
+                          what, d->shown);
     JSValue e = JS_GetException(ctx);
     JSValue h = JS_NewString(ctx, d->host);
     if (JS_IsException(h)) {

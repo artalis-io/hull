@@ -1968,6 +1968,40 @@ JS VM runs with the defaults. The request body size is capped separately by
 `--body-max-size` (default 1 MiB; streaming multipart routes have their own
 `max_total_size`).
 
+### Outbound host allowlist (`manifest.hosts`)
+
+`http.fetch` and the sync `http.*` calls, `ws.connect` and `smtp.send` reach
+only a host `manifest.hosts` admits; `databases.dynamic.hosts`,
+`kv.dynamic.hosts` and the `ssh` host lists use the same patterns. An entry is:
+
+| Entry | Admits |
+|---|---|
+| `"api.example.com"` | that host (case-insensitive), any port |
+| `"*.example.com"` | any subdomain, at any depth; not the apex |
+| `"*"` | any host |
+| `"10.0.0.0/8"`, `"2001:db8::/32"` | an IP literal in the range (never a DNS name) |
+| `"$VAR"`, `"${VAR}"` | the value of a variable in `env` or `secrets`, read at each call |
+
+Any of them may name the **one port it admits**: `"127.0.0.1:8081"`,
+`"*.internal:9000"`, `"*:443"`, `"10.0.0.0/8:5432"`, and for IPv6, in brackets,
+`"[::1]:8081"` or `"[2001:db8::/32]:443"` (a bare IPv6 entry has no port). The
+port checked is the one the call dials: the URL's, else its scheme's (80 for
+`http` / `ws`, 443 for `https` / `wss`); for `db.open` / `kv.open` the DSN's,
+else the backend's (Postgres 5432, MySQL 3306, Valkey 6379); for `smtp.send`
+its `port`. An entry without a port admits every port, so `"127.0.0.1"`
+reaches every service on loopback; to let an app call one local service, name
+its port. A port must be 1-65535 (decimal, no leading zero): a malformed one
+refuses the app at load, naming the entry. `limits.trusted_proxies` takes no
+port. A refused call names the port when an entry has one
+(`host '127.0.0.1:5432' is not in manifest.hosts`).
+
+```lua
+app.manifest({
+    modules = { "hull/http-client@1", "hull/http-server@1" },
+    hosts = { "127.0.0.1:8081", "api.example.com" },   -- the sidecar, one API
+})
+```
+
 ### Outbound HTTP timeout (`hull/http-client`)
 
 Every outbound request - the async `http.async.get` / `post` / `put` / `patch` /

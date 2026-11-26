@@ -227,7 +227,7 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
         return NULL;
 
     /* Host allowlist */
-    if (hl_http_check_host(http_cfg, parsed.host, parsed.host_len) != 0) {
+    if (hl_http_check_host(http_cfg, parsed.host, parsed.host_len, parsed.port) != 0) {
         ShJsonWriter w = hl_audit_begin("http.fetch");
         sh_json_write_kv_string(&w, "method", method);
         char red_url[512];   /* no userinfo, query or fragment (audit 17) */

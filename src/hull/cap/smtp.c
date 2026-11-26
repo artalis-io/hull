@@ -79,12 +79,13 @@ static int has_crlf(const char *s)
 
 /* ── Host allowlist check ────────────────────────────────────────── */
 
-int hl_smtp_check_host(const HlSmtpConfig *cfg, const char *host)
+int hl_smtp_check_host(const HlSmtpConfig *cfg, const char *host, int port)
 {
     if (!cfg || !host)
         return -1;
-    /* Same manifest.hosts matcher as http.fetch: exact + glob + CIDR + $VAR. */
-    return hl_host_match_any_env(cfg->allowed_hosts, cfg->host_count, host)
+    /* Same manifest.hosts matcher as http.fetch: exact + glob + CIDR + $VAR,
+     * and a "host:port" entry admits only that port (#1227). */
+    return hl_host_match_any_env_port(cfg->allowed_hosts, cfg->host_count, host, port)
            ? 0 : -1;
 }
 
@@ -683,7 +684,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
         if (err_msg) *err_msg = "validation_failed";
         return -1;
     }
-    if (hl_smtp_check_host(cfg, msg->host) != 0) {
+    if (hl_smtp_check_host(cfg, msg->host, msg->port) != 0) {
         log_warn("smtp: host '%s' not in allowlist", msg->host);
         if (err_msg) *err_msg = "host_not_allowed";
         hl_smtp_audit_denied(msg);

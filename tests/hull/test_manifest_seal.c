@@ -454,6 +454,59 @@ UTEST(manifest_seal, write_to_sealed_module_set_faults)
     sh_seal_arena_destroy(&arena);
 }
 
+/* #1227: a host entry may name a port; a malformed one is refused at load,
+ * naming the field, and limits.trusted_proxies takes none. */
+UTEST(manifest_host_patterns, ports_validated_at_load)
+{
+    HlAllocator alloc = {0};
+    HlManifest m;
+    build_fixture(&m, &alloc);
+    char err[512];
+    EXPECT_EQ(0, hl_manifest_check_env_refs(&m, err, sizeof err));
+
+    const char *saved = m.hosts[0];
+    m.hosts[0] = "127.0.0.1:8081";
+    EXPECT_EQ(0, hl_manifest_check_env_refs(&m, err, sizeof err));
+    m.hosts[0] = "[::1]:8081";
+    EXPECT_EQ(0, hl_manifest_check_env_refs(&m, err, sizeof err));
+    m.hosts[0] = "127.0.0.1:0";
+    EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
+    EXPECT_TRUE(strstr(err, "\"127.0.0.1:0\" in hosts") != NULL);
+    m.hosts[0] = "api.example.com:99999";
+    EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
+    m.hosts[0] = saved;
+
+    /* databases.dynamic is empty in the fixture: one literal entry, taken
+     * out again before the free. The other three lists hold allocated
+     * entries; each is swapped and put back. */
+    m.databases.dynamic.hosts[0] = "db.local";
+    m.databases.dynamic.host_count = 1;
+    const char **fields[] = {
+        &m.databases.dynamic.hosts[0], &m.kv.dynamic.hosts[0],
+        &m.ssh.connect.hosts[0], &m.ssh.tunnel.hosts[0],
+    };
+    for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) {
+        const char *s = *fields[i];
+        *fields[i] = "db.local:5432";
+        EXPECT_EQ(0, hl_manifest_check_env_refs(&m, err, sizeof err));
+        *fields[i] = "db.local:x";
+        EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
+        *fields[i] = s;
+    }
+
+    m.limits.trusted_proxies[0] = "10.0.0.0/8";
+    m.limits.trusted_proxy_count = 1;
+    EXPECT_EQ(0, hl_manifest_check_env_refs(&m, err, sizeof err));
+    m.limits.trusted_proxies[0] = "10.0.0.1:443";
+    EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
+    EXPECT_TRUE(strstr(err, "limits.trusted_proxies") != NULL);
+    m.limits.trusted_proxies[0] = NULL;
+    m.limits.trusted_proxy_count = 0;
+    m.databases.dynamic.hosts[0] = NULL;
+    m.databases.dynamic.host_count = 0;
+    hl_manifest_free(&m);
+}
+
 /* A "$VAR" reads the environment on the app's behalf, so it must name a
  * variable the manifest declares - in secrets, or in env. */
 UTEST(manifest_env_refs, a_reference_must_name_a_declared_variable)

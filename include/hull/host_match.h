@@ -16,6 +16,12 @@
  *                      Both the network and the host must be canonical IP
  *                      literals (see hl_host_ip_canonical; audit 42).
  *
+ * Any of them may name the one port it admits (#1227): "127.0.0.1:8081",
+ * "*.internal:9000", "*:443", "10.0.0.0/8:5432", and for IPv6 only in
+ * brackets, "[::1]:8081", "[2001:db8::/32]:443". A pattern with no port
+ * admits every port. A ported pattern never matches a check that has no port
+ * (the port-less entry points below, port 0).
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -37,8 +43,21 @@ int hl_host_ip_canonical(const char *host);
  * against every pattern, "*" included. */
 int hl_host_literal_ok(const char *host);
 
-/* 1 if @p host matches @p pattern, else 0. NULL-safe (returns 0). A host that
+/* 1 if @p pattern is well formed (a port, when given, is 1-65535, decimal,
+ * no leading zero; IPv6 takes one only in brackets), else 0. A malformed
+ * pattern matches nothing; the manifest check refuses one at load. */
+int hl_host_pattern_valid(const char *pattern);
+
+/* 1 if @p pattern is well formed and names a port. */
+int hl_host_pattern_has_port(const char *pattern);
+
+/* 1 if @p host on @p port matches @p pattern, else 0 (@p port 0: unknown,
+ * which a ported pattern never matches). NULL-safe. A host that
  * hl_host_literal_ok rejects never matches. */
+int hl_host_match_port(const char *pattern, const char *host, int port);
+
+/* hl_host_match_port with no port: for a check with no destination port
+ * (a peer address: limits.trusted_proxies). */
 int hl_host_match(const char *pattern, const char *host);
 
 /* 1 if @p host matches any of the @p n patterns, else 0. */
@@ -52,11 +71,17 @@ int hl_host_match_any(const char *const *patterns, int n, const char *host);
  * so it works whether or not the manifest was sealed. */
 int hl_host_match_any_env(const char *const *patterns, int n, const char *host);
 
-/* As hl_host_match_any_env, but @p host is ptr + length (not necessarily
- * NUL-terminated, as from a URL parse). Copies into a bounded stack buffer
- * first; an implausibly long host (>= 256 bytes) never matches (fail closed). */
+/* hl_host_match_any_env for a destination on @p port: what every outbound
+ * check calls (http / ws / smtp / ssh / db.open / kv.open). */
+int hl_host_match_any_env_port(const char *const *patterns, int n,
+                               const char *host, int port);
+
+/* As hl_host_match_any_env_port, but @p host is ptr + length (not
+ * necessarily NUL-terminated, as from a URL parse). Copies into a bounded
+ * stack buffer first; an implausibly long host (>= 256 bytes) never matches
+ * (fail closed). */
 int hl_host_match_any_env_n(const char *const *patterns, int n,
-                            const char *host, size_t host_len);
+                            const char *host, size_t host_len, int port);
 
 /*
  * The host of a network DSN (scheme://[userinfo@]host[:port][/...]), for the
@@ -72,6 +97,11 @@ int hl_host_match_any_env_n(const char *const *patterns, int n,
  *   - a port that is not all digits, or any control byte in the authority.
  */
 int hl_dsn_host(const char *dsn, char *buf, size_t bufsz);
+
+/* hl_dsn_host, plus the authority's port in *@p port (0 when the DSN names
+ * none: the caller applies its scheme's default). A port outside 1-65535 is
+ * refused (returns 0). */
+int hl_dsn_host_port(const char *dsn, char *buf, size_t bufsz, int *port);
 
 /*
  * The percent-decoded value of the @p nth (0-based) `key=value` pair named

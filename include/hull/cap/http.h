@@ -114,17 +114,22 @@ int hl_http_redirect_allowed(const char *next_url, void *data);
 int hl_http_chain_remaining_ms(uint64_t deadline_ms, uint64_t now_ms);
 
 /**
- * @brief Check if a hostname is in the allowlist.
+ * @brief Check if a hostname, dialled on @p port, is in the allowlist.
+ * A "host:port" entry admits only that port (#1227); pass the port the
+ * request dials (KlUrl.port: the URL's, or its scheme's default).
  * @return 0 if allowed, -1 if denied.
  */
 int hl_http_check_host(const HlHttpConfig *cfg,
-                        const char *host, size_t host_len);
+                        const char *host, size_t host_len, int port);
 
 /** Why manifest.hosts refused an outbound call (gap 3). */
 typedef struct {
     char host[256];        /**< the refused host, non-printable bytes as '?' */
     char unset_ref[136];   /**< a "$VAR" allowlist entry whose variable is
                             *   unset or empty, "" when there is none */
+    char shown[272];       /**< what a message names: the host, or
+                            *   "host:port" ("[v6]:port") when an allowlist
+                            *   entry names a port (#1227) */
 } HlHttpDenial;
 
 /**

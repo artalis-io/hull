@@ -115,8 +115,10 @@ void hl_smtp_audit_complete(const HlSmtpMessage *msg, const HlSmtpResult *r,
 
 /* ── Internal helpers (exposed for unit testing) ─────────────────── */
 
-/** Check if host is in cfg->allowed_hosts. Returns 0 if allowed, -1 if not. */
-int hl_smtp_check_host(const HlSmtpConfig *cfg, const char *host);
+/** Check if host, dialled on @p port, is in cfg->allowed_hosts (a
+ *  "host:port" entry admits only that port, #1227). Returns 0 if allowed,
+ *  -1 if not. */
+int hl_smtp_check_host(const HlSmtpConfig *cfg, const char *host, int port);
 
 /** Parse 3-digit SMTP response code from a line. Returns code or -1. */
 int hl_smtp_parse_response(const char *line, int len);
