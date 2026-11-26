@@ -164,6 +164,13 @@ int hl_exec_policy_at(const uint8_t *data, size_t len, int i, HlExecCmd *out);
 /* The command named @p name. 0 / -1 (no such command). */
 int hl_exec_policy_find(const uint8_t *data, size_t len,
                         const char *name, size_t name_len, HlExecCmd *out);
+/* A policy of the @p i th command alone: this policy's header with its
+ * count set to 1, then that command's entry bytes, copied unchanged (never
+ * re-encoded). The macOS router hands it to the command's own broker
+ * (docs/design/exec_broker_macos_isolation.md §4.2). *out is malloc'd; the
+ * caller frees it. 0 / -1 (no such command, or out of memory). */
+int hl_exec_policy_slice(const uint8_t *data, size_t len, int i,
+                         uint8_t **out, size_t *out_len);
 
 /* Iterate a string list (env pairs come as name, value, name, value...).
  * *cursor starts at the list pointer; returns the string or NULL at the

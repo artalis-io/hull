@@ -2725,15 +2725,20 @@ with it. That is the Linux backend (`cap/exec_broker_linux.c`); every host-speci
 broker's death-with-the-server setup, the extra leaf check, the binary format, the lock, the exit
 watch, the child's confine / filter / exec - is behind `hull/cap/exec_platform.h`, and
 `cap/exec_broker.c` holds the rest, the same on every host. The macOS backend
-(`cap/exec_broker_macos.c`) applies ONE Seatbelt profile to the broker, which every child inherits
-(macOS refuses a nested sandbox): deny default, `process-exec` of each declared binary by real
+(`cap/exec_broker_macos.c`) applies ONE Seatbelt profile to a broker, which every child inherits
+(macOS refuses a nested sandbox), so with two or more commands the broker is a ROUTER
+(`hl_exec_plat_router`, `router_start` in `cap/exec_broker.c`;
+docs/design/exec_broker_macos_isolation.md): it starts one broker per command (this binary, exec'd
+afresh, sent that command's original policy bytes via `hl_exec_policy_slice`), waits for each
+`READY`, then locks itself with no exec, no fork and no file rule, and forwards each matched call to
+the command's broker. Each broker's profile: deny default, `process-exec` of each declared binary by real
 path, `process-fork` only for the broker's own image (`process-path`, so a command gets EPERM from
 fork / vfork / posix_spawn; a command that is this hull binary is refused), reads of the system
 trees and `fs.read`, writes of `/dev/null` and `fs.write`, `AF_UNIX` only with `unix_sockets`; a
-64-bit Mach-O only; `execve` of the checked path. Its limits, logged at start as `exec: limit:`:
-the commands share the union of grants, and a broker killed with SIGKILL leaves its running
-commands (no PDEATHSIG; a kqueue watch on the server's pid and the channel's EOF take them on
-every other end). OpenBSD has no backend. `exec.run` parks like `hull.sleep` (attached or detached `HlAsyncCtx`, `hl_exec_op_start`);
+64-bit Mach-O only; `execve` of the checked path. Its limit, logged at start as `exec: limit:`:
+a command broker killed with SIGKILL leaves its running calls (no PDEATHSIG; a kqueue watch on
+its parent's pid and the channel's EOF take them on every other end, a SIGKILLed router
+included). OpenBSD has no backend. `exec.run` parks like `hull.sleep` (attached or detached `HlAsyncCtx`, `hl_exec_op_start`);
 the op's free sends `KILL`, so every cancel path stops the child; a broker lost while serving fails
 the waiting calls, and teardown stops it in step (1) while the loop is alive. Under `hull test` only
 stubs answer. `hull build` / `hull check` warn about risky commands (`hull/exec_lint.lua`; never a

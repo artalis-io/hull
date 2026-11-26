@@ -445,6 +445,14 @@ int hl_exec_plat_lock(HlExecBrokerCmd *cmds, int n, unsigned flags,
 #define __NR_pidfd_open 434
 #endif
 
+int hl_exec_plat_router(void) { return 0; }   /* a domain per child (§6.3) */
+
+int hl_exec_plat_router_lock(HlExecReport *r)
+{
+    hl_exec_report_set(r, "exec: no router on Linux");
+    return -1;
+}
+
 int hl_exec_plat_exit_watch(pid_t pid)
 {
     /* Readable the moment it exits (Linux 5.3+). */

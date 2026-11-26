@@ -1099,4 +1099,73 @@ UTEST(exec_child_audit53, a_search_only_ancestor_is_walked)
     rm_list(root, made);
 }
 
+/* ── One command's slice (the macOS router, exec_broker_macos_isolation.md) ── */
+
+static int build_three(HlExecBuf *b)
+{
+    static const char *const names[] = { "one", "two", "three" };
+    static const char *const paths[] = { "/usr/bin/true", "/bin/cat", "/usr/bin/env" };
+    hl_exec_b_init(b, NULL);
+    for (int i = 0; i < 3; i++) {
+        hl_exec_b_cmd(b, names[i], strlen(names[i]), paths[i], strlen(paths[i]),
+                      1000 * (i + 1), -1, -1, -1, i == 1, -1, NULL, 0);
+        hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);     /* env */
+        hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);     /* fs.read */
+        size_t m = hl_exec_b_count_begin(b);                     /* fs.write */
+        if (i == 2) hl_exec_b_str(b, S("/tmp/x"));
+        hl_exec_b_count_end(b, m, i == 2 ? 1 : 0);
+        m = hl_exec_b_count_begin(b);                            /* argv */
+        hl_exec_b_fixed(b, S("--"));
+        hl_exec_b_count_end(b, m, 1);
+    }
+    return hl_exec_b_finish(b);
+}
+
+UTEST(exec_policy_slice, each_command_alone_byte_for_byte)
+{
+    HlExecBuf b;
+    ASSERT_EQ(0, build_three(&b));
+    ASSERT_EQ(3, hl_exec_policy_count(b.data, b.len));
+    size_t entries = 0;
+    for (int i = 0; i < 3; i++) {
+        uint8_t *s = NULL;
+        size_t sl = 0;
+        ASSERT_EQ(0, hl_exec_policy_slice(b.data, b.len, i, &s, &sl));
+        char err[256] = "";
+        EXPECT_EQ(0, hl_exec_policy_validate(s, sl, err, sizeof err));
+        EXPECT_EQ(1, hl_exec_policy_count(s, sl));
+        EXPECT_EQ(0, memcmp(s, b.data, 4));           /* the same magic */
+        /* Its entry is the original's bytes: the slices, in order, are the
+         * whole policy after its header. */
+        ASSERT_TRUE(6 + entries + (sl - 6) <= b.len);
+        EXPECT_EQ(0, memcmp(s + 6, b.data + 6 + entries, sl - 6));
+        entries += sl - 6;
+        HlExecCmd orig, one;
+        ASSERT_EQ(0, hl_exec_policy_at(b.data, b.len, i, &orig));
+        ASSERT_EQ(0, hl_exec_policy_at(s, sl, 0, &one));
+        EXPECT_STREQ(orig.name, one.name);
+        EXPECT_STREQ(orig.path, one.path);
+        EXPECT_EQ(orig.timeout_ms, one.timeout_ms);
+        EXPECT_EQ(orig.flags, one.flags);
+        EXPECT_EQ(orig.n_fs_write, one.n_fs_write);
+        free(s);
+    }
+    EXPECT_EQ(b.len - 6, entries);
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_policy_slice, out_of_range_and_bad_input)
+{
+    HlExecBuf b;
+    ASSERT_EQ(0, build_three(&b));
+    uint8_t *s = NULL;
+    size_t sl = 0;
+    EXPECT_EQ(-1, hl_exec_policy_slice(b.data, b.len, 3, &s, &sl));
+    EXPECT_EQ(-1, hl_exec_policy_slice(b.data, b.len, -1, &s, &sl));
+    EXPECT_EQ(-1, hl_exec_policy_slice(b.data, 3, 0, &s, &sl));
+    EXPECT_EQ(-1, hl_exec_policy_slice(b.data, b.len, 0, NULL, &sl));
+    EXPECT_TRUE(s == NULL);
+    hl_exec_buf_free(&b);
+}
+
 UTEST_MAIN()

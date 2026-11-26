@@ -324,7 +324,8 @@ A manifest using `manifest` or `host` is refused by v0.26.0 (an unknown key), wh
 closed.
 
 **`hull inspect`** shows a command's whole authority: `host.read`, `host.write`,
-`manifest.fs.read`, `manifest.fs.write`, the scope of `host.unix_sockets`, and the macOS union.
+`manifest.fs.read`, `manifest.fs.write`, the scope of `host.unix_sockets`, and the system trees
+each platform adds.
 `hull agent overview` lists the same four lists per command (`host_read`, `host_write`,
 `manifest_fs_read`, `manifest_fs_write`).
 
@@ -376,8 +377,12 @@ it for a precise error, and the broker calls it again as the authority.
      │  fork + execveat(checked fd)          (macOS: execve(checked path))
      ▼
  child  (setsid; own Landlock domain; NNP; rlimits; PDEATHSIG; no process creation)
-        (macOS: the broker's Seatbelt profile, inherited; no process creation)
+        (macOS: its broker's Seatbelt profile, inherited; no process creation)
 ```
+
+On macOS an app with two or more commands has one more level: the broker is a ROUTER that
+starts one broker per command and forwards each call to it (§6.4,
+[exec_broker_macos_isolation.md](exec_broker_macos_isolation.md)).
 
 Everything that differs between kernels is behind one internal interface,
 `hull/cap/exec_platform.h`, one translation unit per host: the broker's death-with-the-server
@@ -672,10 +677,19 @@ directory. A command that legitimately needs one of them names it in `fs.read`.
 
 **macOS** (`cap/exec_broker_macos.c`). Measured on macOS 26 (arm64):
 
-- **One profile, the union.** macOS refuses a second sandbox in a sandboxed process:
+- **One broker per command.** macOS refuses a second sandbox in a sandboxed process:
   `sandbox_init` fails with `EPERM`. So a child cannot narrow itself after fork as on Linux
-  (§6.3). The broker applies ONE Seatbelt profile to itself before `READY`, and every child
-  inherits it:
+  (§6.3), and whatever profile a broker applies, its children inherit. With two or more
+  commands the broker becomes a ROUTER
+  ([exec_broker_macos_isolation.md](exec_broker_macos_isolation.md)): at `POLICY` it checks
+  every command as below, starts one broker per command (this binary again, a clean image),
+  sends each the `POLICY` head and that command's entry alone (its original bytes behind a
+  one-command header, `hl_exec_policy_slice`), waits for every `READY`, and only then locks
+  itself with `(deny default)` and `(allow signal (target children))`: no exec, no fork, no
+  file rule, only the descriptors it holds. It admits and matches each call, forwards it to
+  the command's broker and relays the reply. An app with one command keeps one broker. Each
+  broker applies ONE Seatbelt profile to itself before `READY`, the grants of its one command,
+  and every child inherits it:
   - deny by default; `file-read-metadata`;
   - reads of `/` itself (dyld reads it to find the shared cache, and a child aborts at start
     without it), `/usr`, `/bin`, `/sbin`, `/System`, `/private/etc`, `/private/var/db/dyld`,
@@ -690,16 +704,14 @@ directory. A command that legitimately needs one of them names it in `fs.read`.
   - `AF_UNIX` (`system-socket` of that domain, `network-outbound` to a unix socket) only when
     some command sets `host.unix_sockets`; no other network.
 
-  So every command gets the union of ALL the commands' grants: another's `host` and
-  `manifest.fs` grants, its `unix_sockets`, and `process-exec` of every declared binary. The
-  last means a command that calls `execve` itself can run another command's binary with any
-  arguments, outside that command's argv shape (the shape is matched by the broker, which that
-  exec does not go through). Nothing outside the declared grants and the fixed default set
-  above is added. The broker says so at start (`exec: limit: macOS runs every command in ONE
-  shared sandbox ...`) when the app declares more than one command, and `hull inspect` prints
-  the union as each command's effective authority on macOS. Per-command isolation on macOS
-  would need a broker per command, or a helper that applies each command's own profile before
-  its exec; not done.
+  So each command gets its own grants, its own `unix_sockets` and `process-exec` of its own
+  binary only, as on Linux. Until the router (v0.27.0 and before) every command got the union
+  of all the commands' grants and could exec every declared binary. A broker killed with
+  `SIGKILL` leaves its running calls (§7); the router reports it at start as `exec: limit: no
+  parent-death signal on macOS: a command's broker killed with SIGKILL leaves that command's
+  running calls ...`. A command broker lost while serving fails its waiting calls ("the
+  command broker is gone") and refuses later calls to its command; the other commands go on.
+  The router holds the admission caps for the tree; each command broker checks them again.
 - **No process creation, kept.** `(allow process-fork (process-path (param "SELF")))`: the
   fork right is filtered to the broker's own image. The broker forks; anything it execs gets
   `EPERM` from `fork`, `vfork` and `posix_spawn` (measured, and asserted by
@@ -792,6 +804,12 @@ there is narrower:
   under its `RLIMIT_CPU`, unable to fork, inside the Seatbelt profile. The waiting calls fail
   with "the command broker is gone". The broker reports it at start (`exec: limit: no
   parent-death signal on macOS`), and `e2e_exec_broker_macos.sh` asserts both sides of it.
+  With two or more commands the ROUTER is the broker the server sees, and a router killed with
+  `SIGKILL` takes every running command: each command broker sees the router go (EOF and a
+  kqueue watch on its pid) and kills its jobs. Only a command broker killed with `SIGKILL`
+  leaves running calls, that command's only; the router does not reap them (it would need to
+  signal its grandchildren; [exec_broker_macos_isolation.md](exec_broker_macos_isolation.md)
+  Q2).
 
 `--vm-thread`: the channel is watched by the loop thread, and the result is delivered as an
 async resume (an offloaded entry), so nothing new crosses threads.
@@ -847,8 +865,11 @@ async resume (an offloaded entry), so nothing new crosses threads.
   hsctl adopts `exec` only after both pass, alongside the abrupt-death and admission tests.
 - **macOS e2e** (`tests/e2e_exec_broker_macos.sh`, `make e2e-exec-broker-macos`, CI job
   `exec-broker-macos`): the same cases through `tests/fixtures/exec_probe_macos.c`, plus the
-  union of grants, the `exec: limit:` lines, this binary refused as a command, and the broker's
-  `SIGKILL` leaving the command (§7). The raw-frames admission test runs on both hosts.
+  isolation between commands (another command's grant, `unix_sockets` and binary refused),
+  one broker for one command and a router with one broker each for two, the `exec: limit:`
+  lines, this binary refused as a command, the broker's `SIGKILL` leaving the command, the
+  router's taking it and a command broker's leaving only its call (§7). The raw-frames
+  admission test runs on both hosts.
 - **Unit:** `test_exec` covers the slot matcher (every rule, boundary lengths, `repeat`) and
   the policy codec over untrusted bytes. Each host backend has its own suite:
   `test_exec_broker_linux` (the ELF / `PT_INTERP` reader, file capabilities, the child filter,
@@ -867,7 +888,7 @@ row's guarantees are a plan, not a claim.
 | Linux, native, Landlock ABI 6+ | PR 2 | Landlock + seccomp (raw syscalls) | every row of §6.5: `tests/e2e_exec_broker.sh` on x86_64 (ABI 10) and aarch64 (ABI 8); §8 acceptance passed on spark-7468 (GB10, `hs-metrics`, 2026-11-25) |
 | Linux, cosmo APE | planned | as native, once the APE build carries the broker | none; refused at start (no broker) unless `--allow-degraded-sandbox` |
 | Linux, Landlock below ABI 6 | PR 2 | as above, minus the missing rights | refused unless `--allow-degraded-sandbox`, which names what is missing |
-| macOS | PR 3 | one Seatbelt profile (§6.4) | `tests/e2e_exec_broker_macos.sh` and `test_exec_broker_macos` on macOS 26 (arm64) and the `macos-15` runner: no process creation, exec only of the declared binaries, no home directory or network; the union of grants and a broker killed with `SIGKILL` leaving its commands (§7) are limits, reported at start |
+| macOS | PR 3; per-command brokers #1218 | a Seatbelt profile per command (§6.4) | `tests/e2e_exec_broker_macos.sh` and `test_exec_broker_macos` on macOS 26 (arm64) and the `macos-15` runner: no process creation, exec only of the command's own binary, its own grants, no home directory or network; a command broker killed with `SIGKILL` leaving its running calls (§7) is a limit, reported at start |
 | OpenBSD | not supported (§6.4) | none (an OpenBSD backend is not written) | refused unless `--allow-degraded-sandbox` |
 | Windows (cosmo APE) | not supported | none | **refused at app load**, even with `--allow-degraded-sandbox` |
 | FreeBSD / NetBSD | not supported | none (no kernel sandbox Hull uses) | refused unless `--allow-degraded-sandbox` |
@@ -1193,7 +1214,9 @@ The explicit behaviour when isolation is unavailable: **refuse at start**. A wea
 well-defined guarantee may run under `--allow-degraded-sandbox`, one `exec: degraded:` line
 per guarantee lost (§6.5's rule). Never accept a field and enforce less.
 
-**The macOS union deserves the same rule.** It is documented as a shared trust domain (§3.1,
+**Superseded:** per-command brokers removed the macOS union (#1218,
+[exec_broker_macos_isolation.md](exec_broker_macos_isolation.md)); the interim rule below was
+not built. **The macOS union deserves the same rule.** It is documented as a shared trust domain (§3.1,
 §6.4: one profile, so every command reaches every command's grants and may exec every
 declared binary), shown by `hull inspect` and logged at start (`exec: limit:`), and it runs.
 Per-command isolation on macOS is tracked in issue #1218, which has its own design; the

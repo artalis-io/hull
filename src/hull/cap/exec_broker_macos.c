@@ -4,8 +4,8 @@
  *
  * macOS refuses a second sandbox in a sandboxed process (sandbox_init
  * fails with EPERM), so a child cannot narrow itself after fork as it does
- * on Linux. The broker applies ONE Seatbelt profile to itself, the union of
- * every command's grants, and every child inherits it:
+ * on Linux. A broker applies ONE Seatbelt profile to itself, the union of
+ * its commands' grants, and every child inherits it:
  *
  *   - deny by default;
  *   - process-exec of each declared binary by its real path, nothing else;
@@ -16,9 +16,14 @@
  *     writes of /dev/null and each command's fs.write; AF_UNIX sockets
  *     only when a command sets unix_sockets; no other network.
  *
- * What macOS cannot give (reported at start as "exec: limit:" lines):
- * per-command grants (one command sees another's fs.read / fs.write), and
- * a child outliving a broker killed with SIGKILL (no PR_SET_PDEATHSIG).
+ * With two or more commands the broker is a ROUTER (exec_broker.c): it
+ * starts one broker per command, each applying the profile below for its one
+ * command, then locks itself with hl_exec_macos_router_profile. So the
+ * "union" is always one command's own grants
+ * (docs/design/exec_broker_macos_isolation.md).
+ *
+ * What macOS cannot give (reported at start as an "exec: limit:" line): a
+ * child outliving a broker killed with SIGKILL (no PR_SET_PDEATHSIG).
  * A child cannot fork, so that is at most one process per call in flight,
  * still under its CPU limit. Every other end of the broker - the server
  * gone (a kqueue watch on its pid, and the channel's EOF), a teardown, a
@@ -315,11 +320,8 @@ int hl_exec_plat_lock(HlExecBrokerCmd *cmds, int n, unsigned flags,
         hl_exec_report_line(r, "exec: no sandbox (--no-sandbox)");
         return 0;
     }
-    if (n > 1)
-        hl_exec_report_line(r, "exec: limit: macOS runs every command in ONE "
-                            "shared sandbox: each gets the union of all commands' "
-                            "host and manifest grants, and may exec any declared "
-                            "binary (`hull inspect` shows the union)");
+    /* Several commands under a sandbox are routed, one broker each
+     * (hl_exec_plat_router); here n is 1, or the sandbox is off. */
     hl_exec_report_line(r, "exec: limit: no parent-death signal on macOS: a "
                         "broker killed with SIGKILL leaves a running command "
                         "until it exits (it cannot fork; its CPU limit holds)");
@@ -339,6 +341,35 @@ int hl_exec_plat_lock(HlExecBrokerCmd *cmds, int n, unsigned flags,
     }
     hl_exec_macos_profile_free(profile, params);
     return rc == 0 ? 0 : -1;
+}
+
+/* ── The router (docs/design/exec_broker_macos_isolation.md §4.2) ──── */
+
+/* Everything the router uses once locked is a descriptor it holds (the
+ * server's channel, each command's broker channel, kqueue watches): no file
+ * rule, no exec, no fork. It may signal its children (the command brokers). */
+const char hl_exec_macos_router_profile[] =
+    "(version 1)\n"
+    "(deny default)\n"
+    "(allow signal (target children))\n";
+
+int hl_exec_plat_router(void) { return 1; }
+
+int hl_exec_plat_router_lock(HlExecReport *r)
+{
+    const char *const params[] = { NULL };
+    char *err = NULL;
+    if (sandbox_init_with_parameters(hl_exec_macos_router_profile, 0, params, &err) != 0) {
+        hl_exec_report_set(r, "exec: the command router's Seatbelt profile could not "
+                           "be applied: %s", err ? err : strerror(errno));
+        if (err) sandbox_free_error(err);
+        return -1;
+    }
+    hl_exec_report_line(r, "exec: limit: no parent-death signal on macOS: a "
+                        "command's broker killed with SIGKILL leaves that "
+                        "command's running calls until they exit (they cannot "
+                        "fork; their CPU limit holds)");
+    return 0;
 }
 
 int hl_exec_plat_exit_watch(pid_t pid)

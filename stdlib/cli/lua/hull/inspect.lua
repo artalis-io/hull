@@ -257,39 +257,14 @@ local function main()
             end
             -- Effective authority (docs/design/exec_broker.md §3.1, §6.4): what
             -- each command can actually reach, per platform, not only what it
-            -- declares.
-            local u = { exec = {}, hr = {}, hw = {}, mr = {}, mw = {}, unix = false }
-            local function add(set, l)
-                for _, v in ipairs(strs(l)) do set[#set + 1] = v end
-            end
-            for _, name in ipairs(names) do
-                local c = m.exec[name]
-                if type(c) ~= "table" then c = {} end
-                u.exec[#u.exec + 1] = esc(c.path)
-                local h = host_of(c)
-                add(u.hr, h.read); add(u.hw, h.write)
-                local cf = type(c.manifest) == "table" and type(c.manifest.fs) == "table"
-                           and c.manifest.fs or {}
-                add(u.mr, cf.read); add(u.mw, cf.write)
-                if unix_of(c) then u.unix = true end
-            end
-            local function show(label, l)
-                if #l > 0 then print("      " .. label .. table.concat(l, ", ")) end
-            end
-            print("  Effective authority:")
+            -- declares. Each command has its own sandbox on both (macOS: a
+            -- broker per command, docs/design/exec_broker_macos_isolation.md).
+            print("  Effective authority (each command its own sandbox):")
             print("    Linux: each command exactly as listed above, plus reads of /usr /lib")
             print("      /lib64 /etc /proc /sys /dev.")
-            print("    macOS: ONE sandbox for all commands. EVERY command gets all of:")
-            show("exec:              ", u.exec)
-            print("                         (a command that execs one of these itself is not held")
-            print("                         to that command's argv)")
-            show("host.read:         ", u.hr)
-            show("host.write:        ", u.hw)
-            show("manifest.fs.read:  ", u.mr)
-            show("manifest.fs.write: ", u.mw)
-            print("      unix sockets:      " .. (u.unix and "yes (any pathname socket)" or "no"))
-            print("      plus: the metadata (stat, readlink) of EVERY path; reads of / /usr /bin")
-            print("      /sbin /System /private/etc, dyld's cache, /Library/Preferences/Logging,")
+            print("    macOS: each command exactly as listed above, plus the metadata (stat,")
+            print("      readlink) of every path; reads of / /usr /bin /sbin /System")
+            print("      /private/etc, dyld's cache, /Library/Preferences/Logging,")
             print("      /dev/urandom /dev/random /dev/zero; sysctl reads; user lookups")
             print("    Both: host.write also reads and issues ioctls on its paths;")
             print("      manifest.fs.write writes, truncates and creates, but neither reads")

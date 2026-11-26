@@ -107,6 +107,19 @@ int hl_exec_plat_binary_check(int fd, const char *real, char *interp,
 int hl_exec_plat_lock(HlExecBrokerCmd *cmds, int n, unsigned flags,
                       const char *self, HlExecReport *r);
 
+/* Does this host give each command a broker of its own when the policy has
+ * two or more (docs/design/exec_broker_macos_isolation.md)? macOS: 1 - a
+ * sandboxed process cannot narrow itself, so the broker becomes a router
+ * that starts one broker per command before it locks. Linux: 0 - each child
+ * gets its own domain from the one broker (§6.3). */
+int hl_exec_plat_router(void);
+
+/* Lock the router once every command's broker is ready: no exec, no fork,
+ * no file access; it keeps the descriptors it holds and may signal its
+ * children. 0, or -1 with @p r set to why. Only called when
+ * hl_exec_plat_router() is 1. */
+int hl_exec_plat_router_lock(HlExecReport *r);
+
 /* A descriptor that turns readable once @p pid exits, so its reply goes
  * out at once; -1 when the host has none (the broker then reaps on a
  * 50 ms tick). The broker closes it. */
@@ -148,6 +161,8 @@ void hl_exec_plat_child_exec(const HlExecBrokerCmd *cmd, int bfd,
 int  hl_exec_macos_profile(const HlExecBrokerCmd *cmds, int n, const char *self,
                            char **profile, char ***params);
 void hl_exec_macos_profile_free(char *profile, char **params);
+/* The router's Seatbelt profile (SBPL text), for its unit tests. */
+extern const char hl_exec_macos_router_profile[];
 #endif
 
 #endif /* HL_EXEC_BROKER_SUPPORTED */

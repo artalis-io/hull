@@ -561,6 +561,7 @@ typedef struct {
     uint8_t *reply; size_t reply_len, reply_off;
     int      queued;
     size_t   reserved;          /* stdout_max + stderr_max, held until freed */
+    int      routed;            /* run by its command's own broker (the router) */
 #ifdef HL_EXEC_TEST_HOOKS
     int      probe_sent;
 #endif
@@ -569,6 +570,19 @@ typedef struct {
 static Job    g_jobs[HL_EXEC_MAX_INFLIGHT];
 static size_t g_reserved;
 static int    g_chan = 3;
+
+/* The router (macOS, two or more commands; exec_platform.h
+ * hl_exec_plat_router): command i runs in broker g_subs[i], a fresh copy of
+ * this binary holding that command's policy alone. The router admits and
+ * matches each call, forwards it, and relays the reply
+ * (docs/design/exec_broker_macos_isolation.md §4). */
+typedef struct {
+    int         fd;             /* -1 once lost */
+    pid_t       pid;
+    HlChanFrame rd;
+} Sub;
+static int    g_router;
+static Sub    g_subs[HL_EXEC_MAX_COMMANDS];
 
 /* Small frames (BUSY / REFUSED / PROBE) waiting to go out. */
 typedef struct { uint8_t *buf; size_t len, off; } Out;
@@ -594,11 +608,11 @@ static uint8_t *frame_make(uint32_t type, uint32_t id, const void *a, size_t ale
     return f;
 }
 
-static void queue_small(uint32_t type, uint32_t id, const char *text)
+static void queue_frame(uint32_t type, uint32_t id, const void *data, size_t dlen)
 {
     if (g_outq_n >= HX_OUTQ) return;   /* reading stops before this (backpressure) */
     size_t len;
-    uint8_t *f = frame_make(type, id, text, text ? strlen(text) : 0, NULL, 0, &len);
+    uint8_t *f = frame_make(type, id, data, dlen, NULL, 0, &len);
     if (!f) return;
     int k = -1;
     for (int i = 0; i < HX_OUTQ; i++)
@@ -607,6 +621,30 @@ static void queue_small(uint32_t type, uint32_t id, const char *text)
     g_outq[k] = (Out){ f, len, 0 };
     g_outq_n++;
     g_order[g_order_n++] = -1 - k;
+}
+
+static void queue_small(uint32_t type, uint32_t id, const char *text)
+{
+    queue_frame(type, id, text, text ? strlen(text) : 0);
+}
+
+static void job_free(Job *j);
+
+/* The reply of routed job @p j: a frame its command's broker sent, or one
+ * the router makes when that broker is gone. */
+static void job_reply_frame(Job *j, uint32_t type, const void *body, size_t len)
+{
+    j->reply = frame_make(type, j->id, body, len, NULL, 0, &j->reply_len);
+    if (!j->reply) {
+        /* No reply to hold: free the slot now (nothing else would) and say
+         * so in a small frame. */
+        uint32_t id = j->id;
+        job_free(j);
+        queue_small(HX_REFUSED, id, "exec: out of memory");
+        return;
+    }
+    j->queued = 1;
+    g_order[g_order_n++] = (int)(j - g_jobs);
 }
 
 static void job_free(Job *j)
@@ -681,6 +719,81 @@ static void kill_all(void)
 {
     for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++)
         if (g_jobs[i].used && g_jobs[i].pid > 0) kill(-g_jobs[i].pid, SIGKILL);
+}
+
+/* ── The router's side of a call ───────────────────────────────────── */
+
+/* Command @p ci's broker is gone (EOF, a write it did not take, a frame it
+ * should not send): every call routed to it that has no reply yet fails,
+ * and later calls to it are refused. Its running calls are its own to end:
+ * on SIGKILL they run on (the documented limit; it cannot be reaped from
+ * here without signalling grandchildren, §4.4). */
+static void sub_lost(int ci)
+{
+    Sub *s = &g_subs[ci];
+    if (s->fd < 0) return;
+    close(s->fd);
+    s->fd = -1;
+    hl_chan_frame_reset(&s->rd);
+    char msg[160];
+    snprintf(msg, sizeof msg, "exec.%s: the command broker is gone", g_cmds[ci].c.name);
+    for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
+        Job *j = &g_jobs[i];
+        if (!j->used || !j->routed || j->ci != ci || j->queued) continue;
+        if (j->discard) job_free(j);
+        else job_reply_frame(j, HX_REFUSED, msg, strlen(msg));
+    }
+}
+
+/* A frame from command @p ci's broker: a reply ends the call routed under
+ * its id; a test probe goes straight on to the server. */
+static void sub_frame(int ci, uint32_t type, uint32_t id, const uint8_t *p, size_t len)
+{
+#ifdef HL_EXEC_TEST_HOOKS
+    if (type == HX_PROBE) { queue_frame(HX_PROBE, id, p, len); return; }
+#endif
+    if (type != HX_DONE && type != HX_BUSY && type != HX_REFUSED) { sub_lost(ci); return; }
+    for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
+        Job *j = &g_jobs[i];
+        if (!j->used || !j->routed || j->id != id) continue;
+        if (j->ci != ci) { sub_lost(ci); return; }   /* not its call */
+        if (j->queued) return;
+        if (j->discard) { job_free(j); return; }
+        /* A reply holds the call's output, at most what was reserved for it
+         * (the DONE head is 24 bytes); more is a broker gone wrong. */
+        if (len > j->reserved + 24 + 1024) { sub_lost(ci); return; }
+        job_reply_frame(j, type, p, len);
+        return;
+    }
+    /* No such call: it was KILLed and freed meanwhile. */
+}
+
+/* Forward an admitted, matched RUN to its command's broker, as one job.
+ * The write is bounded: the broker reads every RUN as it comes (it holds at
+ * most HL_EXEC_MAX_INFLIGHT jobs, so its own reading never stops). */
+static void route_call(int slot, int ci, uint32_t id, const uint8_t *p, size_t len,
+                       size_t reserve)
+{
+    Sub *s = &g_subs[ci];
+    char msg[160];
+    if (s->fd < 0 ||
+        hl_chan_write_frame(s->fd, HX_MAGIC, HX_RUN, id, p, len, NULL, 0,
+                            hl_chan_mono_ms() + 5000) != 0) {
+        sub_lost(ci);
+        snprintf(msg, sizeof msg, "exec.%s: the command broker is gone", g_cmds[ci].c.name);
+        queue_small(HX_REFUSED, id, msg);
+        return;
+    }
+    Job *j = &g_jobs[slot];
+    memset(j, 0, sizeof *j);
+    j->out_fd = j->err_fd = j->pidfd = j->in_fd = -1;
+    j->used = 1;
+    j->routed = 1;
+    j->id = id;
+    j->ci = ci;
+    j->reserved = reserve;
+    g_reserved += reserve;
+    g_cmds[ci].running++;
 }
 
 /* ── One call ──────────────────────────────────────────────────────── */
@@ -838,6 +951,10 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
         queue_small(HX_BUSY, id, "exec: too much output held for delivery");
         return;
     }
+    if (g_router) {                      /* its own broker runs it */
+        route_call(free_slot, ci, id, p, len, reserve);
+        return;
+    }
 
     int bfd = open_checked(cmd, err, sizeof err);
     if (bfd < 0) {
@@ -977,6 +1094,20 @@ static void kill_call(uint32_t id)
     for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
         Job *j = &g_jobs[i];
         if (!j->used || j->id != id) continue;
+        if (j->routed && !j->queued) {
+            /* Its broker kills the child and sends no reply; the slot frees
+             * now (that broker holds its own caps meanwhile). Freed BEFORE a
+             * failed write marks the broker lost, which would otherwise
+             * queue a reply for this slot (review: the freed slot stayed in
+             * g_order). */
+            int ci = j->ci;
+            int lost = g_subs[ci].fd >= 0 &&
+                       hl_chan_write_frame(g_subs[ci].fd, HX_MAGIC, HX_KILL, id, NULL, 0,
+                                           NULL, 0, hl_chan_mono_ms() + 1000) != 0;
+            job_free(j);
+            if (lost) sub_lost(ci);
+            return;
+        }
         if (j->pid > 0) kill(-j->pid, SIGKILL);
         j->discard = 1;
         if (j->queued && j->reply_off == 0) {
@@ -1061,6 +1192,82 @@ static int root_take(const uint8_t **p, const uint8_t *end, char *out)
     return 0;
 }
 
+static int env_allowed(const char *kv);
+
+/* The router's start (docs/design/exec_broker_macos_isolation.md §4.2): one
+ * broker per command, this same binary started afresh (a clean image: every
+ * descriptor here is close-on-exec), each sent the POLICY head it got and its
+ * command's entry alone, all ready before the router locks itself - it can
+ * start nothing after. Any broker that refuses or does not answer refuses
+ * the start, naming its command. */
+static int router_start(const uint8_t *head, size_t head_len, const char *self,
+                        HlExecReport *r)
+{
+    uint64_t deadline = hl_chan_mono_ms() + 8000;   /* the server waits 10 s */
+    for (int i = 0; i < g_ncmds; i++) g_subs[i] = (Sub){ .fd = -1, .pid = -1 };
+    /* Start them all first, so their loading overlaps. */
+    for (int i = 0; i < g_ncmds; i++) {
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+            hl_exec_report_set(r, "exec.%s: its broker: %s", g_cmds[i].c.name,
+                               strerror(errno));
+            return -1;
+        }
+        (void)fcntl(sv[0], F_SETFD, FD_CLOEXEC);
+        (void)fcntl(sv[1], F_SETFD, FD_CLOEXEC);
+        char a0[PATH_MAX], a1[] = HL_EXEC_BROKER_ARGV1;
+        snprintf(a0, sizeof a0, "%s", self);
+        char *argv[] = { a0, a1, NULL };
+        pid_t pid = hl_chan_spawn(self, argv, sv[1], env_allowed);
+        int e = errno;
+        close(sv[1]);
+        if (pid < 0) {
+            close(sv[0]);
+            hl_exec_report_set(r, "exec.%s: its broker could not start: %s",
+                               g_cmds[i].c.name, strerror(e));
+            return -1;
+        }
+        g_subs[i].fd = sv[0];
+        g_subs[i].pid = pid;
+    }
+    for (int i = 0; i < g_ncmds; i++) {
+        uint8_t *one = NULL;
+        size_t one_len = 0;
+        if (hl_exec_policy_slice(g_policy, g_policy_len, i, &one, &one_len) != 0) {
+            hl_exec_report_set(r, "exec.%s: out of memory", g_cmds[i].c.name);
+            return -1;
+        }
+        int wr = hl_chan_write_frame(g_subs[i].fd, HX_MAGIC, HX_POLICY, 0, head, head_len,
+                                     one, one_len, deadline);
+        free(one);
+        if (wr != 0) {
+            hl_exec_report_set(r, "exec.%s: its broker did not take its policy",
+                               g_cmds[i].c.name);
+            return -1;
+        }
+    }
+    for (int i = 0; i < g_ncmds; i++) {
+        HlChanFrame rd = { .magic = HX_MAGIC, .max = 8192 };
+        int rc = hl_chan_frame_read(g_subs[i].fd, &rd, deadline);
+        if (rc != HL_CHAN_DONE || (rd.type != HX_READY && rd.type != HX_REFUSED)) {
+            hl_chan_frame_reset(&rd);
+            hl_exec_report_set(r, "exec.%s: its broker did not start", g_cmds[i].c.name);
+            return -1;
+        }
+        if (rd.type == HX_REFUSED) {
+            /* Its own report: one command's checks, the same messages. */
+            hl_exec_report_set(r, "%.*s", (int)(rd.len < 1024 ? rd.len : 1024),
+                               (const char *)rd.buf);
+            hl_chan_frame_reset(&rd);
+            return -1;
+        }
+        hl_chan_frame_reset(&rd);
+        hl_chan_set_nonblock(g_subs[i].fd);
+        g_subs[i].rd = (HlChanFrame){ .magic = HX_MAGIC, .max = HX_REPLY_MAX };
+    }
+    return hl_exec_plat_router_lock(r);
+}
+
 static int policy_load(const uint8_t *p, size_t len, char *report, size_t rsz)
 {
     report[0] = '\0';
@@ -1082,6 +1289,7 @@ static int policy_load(const uint8_t *p, size_t len, char *report, size_t rsz)
         snprintf(report, rsz, "exec: malformed POLICY");
         return -1;
     }
+    size_t head_len = (size_t)(q - p);   /* flags, roots, databases */
     size_t plen = (size_t)(end - q);
     char err[256];
     if (hl_exec_policy_validate(q, plen, err, sizeof err) != 0) {
@@ -1119,7 +1327,24 @@ static int policy_load(const uint8_t *p, size_t len, char *report, size_t rsz)
         return -1;
     }
     HlExecReport r = { report, rsz, at };
-    int lrc = hl_exec_plat_lock(g_cmds, g_ncmds, g_flags, self, &r);
+    int lrc;
+    if (hl_exec_plat_router() && g_ncmds >= 2 && !(g_flags & HL_EXEC_POLICY_NO_SANDBOX)) {
+        /* One broker per command, then the router locks itself. The checks
+         * above ran here too, so a refusal reads the same either way. */
+        g_router = 1;
+        lrc = 0;
+        for (int i = 0; i < g_ncmds && lrc == 0; i++) {
+            if (strcmp(g_cmds[i].real, self) == 0) {
+                hl_exec_report_set(&r, "exec.%s: %s is this hull binary itself, "
+                                   "which macOS lets fork; declare another command",
+                                   g_cmds[i].c.name, g_cmds[i].real);
+                lrc = -1;
+            }
+        }
+        if (lrc == 0) lrc = router_start(p, head_len, self, &r);
+    } else {
+        lrc = hl_exec_plat_lock(g_cmds, g_ncmds, g_flags, self, &r);
+    }
     /* The rules are made: the grants' descriptors are no longer needed. */
     for (int i = 0; i < g_ncmds; i++) {
         Cmd *c = &g_cmds[i];
@@ -1158,8 +1383,8 @@ int hl_exec_broker_main(void)
 
     rd.max = HX_RUN_MAX;
     for (;;) {
-        struct pollfd pf[2 + 4 * HL_EXEC_MAX_INFLIGHT];
-        int map[2 + 4 * HL_EXEC_MAX_INFLIGHT];
+        struct pollfd pf[2 + 4 * HL_EXEC_MAX_INFLIGHT + HL_EXEC_MAX_COMMANDS];
+        int map[2 + 4 * HL_EXEC_MAX_INFLIGHT + HL_EXEC_MAX_COMMANDS];
         int np = 0;
         short cev = (g_outq_n < HX_OUTQ - 2) ? POLLIN : 0;   /* backpressure */
         if (g_order_n > 0) cev |= POLLOUT;
@@ -1169,11 +1394,20 @@ int hl_exec_broker_main(void)
             pf[np] = (struct pollfd){ server_gone, POLLIN, 0 };
             map[np++] = -2;
         }
+        /* The command brokers (router only): map -3 - i. Always read: a
+         * reply goes to its job's own slot, not the small-frame queue the
+         * backpressure above protects (and a broker that hung up must be
+         * seen, or poll returns at once on its POLLHUP for ever). */
+        for (int i = 0; g_router && i < g_ncmds; i++)
+            if (g_subs[i].fd >= 0) {
+                pf[np] = (struct pollfd){ g_subs[i].fd, POLLIN, 0 };
+                map[np++] = -3 - i;
+            }
         uint64_t now = hl_chan_mono_ms();
         int timeout = -1;
         for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
             Job *j = &g_jobs[i];
-            if (!j->used) continue;
+            if (!j->used || j->routed) continue;   /* its broker times it */
             if (j->out_fd >= 0) { pf[np] = (struct pollfd){ j->out_fd, POLLIN, 0 }; map[np++] = i; }
             if (j->err_fd >= 0) { pf[np] = (struct pollfd){ j->err_fd, POLLIN, 0 }; map[np++] = i; }
             if (j->pidfd >= 0 && j->pid > 0) { pf[np] = (struct pollfd){ j->pidfd, POLLIN, 0 }; map[np++] = i; }
@@ -1205,6 +1439,18 @@ int hl_exec_broker_main(void)
         for (int k = 1; k < np; k++) {
             if (!(pf[k].revents & (POLLIN | POLLOUT | POLLHUP | POLLERR))) continue;
             if (map[k] == -2) goto out;       /* the server is gone */
+            if (map[k] <= -3) {
+                int ci = -3 - map[k];
+                Sub *s = &g_subs[ci];
+                while (s->fd >= 0) {
+                    int src = hl_chan_frame_read_some(s->fd, &s->rd);
+                    if (src == HL_CHAN_MORE) break;
+                    if (src != HL_CHAN_DONE) { sub_lost(ci); break; }
+                    sub_frame(ci, s->rd.type, s->rd.id, s->rd.buf, s->rd.len);
+                    hl_chan_frame_reset(&s->rd);
+                }
+                continue;
+            }
             Job *j = &g_jobs[map[k]];
             Cmd *cmd = &g_cmds[j->ci];
             if (pf[k].fd == j->pidfd) continue;   /* reap() below */
@@ -1240,7 +1486,7 @@ int hl_exec_broker_main(void)
         now = hl_chan_mono_ms();
         for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
             Job *j = &g_jobs[i];
-            if (!j->used) continue;
+            if (!j->used || j->routed) continue;   /* replied to by sub_frame */
             if (j->pid > 0 && !j->timed_out && now >= j->deadline) {
                 kill(-j->pid, SIGKILL);
                 j->timed_out = 1;

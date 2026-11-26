@@ -30,6 +30,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const uint8_t MAGIC[4] = { 'H', 'X', 'P', '1' };
@@ -732,6 +733,29 @@ int hl_exec_policy_at(const uint8_t *data, size_t len, int i, HlExecCmd *out)
     for (int k = 0; k <= i; k++) read_cmd(&r, &c);
     if (r.bad) return -1;
     *out = c;
+    return 0;
+}
+
+int hl_exec_policy_slice(const uint8_t *data, size_t len, int i,
+                         uint8_t **out, size_t *out_len)
+{
+    int n = hl_exec_policy_count(data, len);
+    if (n < 0 || i < 0 || i >= n || !out || !out_len) return -1;
+    Rd r = { data + 6, data + len, 0 };
+    HlExecCmd c;
+    for (int k = 0; k < i; k++) read_cmd(&r, &c);
+    const uint8_t *start = r.p;
+    read_cmd(&r, &c);
+    if (r.bad) return -1;
+    size_t elen = (size_t)(r.p - start);
+    uint8_t *s = malloc(6 + elen);
+    if (!s) return -1;
+    memcpy(s, data, 4);                  /* the magic */
+    s[4] = 1;
+    s[5] = 0;
+    memcpy(s + 6, start, elen);
+    *out = s;
+    *out_len = 6 + elen;
     return 0;
 }
 

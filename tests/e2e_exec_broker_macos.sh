@@ -14,6 +14,9 @@
 #     (time(1)) refused its fork;
 #   - unix_sockets: an AF_UNIX connect refused without it, allowed with it;
 #   - the start report names what macOS cannot narrow ("exec: limit:");
+#   - two or more commands each run under their own broker and profile (a
+#     router starts them): one command's grants, unix_sockets and binary are
+#     not another's; one command keeps a single broker;
 #   - a timeout kills the child (SIGKILL, timed_out); output cut at the caps;
 #   - stdin: 900 KiB round-trips through cat, a command that never reads it
 #     ends, and one that never reads it and sleeps times out cleanly;
@@ -23,7 +26,9 @@
 #     rewritten in place fails the next call; a replaced binary is ESTALE;
 #   - orderly shutdown and server death take the running command; broker
 #     death (SIGKILL) leaves it (no parent-death signal on macOS: the
-#     documented limit) and the waiting call fails cleanly;
+#     documented limit) and the waiting call fails cleanly; with several
+#     commands, the router's death takes the command, and a command broker's
+#     death leaves only that command's call (the narrowed limit);
 #   - admission by raw frames (tests/e2e_exec_frames.c).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
@@ -112,11 +117,16 @@ check_line "/etc is readable" "etc=ok"
 check_line "AF_UNIX connect refused without unix_sockets" "no-unix: unix=EPERM"
 check_line "exec of an undeclared binary refused" "Operation not permitted"
 check_line "a declared command cannot fork (time)" "time: status=1"
-check_line "the start report names the shared sandbox" "exec: limit: macOS runs every command in ONE shared sandbox"
-check_line "the start report names the missing parent-death signal" "exec: limit: no parent-death signal on macOS"
+if printf '%s\n' "$out" | grep -qF "ONE shared sandbox"; then
+    fail "no shared sandbox: each command has its own broker" "$out"
+else
+    pass "no shared sandbox: each command has its own broker"
+fi
+check_line "the start report names the missing parent-death signal, per command broker" \
+    "exec: limit: no parent-death signal on macOS: a command's broker killed with SIGKILL"
 
-# unix_sockets on one command opens AF_UNIX to every command of the app
-# (the union: macOS has no per-child narrowing).
+# unix_sockets on one command opens AF_UNIX to that command only: each has
+# its own broker and profile (docs/design/exec_broker_macos_isolation.md).
 run_main "$FIX/a1u" <<EOF
 app.manifest({
   modules = { "hull/exec@1" },
@@ -132,7 +142,34 @@ app.main(function()
 end)
 EOF
 check_line "AF_UNIX connect allowed with unix_sockets" "unix: unix=ok"
-check_line "...and to the app's other commands (the union)" "other: unix=ok"
+check_line "...and not to the app's other commands" "other: unix=EPERM"
+
+# A grant and a binary of one command are not another's.
+mkdir -p "$FIX/iso/data"
+echo "b-only" > "$FIX/iso/data/b.txt"
+ISOR=$(cd "$FIX/iso" && pwd -P)
+run_main "$FIX/iso" <<EOF
+app.manifest({
+  modules = { "hull/exec@1" },
+  exec = {
+    rd = { path = "$PROBE", argv = { "read", "$ISOR/data/b.txt" } },
+    ex = { path = "$PROBE", argv = { "exec", "/bin/cat" } },
+    cat = { path = "/bin/cat", argv = { "$ISOR/data/b.txt" },
+            manifest = { fs = { read = { "data/b.txt" } } } },
+  },
+})
+local exec = require("hull.exec")
+app.main(function()
+  for _, n in ipairs({ "rd", "ex", "cat" }) do
+    local r = exec.run(n)
+    print(n .. ": status=" .. r.status .. " " .. r.stdout:gsub("\n", " "))
+  end
+  return 0
+end)
+EOF
+check_line "a command reads its own grant" "cat: status=0 b-only"
+check_line "another command does not reach that grant" "rd: status=0 read=EPERM"
+check_line "a command cannot exec another command's binary itself" "ex: status=0 exec=EPERM"
 
 # ── Timeout, truncation ──────────────────────────────────────────────
 
@@ -444,6 +481,77 @@ echo "== deaths, after exec"
 death_case "orderly shutdown (SIGTERM) takes the command" term
 death_case "server death (kill -9) takes the broker and the command" server
 death_case "broker death (kill -9) leaves the command (documented limit)" broker
+
+# Two commands: a router and one broker each.
+cat > "$FIX/ready2_app.lua" <<EOF
+app.manifest({ modules = { "hull/exec@1", "hull/http-server@1" },
+  exec = { ready = { path = "$PROBE", argv = { "ready" }, timeout_ms = 60000 },
+           other = { path = "$PROBE", argv = { "unix" } } } })
+local exec = require("hull.exec")
+app.get("/ready", function(req, res)
+  local ok, r = pcall(exec.run, "ready")
+  res:json({ ok = ok, msg = ok and r.stdout or tostring(r) })
+end)
+app.get("/other", function(req, res)
+  local ok, r = pcall(exec.run, "other")
+  res:json({ ok = ok, msg = ok and r.stdout or tostring(r) })
+end)
+EOF
+
+echo "== one broker per command"
+if start_server "$FIX/t1" < "$FIX/ready_app.lua"; then
+    broker=$(log_pid 'exec broker pid \([0-9]*\)')
+    if [ -n "$broker" ] && [ -z "$(pgrep -P "$broker")" ]; then
+        pass "one command: a single broker, as before"
+    else
+        fail "one command: a single broker, as before" "broker $broker children: $(pgrep -P "$broker" | tr '\n' ' ')"
+    fi
+    kill -TERM "$SPID"; wait "$SPID" 2>/dev/null || true
+fi
+if start_server "$FIX/t2" < "$FIX/ready2_app.lua"; then
+    broker=$(log_pid 'exec broker pid \([0-9]*\)')
+    n=$(pgrep -P "$broker" | wc -l | tr -d ' ')
+    if [ "$n" = 2 ]; then pass "two commands: the router starts one broker each"
+    else fail "two commands: the router starts one broker each" "children of $broker: $n"; fi
+    kill -TERM "$SPID"; wait "$SPID" 2>/dev/null || true
+fi
+
+death_case2() {  # death_case2 <label> <router|sub>
+    start_server "$FIX/e_$2" < "$FIX/ready2_app.lua" || return
+    (curl -s -m 20 "http://127.0.0.1:$PORT/ready" > "$FIX/e_$2/resp" 2>&1 &)
+    probe=$(log_pid 'exec probe ready pid=\([0-9]*\)') || { sleep 1; fail "$1: the probe never got ready" "$(cat "$SLOG")"; kill -9 "$SPID"; return; }
+    PIDS="$PIDS $probe"
+    router=$(log_pid 'exec broker pid \([0-9]*\)')
+    sub=$(ps -o ppid= -p "$probe" | tr -d ' ')
+    if [ "$2" = router ]; then
+        kill -9 "$router"
+        if gone_within "$probe"; then pass "$1"; else fail "$1" "probe $probe still alive"; kill -9 "$probe" 2>/dev/null || true; fi
+    else
+        kill -9 "$sub"
+        sleep 0.3
+        if kill -0 "$probe" 2>/dev/null; then pass "$1"; else fail "$1" "probe $probe is gone (the limit text is stale)"; fi
+        kill -9 "$probe" 2>/dev/null || true
+        for i in $(seq 1 40); do [ -s "$FIX/e_$2/resp" ] && break; sleep 0.05; done
+        case "$(cat "$FIX/e_$2/resp")" in
+            *"command broker is gone"*) pass "the waiting call fails cleanly when its command's broker dies" ;;
+            *) fail "the waiting call fails cleanly when its command's broker dies" "$(cat "$FIX/e_$2/resp")" ;;
+        esac
+        other=$(curl -s -m 5 "http://127.0.0.1:$PORT/other")
+        case "$other" in *'"ok":true'*) pass "the other command still runs" ;;
+                         *) fail "the other command still runs" "$other" ;; esac
+        again=$(curl -s -m 5 "http://127.0.0.1:$PORT/ready")
+        case "$again" in *"command broker is gone"*) pass "a later call to the lost command is refused" ;;
+                         *) fail "a later call to the lost command is refused" "$again" ;; esac
+    fi
+    kill -TERM "$SPID" 2>/dev/null || true
+    wait "$SPID" 2>/dev/null || true
+    gone_within "$router" || fail "$1: the router outlived the server"
+    gone_within "$sub" || fail "$1: a command broker outlived the server"
+}
+
+echo "== deaths, two commands"
+death_case2 "router death (kill -9) takes the command (its broker sees it go)" router
+death_case2 "a command broker's death (kill -9) leaves only that call (documented limit)" sub
 
 # ── Admission by raw frames ──────────────────────────────────────────
 
