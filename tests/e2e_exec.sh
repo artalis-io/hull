@@ -379,6 +379,46 @@ refuse "fs and host.read for one grant" "fs and host.read / host.write both give
 refuse "unix_sockets and host.unix_sockets" "unix_sockets and host.unix_sockets both given" \
     'exec = { a = { path = "/bin/true", unix_sockets = true, host = { unix_sockets = true } } }' \
     'exec: { a: { path: "/bin/true", unixSockets: true, host: { unixSockets: true } } }'
+# exec_audit53.*: a control byte in a command's grant is refused at load,
+# and the error names the entry, not its bytes.
+refuse "exec_audit53.control_byte: a control byte in a child grant" "holds a control character" \
+    'exec = { a = { path = "/bin/true", manifest = { fs = { read = { "data/a\nX" } } } } }' \
+    'exec: { a: { path: "/bin/true", manifest: { fs: { read: ["data/a\nX"] } } } }'
+# JS reads two spellings; both at once was one read and the other signed and
+# shown by hull inspect.
+js_refuse() {   # label want section
+    d="$TMPDIR/refuse_js2"
+    rm -rf "$d"; mkdir -p "$d"
+    printf 'import { app } from "hull:app";\napp.manifest({ modules: ["hull/exec@1"], %s });\napp.main(() => 0);\n' \
+        "$3" > "$d/app.js"
+    out=$(cd "$d" && "$HULL" app.js 2>&1) && rc=0 || rc=$?
+    if [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -qF -- "$2"; then pass "js: $1"
+    else fail "js: $1 (rc=$rc)" "$out"; fi
+}
+js_refuse "exec_audit53.both_spellings: host.unixSockets and host.unix_sockets" \
+    "unixSockets and unix_sockets both given" \
+    'exec: { a: { path: "/bin/true", host: { unixSockets: false, unix_sockets: true } } }'
+js_refuse "exec_audit53.both_spellings: timeoutMs and timeout_ms" \
+    "timeoutMs and timeout_ms both given" \
+    'exec: { a: { path: "/bin/true", timeoutMs: 1000, timeout_ms: 2000 } }'
+# A null first spelling is absent: the legacy unix_sockets is read (and
+# warned about), not dropped.
+d="$TMPDIR/js_null_spelling"
+rm -rf "$d"; mkdir -p "$d/tests"
+cat > "$d/app.js" <<'APP'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/exec@1"],
+  exec: { a: { path: "/bin/cat", unixSockets: null, unix_sockets: true } } });
+app.main(() => 0);
+APP
+printf 'import { exec } from "hull:exec";\ntest.execStub("a", { stdout: "x" });\ntest("runs", async () => { test.eq((await exec.run("a")).stdout, "x"); });\n' \
+    > "$d/tests/test_null.js"
+out=$(cd "$d" && "$HULL" test . 2>&1) && rc=0 || rc=$?
+if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q "exec.a.unix_sockets is the v0.26.0 spelling"; then
+    pass "js: exec_audit53.null_spelling: a null unixSockets falls back to unix_sockets"
+else
+    fail "js: exec_audit53.null_spelling (rc=$rc)" "$out"
+fi
 refuse "host.write outside /dev, /run, /tmp" "must be under /dev, /run or /tmp" \
     'exec = { a = { path = "/bin/true", host = { write = { "/etc/x" } } } }' \
     'exec: { a: { path: "/bin/true", host: { write: ["/etc/x"] } } }'
@@ -439,6 +479,38 @@ for want in "host.read:  /dev/nvidiactl" "host.write: /dev/nvidiactl" \
     if printf '%s\n' "$out" | grep -qF -- "$want"; then pass "inspect: $want"
     else fail "inspect: $want" "$out"; fi
 done
+
+# exec_inspect_audit53.*: inspect shows the grants the extractor enforces
+# (a legacy fs beside a host table), one line per manifest string, and does
+# not crash on a planted non-string entry.
+d="$TMPDIR/inspect53"
+rm -rf "$d"; mkdir -p "$d"
+cat > "$d/package.sig" <<'SIG'
+{"manifest":{"modules":["hull/exec@1"],"exec":{"mixed":{"path":"/bin/ls","fs":{"read":["/etc/hosts"],"write":["/tmp/out"]},"host":{"unix_sockets":true}},"forge":{"path":"/bin/cat","host":{"read":["/x\n      unix sockets:      no"]}}}}}
+SIG
+out=$("$HULL" inspect "$d" 2>&1) || true
+for want in "host.read:  /etc/hosts" "host.write: /tmp/out" \
+            ", /etc/hosts" "host.write:        /tmp/out" \
+            '/x\n      unix sockets:      no'; do
+    if printf '%s\n' "$out" | grep -qF -- "$want"; then pass "exec_inspect_audit53: $want"
+    else fail "exec_inspect_audit53: $want" "$out"; fi
+done
+if printf '%s\n' "$out" | grep -qx "      unix sockets:      no"; then
+    fail "exec_inspect_audit53.forge: a grant forged an output line" "$out"
+else
+    pass "exec_inspect_audit53.forge: a newline in a grant stays on its line"
+fi
+cat > "$d/package.sig" <<'SIG'
+{"manifest":{"modules":["hull/exec@1"],"exec":{"bad":{"path":"/bin/cat","manifest":{"fs":{"read":[{}]}},"host":{"read":[1,"/etc"]},"argv":[{"enum":[{}]},{"repeat":{"min":{},"max":[]}}],"timeout_ms":1.5}}}}
+SIG
+out=$("$HULL" inspect "$d" 2>&1) && rc=0 || rc=$?
+if printf '%s\n' "$out" | grep -q "invalid value\|attempt to"; then
+    fail "exec_inspect_audit53.non_string: inspect crashed (rc=$rc)" "$out"
+elif printf '%s\n' "$out" | grep -qF "host.read:  /etc"; then
+    pass "exec_inspect_audit53.non_string: non-string entries are skipped"
+else
+    fail "exec_inspect_audit53.non_string (rc=$rc)" "$out"
+fi
 
 echo "== the hull check lint =="
 # hull check (and hull build) warn about risky declared commands; a warning

@@ -269,20 +269,29 @@ static int mx_keys(JSContext *ctx, JSValueConst obj, const char *const *allowed,
     return rc;
 }
 
-/* An own property under either spelling (@p alt may be NULL). */
+/* An own property under either spelling (@p alt may be NULL). A null counts
+ * as absent, and giving both spellings is refused (when @p b is set): one
+ * spelling read, the other signed and shown by hull inspect (audit 53). */
 static JSValue mx_own2(JSContext *ctx, JSValueConst obj, const char *key,
-                       const char *alt)
+                        const char *alt, HlExecBuf *b, const char *where)
 {
     JSValue v = mjs_own(ctx, obj, key);
-    if (JS_IsUndefined(v) && alt) v = mjs_own(ctx, obj, alt);
-    return v;
+    if (!alt) return v;
+    JSValue w = mjs_own(ctx, obj, alt);
+    int has_v = !JS_IsUndefined(v) && !JS_IsNull(v);
+    int has_w = !JS_IsUndefined(w) && !JS_IsNull(w);
+    if (has_v && has_w && b)
+        hl_exec_b_fail(b, "%s: %s and %s both given; keep %s", where, key, alt, key);
+    if (has_v) { JS_FreeValue(ctx, w); return v; }
+    JS_FreeValue(ctx, v);
+    return w;
 }
 
 /* An integer field: -1 absent, -2 negative or past 2^32 (refused later). */
 static int64_t mx_int(JSContext *ctx, JSValueConst obj, const char *key,
                       const char *alt, HlExecBuf *b, const char *where)
 {
-    JSValue v = mx_own2(ctx, obj, key, alt);
+    JSValue v = mx_own2(ctx, obj, key, alt, b, where);
     int64_t out = -1;
     if (JS_IsNumber(v)) {
         double d = 0;
@@ -305,7 +314,7 @@ static int64_t mx_int(JSContext *ctx, JSValueConst obj, const char *key,
 static int mx_bool(JSContext *ctx, JSValueConst obj, const char *key,
                    const char *alt, HlExecBuf *b, const char *where)
 {
-    JSValue v = mx_own2(ctx, obj, key, alt);
+    JSValue v = mx_own2(ctx, obj, key, alt, b, where);
     int out = 0;
     if (JS_IsBool(v)) out = JS_ToBool(ctx, v);
     else if (!JS_IsUndefined(v) && !JS_IsNull(v))
@@ -509,7 +518,7 @@ static void mx_child_manifest(JSContext *ctx, JSValueConst t, const char *cmd,
 /* Whether an own property is present under either spelling. */
 static int mx_present(JSContext *ctx, JSValueConst obj, const char *key, const char *alt)
 {
-    JSValue v = mx_own2(ctx, obj, key, alt);
+    JSValue v = mx_own2(ctx, obj, key, alt, NULL, NULL);
     int p = !JS_IsUndefined(v) && !JS_IsNull(v);
     JS_FreeValue(ctx, v);
     return p;
