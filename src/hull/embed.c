@@ -214,6 +214,7 @@ int hl_embed_seal(HlEmbed *e, const char *db_path)
     policy.fs_write         = (const char *const *)e->writes;
     policy.fs_write_count   = e->nwrites;
     policy.network_inbound  = e->net_inbound;
+    policy.allow_bind       = e->net_inbound;   /* may bind after the seal */
     policy.network_outbound = e->net_outbound;
     policy.gpu              = e->gpu;
     policy.tui              = e->tui;

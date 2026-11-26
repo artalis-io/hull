@@ -10,6 +10,16 @@ release-artifact layout).
 
 ### Security
 
+- **The sandbox refuses a second listener** (#1226). Keel bound the server's listener only when
+  the run started, after the kernel sandbox, so the sandbox allowed `bind(2)` on any address and
+  port for the server's whole life: native code running inside Hull could open a listener of its
+  own. Hull now binds and listens on `-b` / `-p` itself just before the sandbox applies and hands
+  the socket to Keel, and the sandbox then refuses every bind: on macOS (Seatbelt denies
+  `network-bind`) and on Linux 6.7+ (Landlock ABI 4, `LANDLOCK_ACCESS_NET_BIND_TCP` with no rule;
+  vendor/pledge patch 0006). An older Linux kernel still allows it; the `[sandbox] applied` line
+  reports `bind: refused` or `bind: kernel`. A port already taken is now reported before `app.main` runs (an app with
+  both `app.main` and routes), not after it. A main-only CLI binds no port.
+
 - **`hull/exec` on macOS: each declared command has a sandbox of its own** (#1218,
   docs/design/exec_broker_macos_isolation.md). macOS refuses a second sandbox in a sandboxed
   process, so the broker applied one Seatbelt profile that every command inherited: each

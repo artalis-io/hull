@@ -198,6 +198,11 @@ _Thread_local static struct {
 #define HULL_UNVEIL_TEST_NO_TSYNC 0
 #endif
 
+/* HULL PATCH 0006 (#1226): input / output of the TCP bind refusal in
+ * unveil_init. */
+int hull_unveil_handle_net_bind;
+int hull_unveil_net_bind_handled;
+#define HULL_LANDLOCK_ACCESS_NET_BIND_TCP (1ULL << 0)
 int hull_unveil_unsynced_threads;
 int hull_unveil_sync_mode;
 #if HULL_UNVEIL_TEST_NO_TSYNC
@@ -431,12 +436,30 @@ static int unveil_init(void) {
   if (landlock_abi_version < 3) {
     State.fs_mask &= ~LANDLOCK_ACCESS_FS_TRUNCATE;
   }
-  const struct landlock_ruleset_attr attr = {
+  /* HULL PATCH 0006: refuse every TCP bind (#1226). With
+   * hull_unveil_handle_net_bind set before the first unveil() and Landlock
+   * ABI >= 4, the ruleset handles LANDLOCK_ACCESS_NET_BIND_TCP and no rule
+   * ever grants it, so bind(2) of a TCP socket fails EACCES from then on.
+   * The struct is declared here, not taken from <linux/landlock.h>, so the
+   * build does not depend on the kernel headers having the net field
+   * (Linux 6.7+). hull_unveil_net_bind_handled reports whether it applied. */
+  struct hull_landlock_ruleset_attr {
+    uint64_t handled_access_fs;
+    uint64_t handled_access_net;
+  } attr = {
       .handled_access_fs = State.fs_mask,
   };
+  size_t attr_size = sizeof(attr.handled_access_fs);
+  hull_unveil_net_bind_handled = 0;
+  if (hull_unveil_handle_net_bind && landlock_abi_version >= 4) {
+    attr.handled_access_net = HULL_LANDLOCK_ACCESS_NET_BIND_TCP;
+    attr_size = sizeof(attr);
+  }
   // [undocumented] landlock_create_ruleset() always returns o_cloexec
   //                assert(__sys_fcntl(rc, F_GETFD, 0) == FD_CLOEXEC);
-  if ((rc = landlock_create_ruleset(&attr, sizeof(attr), 0)) < 0) return -1;
+  if ((rc = landlock_create_ruleset((const void *)&attr, attr_size, 0)) < 0)
+    return -1;
+  hull_unveil_net_bind_handled = attr_size == sizeof(attr);
   // grant file descriptor a higher number that's less likely to interfere
   if ((fd = fcntl(rc, F_DUPFD_CLOEXEC, 100)) == -1) {
     return err_close(-1, rc);

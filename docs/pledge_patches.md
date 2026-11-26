@@ -152,3 +152,25 @@ generic `_IOR` / `_IOW('T', 0x2a..0x2d, struct termios2)` encoding, identical on
 x86_64 and aarch64). They read and set exactly what the old four do, so the
 promise grants nothing new. Gate: `sandbox_tty.termios2_allowed` in
 `tests/sandbox_violation.c` (Test 6), which also checks TIOCSTI stays refused.
+
+## Patch 0006 - no TCP bind after the seal (#1226)
+
+Upstream's ruleset handles filesystem rights only, so under the `inet` promise
+a sandboxed process could still `bind(2)` a socket on any address and port.
+Hull's server binds its listener before phase 2 (`hl_serve_prebind_listener`
+in `serve.c`, adopted by Keel as `listen_fd`), so nothing in the process binds
+after it.
+
+The patch adds `hull_unveil_handle_net_bind` (an input, read when the first
+`unveil()` creates the ruleset) and `hull_unveil_net_bind_handled` (the
+result). With the input set and Landlock ABI 4 or later (Linux 6.7+), the
+ruleset also handles `LANDLOCK_ACCESS_NET_BIND_TCP` and no rule ever grants
+it, so every TCP bind after `unveil(NULL, NULL)` fails `EACCES`, port 0
+included; connect is not handled and stays as before. The attribute struct is
+declared in the patch, so the build does not depend on kernel headers that
+carry the net field. On an older ABI nothing changes, and the `[sandbox]
+applied` line says `bind: kernel` instead of `bind: refused`. `hl_sandbox_apply`
+sets the input from `HlSandboxPolicy.allow_bind` (0 for the two runners, the
+embedder's `net_inbound` for `hl_embed_seal`). Gate: the "Landlock TCP bind
+refusal" case in `tests/sandbox_violation.c` (Test 6) and the `bind: refused`
+check in `tests/e2e_sandbox.sh` Test 1 on a Landlock kernel of 6.7 or later.
