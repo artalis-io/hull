@@ -9,6 +9,9 @@
  *   exec_probe_macos spew        4 MiB to stdout, 1 MiB to stderr
  *   exec_probe_macos unix        connects to a system AF_UNIX socket:
  *                                "unix=<ok|errno name>"
+ *   exec_probe_macos read PATH   opens PATH for reading: "read=<ok|errno name>"
+ *   exec_probe_macos exec PATH   execs PATH (its own execve, outside the
+ *                                broker): "exec=<errno name>" when refused
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -109,6 +112,19 @@ int main(int argc, char **argv)
     if (argc < 2) return 2;
     if (strcmp(argv[1], "probe") == 0 && argc > 2) return probe(argv[2]);
     if (strcmp(argv[1], "unix") == 0) return unix_conn();
+    if (strcmp(argv[1], "read") == 0 && argc > 2) {
+        int fd = open(argv[2], O_RDONLY);
+        printf("read=%s\n", res(fd));
+        if (fd >= 0) close(fd);
+        return 0;
+    }
+    if (strcmp(argv[1], "exec") == 0 && argc > 2) {
+        char *av[] = { argv[2], NULL };
+        fflush(stdout);
+        execve(argv[2], av, environ);
+        printf("exec=%s\n", res(-1));
+        return 0;
+    }
     if (strcmp(argv[1], "ready") == 0) {
         printf("HULL_EXEC_PROBE_READY\n");
         fflush(stdout);

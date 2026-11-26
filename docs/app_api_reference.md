@@ -3022,11 +3022,12 @@ arguments, and the few slots the app fills, each with a shape its value must mat
 ([docs/design/exec_broker.md](design/exec_broker.md)). There is no shell anywhere; the
 arguments reach the program exactly as matched.
 
-> **Where it runs.** Native Linux and macOS, through the command broker (below). On macOS every
-> command of an app gets the union of their `host` and `manifest.fs` grants (macOS refuses a
-> second sandbox in a sandboxed process, so a child cannot narrow itself), and a broker killed
-> with `SIGKILL` leaves its running commands until they exit (no parent-death signal; they
-> cannot fork); the broker logs both at start as `exec: limit:` lines. A command cannot be
+> **Where it runs.** Native Linux and macOS, through the command broker (below). On both, each
+> command gets exactly its own grants (on macOS each command has a broker of its own once an
+> app declares two or more, since macOS refuses a second sandbox in a sandboxed process). On
+> macOS a command broker killed with `SIGKILL` leaves its running calls until they exit (no
+> parent-death signal; they cannot fork); the broker logs that at start as an `exec: limit:`
+> line. A command cannot be
 > this hull binary itself on macOS. On a host with no broker (OpenBSD, FreeBSD, a cosmo APE) an
 > app with an `exec` section is refused at start, unless `--allow-degraded-sandbox` (then
 > `exec.run` fails). Windows is refused at start always: its processes re-split their one
@@ -3120,9 +3121,9 @@ another pathname is not reachable through it. A write grant
 never deletes or renames.
 
 What a child grant means also depends on the platform: on Linux each command gets exactly its
-own grants; on macOS all commands of an app share one sandbox, so each gets the union of every
-command's `host` and `manifest.fs` grants (logged at start as `exec: limit:`). Every command
-also reads the system trees (`/usr /lib /lib64 /etc /proc /sys /dev` on Linux).
+own grants, and so on macOS, where each command runs under a broker of its own (a macOS
+command also reads the metadata of every path). Every command also reads the system trees
+(`/usr /lib /lib64 /etc /proc /sys /dev` on Linux).
 
 **The v0.26.0 spelling** `fs = { read, write }` and `unix_sockets` on the entry (JS `fs`,
 `unixSockets`, `unix_sockets`) is refused since 0.28.0: the app does not load, and the error

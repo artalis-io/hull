@@ -451,13 +451,17 @@ out=$("$HULL" inspect "$d" 2>&1) || true
 for want in "host.read:  /dev/nvidiactl" "host.write: /dev/nvidiactl" \
             "manifest.fs.read:  data/gpu-ids" "manifest.fs.write: out/" \
             "host.read:  /etc" "local IPC: may connect to any pathname unix socket" \
-            "macOS: ONE sandbox for all commands" \
-            "exec:              /usr/bin/nvidia-smi, /bin/cat" \
-            "host.read:         /dev/nvidiactl, /etc" \
-            "manifest.fs.write: out/" "unix sockets:      yes"; do
+            "Effective authority (each command its own sandbox)" \
+            "macOS: each command exactly as listed above"; do
     if printf '%s\n' "$out" | grep -qF -- "$want"; then pass "inspect: $want"
     else fail "inspect: $want" "$out"; fi
 done
+# macOS gives each command a broker of its own (#1218): no union is shown.
+if printf '%s\n' "$out" | grep -qF "ONE sandbox"; then
+    fail "inspect: no macOS union (each command its own broker)" "$out"
+else
+    pass "inspect: no macOS union (each command its own broker)"
+fi
 
 # exec_inspect_audit53.*: inspect shows the grants the extractor enforces,
 # one line per manifest string, and does not crash on a planted non-string
@@ -469,7 +473,6 @@ cat > "$d/package.sig" <<'SIG'
 SIG
 out=$("$HULL" inspect "$d" 2>&1) || true
 for want in "host.read:  /etc/hosts" "host.write: /tmp/out" \
-            ", /etc/hosts" "host.write:        /tmp/out" \
             '/x\n      unix sockets:      no'; do
     if printf '%s\n' "$out" | grep -qF -- "$want"; then pass "exec_inspect_audit53: $want"
     else fail "exec_inspect_audit53: $want" "$out"; fi

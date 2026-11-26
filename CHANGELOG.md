@@ -8,6 +8,24 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Security
+
+- **`hull/exec` on macOS: each declared command has a sandbox of its own** (#1218,
+  docs/design/exec_broker_macos_isolation.md). macOS refuses a second sandbox in a sandboxed
+  process, so the broker applied one Seatbelt profile that every command inherited: each
+  command got the union of every command's `host` and `manifest.fs` grants, `AF_UNIX` when any
+  command set `host.unix_sockets`, and could exec any declared binary itself, outside that
+  command's argv shape. With two or more commands the broker is now a router: it starts one
+  broker per command, each holding that command's policy alone and applying that command's
+  profile, then locks itself with no exec, no fork and no file access. A command now reaches
+  only its own grants, as on Linux. An app with one command is unchanged. A router killed with
+  `SIGKILL` no longer leaves running commands; a command's broker killed with `SIGKILL` leaves
+  that command's running calls (the startup `exec: limit:` line says so), and later calls to
+  that command fail with "the command broker is gone". Each extra broker costs about 4 MB and a
+  few ms of start. A macOS app whose command relied on another command's grants (never a
+  documented guarantee) loses them; `hull inspect` prints each command's own authority on both
+  platforms.
+
 ### Removed
 
 - **`hull/exec`: the v0.26.0 command-entry keys `fs` and `unix_sockets` are refused.**

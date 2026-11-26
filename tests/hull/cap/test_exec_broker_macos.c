@@ -240,7 +240,9 @@ static int locked_broker(void *arg)
         return 10;
     }
     if (!strstr(rep, "exec: limit: no parent-death signal")) return 11;
-    if (!strstr(rep, "exec: limit: macOS runs every command in ONE shared sandbox")) return 12;
+    /* Several commands are routed, one broker each (the router tests below):
+     * a broker never reports a shared sandbox any more. */
+    if (strstr(rep, "ONE shared sandbox")) return 12;
     /* The broker forks, and a declared binary runs. */
     char *echo[] = { "/bin/echo", "x", NULL };
     if (run_quiet("/bin/echo", echo) != 0) return 20;
@@ -371,6 +373,58 @@ UTEST(exec_macos, the_child_steps_are_no_ops_here)
     EXPECT_EQ(0, hl_exec_plat_child_confine(&c, 0));
     EXPECT_EQ(0, hl_exec_plat_child_filter(&c, 0));
     EXPECT_EQ(0, hl_exec_plat_leaf_check(-1, "/bin/ls", NULL, 0));
+}
+
+/* ── The router (exec_broker_macos_isolation.md §4.2) ──────────────── */
+
+UTEST(exec_macos, the_router_profile_has_no_exec_fork_or_file_rule)
+{
+    const char *p = hl_exec_macos_router_profile;
+    EXPECT_TRUE(strstr(p, "(deny default)") != NULL);
+    EXPECT_TRUE(strstr(p, "process-exec") == NULL);
+    EXPECT_TRUE(strstr(p, "process-fork") == NULL);
+    EXPECT_TRUE(strstr(p, "file-") == NULL);
+    EXPECT_TRUE(strstr(p, "network") == NULL);
+    EXPECT_EQ(1, hl_exec_plat_router());
+}
+
+/* In a child: lock as the router, then check it keeps its socket and its
+ * child, and can open, fork and exec nothing. 0 = all as expected. */
+static int locked_router(void *arg)
+{
+    (void)arg;
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return 10;
+    pid_t kid = fork();
+    if (kid < 0) return 11;
+    if (kid == 0) { char c; if (read(sv[1], &c, 1) == 1) (void)write(sv[1], "y", 1); pause(); _exit(0); }
+    char rep[512] = "";
+    HlExecReport r = { rep, sizeof rep, 0 };
+    if (hl_exec_plat_router_lock(&r) != 0) return 12;
+    if (!strstr(rep, "exec: limit: no parent-death signal")) return 13;
+    if (write(sv[0], "x", 1) != 1) return 14;                 /* its channel */
+    struct pollfd pf = { sv[0], POLLIN, 0 };
+    char c;
+    if (poll(&pf, 1, 2000) != 1 || read(sv[0], &c, 1) != 1) return 15;
+    errno = 0;
+    if (open("/etc/hosts", O_RDONLY) >= 0 || errno != EPERM) return 16;
+    if (open("/dev/null", O_RDWR) >= 0) return 17;
+    pid_t f = fork();
+    if (f == 0) _exit(0);
+    if (f >= 0) return 18;
+    char *av[] = { "/usr/bin/true", NULL };
+    execv("/usr/bin/true", av);
+    if (errno != EPERM) return 19;
+    if (kill(kid, SIGKILL) != 0) return 20;                   /* its children */
+    int st;
+    if (waitpid(kid, &st, 0) != kid) return 21;
+    if (kill(1, 0) == 0) return 22;                           /* nobody else */
+    return 0;
+}
+
+UTEST(exec_macos, the_locked_router_keeps_its_channels_and_starts_nothing)
+{
+    EXPECT_EQ(0, in_child(locked_router, NULL));
 }
 
 #else

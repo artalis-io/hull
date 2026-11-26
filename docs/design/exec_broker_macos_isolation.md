@@ -1,6 +1,8 @@
 # Per-command isolation on macOS: one sub-broker per command
 
-- **Status:** design decided (2026-11-26, §10), not yet implemented. Issue #1218.
+- **Status:** phase 1 implemented (#1218): `router_start` in `cap/exec_broker.c`,
+  `hl_exec_plat_router` / `hl_exec_plat_router_lock` in `cap/exec_broker_macos.c`,
+  `hl_exec_policy_slice` in `cap/exec.c`. Decisions in §10.
 - **Parent design:** [exec_broker.md](exec_broker.md) (§6.4 macOS backend, §7 lifetime, §15.6
   the interim proposal this replaces).
 - **Scope:** the macOS backend only. Linux is unchanged. No manifest change.
