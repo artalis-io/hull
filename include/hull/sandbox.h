@@ -61,6 +61,15 @@ typedef struct HlSandboxPolicy {
      * outbound sockets still need it). */
     int network_inbound;
 
+    /* http.unix_sockets, resolved (#1228): the AF_UNIX sockets the app may
+     * connect to. With no outbound grant otherwise, Seatbelt allows
+     * network-outbound to exactly these paths and Linux adds the `unix`
+     * promise (Landlock cannot restrict connect(2) by path, so on Linux the
+     * capability layer's check is the boundary). Paths must outlive the
+     * apply call. */
+    const char *const *unix_sockets;
+    int                unix_socket_count;
+
     /* GPU access. If gpu == 0, no GPU paths are unveiled.
      * If gpu == 1 and gpu_device_count == 0, all devices are allowed.
      * If gpu_device_count > 0, gpu_devices[0..gpu_device_count) lists

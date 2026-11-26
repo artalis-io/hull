@@ -23,6 +23,7 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "log.h"
@@ -206,6 +207,17 @@ static void on_http_detached_deadline(void *user_data)
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
+static HlAsyncCtx *http_async_start_url(KlHttpServer *server, KlHttpConn *conn,
+                                        HlNetBackendCtx *net_ctx,
+                                        HlAllocator *alloc,
+                                        HlHttpConfig *http_cfg, int timeout_ms,
+                                        const char *method, const char *url,
+                                        const HlHttpHeader *headers, int num_headers,
+                                        const char *body, size_t body_len);
+
+/* An http+unix:// URL is started with its authority rewritten to the
+ * entry's resolved path (#1228): Keel dials that path, and the redirect
+ * guard compares against it. Keel copies what it needs before returning. */
 HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
                                   HlNetBackendCtx *net_ctx,
                                   HlAllocator *alloc,
@@ -213,6 +225,31 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
                                   const char *method, const char *url,
                                   const HlHttpHeader *headers, int num_headers,
                                   const char *body, size_t body_len)
+{
+    KlUrl parsed;
+    int unix_idx = -1;
+    if (http_cfg && url && kl_url_parse(url, &parsed) == 0 && parsed.is_unix &&
+        hl_http_check_url(http_cfg, &parsed, &unix_idx) == 0) {
+        char *owned = NULL;
+        const char *dial = hl_http_dial_url(http_cfg, url, unix_idx, &owned);
+        if (!dial) return NULL;
+        HlAsyncCtx *ctx = http_async_start_url(server, conn, net_ctx, alloc, http_cfg,
+                                               timeout_ms, method, dial, headers,
+                                               num_headers, body, body_len);
+        free(owned);
+        return ctx;
+    }
+    return http_async_start_url(server, conn, net_ctx, alloc, http_cfg, timeout_ms,
+                                method, url, headers, num_headers, body, body_len);
+}
+
+static HlAsyncCtx *http_async_start_url(KlHttpServer *server, KlHttpConn *conn,
+                                        HlNetBackendCtx *net_ctx,
+                                        HlAllocator *alloc,
+                                        HlHttpConfig *http_cfg, int timeout_ms,
+                                        const char *method, const char *url,
+                                        const HlHttpHeader *headers, int num_headers,
+                                        const char *body, size_t body_len)
 {
     if (!server || !http_cfg || !method || !url)
         return NULL;
@@ -227,7 +264,7 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
         return NULL;
 
     /* Host allowlist */
-    if (hl_http_check_host(http_cfg, parsed.host, parsed.host_len, parsed.port) != 0) {
+    if (hl_http_check_url(http_cfg, &parsed, NULL) != 0) {
         ShJsonWriter w = hl_audit_begin("http.fetch");
         sh_json_write_kv_string(&w, "method", method);
         char red_url[512];   /* no userinfo, query or fragment (audit 17) */

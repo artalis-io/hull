@@ -277,7 +277,28 @@ static void on_done(KlHttpClient *client, void *user)
 
 /* ── public API ──────────────────────────────────────────────────────── */
 
+static int http_stream_start_url(HlHttpStream **out, const HlHttpStreamConfig *cfg);
+
+/* An http+unix:// URL starts with its authority rewritten to the entry's
+ * resolved path (#1228); Keel copies what it needs before returning. */
 int hl_http_stream_start(HlHttpStream **out, const HlHttpStreamConfig *cfg)
+{
+    KlUrl parsed;
+    int unix_idx = -1;
+    if (cfg && cfg->http_cfg && cfg->url && kl_url_parse(cfg->url, &parsed) == 0 &&
+        parsed.is_unix && hl_http_check_url(cfg->http_cfg, &parsed, &unix_idx) == 0) {
+        char *owned = NULL;
+        HlHttpStreamConfig c = *cfg;
+        c.url = hl_http_dial_url(cfg->http_cfg, cfg->url, unix_idx, &owned);
+        if (!c.url) { if (out) *out = NULL; return -1; }
+        int rc = http_stream_start_url(out, &c);
+        free(owned);
+        return rc;
+    }
+    return http_stream_start_url(out, cfg);
+}
+
+static int http_stream_start_url(HlHttpStream **out, const HlHttpStreamConfig *cfg)
 {
     if (!out) return -1;
     *out = NULL;
@@ -293,7 +314,7 @@ int hl_http_stream_start(HlHttpStream **out, const HlHttpStreamConfig *cfg)
 
     KlUrl parsed;
     if (kl_url_parse(cfg->url, &parsed) != 0) return -1;
-    if (hl_http_check_host(cfg->http_cfg, parsed.host, parsed.host_len, parsed.port) != 0) {
+    if (hl_http_check_url(cfg->http_cfg, &parsed, NULL) != 0) {
         ShJsonWriter w = hl_audit_begin("http.stream");
         sh_json_write_kv_string(&w, "method", cfg->method);
         char red[512];

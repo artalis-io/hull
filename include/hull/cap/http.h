@@ -16,6 +16,7 @@
 
 #include "hull/limits/http.h"
 #include "hull/cap/http_redirect_guard.h"
+#include "hull/shared/http_unix.h"
 
 /* Forward declarations for optional modules */
 typedef struct KlHttpClientPool KlHttpClientPool;
@@ -43,6 +44,10 @@ typedef struct HlHttpConfig {
     int              follow_redirects; /**< 1 = follow 3xx redirects (default) */
     int              max_redirects;    /**< Max redirect hops (0 = HL_HTTP_MAX_REDIRECTS, 5) */
     KlDecompressConfig *decompress;    /**< Response decompression (NULL = disabled) */
+    HlHttpUnixSet    unix_sockets;     /**< http.unix_sockets, resolved (#1228): the
+                                        *   only sockets an http+unix:// URL may
+                                        *   dial. Held by value, so it is sealed
+                                        *   with the config. */
 } HlHttpConfig;
 
 /**
@@ -122,6 +127,25 @@ int hl_http_chain_remaining_ms(uint64_t deadline_ms, uint64_t now_ms);
 int hl_http_check_host(const HlHttpConfig *cfg,
                         const char *host, size_t host_len, int port);
 
+/**
+ * @brief The allowlist check for a parsed URL, either kind (#1228): a TCP URL
+ * through hl_http_check_host; an http+unix:// URL against
+ * cfg->unix_sockets - its authority must name a declared entry (its
+ * spelling, or its resolved path) that passes hl_http_unix_path_ok now.
+ * @p unix_idx (may be NULL) gets the entry's index, -1 for a TCP URL.
+ * @return 0 if allowed, -1 if denied.
+ */
+int hl_http_check_url(const HlHttpConfig *cfg, const KlUrl *u, int *unix_idx);
+
+/**
+ * @brief The URL Keel is handed for @p url: @p url itself for a TCP URL
+ * (*@p owned NULL); for an http+unix:// one, a copy whose authority is the
+ * entry's resolved path (*@p owned set; the caller frees it once Keel's
+ * start call returned - Keel copies what it needs). NULL on failure.
+ */
+const char *hl_http_dial_url(const HlHttpConfig *cfg, const char *url,
+                             int unix_idx, char **owned);
+
 /** Why manifest.hosts refused an outbound call (gap 3). */
 typedef struct {
     char host[256];        /**< the refused host, non-printable bytes as '?' */
@@ -129,7 +153,10 @@ typedef struct {
                             *   unset or empty, "" when there is none */
     char shown[272];       /**< what a message names: the host, or
                             *   "host:port" ("[v6]:port") when an allowlist
-                            *   entry names a port (#1227) */
+                            *   entry names a port (#1227), or the socket
+                            *   path of an http+unix:// URL */
+    int  is_unix;          /**< 1: an http+unix:// URL whose socket is not in
+                            *   http.unix_sockets (or is a link) (#1228) */
 } HlHttpDenial;
 
 /**

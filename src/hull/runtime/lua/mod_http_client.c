@@ -276,6 +276,10 @@ static void lua_http_raise_if_denied(lua_State *L, const HlLua *lua,
 {
     HlHttpDenial d;
     if (!hl_http_url_denied(lua->base.http_cfg, url, &d)) return;
+    if (d.is_unix)   /* #1228 */
+        hl_lua_refuse(L, HL_LUA_REFUSAL_DENIED "%s: socket '%s' is not in "
+                      "http.unix_sockets (or a path to it holds a symbolic link)",
+                      what, d.shown);
     if (d.unset_ref[0])
         hl_lua_refuse(L, HL_LUA_REFUSAL_DENIED "%s: host '%s' is not in "
                       "manifest.hosts (its entry %s names an unset variable)",

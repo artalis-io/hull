@@ -40,6 +40,16 @@ release-artifact layout).
 
 ### Added
 
+- **`http.fetch` over a declared Unix-domain socket** (#1228). `http = { unix_sockets = {...} }`
+  (JS `http.unixSockets`) lists the sockets an `http+unix://` URL may dial: an absolute path,
+  `"@state/<rel>"` or an app-relative path. The URL names a socket by the entry's own spelling,
+  percent-encoded (`http+unix://%40state%2Finfer.sock/v1/infer`), and Hull dials the resolved
+  path, so a sidecar can live in the state directory. Each dial checks the path again (no
+  symbolic link below the root, the file a socket); an undeclared socket is refused with code
+  `denied`, and a redirect may not leave the socket. On macOS the Seatbelt profile names the
+  sockets; on Linux the capability layer is the boundary (Landlock cannot restrict a connect by
+  path).
+
 - **`manifest.hosts` entries may name a port** (#1227). `"127.0.0.1:8081"`, `"*.internal:9000"`,
   `"*:443"`, `"10.0.0.0/8:5432"` and, for IPv6, `"[::1]:8081"` admit only that port; an entry
   without one admits every port, as before. A bare `"127.0.0.1"` let an app reach every service

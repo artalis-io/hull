@@ -17,6 +17,7 @@
 
 #include "hull/manifest.h"
 #include "hull/host_match.h"
+#include "hull/shared/http_unix.h"
 #include "hull/utils/alloc.h"
 #include "hull/utils/env_ref.h"   /* hl_env_ref, for hl_manifest_check_env_refs */
 #include <sh_seal_arena.h>
@@ -101,6 +102,8 @@ void hl_manifest_free(HlManifest *m)
         hl_manifest_str_free(a, &m->databases.dynamic.schemes[i]);
     for (int i = 0; i < m->kv.dynamic.host_count; i++)
         hl_manifest_str_free(a, &m->kv.dynamic.hosts[i]);
+    for (int i = 0; i < m->http_unix_socket_count; i++)
+        hl_manifest_str_free(a, &m->http_unix_sockets[i]);
     for (int i = 0; i < m->kv.dynamic.scheme_count; i++)
         hl_manifest_str_free(a, &m->kv.dynamic.schemes[i]);
     /* ssh = { connect = { hosts, users }, tunnel = { hosts } }. Missing here
@@ -224,6 +227,10 @@ static int manifest_seal_impl(HlManifest *dst, const HlManifest *src, SealCtx *a
             goto fail;
     for (int i = 0; i < src->kv.dynamic.scheme_count; i++)
         if (seal_str(arena, &dst->kv.dynamic.schemes[i], src->kv.dynamic.schemes[i]) != 0)
+            goto fail;
+    /* http.unix_sockets (#1228): read on every http+unix:// dial. */
+    for (int i = 0; i < src->http_unix_socket_count; i++)
+        if (seal_str(arena, &dst->http_unix_sockets[i], src->http_unix_sockets[i]) != 0)
             goto fail;
     /* ssh.connect: the hosts an app may reach and the logins it may use.
      *
@@ -400,5 +407,16 @@ int hl_manifest_check_env_refs(const HlManifest *m, char *err, size_t err_size)
         check_patterns("limits.trusted_proxies", m->limits.trusted_proxies,
                        m->limits.trusted_proxy_count, 1, err, err_size) != 0)
         return -1;
+    /* http.unix_sockets (#1228): shape only; the paths are resolved (and the
+     * "@state/" ones need a state directory) when the HTTP client is set up. */
+    for (int i = 0; i < m->http_unix_socket_count; i++) {
+        char why[64];
+        if (!hl_http_unix_entry_valid(m->http_unix_sockets[i], why, sizeof why)) {
+            snprintf(err, err_size, "manifest: \"%s\" in http.unix_sockets is "
+                     "not a socket path (it holds %s)",
+                     m->http_unix_sockets[i] ? m->http_unix_sockets[i] : "", why);
+            return -1;
+        }
+    }
     return 0;
 }
