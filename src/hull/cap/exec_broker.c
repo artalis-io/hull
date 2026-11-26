@@ -628,12 +628,21 @@ static void queue_small(uint32_t type, uint32_t id, const char *text)
     queue_frame(type, id, text, text ? strlen(text) : 0);
 }
 
+static void job_free(Job *j);
+
 /* The reply of routed job @p j: a frame its command's broker sent, or one
  * the router makes when that broker is gone. */
 static void job_reply_frame(Job *j, uint32_t type, const void *body, size_t len)
 {
     j->reply = frame_make(type, j->id, body, len, NULL, 0, &j->reply_len);
-    if (!j->reply) { j->discard = 1; return; }
+    if (!j->reply) {
+        /* No reply to hold: free the slot now (nothing else would) and say
+         * so in a small frame. */
+        uint32_t id = j->id;
+        job_free(j);
+        queue_small(HX_REFUSED, id, "exec: out of memory");
+        return;
+    }
     j->queued = 1;
     g_order[g_order_n++] = (int)(j - g_jobs);
 }
@@ -740,7 +749,9 @@ static void sub_lost(int ci)
  * its id; a test probe goes straight on to the server. */
 static void sub_frame(int ci, uint32_t type, uint32_t id, const uint8_t *p, size_t len)
 {
+#ifdef HL_EXEC_TEST_HOOKS
     if (type == HX_PROBE) { queue_frame(HX_PROBE, id, p, len); return; }
+#endif
     if (type != HX_DONE && type != HX_BUSY && type != HX_REFUSED) { sub_lost(ci); return; }
     for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
         Job *j = &g_jobs[i];
@@ -748,6 +759,9 @@ static void sub_frame(int ci, uint32_t type, uint32_t id, const uint8_t *p, size
         if (j->ci != ci) { sub_lost(ci); return; }   /* not its call */
         if (j->queued) return;
         if (j->discard) { job_free(j); return; }
+        /* A reply holds the call's output, at most what was reserved for it
+         * (the DONE head is 24 bytes); more is a broker gone wrong. */
+        if (len > j->reserved + 24 + 1024) { sub_lost(ci); return; }
         job_reply_frame(j, type, p, len);
         return;
     }
@@ -1082,12 +1096,16 @@ static void kill_call(uint32_t id)
         if (!j->used || j->id != id) continue;
         if (j->routed && !j->queued) {
             /* Its broker kills the child and sends no reply; the slot frees
-             * now (that broker holds its own caps meanwhile). */
-            if (g_subs[j->ci].fd >= 0 &&
-                hl_chan_write_frame(g_subs[j->ci].fd, HX_MAGIC, HX_KILL, id, NULL, 0,
-                                    NULL, 0, hl_chan_mono_ms() + 1000) != 0)
-                sub_lost(j->ci);
+             * now (that broker holds its own caps meanwhile). Freed BEFORE a
+             * failed write marks the broker lost, which would otherwise
+             * queue a reply for this slot (review: the freed slot stayed in
+             * g_order). */
+            int ci = j->ci;
+            int lost = g_subs[ci].fd >= 0 &&
+                       hl_chan_write_frame(g_subs[ci].fd, HX_MAGIC, HX_KILL, id, NULL, 0,
+                                           NULL, 0, hl_chan_mono_ms() + 1000) != 0;
             job_free(j);
+            if (lost) sub_lost(ci);
             return;
         }
         if (j->pid > 0) kill(-j->pid, SIGKILL);
@@ -1376,11 +1394,13 @@ int hl_exec_broker_main(void)
             pf[np] = (struct pollfd){ server_gone, POLLIN, 0 };
             map[np++] = -2;
         }
-        /* The command brokers (router only): map -3 - i. Not read while the
-         * server is not reading us (backpressure, as above). */
+        /* The command brokers (router only): map -3 - i. Always read: a
+         * reply goes to its job's own slot, not the small-frame queue the
+         * backpressure above protects (and a broker that hung up must be
+         * seen, or poll returns at once on its POLLHUP for ever). */
         for (int i = 0; g_router && i < g_ncmds; i++)
             if (g_subs[i].fd >= 0) {
-                pf[np] = (struct pollfd){ g_subs[i].fd, (short)(cev & POLLIN), 0 };
+                pf[np] = (struct pollfd){ g_subs[i].fd, POLLIN, 0 };
                 map[np++] = -3 - i;
             }
         uint64_t now = hl_chan_mono_ms();
@@ -1422,7 +1442,7 @@ int hl_exec_broker_main(void)
             if (map[k] <= -3) {
                 int ci = -3 - map[k];
                 Sub *s = &g_subs[ci];
-                while (s->fd >= 0 && g_outq_n < HX_OUTQ - 2) {
+                while (s->fd >= 0) {
                     int src = hl_chan_frame_read_some(s->fd, &s->rd);
                     if (src == HL_CHAN_MORE) break;
                     if (src != HL_CHAN_DONE) { sub_lost(ci); break; }

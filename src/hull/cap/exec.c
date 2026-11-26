@@ -746,7 +746,7 @@ int hl_exec_policy_slice(const uint8_t *data, size_t len, int i,
     for (int k = 0; k < i; k++) read_cmd(&r, &c);
     const uint8_t *start = r.p;
     read_cmd(&r, &c);
-    if (r.bad || r.p < start) return -1;
+    if (r.bad) return -1;
     size_t elen = (size_t)(r.p - start);
     uint8_t *s = malloc(6 + elen);
     if (!s) return -1;

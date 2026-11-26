@@ -14,6 +14,10 @@
  *   6. a second POLICY                          -> the broker exits
  *   7. stdin past the command's stdin_max      -> REFUSED
  *   8. a full POLICY head before a near-limit policy -> read, then judged
+ *   9. two commands (macOS: a router, one broker each): KILL of a running
+ *      call frees its slot exactly once - the command runs again, its
+ *      concurrency is still held by a live call, nothing comes for the
+ *      killed id, and the other command runs
  *
  * Usage: e2e_exec_frames <path to hull> [degraded]
  *
@@ -45,6 +49,7 @@
 #define POLICY  1u
 #define READY   2u
 #define RUN     3u
+#define KILL    4u
 #define DONE    5u
 #define BUSY    6u
 #define REFUSED 7u
@@ -138,6 +143,26 @@ static HlExecBuf policy_one(const char *name, const char *path,
         hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
     }
     hl_exec_b_count_end(&b, m, (size_t)nfixed + (slot ? 1 : 0));
+    if (hl_exec_b_finish(&b) != 0) { fprintf(stderr, "policy: %s\n", b.err); exit(2); }
+    return b;
+}
+
+/* A policy of two commands: "sl" (sleep 30, concurrency 1) and "e" (echo). */
+static HlExecBuf policy_two(void)
+{
+    HlExecBuf b;
+    hl_exec_b_init(&b, NULL);
+    hl_exec_b_cmd(&b, "sl", 2, SLEEP_BIN, strlen(SLEEP_BIN), 60000, -1, -1, 1, 0, -1,
+                  NULL, 0);
+    for (int k = 0; k < 3; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    size_t m = hl_exec_b_count_begin(&b);
+    hl_exec_b_fixed(&b, "30", 2);
+    hl_exec_b_count_end(&b, m, 1);
+    hl_exec_b_cmd(&b, "e", 1, "/bin/echo", 9, 60000, -1, -1, 2, 0, -1, NULL, 0);
+    for (int k = 0; k < 3; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    m = hl_exec_b_count_begin(&b);
+    hl_exec_b_fixed(&b, "hi", 2);
+    hl_exec_b_count_end(&b, m, 1);
     if (hl_exec_b_finish(&b) != 0) { fprintf(stderr, "policy: %s\n", b.err); exit(2); }
     return b;
 }
@@ -365,6 +390,36 @@ int main(int argc, char **argv)
         free(head);
         free(junk);
     }
+
+    /* 9. exec_frames_router.kill_frees_once: KILL of a running call (a
+     * cancelled request, a deadline) through two commands - on macOS the
+     * router forwards it to the command's broker (#1218). */
+    p = policy_two();
+    b = broker_start(&p);
+    run(b.fd, 1, "sl", NULL);
+    r = expect(b.fd, 1, &t, msg, sizeof msg, 500);
+    CHECK(r == 0, "a running call has no reply yet (r %d)", r);
+    send_frame(b.fd, KILL, 1, NULL, 0, NULL, 0);
+    usleep(300000);                          /* its broker reaps the child */
+    run(b.fd, 2, "sl", NULL);
+    r = expect(b.fd, 2, &t, msg, sizeof msg, 800);
+    CHECK(r == 0, "after a KILL the command runs again (r %d, %s)", r, r == 1 ? msg : "");
+    run(b.fd, 3, "sl", NULL);
+    r = expect(b.fd, 3, &t, msg, sizeof msg, 3000);
+    CHECK(r == 1 && t == BUSY && strstr(msg, "concurrency"),
+          "...and its concurrency is held by the live call (%s)", msg);
+    run(b.fd, 4, "e", NULL);
+    r = expect(b.fd, 4, &t, msg, sizeof msg, 3000);
+    CHECK(r == 1 && t == DONE, "the other command runs");
+    send_frame(b.fd, KILL, 2, NULL, 0, NULL, 0);
+    usleep(300000);
+    run(b.fd, 5, "e", NULL);
+    r = expect(b.fd, 5, &t, msg, sizeof msg, 3000);
+    CHECK(r == 1 && t == DONE, "after both KILLs a call still gets its own reply");
+    r = expect(b.fd, 1, &t, msg, sizeof msg, 300);
+    CHECK(r == 0, "nothing ever comes for a killed id (r %d)", r);
+    broker_end(&b);
+    hl_exec_buf_free(&p);
 
     printf("e2e_exec_frames: %s\n", g_fail ? "FAILED" : "ok");
     return g_fail ? 1 : 0;

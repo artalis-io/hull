@@ -156,6 +156,20 @@ The sub-broker admits and matches the call again (defence in depth: the router i
 process that can write to it, but a router bug must not widen a command). It then runs the
 call exactly as today: re-open and re-check the binary, fork, child setup, exec.
 
+Two consequences, accepted in phase 1 (review, #1218):
+
+- A `KILL` frees the router's slot and reservation as soon as it is forwarded, while the
+  command's broker still holds the killed child until it is reaped (milliseconds: it gets
+  `SIGKILL`). For that moment the router's tree-wide caps under-count by one call; the command
+  broker's own caps still hold.
+- Forwarding is a bounded blocking write (a `RUN` 5 s, a `KILL` 1 s). A command broker always
+  reads its channel, so this never deadlocks, but a large-stdin `RUN` to a slow broker stalls
+  the router for that time, and a write that times out marks that command's broker lost. A
+  per-command output queue would remove both; not needed until a deployment shows it.
+
+A reply larger than the call's reservation (plus its 24-byte head) is taken as a broker gone
+wrong: that command's broker is dropped. `PROBE` frames are relayed in test builds only.
+
 `DONE` / `BUSY` / `REFUSED` frames go back the same way: the router reads each one from the
 sub-broker's channel and queues it for the server, where its output already counts against the
 reservation the router made in step 1. `KILL {id}` is forwarded to the sub-broker that holds the
