@@ -45,7 +45,7 @@ HlNetReach hl_net_check_reach(const HlManifestNetConnect *g,
     /* Same matcher http / ws / smtp / databases.dynamic / kv.dynamic use:
      * exact (case-insensitive), "*", "*.suffix" subdomain glob, CIDR against IP
      * literals only, and "$VAR" / "${VAR}" env references resolved here. */
-    if (!hl_host_match_any_env(g->hosts, g->host_count, host))
+    if (!hl_host_match_any_env_port(g->hosts, g->host_count, host, port))
         return HL_NET_REACH_HOST;
 
     return HL_NET_REACH_OK;

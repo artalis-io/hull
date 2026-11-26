@@ -48,6 +48,19 @@ release-artifact layout).
   `hull check` lint for the old keys and their `@deprecated` TypeScript members are gone;
   the policy encoding is unchanged.
 
+### Added
+
+- **`manifest.hosts` entries may name a port** (#1227). `"127.0.0.1:8081"`, `"*.internal:9000"`,
+  `"*:443"`, `"10.0.0.0/8:5432"` and, for IPv6, `"[::1]:8081"` admit only that port; an entry
+  without one admits every port, as before. A bare `"127.0.0.1"` let an app reach every service
+  on loopback (a local database, the agent API); naming the port lets it call one sidecar and
+  nothing else. The port checked is the one the call dials (the URL's or its scheme's default;
+  a DSN's or its backend's default), for `http.fetch` and the sync calls (every redirect hop
+  too), `ws.connect`, `smtp.send`, `db.open`, `kv.open` and the `ssh` grants, which share the
+  matcher. A malformed port (`0`, over 65535, a leading zero, letters) refuses the app at load,
+  naming the entry, and `limits.trusted_proxies` takes none. A refused call names the port when
+  an entry has one. Covered by `tests/e2e_host_port.sh` and `test_host_match`.
+
 ### Changed
 
 - **Keel 3.6.0** (from 3.4.0; 3.5.0 and 3.6.0 notes in `vendor/keel/CHANGELOG.md`). A client

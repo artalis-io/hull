@@ -84,4 +84,22 @@ UTEST(kv_dynamic, env_ref_host) {
     unsetenv("HULL_TEST_KV_HOST");
 }
 
+/* #1227: a "host:port" entry admits only that port; a DSN with no port is
+ * checked as Valkey's default, 6379. */
+UTEST(kv_dynamic, ported_host_entry) {
+    char e[256];
+    const char *schemes[] = { "valkey", "redis" };
+    const char *hosts[]   = { "127.0.0.1:6380", "cache.local:6379" };
+    HlManifestKvDynamic p = policy_of(schemes, 2, hosts, 2);
+
+    OK("valkey://127.0.0.1:6380", &p);
+    DENY("valkey://127.0.0.1:6381", &p);
+    DENY("valkey://127.0.0.1", &p);                /* default 6379, not 6380 */
+    OK("redis://cache.local", &p);                 /* default 6379 */
+    OK("redis://cache.local:6379/2", &p);
+    DENY("redis://cache.local:6380", &p);
+    DENY("redis://cache.local:0", &p);             /* not a port */
+    DENY("redis://cache.local:70000", &p);
+}
+
 UTEST_MAIN();

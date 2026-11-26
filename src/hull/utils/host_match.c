@@ -215,14 +215,75 @@ static int cidr_match(const char *pattern, const char *host)
     return 1;
 }
 
-int hl_host_match(const char *pattern, const char *host)
+/* ── Ports in patterns (#1227) ────────────────────────────────────────
+ *
+ * A pattern may name the one port it admits:
+ *
+ *   "127.0.0.1:8081"   "*.internal:9000"   "*:443"   "10.0.0.0/8:5432"
+ *   "[::1]:8081"       "[2001:db8::/32]:443"
+ *
+ * IPv6 takes a port only in brackets: a bare IPv6 pattern ("::1",
+ * "2001:db8::/32") has several ':' and no port. A pattern with exactly one
+ * ':' (and no brackets) is host ':' port. A port is 1-65535, decimal, at most
+ * five digits, no leading zero. A pattern with no port admits every port, as
+ * before. */
+
+/* Split @p pattern into its host part (into @p buf) and its port (*@p port,
+ * 0 = none). 1 on success, 0 for a malformed pattern (which matches
+ * nothing). */
+static int split_pattern(const char *pattern, char *buf, size_t bufsz,
+                         int *port)
 {
-    if (!pattern || !host || !*host) return 0;
+    *port = 0;
+    const char *hb = pattern, *he, *ps = NULL;
+    if (pattern[0] == '[') {
+        const char *close = strchr(pattern, ']');
+        if (!close) return 0;
+        hb = pattern + 1;
+        he = close;
+        if (close[1] == ':')            ps = close + 2;
+        else if (close[1] != '\0')      return 0;
+        if (!memchr(hb, ':', (size_t)(he - hb))) return 0;  /* IPv6 only */
+    } else {
+        const char *c1 = strchr(pattern, ':');
+        if (c1 && !strchr(c1 + 1, ':')) { he = c1; ps = c1 + 1; }
+        else he = pattern + strlen(pattern);
+    }
+    if (ps) {
+        size_t n = strlen(ps);
+        if (n == 0 || n > 5 || ps[0] == '0') return 0;
+        long v = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (ps[i] < '0' || ps[i] > '9') return 0;
+            v = v * 10 + (ps[i] - '0');
+        }
+        if (v < 1 || v > 65535) return 0;
+        *port = (int)v;
+    }
+    size_t hl = (size_t)(he - hb);
+    if (hl == 0 || hl >= bufsz) return 0;
+    memcpy(buf, hb, hl);
+    buf[hl] = '\0';
+    return 1;
+}
 
-    /* A host that looks like an IP literal but is not in the canonical form
-     * matches nothing (audit 42): the dial may read it as another address. */
-    if (!hl_host_literal_ok(host)) return 0;
+int hl_host_pattern_valid(const char *pattern)
+{
+    char host[256];
+    int port;
+    return pattern && pattern[0] && split_pattern(pattern, host, sizeof host, &port);
+}
 
+int hl_host_pattern_has_port(const char *pattern)
+{
+    char host[256];
+    int port;
+    return pattern && split_pattern(pattern, host, sizeof host, &port) && port != 0;
+}
+
+/* The host part of a pattern, port already split off. */
+static int host_part_match(const char *pattern, const char *host)
+{
     /* Any host. */
     if (pattern[0] == '*' && pattern[1] == '\0')
         return 1;
@@ -244,6 +305,28 @@ int hl_host_match(const char *pattern, const char *host)
     return strcasecmp(pattern, host) == 0;
 }
 
+int hl_host_match_port(const char *pattern, const char *host, int port)
+{
+    if (!pattern || !host || !*host) return 0;
+
+    /* A host that looks like an IP literal but is not in the canonical form
+     * matches nothing (audit 42): the dial may read it as another address. */
+    if (!hl_host_literal_ok(host)) return 0;
+
+    char hpat[256];
+    int pport;
+    if (!split_pattern(pattern, hpat, sizeof hpat, &pport)) return 0;
+    /* A pattern's port admits only that port; an unknown port (0) never
+     * matches a ported pattern. */
+    if (pport && pport != port) return 0;
+    return host_part_match(hpat, host);
+}
+
+int hl_host_match(const char *pattern, const char *host)
+{
+    return hl_host_match_port(pattern, host, 0);
+}
+
 int hl_host_match_any(const char *const *patterns, int n, const char *host)
 {
     if (!patterns) return 0;
@@ -253,7 +336,8 @@ int hl_host_match_any(const char *const *patterns, int n, const char *host)
     return 0;
 }
 
-int hl_host_match_any_env(const char *const *patterns, int n, const char *host)
+int hl_host_match_any_env_port(const char *const *patterns, int n,
+                               const char *host, int port)
 {
     if (!patterns || !host) return 0;
     char var[128];
@@ -263,27 +347,33 @@ int hl_host_match_any_env(const char *const *patterns, int n, const char *host)
          * (including a literal that merely contains '$') is matched as-is. */
         if (hl_env_ref(pat, var, sizeof var)) {
             const char *v = getenv(var);
-            if (v && v[0] && hl_host_match(v, host)) return 1;
-        } else if (hl_host_match(pat, host)) {
+            if (v && v[0] && hl_host_match_port(v, host, port)) return 1;
+        } else if (hl_host_match_port(pat, host, port)) {
             return 1;
         }
     }
     return 0;
 }
 
+int hl_host_match_any_env(const char *const *patterns, int n, const char *host)
+{
+    return hl_host_match_any_env_port(patterns, n, host, 0);
+}
+
 int hl_host_match_any_env_n(const char *const *patterns, int n,
-                            const char *host, size_t host_len)
+                            const char *host, size_t host_len, int port)
 {
     if (!host) return 0;
     char buf[256];
     if (host_len >= sizeof buf) return 0;   /* implausible host; fail closed */
     memcpy(buf, host, host_len);
     buf[host_len] = '\0';
-    return hl_host_match_any_env(patterns, n, buf);
+    return hl_host_match_any_env_port(patterns, n, buf, port);
 }
 
-int hl_dsn_host(const char *dsn, char *buf, size_t bufsz)
+int hl_dsn_host_port(const char *dsn, char *buf, size_t bufsz, int *port)
 {
+    if (port) *port = 0;
     if (!dsn || !buf || bufsz == 0) return 0;
     const char *sep = strstr(dsn, "://");
     if (!sep) return 0;
@@ -329,17 +419,29 @@ int hl_dsn_host(const char *dsn, char *buf, size_t bufsz)
         }
         rest = hend;
     }
+    long pv = 0;
     if (rest < end) {                                 /* ":port", digits */
         if (*rest != ':' || rest + 1 == end) return 0;
-        for (const char *q = rest + 1; q < end; q++)
+        for (const char *q = rest + 1; q < end; q++) {
             if (*q < '0' || *q > '9') return 0;
+            if (pv <= 65535) pv = pv * 10 + (*q - '0');
+        }
+        /* The backends read the port as a decimal service name: one they
+         * would reject (0, > 65535) is refused here too. */
+        if (pv < 1 || pv > 65535) return 0;
     }
 
     size_t n = (size_t)(hend - host);
     if (n == 0 || n >= bufsz) return 0;
     memcpy(buf, host, n);
     buf[n] = '\0';
+    if (port) *port = (int)pv;
     return 1;
+}
+
+int hl_dsn_host(const char *dsn, char *buf, size_t bufsz)
+{
+    return hl_dsn_host_port(dsn, buf, bufsz, NULL);
 }
 
 int hl_dsn_query_param(const char *dsn, const char *key, int nth,

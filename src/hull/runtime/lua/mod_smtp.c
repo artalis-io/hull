@@ -256,7 +256,7 @@ static int lua_smtp_send(lua_State *L)
         smtp_scratch_release(lua, scratch_mark);
         return lua_smtp_fail(L, "validation_failed");
     }
-    if (hl_smtp_check_host(lua->base.smtp_cfg, msg.host) != 0) {
+    if (hl_smtp_check_host(lua->base.smtp_cfg, msg.host, msg.port) != 0) {
         hl_smtp_audit_denied(&msg);
         smtp_scratch_release(lua, scratch_mark);
         return lua_smtp_fail(L, "host_not_allowed");

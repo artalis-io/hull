@@ -70,11 +70,15 @@ int hl_cap_kv_check_dsn(const struct HlManifestKvDynamic *policy, const char *ds
     }
 
     char host[256];
-    if (!hl_dsn_host(dsn, host, sizeof host)) {
+    int port = 0;
+    if (!hl_dsn_host_port(dsn, host, sizeof host, &port)) {
         if (errbuf && errlen) snprintf(errbuf, errlen, "kv.open: DSN has no host, or one a backend could parse differently");
         return -1;
     }
-    if (!hl_host_match_any_env(policy->hosts, policy->host_count, host)) {
+    /* Every Valkey scheme dials 6379 when the DSN names no port
+     * (hl_valkey_dsn_parse); a "host:port" entry admits only its port. */
+    if (port == 0) port = 6379;
+    if (!hl_host_match_any_env_port(policy->hosts, policy->host_count, host, port)) {
         if (errbuf && errlen)
             snprintf(errbuf, errlen, "kv.open: host '%s' not allowed by kv.dynamic.hosts", host);
         return -1;

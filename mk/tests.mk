@@ -831,8 +831,8 @@ $(BUILDDIR)/test_seal_arena: $(TESTDIR)/hull/test_seal_arena.c $(SH_SEAL_ARENA_O
 # Links only manifest.o (the shared / runtime-free part) - manifest_lua
 # and manifest_js are NOT needed since the fixture builds the manifest
 # by hand, and pulling them in would force a QuickJS + Lua link.
-$(BUILDDIR)/test_manifest_seal: $(TESTDIR)/hull/test_manifest_seal.c $(BUILDDIR)/manifest.o $(BUILDDIR)/cap_exec.o $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDDIR)/manifest.o $(BUILDDIR)/cap_exec.o $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(KEEL_LIB) -lpthread
+$(BUILDDIR)/test_manifest_seal: $(TESTDIR)/hull/test_manifest_seal.c $(BUILDDIR)/manifest.o $(BUILDDIR)/cap_exec.o $(HOST_MATCH_OBJ) $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDDIR)/manifest.o $(BUILDDIR)/cap_exec.o $(HOST_MATCH_OBJ) $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(KEEL_LIB) -lpthread
 
 # QuickJS HULL PATCH 0009 test seam (audit 40): test_js links a second copy
 # of quickjs.c built with -DQJS_HULL_TEST_HOOKS, which compiles in
@@ -1656,6 +1656,14 @@ e2e-refusal-codes: $(BUILDDIR)/hull
 .PHONY: e2e-host-denied
 e2e-host-denied: $(BUILDDIR)/hull
 	sh tests/e2e_host_denied.sh
+
+# A "host:port" manifest.hosts entry admits that port only (#1227): the
+# app reaches its own server through it, and the same host on another port
+# is refused coded denied (http.fetch, sync http.get, ws.connect); a
+# malformed port refuses the app at load. Both runtimes.
+.PHONY: e2e-host-port
+e2e-host-port: $(BUILDDIR)/hull
+	sh tests/e2e_host_port.sh
 
 # hull/exec PR 1 (docs/design/exec_broker.md): the manifest's exec section,
 # the argument matcher and the hull test stubs, both runtimes.

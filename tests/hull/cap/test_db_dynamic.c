@@ -259,6 +259,32 @@ UTEST(db_dynamic, network_host_gate)
     ASSERT_TRUE(err != NULL);
     ASSERT_TRUE(strstr(err, "host") == NULL);
 }
+
+/* #1227: a "host:port" entry admits only that port, and a DSN that names no
+ * port is checked as the scheme's default (5432 for Postgres). */
+UTEST(db_dynamic, ported_host_entry)
+{
+    HlManifestDbDynamic p = {0};
+    p.declared = 1;
+    p.schemes[0] = "postgres"; p.scheme_count = 1;
+    p.hosts[0] = "127.0.0.1:1"; p.host_count = 1;
+
+    const char *err = NULL;    /* the admitted port: past the gate, refused */
+    ASSERT_TRUE(hl_db_dynamic_open("postgres://u@127.0.0.1:1/db?sslmode=disable",
+                                   &p, NULL, &err) == NULL);
+    ASSERT_TRUE(err != NULL);
+    EXPECT_TRUE(strstr(err, "databases.dynamic.hosts") == NULL);
+
+    err = NULL;                /* another port on the same host */
+    ASSERT_TRUE(hl_db_dynamic_open("postgres://u@127.0.0.1:2/db", &p, NULL, &err) == NULL);
+    ASSERT_TRUE(err != NULL);
+    EXPECT_TRUE(strstr(err, "databases.dynamic.hosts") != NULL);
+
+    err = NULL;                /* no port: the default, 5432 */
+    ASSERT_TRUE(hl_db_dynamic_open("postgres://u@127.0.0.1/db", &p, NULL, &err) == NULL);
+    ASSERT_TRUE(err != NULL);
+    EXPECT_TRUE(strstr(err, "databases.dynamic.hosts") != NULL);
+}
 #endif
 
 #ifdef HL_ENABLE_MYSQL

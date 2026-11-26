@@ -251,7 +251,7 @@ declare namespace Hull {
     /** A module declaration `"<vendor>/<name>@<major>"`; a trailing `?` marks it optional. */
     type ModuleSpec = `${ModuleName}@${number}` | `${ModuleName}@${number}?`;
 
-    /** An outbound network allowlist: hosts (exact, `*`, `*.suffix`, CIDR, `$VAR`) and DSN schemes. */
+    /** An outbound network allowlist: hosts (exact, `*`, `*.suffix`, CIDR, `$VAR`; any of them `:port` for that port only, IPv6 as `[addr]:port`) and DSN schemes. */
     interface DynamicAllowlist {
         /** Allowed hosts. */
         hosts?: string[];
@@ -364,7 +364,7 @@ declare namespace Hull {
         env?: string[];
         /** Variables readable only through `"$VAR"` references elsewhere in the manifest. */
         secrets?: string[];
-        /** Outbound hosts `http.fetch`, `ws.connect`, `smtp.send` may reach. */
+        /** Outbound hosts `http.fetch`, `ws.connect`, `smtp.send` may reach: exact, `*`, `*.suffix`, CIDR or `$VAR`, optionally `:port` (that port only; IPv6 as `[addr]:port`). An entry with no port admits every port. */
         hosts?: string[];
         /** Outbound HTTP defaults. */
         http?: {

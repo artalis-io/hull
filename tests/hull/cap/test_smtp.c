@@ -244,28 +244,28 @@ UTEST(smtp_host, allowed)
 {
     const char *hosts[] = { "smtp.example.com", "smtp.gmail.com" };
     HlSmtpConfig cfg = { .allowed_hosts = hosts, .host_count = 2 };
-    ASSERT_EQ(0, hl_smtp_check_host(&cfg, "smtp.example.com"));
-    ASSERT_EQ(0, hl_smtp_check_host(&cfg, "smtp.gmail.com"));
+    ASSERT_EQ(0, hl_smtp_check_host(&cfg, "smtp.example.com", 587));
+    ASSERT_EQ(0, hl_smtp_check_host(&cfg, "smtp.gmail.com", 587));
 }
 
 UTEST(smtp_host, denied)
 {
     const char *hosts[] = { "smtp.example.com" };
     HlSmtpConfig cfg = { .allowed_hosts = hosts, .host_count = 1 };
-    ASSERT_NE(0, hl_smtp_check_host(&cfg, "evil.com"));
+    ASSERT_NE(0, hl_smtp_check_host(&cfg, "evil.com", 587));
 }
 
 UTEST(smtp_host, case_insensitive)
 {
     const char *hosts[] = { "SMTP.Example.COM" };
     HlSmtpConfig cfg = { .allowed_hosts = hosts, .host_count = 1 };
-    ASSERT_EQ(0, hl_smtp_check_host(&cfg, "smtp.example.com"));
+    ASSERT_EQ(0, hl_smtp_check_host(&cfg, "smtp.example.com", 587));
 }
 
 UTEST(smtp_host, empty_list)
 {
     HlSmtpConfig cfg = { .allowed_hosts = NULL, .host_count = 0 };
-    ASSERT_NE(0, hl_smtp_check_host(&cfg, "smtp.example.com"));
+    ASSERT_NE(0, hl_smtp_check_host(&cfg, "smtp.example.com", 587));
 }
 
 /* §2.8: smtp shares the http glob/CIDR matcher. */
@@ -273,14 +273,14 @@ UTEST(smtp_host, wildcard_subdomain)
 {
     const char *hosts[] = { "*.example.com" };
     HlSmtpConfig cfg = { .allowed_hosts = hosts, .host_count = 1 };
-    ASSERT_EQ(0, hl_smtp_check_host(&cfg, "smtp.example.com"));
-    ASSERT_NE(0, hl_smtp_check_host(&cfg, "example.com"));   /* apex */
-    ASSERT_NE(0, hl_smtp_check_host(&cfg, "evil.com"));
+    ASSERT_EQ(0, hl_smtp_check_host(&cfg, "smtp.example.com", 587));
+    ASSERT_NE(0, hl_smtp_check_host(&cfg, "example.com", 587));   /* apex */
+    ASSERT_NE(0, hl_smtp_check_host(&cfg, "evil.com", 587));
 }
 
 UTEST(smtp_host, null_cfg)
 {
-    ASSERT_NE(0, hl_smtp_check_host(NULL, "smtp.example.com"));
+    ASSERT_NE(0, hl_smtp_check_host(NULL, "smtp.example.com", 587));
 }
 
 /* ════════════════════════════════════════════════════════════════════

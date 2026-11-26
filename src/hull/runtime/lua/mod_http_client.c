@@ -279,9 +279,9 @@ static void lua_http_raise_if_denied(lua_State *L, const HlLua *lua,
     if (d.unset_ref[0])
         hl_lua_refuse(L, HL_LUA_REFUSAL_DENIED "%s: host '%s' is not in "
                       "manifest.hosts (its entry %s names an unset variable)",
-                      what, d.host, d.unset_ref);
+                      what, d.shown, d.unset_ref);
     hl_lua_refuse(L, HL_LUA_REFUSAL_DENIED "%s: host '%s' is not in "
-                  "manifest.hosts", what, d.host);
+                  "manifest.hosts", what, d.shown);
 }
 
 /* http.request(method, url, opts?) */
