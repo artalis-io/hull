@@ -10484,6 +10484,66 @@ UTEST(js_runtime, manifest_http_timeout)
  * empty list - every device (/dev/dri unveiled whole). Each element counts
  * now, so a list with no valid index disables gpu; a devices value that is
  * not an array does too. */
+/* 0.28.0: the v0.26.0 spellings on a command entry (fs, unixSockets /
+ * unix_sockets) are refused, naming the replacement; host: { ... } is the
+ * only spelling. A null value counts: the key is the refusal. */
+UTEST(exec_v028, legacy_keys_refused)
+{
+    static const struct { const char *decl; const char *want; } cases[] = {
+        { "app.manifest({ exec: { a: { path: '/bin/true', fs: { read: ['/etc'] } } } });",
+          "exec.a.fs: removed in 0.28.0, use exec.a.host" },
+        { "app.manifest({ exec: { a: { path: '/bin/true', fs: { read: ['/etc'] }, "
+          "host: { read: ['/usr'] } } } });",
+          "exec.a.fs: removed in 0.28.0, use exec.a.host" },
+        { "app.manifest({ exec: { a: { path: '/bin/true', unixSockets: true } } });",
+          "exec.a.unixSockets: removed in 0.28.0, use exec.a.host.unixSockets" },
+        { "app.manifest({ exec: { a: { path: '/bin/true', unix_sockets: true } } });",
+          "exec.a.unix_sockets: removed in 0.28.0, use exec.a.host.unix_sockets" },
+        { "app.manifest({ exec: { a: { path: '/bin/true', unixSockets: null, "
+          "host: { unixSockets: true } } } });",
+          "exec.a.unixSockets: removed in 0.28.0, use exec.a.host.unixSockets" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        char src[512];
+        snprintf(src, sizeof src, "import { app } from 'hull:app';\n%s\n",
+                 cases[i].decl);
+        char *msg = NULL;
+        EXPECT_EQ(a5_module_named("<test>", src, &msg), 0);
+        free(msg);
+        HlManifest m;
+        ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+        EXPECT_EQ_MSG(m.exec_invalid, 1, cases[i].decl);
+        EXPECT_TRUE_MSG(m.exec.data == NULL, cases[i].decl);
+        EXPECT_TRUE_MSG(strstr(m.exec.err, cases[i].want) != NULL, m.exec.err);
+        hl_manifest_free(&m);
+        cleanup_js();
+    }
+}
+
+UTEST(exec_v028, host_keys_accepted)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ exec: { a: { path: '/bin/true', "
+        "host: { read: ['/etc'], unixSockets: true } } } });\n", &msg), 0);
+    free(msg);
+    HlManifest m;
+    ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+    ASSERT_EQ(m.exec_invalid, 0);
+    ASSERT_TRUE(m.exec.data != NULL);
+    HlExecCmd c;
+    ASSERT_EQ(0, hl_exec_policy_at(m.exec.data, m.exec.len, 0, &c));
+    EXPECT_TRUE(c.flags & HL_EXEC_CMD_UNIX_SOCKETS);
+    EXPECT_EQ(1, (int)c.n_fs_read);
+    hl_manifest_free(&m);
+    cleanup_js();
+}
+
 UTEST(js_runtime, manifest_gpu_devices_fail_closed)
 {
     static const struct { const char *decl; int gpu; int count; int inv; } cases[] = {

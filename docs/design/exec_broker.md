@@ -316,11 +316,10 @@ child manifest):
 **Compatibility.** A command with no `manifest` encodes to exactly the v0.26.0 bytes (a new
 command flag, `HL_EXEC_CMD_APP_FS`, appends the child lists only when there are any; a golden
 test holds the v0.26.0 encoding), so a v0.26.0 policy still means what it meant. The v0.26.0
-spellings `fs` and `unix_sockets` on the entry are taken as `host = { read, write }` and
-`host.unix_sockets`, with the same meaning (absolute paths, never reinterpreted as
-app-relative), one WARN per process at load, and a `hull check` lint naming the replacement.
-Giving both spellings for one grant (`fs` with `host.read` / `host.write`, or `unix_sockets`
-with `host.unix_sockets`) is refused. They are accepted through 0.27.x and refused from 0.28.0.
+spellings `fs` and `unix_sockets` on the entry were taken as `host = { read, write }` and
+`host.unix_sockets` through 0.27.x, with one WARN at load. Since 0.28.0 they are refused at
+load (JS `fs`, `unixSockets` and `unix_sockets` too), the error naming the command and the
+replacement (`exec.<name>.fs: removed in 0.28.0, use exec.<name>.host`); write them as `host`.
 A manifest using `manifest` or `host` is refused by v0.26.0 (an unknown key), which fails
 closed.
 
@@ -1285,7 +1284,7 @@ security goal is met by §15.7 today, and nested calls need a Hull callee that r
 0. **Done (v0.27.0, #1217 + #1219):** native child manifests (§3.1): `manifest.fs` with
    app-relative and `@state/` grants opened by descriptor, `host` for absolute grants,
    independent authority, the legacy `fs` / `unix_sockets` keys read as `host` through 0.27.x
-   (refused from 0.28.0), and `hull inspect` showing both sets and the effective authority per
+   (refused since 0.28.0), and `hull inspect` showing both sets and the effective authority per
    platform.
 1. **macOS shared trust domain: moved to issue #1218.** This review proposed an interim rule
    (§15.6: differing grants refused on macOS unless `--allow-degraded-sandbox`, plus a §1 note
@@ -1308,7 +1307,7 @@ close the separate-service design's loopback gap. Raise it when a deployment nee
 
 **Compatibility.** A manifest without the new keys encodes and behaves byte-for-byte as in
 v0.26.0 (§3.1 keeps that: a command with no `manifest` encodes to the v0.26.0 bytes, and the
-legacy `fs` / `unix_sockets` keys are read as `host` until 0.28.0). A manifest WITH them is refused by v0.26.0 (unknown key), which fails closed. Slice 0
+legacy `fs` / `unix_sockets` keys were read as `host` until 0.28.0, which refuses them). A manifest WITH them is refused by v0.26.0 (unknown key), which fails closed. Slice 0
 breaks one case: macOS, several commands, differing grants, now needs
 `--allow-degraded-sandbox`.
 

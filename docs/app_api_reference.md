@@ -3124,10 +3124,10 @@ own grants; on macOS all commands of an app share one sandbox, so each gets the 
 command's `host` and `manifest.fs` grants (logged at start as `exec: limit:`). Every command
 also reads the system trees (`/usr /lib /lib64 /etc /proc /sys /dev` on Linux).
 
-**The v0.26.0 spelling** `fs = { read, write }` and `unix_sockets` on the entry is taken as
-`host = { read, write }` / `host.unix_sockets`, never as app-relative paths, with one WARN at
-start; `hull check` names each use. Giving both spellings for one grant is refused. The old
-spelling is refused from 0.28.0.
+**The v0.26.0 spelling** `fs = { read, write }` and `unix_sockets` on the entry (JS `fs`,
+`unixSockets`, `unix_sockets`) is refused since 0.28.0: the app does not load, and the error
+names the command and the replacement (`exec.<name>.fs: removed in 0.28.0, use
+exec.<name>.host`). Write it as `host = { read, write, unix_sockets }`.
 
 **`sha256` pins the main executable's bytes.** The broker hashes the file from the descriptor
 it will exec: at start (a mismatch refuses the app) and before every call (a mismatch fails the
@@ -3169,7 +3169,7 @@ section is refused by the resolver. The section is part of the signed manifest.
 binary is a general-purpose program (a shell, an interpreter, `env`, `find`, `xargs`, `ssh`,
 `curl`, `sudo`, `systemd-run`, `git`, `tar`, ...), whose path is outside `/usr`, `/bin`,
 `/sbin` and `/opt`, or that has a slot with no `chars` or `enum`, a slot with `allow_dash`, a
-slot after fixed arguments with no `--` before it, or a v0.26.0 `fs` / `unix_sockets`.
+slot after fixed arguments with no `--` before it.
 `hull inspect` shows each command's pin and its whole authority: `host.read`, `host.write`,
 `manifest.fs.read`, `manifest.fs.write` and the scope of `host.unix_sockets`.
 

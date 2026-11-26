@@ -123,9 +123,11 @@ static int read_port_array(lua_State *L, int table_idx, int *out)
 
 static const char *const EXEC_CMD_KEYS[] = {
     "path", "argv", "timeout_ms", "stdout_max", "stderr_max", "env",
-    "concurrency", "host", "manifest", "stdin_max", "sha256",
-    "fs", "unix_sockets",              /* v0.26.0 spellings of host's fields */
-    NULL };
+    "concurrency", "host", "manifest", "stdin_max", "sha256", NULL };
+/* The v0.26.0 spellings of host's fields, refused since 0.28.0: pairs of
+ * (removed key, replacement), named in the error. */
+static const char *const EXEC_CMD_REMOVED[] = {
+    "fs", "host", "unix_sockets", "host.unix_sockets", NULL };
 static const char *const EXEC_HOST_KEYS[] = { "read", "write", "unix_sockets", NULL };
 static const char *const EXEC_SLOT_KEYS[] = {
     "enum", "prefix", "suffix", "chars", "min", "max", "repeat",
@@ -140,13 +142,30 @@ static int exec_key_in(const char *k, const char *const *list)
     return 0;
 }
 
-/* Fail on a key of the table at @p t that @p allowed does not name. */
-static int lx_keys(lua_State *L, int t, const char *const *allowed,
-                   HlExecBuf *b, const char *where)
+/* A removed key's replacement (@p removed: pairs), or NULL. */
+static const char *exec_key_removed(const char *k, const char *const *removed)
+{
+    for (size_t i = 0; removed && removed[i]; i += 2)
+        if (strcmp(k, removed[i]) == 0) return removed[i + 1];
+    return NULL;
+}
+
+/* Fail on a key of the table at @p t that @p allowed does not name; a key
+ * @p removed names (pairs, may be NULL) is refused naming its replacement. */
+static int lx_keys_ex(lua_State *L, int t, const char *const *allowed,
+                      const char *const *removed, HlExecBuf *b, const char *where)
 {
     lua_pushnil(L);
     while (lua_next(L, t)) {
         lua_pop(L, 1);
+        const char *rep = lua_type(L, -1) == LUA_TSTRING
+            ? exec_key_removed(lua_tostring(L, -1), removed) : NULL;
+        if (rep) {
+            hl_exec_b_fail(b, "%s.%s: removed in 0.28.0, use %s.%s", where,
+                           lua_tostring(L, -1), where, rep);
+            lua_pop(L, 1);
+            return -1;
+        }
         if (lua_type(L, -1) != LUA_TSTRING || !exec_key_in(lua_tostring(L, -1), allowed)) {
             hl_exec_b_fail(b, "%s: unknown key '%s'", where,
                            lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1)
@@ -156,6 +175,12 @@ static int lx_keys(lua_State *L, int t, const char *const *allowed,
         }
     }
     return 0;
+}
+
+static int lx_keys(lua_State *L, int t, const char *const *allowed,
+                   HlExecBuf *b, const char *where)
+{
+    return lx_keys_ex(L, t, allowed, NULL, b, where);
 }
 
 /* An integer field: -1 absent, -2 negative (refused by validation). */
@@ -355,7 +380,7 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
 {
     char where[96];
     snprintf(where, sizeof where, "exec.%s", name);
-    if (lx_keys(L, t, EXEC_CMD_KEYS, b, where) != 0) return;
+    if (lx_keys_ex(L, t, EXEC_CMD_KEYS, EXEC_CMD_REMOVED, b, where) != 0) return;
     int base = lua_gettop(L);
     size_t pl;
     const char *path = lx_str(L, t, "path", &pl, b, where);
@@ -367,8 +392,7 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
     int64_t so = lx_int(L, t, "stdout_max", b, where);
     int64_t se = lx_int(L, t, "stderr_max", b, where);
     int64_t conc = lx_int(L, t, "concurrency", b, where);
-    /* host = { read, write, unix_sockets }; the v0.26.0 spellings fs and
-     * unix_sockets map onto it, never both for one grant. */
+    /* host = { read, write, unix_sockets } */
     int hb = lua_gettop(L);
     lua_getfield(L, t, "host");
     int host = lua_gettop(L);
@@ -379,33 +403,8 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
         snprintf(hw, sizeof hw, "%s.host", where);
         (void)lx_keys(L, host, EXEC_HOST_KEYS, b, hw);
     }
-    lua_getfield(L, t, "fs");
-    int legacy_fs = !lua_isnil(L, -1);
-    lua_pop(L, 1);
-    lua_getfield(L, t, "unix_sockets");
-    int legacy_unix = !lua_isnil(L, -1);
-    lua_pop(L, 1);
-    int host_rw = 0, host_unix = 0;
-    if (lua_istable(L, host)) {
-        lua_getfield(L, host, "read");
-        host_rw |= !lua_isnil(L, -1);
-        lua_getfield(L, host, "write");
-        host_rw |= !lua_isnil(L, -1);
-        lua_getfield(L, host, "unix_sockets");
-        host_unix = !lua_isnil(L, -1);
-        lua_pop(L, 3);
-    }
-    if (legacy_fs && host_rw)
-        hl_exec_b_fail(b, "%s: fs and host.read / host.write both given; fs is the "
-                       "v0.26.0 spelling of host = { read, write }: keep host", where);
-    if (legacy_unix && host_unix)
-        hl_exec_b_fail(b, "%s: unix_sockets and host.unix_sockets both given; keep "
-                       "host.unix_sockets", where);
-    if (legacy_fs) hl_exec_legacy_note(name, "fs", "host");
-    if (legacy_unix) hl_exec_legacy_note(name, "unix_sockets", "host.unix_sockets");
-    int unix_sockets = legacy_unix ? lx_bool(L, t, "unix_sockets", b, where)
-                     : lua_istable(L, host) ? lx_bool(L, host, "unix_sockets", b, where)
-                     : 0;
+    int unix_sockets = lua_istable(L, host) ? lx_bool(L, host, "unix_sockets", b, where)
+                                            : 0;
     lua_settop(L, hb);
     int64_t stdin_max = lx_int(L, t, "stdin_max", b, where);
     size_t hl;
@@ -452,21 +451,15 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
     lua_pop(L, 1);
     hl_exec_b_count_end(b, mark, n_env);
 
-    /* The host grants: absolute paths (host.read / host.write, or the
-     * v0.26.0 fs = { read, write }), encoded as before. */
-    lua_getfield(L, t, legacy_fs ? "fs" : "host");
+    /* The host grants: absolute paths (host.read / host.write). */
+    lua_getfield(L, t, "host");
     int fs = lua_gettop(L);
     if (lua_istable(L, fs)) {
         char fw[192];
-        snprintf(fw, sizeof fw, "%s.%s", where, legacy_fs ? "fs" : "host");
-        if (!legacy_fs || lx_keys(L, fs, EXEC_FS_KEYS, b, fw) == 0) {
-            lx_str_list(L, fs, "read", b, fw);
-            lx_str_list(L, fs, "write", b, fw);
-        }
+        snprintf(fw, sizeof fw, "%s.host", where);
+        lx_str_list(L, fs, "read", b, fw);
+        lx_str_list(L, fs, "write", b, fw);
     } else {
-        if (legacy_fs)
-            hl_exec_b_fail(b, "%s: fs must be a table { read = {...}, write = {...} }",
-                           where);
         hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
         hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
     }

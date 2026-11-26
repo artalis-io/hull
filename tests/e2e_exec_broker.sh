@@ -87,7 +87,7 @@ app.manifest({
   exec = {
     probe = { path = "$PROBE", argv = { "probe" } },
     ["no-unix"] = { path = "$PROBE", argv = { "unix" } },
-    unix = { path = "$PROBE", argv = { "unix" }, unix_sockets = true },
+    unix = { path = "$PROBE", argv = { "unix" }, host = { unix_sockets = true } },
   },
 })
 local exec = require("hull.exec")
@@ -128,7 +128,7 @@ app.manifest({
     unit = { path = "/usr/bin/systemctl",
              argv = { "show", "--no-pager", "-p", "ActiveState", "--",
                       { suffix = ".service", chars = "a-z0-9-", max = 64 } },
-             unix_sockets = true },
+             host = { unix_sockets = true } },
   },
 })
 local exec = require("hull.exec")

@@ -337,10 +337,6 @@ declare namespace Hull {
          * exist at start).
          */
         manifest?: ExecChildManifest;
-        /** @deprecated v0.26.0 spelling of `host: { read, write }`; refused from 0.28.0. */
-        fs?: { read?: string[]; write?: string[] };
-        /** @deprecated v0.26.0 spelling of `host.unixSockets`; refused from 0.28.0. */
-        unixSockets?: boolean;
         /**
          * The bytes a call may write to the command's stdin (`exec.run`'s
          * `stdin` option), 1..1048576. Without it the command reads /dev/null.

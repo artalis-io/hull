@@ -53,11 +53,6 @@ int hl_exec_child_key(HlExecBuf *b, const char *cmd, const char *key);
 int hl_exec_child_grant_entry(HlExecBuf *b, const char *cmd, const char *list,
                               unsigned idx, const char *raw, size_t n);
 
-/* A v0.26.0 spelling (exec.<cmd>.fs, exec.<cmd>.unix_sockets): taken as its
- * host equivalent with one WARN per process naming the replacement. Accepted
- * in 0.27.x, refused from 0.28.0 (docs/design/exec_broker.md §3). */
-void hl_exec_legacy_note(const char *cmd, const char *legacy, const char *replacement);
-
 /* 0 when @p raw (n bytes) is an app fs grant a command may take; -1 with
  * the reason in @p why. Pure string check (no filesystem access). */
 int hl_exec_child_grant_check(const char *raw, size_t n, char *why, size_t why_size);

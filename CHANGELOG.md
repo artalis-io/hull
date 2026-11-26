@@ -8,6 +8,18 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Removed
+
+- **`hull/exec`: the v0.26.0 command-entry keys `fs` and `unix_sockets` are refused.**
+  v0.27.0 read them as `host = { read, write }` and `host.unix_sockets` with one WARN and
+  announced their removal. A manifest that still uses them on a command entry (JS `fs`,
+  `unixSockets`, `unix_sockets`) now fails to load, the error naming the command and the
+  replacement (`exec.<name>.fs: removed in 0.28.0, use exec.<name>.host`). Move absolute
+  grants and local sockets to `host = { read, write, unix_sockets }` (JS `host: { read,
+  write, unixSockets }`), and app-relative grants to `manifest = { fs = { ... } }`. The
+  `hull check` lint for the old keys and their `@deprecated` TypeScript members are gone;
+  the policy encoding is unchanged.
+
 ## [0.27.0] - 2026-11-26
 
 `hull/exec`: each declared command has its own `manifest` (a strict subset of the app manifest)

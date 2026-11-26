@@ -207,16 +207,12 @@ local function main()
                 local t = strs(l)
                 return #t > 0 and table.concat(t, ", ") or nil
             end
-            -- The host grants as the extractor takes them: the v0.26.0 fs
-            -- whenever it is given (it and host.read / write are never both
-            -- accepted), else host (audit 53).
+            -- The host grants as the extractor takes them (audit 53).
             local function host_of(c)
-                if type(c.fs) == "table" then return c.fs end
                 return type(c.host) == "table" and c.host or {}
             end
             local function unix_of(c)
-                return (type(c.host) == "table" and (c.host.unix_sockets or c.host.unixSockets))
-                       or c.unix_sockets or c.unixSockets
+                return type(c.host) == "table" and (c.host.unix_sockets or c.host.unixSockets)
             end
             for _, name in ipairs(names) do
                 local c = m.exec[name]
@@ -237,9 +233,8 @@ local function main()
                 local se = num(c.stderr_max or c.stderrMax, 16384)
                 print(string.format("    limits: %d ms, stdout %d, stderr %d, %d at once",
                                     t, so, se, num(c.concurrency, 2)))
-                -- Its whole authority: the host grants (absolute paths; the
-                -- v0.26.0 fs / unix_sockets are their old spelling) and its
-                -- child manifest (the app's own fs vocabulary).
+                -- Its whole authority: the host grants (absolute paths) and
+                -- its child manifest (the app's own fs vocabulary).
                 local host = host_of(c)
                 if list(host.read) then print("    host.read:  " .. list(host.read)) end
                 if list(host.write) then print("    host.write: " .. list(host.write)) end
