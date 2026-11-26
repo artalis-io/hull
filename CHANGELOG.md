@@ -8,6 +8,11 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-11-26
+
+`hull/exec`: each declared command has its own `manifest` (a strict subset of the app manifest)
+and a `host` table for absolute grants and local sockets; the v0.26.0 entry keys are deprecated.
+
 ### Changed
 
 - **`hull/exec`: a command entry has its own `manifest`, a strict subset of the app manifest.**
