@@ -18,6 +18,11 @@
  *      call frees its slot exactly once - the command runs again, its
  *      concurrency is still held by a live call, nothing comes for the
  *      killed id, and the other command runs
+ *  10. macOS router: the killed call's broker dies first (the KILL's write
+ *      fails) while another command's call is live, and a RUN follows in the
+ *      same read - the live call completes, the new call gets its own reply,
+ *      the router takes more calls, the lost command is refused (review of
+ *      #1218: the killed slot stayed queued and freed the next call)
  *
  * Usage: e2e_exec_frames <path to hull> [degraded]
  *
@@ -166,6 +171,40 @@ static HlExecBuf policy_two(void)
     if (hl_exec_b_finish(&b) != 0) { fprintf(stderr, "policy: %s\n", b.err); exit(2); }
     return b;
 }
+
+#ifdef __APPLE__
+/* Commands "sl" (sleep 30, concurrency 1) and "s1" (sleep 1, concurrency 4). */
+static HlExecBuf policy_sl_s1(void)
+{
+    HlExecBuf b;
+    hl_exec_b_init(&b, NULL);
+    static const char *const names[] = { "sl", "s1" }, *const args[] = { "30", "1" };
+    static const int conc[] = { 1, 4 };
+    for (int i = 0; i < 2; i++) {
+        hl_exec_b_cmd(&b, names[i], 2, SLEEP_BIN, strlen(SLEEP_BIN), 60000, -1, -1,
+                      conc[i], 0, -1, NULL, 0);
+        for (int k = 0; k < 3; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+        size_t m = hl_exec_b_count_begin(&b);
+        hl_exec_b_fixed(&b, args[i], strlen(args[i]));
+        hl_exec_b_count_end(&b, m, 1);
+    }
+    if (hl_exec_b_finish(&b) != 0) { fprintf(stderr, "policy: %s\n", b.err); exit(2); }
+    return b;
+}
+
+/* The children of @p pid (pgrep -P), up to @p max; their count. */
+static int children_of(pid_t pid, pid_t *out, int max)
+{
+    char cmd[64];
+    snprintf(cmd, sizeof cmd, "pgrep -P %d", (int)pid);
+    FILE *f = popen(cmd, "r");
+    if (!f) return 0;
+    int n = 0, v;
+    while (n < max && fscanf(f, "%d", &v) == 1) out[n++] = (pid_t)v;
+    pclose(f);
+    return n;
+}
+#endif
 
 typedef struct { int fd; pid_t pid; } Broker;
 
@@ -420,6 +459,57 @@ int main(int argc, char **argv)
     CHECK(r == 0, "nothing ever comes for a killed id (r %d)", r);
     broker_end(&b);
     hl_exec_buf_free(&p);
+
+#ifdef __APPLE__
+    /* 10. exec_frames_router.kill_after_broker_lost */
+    p = policy_sl_s1();
+    b = broker_start(&p);
+    pid_t subs[4];
+    int nsub = children_of(b.pid, subs, 4);
+    CHECK(nsub == 2, "two commands: the router has one broker each (%d)", nsub);
+    run(b.fd, 1, "sl", NULL);                /* the call to be killed */
+    run(b.fd, 2, "s1", NULL);                /* the live call (1 s) */
+    usleep(300000);
+    pid_t target = -1;                       /* sl's broker: the one with a child */
+    for (int i = 0; i < nsub; i++) {
+        pid_t kids[2];
+        if (children_of(subs[i], kids, 2) > 0 && target < 0) {
+            /* s1's sleep may still run too: sl's child runs 30 s. */
+            char cmd[96];
+            snprintf(cmd, sizeof cmd, "ps -o args= -p %d | grep -q ' 30$'", (int)kids[0]);
+            if (system(cmd) == 0) target = subs[i];
+        }
+    }
+    CHECK(target > 0, "found the killed call's broker (%d)", (int)target);
+    /* Hold the router, so the KILL, the next RUN and the broker's death all
+     * reach it in one poll pass. The frames go first: macOS's poll, resumed,
+     * reports the event that fired first, and the server's channel is read
+     * first. The KILL's write then finds the broker dead (EPIPE) and marks
+     * it lost while the RUN is read in the same loop. */
+    kill(b.pid, SIGSTOP);
+    usleep(50000);
+    send_frame(b.fd, KILL, 1, NULL, 0, NULL, 0);
+    run(b.fd, 3, "s1", NULL);
+    usleep(50000);
+    if (target > 0) kill(target, SIGKILL);
+    usleep(200000);
+    kill(b.pid, SIGCONT);
+    r = expect(b.fd, 2, &t, msg, sizeof msg, 4000);
+    CHECK(r == 1 && t == DONE, "the live call completes normally (r %d, type %u)", r,
+          r == 1 ? t : 0);
+    r = expect(b.fd, 3, &t, msg, sizeof msg, 4000);
+    CHECK(r == 1 && t == DONE, "the call read with the KILL gets its own reply "
+          "(r %d, type %u)", r, r == 1 ? t : 0);
+    run(b.fd, 4, "s1", NULL);
+    r = expect(b.fd, 4, &t, msg, sizeof msg, 4000);
+    CHECK(r == 1 && t == DONE, "the router takes another call afterwards");
+    run(b.fd, 5, "sl", NULL);
+    r = expect(b.fd, 5, &t, msg, sizeof msg, 3000);
+    CHECK(r == 1 && t == REFUSED && strstr(msg, "command broker is gone"),
+          "a call to the lost command is refused (%s)", msg);
+    broker_end(&b);
+    hl_exec_buf_free(&p);
+#endif
 
     printf("e2e_exec_frames: %s\n", g_fail ? "FAILED" : "ok");
     return g_fail ? 1 : 0;
