@@ -1460,4 +1460,49 @@ UTEST(db_registry, mysql_server_public_key_file_is_confined)
     rm_tree(root);
 }
 
+/* A database the registry refuses to open (a symbolic link where its -wal
+ * should be) is a file the command broker cannot keep a write grant off:
+ * the start is refused, never the file left out of the protected list
+ * (audit 53). A plain miss and an unset env reference name no file. */
+UTEST(db_registry_audit53, refused_file_dsn_is_not_skipped)
+{
+    char root[PATH_MAX], app[PATH_MAX], p[PATH_MAX + 32];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    snprintf(p, sizeof p, "%s/cache", app);
+    ASSERT_EQ(0, mkdir(p, 0700));
+    char (*out)[PATH_MAX] = calloc(16, PATH_MAX);
+    ASSERT_TRUE(out != NULL);
+
+    /* not refused: the file (not made yet) is listed */
+    HlManifest m = {0};
+    m.databases.named[0].name = "cache";
+    m.databases.named[0].dsn = "cache/c.db";
+    m.databases.named_count = 1;
+    HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    EXPECT_EQ(1, hl_db_registry_file_paths(reg, out, 16));
+
+    /* refused (a planted -wal link): the start is refused */
+    snprintf(p, sizeof p, "%s/cache/c.db-wal", app);
+    ASSERT_EQ(0, symlink("/tmp/elsewhere", p));
+    EXPECT_EQ(-1, hl_db_registry_file_paths(reg, out, 16));
+    hl_db_registry_destroy(reg);
+
+    /* an unset env reference names no database: nothing to protect */
+    HlManifest m2 = {0};
+    m2.databases.named[0].name = "primary";
+    m2.databases.named[0].dsn = "$HULL_TEST_AUDIT53_UNSET_DSN";
+    m2.databases.named_count = 1;
+    unsetenv("HULL_TEST_AUDIT53_UNSET_DSN");
+    reg = hl_db_registry_create(&m2, NULL, NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    EXPECT_EQ(0, hl_db_registry_file_paths(reg, out, 16));
+    hl_db_registry_destroy(reg);
+
+    free(out);
+    rm_tree(root);
+}
+
 UTEST_MAIN()

@@ -177,42 +177,70 @@ local function main()
             table.sort(names)
             local function slot_desc(s)
                 if type(s.enum) == "table" then
-                    return "<one of: " .. table.concat(s.enum, ", ") .. ">"
+                    local e = {}
+                    for _, v in ipairs(s.enum) do e[#e + 1] = tostring(v) end
+                    return "<one of: " .. table.concat(e, ", ") .. ">"
                 end
                 local parts = {}
-                if s.prefix then parts[#parts + 1] = "prefix " .. string.format("%q", s.prefix) end
-                if s.suffix then parts[#parts + 1] = "suffix " .. string.format("%q", s.suffix) end
-                parts[#parts + 1] = "chars " .. (s.chars or "A-Za-z0-9._-")
-                parts[#parts + 1] = "len " .. (s.min or 1) .. ".." .. (s.max or 256)
+                if s.prefix then parts[#parts + 1] = "prefix " .. string.format("%q", tostring(s.prefix)) end
+                if s.suffix then parts[#parts + 1] = "suffix " .. string.format("%q", tostring(s.suffix)) end
+                parts[#parts + 1] = "chars " .. tostring(s.chars or "A-Za-z0-9._-")
+                parts[#parts + 1] = "len " .. tostring(s.min or 1) .. ".." .. tostring(s.max or 256)
                 local rep = s["repeat"]
                 if type(rep) == "table" then
-                    parts[#parts + 1] = "x" .. (rep.min or 1) .. ".." .. (rep.max or "?")
+                    parts[#parts + 1] = "x" .. tostring(rep.min or 1) .. ".." .. tostring(rep.max or "?")
                 end
                 if s.allow_dash or s.allowDash then parts[#parts + 1] = "[!] may start with '-'" end
                 return "<" .. table.concat(parts, ", ") .. ">"
             end
+            -- Manifest text is a cloned tree's: one line each (audit 53).
+            local function esc(v) return tool.escape(tostring(v)) end
+            -- Only the strings a list holds (the extractor refuses the rest).
+            local function strs(l)
+                local out = {}
+                for _, v in ipairs(type(l) == "table" and l or {}) do
+                    if type(v) == "string" then out[#out + 1] = esc(v) end
+                end
+                return out
+            end
+            local function list(l)
+                local t = strs(l)
+                return #t > 0 and table.concat(t, ", ") or nil
+            end
+            -- The host grants as the extractor takes them: the v0.26.0 fs
+            -- whenever it is given (it and host.read / write are never both
+            -- accepted), else host (audit 53).
+            local function host_of(c)
+                if type(c.fs) == "table" then return c.fs end
+                return type(c.host) == "table" and c.host or {}
+            end
+            local function unix_of(c)
+                return (type(c.host) == "table" and (c.host.unix_sockets or c.host.unixSockets))
+                       or c.unix_sockets or c.unixSockets
+            end
             for _, name in ipairs(names) do
                 local c = m.exec[name]
-                print("  " .. name .. "  " .. tostring(c.path))
+                if type(c) ~= "table" then c = {} end
+                print("  " .. esc(name) .. "  " .. esc(c.path))
                 if type(c.sha256) == "string" then
-                    print("    sha256 pin: " .. c.sha256:lower())
+                    print("    sha256 pin: " .. esc(c.sha256:lower()))
                 end
                 local argv = {}
-                for _, a in ipairs(c.argv or {}) do
-                    argv[#argv + 1] = type(a) == "table" and slot_desc(a) or string.format("%q", a)
+                for _, a in ipairs(type(c.argv) == "table" and c.argv or {}) do
+                    argv[#argv + 1] = type(a) == "table" and esc(slot_desc(a))
+                                      or esc(string.format("%q", tostring(a)))
                 end
                 if #argv > 0 then print("    argv: " .. table.concat(argv, " ")) end
-                local t = c.timeout_ms or c.timeoutMs or 5000
-                local so = c.stdout_max or c.stdoutMax or 65536
-                local se = c.stderr_max or c.stderrMax or 16384
+                local function num(v, d) return math.tointeger(v) or d end
+                local t = num(c.timeout_ms or c.timeoutMs, 5000)
+                local so = num(c.stdout_max or c.stdoutMax, 65536)
+                local se = num(c.stderr_max or c.stderrMax, 16384)
                 print(string.format("    limits: %d ms, stdout %d, stderr %d, %d at once",
-                                    t, so, se, c.concurrency or 2))
+                                    t, so, se, num(c.concurrency, 2)))
                 -- Its whole authority: the host grants (absolute paths; the
                 -- v0.26.0 fs / unix_sockets are their old spelling) and its
                 -- child manifest (the app's own fs vocabulary).
-                local host = type(c.host) == "table" and c.host
-                             or (type(c.fs) == "table" and c.fs) or {}
-                local function list(l) return type(l) == "table" and table.concat(l, ", ") or nil end
+                local host = host_of(c)
                 if list(host.read) then print("    host.read:  " .. list(host.read)) end
                 if list(host.write) then print("    host.write: " .. list(host.write)) end
                 local cm = type(c.manifest) == "table" and c.manifest or {}
@@ -223,12 +251,11 @@ local function main()
                 if list(cfs.write) then
                     print("    manifest.fs.write: " .. list(cfs.write) .. "  (under the app dir / @state)")
                 end
-                local smax = c.stdin_max or c.stdinMax
-                if smax and smax ~= 0 then
+                local smax = num(c.stdin_max or c.stdinMax, 0)
+                if smax ~= 0 then
                     print(string.format("    stdin: up to %d bytes from the app", smax))
                 end
-                local hu = type(c.host) == "table" and (c.host.unix_sockets or c.host.unixSockets)
-                if hu or c.unix_sockets or c.unixSockets then
+                if unix_of(c) then
                     print("    local IPC: may connect to any pathname unix socket the service account")
                     print("               can reach (not limited to the one it needs)")
                 end
@@ -238,18 +265,18 @@ local function main()
             -- declares.
             local u = { exec = {}, hr = {}, hw = {}, mr = {}, mw = {}, unix = false }
             local function add(set, l)
-                for _, v in ipairs(type(l) == "table" and l or {}) do set[#set + 1] = v end
+                for _, v in ipairs(strs(l)) do set[#set + 1] = v end
             end
             for _, name in ipairs(names) do
                 local c = m.exec[name]
-                u.exec[#u.exec + 1] = tostring(c.path)
-                local h = type(c.host) == "table" and c.host or (type(c.fs) == "table" and c.fs) or {}
+                if type(c) ~= "table" then c = {} end
+                u.exec[#u.exec + 1] = esc(c.path)
+                local h = host_of(c)
                 add(u.hr, h.read); add(u.hw, h.write)
                 local cf = type(c.manifest) == "table" and type(c.manifest.fs) == "table"
                            and c.manifest.fs or {}
                 add(u.mr, cf.read); add(u.mw, cf.write)
-                if (type(c.host) == "table" and (c.host.unix_sockets or c.host.unixSockets))
-                   or c.unix_sockets or c.unixSockets then u.unix = true end
+                if unix_of(c) then u.unix = true end
             end
             local function show(label, l)
                 if #l > 0 then print("      " .. label .. table.concat(l, ", ")) end

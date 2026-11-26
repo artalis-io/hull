@@ -1018,4 +1018,85 @@ UTEST(exec_child, final_first_start_unresolvable_root_and_duckdb)
     rm_list(root, made);
 }
 
+/* Audit 53: a grant naming a control byte is refused (the broker's report
+ * quotes it in a log line), and a directory grant whose containment of a
+ * root cannot be judged is refused, never taken as "not contained". */
+UTEST(exec_child_audit53, a_control_byte_is_refused)
+{
+    char why[160];
+    static const char *const bad[] = { "data/a\nX", "data/\rx", "data/\x1b[2K", "d\x7f", NULL };
+    for (int i = 0; bad[i]; i++) {
+        EXPECT_EQ(-1, hl_exec_child_grant_check(bad[i], strlen(bad[i]), why, sizeof why));
+        EXPECT_TRUE(strstr(why, "control") != NULL);
+    }
+    /* the load error names the entry, not the bytes */
+    HlExecBuf b;
+    hl_exec_b_init(&b, NULL);
+    EXPECT_EQ(-1, hl_exec_child_grant_entry(&b, "c", "read", 1, "data/a\nX", 8));
+    EXPECT_TRUE(b.err[0] && strchr(b.err, '\n') == NULL);
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_child_audit53, unwalkable_root_containment_is_refused)
+{
+    if (geteuid() == 0) { UTEST_SKIP("root ignores the directory mode"); }
+    char root[] = "/tmp/hull-exec-a53-XXXXXX";
+    ASSERT_TRUE(mkdtemp(root) != NULL);
+    char app[PATH_MAX], mid[PATH_MAX + 16], st[PATH_MAX + 32], why[192];
+    snprintf(app, sizeof app, "%s/app", root);
+    mk(root, "app", 1);
+    mk(app, "var", 1);
+    mk(app, "var/mid", 1);
+    mk(app, "var/mid/st", 1);
+    snprintf(mid, sizeof mid, "%s/var/mid", app);
+    snprintf(st, sizeof st, "%s/var/mid/st", app);
+    HlExecChildRoots r = { app, st, NULL, 0 };
+    HlExecChildGrant g;
+    /* walkable: refused because it holds the state directory */
+    EXPECT_EQ(-1, hl_exec_child_grant_open(&r, "var/", 1, &g, why, sizeof why));
+    EXPECT_TRUE(strstr(why, "holds the state directory") != NULL);
+    /* not walkable (no search right on mid): still refused */
+    ASSERT_EQ(0, chmod(mid, 0));
+    int rc = hl_exec_child_grant_open(&r, "var/", 1, &g, why, sizeof why);
+    if (rc == 0) close(g.fd);
+    (void)chmod(mid, 0700);
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(strstr(why, "cannot be checked") != NULL);
+    static const char *const made[] = { "app/var/mid/st", "app/var/mid", "app/var", "app", NULL };
+    rm_list(root, made);
+}
+
+/* Review of the audit 53 fix: the walk needs only the search right, as a
+ * path lookup does, so an app under a directory the service account may pass
+ * through but not list (mode 0711) still gets its directory grants. */
+UTEST(exec_child_audit53, a_search_only_ancestor_is_walked)
+{
+#if defined(__COSMOPOLITAN__)
+    /* No search-only open here: the walk falls back to O_RDONLY and refuses
+     * an unreadable ancestor (fail closed). Cosmo has no broker backend. */
+    UTEST_SKIP("no O_PATH / O_SEARCH walk on a cosmo build");
+#endif
+    if (geteuid() == 0) { UTEST_SKIP("root ignores the directory mode"); }
+    char root[] = "/tmp/hull-exec-a53s-XXXXXX";
+    ASSERT_TRUE(mkdtemp(root) != NULL);
+    char top[PATH_MAX], app[PATH_MAX + 16], st[PATH_MAX + 16], why[192];
+    snprintf(top, sizeof top, "%s/top", root);
+    mk(root, "top", 1);
+    mk(top, "app", 1);
+    mk(top, "app/out", 1);
+    mk(top, "st", 1);
+    snprintf(app, sizeof app, "%s/app", top);
+    snprintf(st, sizeof st, "%s/st", top);
+    ASSERT_EQ(0, chmod(top, 0311));             /* search, no read */
+    HlExecChildRoots r = { app, st, NULL, 0 };
+    HlExecChildGrant g;
+    int rc = hl_exec_child_grant_open(&r, "out/", 1, &g, why, sizeof why);
+    if (rc == 0) close(g.fd);
+    (void)chmod(top, 0700);
+    EXPECT_EQ(0, rc);
+    if (rc != 0) printf("        refused: %s\n", why);
+    static const char *const made[] = { "top/app/out", "top/app", "top/st", "top", NULL };
+    rm_list(root, made);
+}
+
 UTEST_MAIN()

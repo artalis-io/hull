@@ -605,6 +605,33 @@ static const char *lookup_dsn(const HlDbRegistry *reg, const char *name,
                                 strcmp(name, INTERNAL_NAME) == 0, err);
 }
 
+/* For a DSN lookup_dsn refused: does @p name still name a database FILE
+ * (one a command's grant must be kept off)? An env reference that is unset
+ * names nothing; anything else that cannot be told counts as a file. */
+static int refused_names_file(const HlDbRegistry *reg, const char *name)
+{
+    const char *d = NULL;
+    if (strcmp(name, INTERNAL_NAME) == 0) {
+        d = (reg->manifest && reg->manifest->databases.internal)
+            ? reg->manifest->databases.internal
+            : (reg->has_internal_dsn ? reg->internal_dsn : NULL);
+        if (!d) return 1;                 /* Hull's own default: refused, a file */
+    } else if (reg->manifest) {
+        for (int i = 0; i < reg->manifest->databases.named_count; i++) {
+            const HlManifestDbNamed *e = &reg->manifest->databases.named[i];
+            if (e->name && strcmp(e->name, name) == 0) { d = e->dsn; break; }
+        }
+    }
+    if (!d) return 1;
+    char var[128];
+    if (hl_env_ref(d, var, sizeof var)) {
+        d = getenv(var);
+        if (!d || !d[0]) return 0;        /* unset: no database at all */
+    }
+    const char *f = hl_dsn_file_path(d);
+    return f && f[0] && strcmp(f, ":memory:") != 0;
+}
+
 int hl_db_registry_file_paths(HlDbRegistry *reg, char (*out)[PATH_MAX], int max)
 {
     int n = 0;
@@ -622,7 +649,14 @@ int hl_db_registry_file_paths(HlDbRegistry *reg, char (*out)[PATH_MAX], int max)
         const char *err = NULL;
         char buf[PATH_MAX + 64];
         const char *dsn = lookup_dsn(reg, names[i], &err, buf, sizeof buf);
-        if (!dsn) continue;
+        if (!dsn) {
+            /* A plain miss is no database. A refused one (a symbolic link
+             * where its file or a sidecar should be) is a file that cannot be
+             * protected: the start is refused (audit 53), never the file
+             * left unprotected for a later db.connect to open. */
+            if (err && refused_names_file(reg, names[i])) return -1;
+            continue;
+        }
         const char *f = hl_dsn_file_path(dsn);          /* NULL: network, :memory: */
         if (!f || !f[0] || strcmp(f, ":memory:") == 0) continue;
         /* The file's real path, or - its directory not made yet on a first

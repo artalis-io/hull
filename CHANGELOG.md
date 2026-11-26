@@ -8,6 +8,11 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-11-26
+
+`hull/exec`: each declared command has its own `manifest` (a strict subset of the app manifest)
+and a `host` table for absolute grants and local sockets; the v0.26.0 entry keys are deprecated.
+
 ### Changed
 
 - **`hull/exec`: a command entry has its own `manifest`, a strict subset of the app manifest.**
@@ -27,6 +32,31 @@ release-artifact layout).
   link cannot redirect it. `hull inspect` shows each command's grants and, per platform, what
   every command can actually reach (on macOS the union, including `exec` of every declared
   binary); `hull agent overview` lists them.
+
+### Security
+
+- **`hull/exec` child manifests: audit 53 fixes, before the first release with them.**
+  - `hull inspect` showed none of a command's v0.26.0 `fs` grants when the entry also had a
+    `host` table (`host = { unix_sockets = true }`), though they were enforced, including in
+    the macOS union. It now takes the grants as the extractor does. Its exec section also puts
+    every manifest string on one line (a newline in a planted `package.sig` forged output
+    lines) and skips non-string entries instead of crashing.
+  - A directory grant whose containment of the app or state directory could not be judged (a
+    directory the broker could not search, no descriptor left, past 256 levels) was taken as
+    "not contained" and granted, `.hull` included. It is refused, and so is a write grant
+    whose database directory exists but cannot be walked.
+  - A file database whose DSN the registry refused (a planted symbolic link at its `-wal`) was
+    left out of the protected list, so a command could remove the link and a later
+    `db.connect` opened a live database it could write. The start is refused.
+  - A child grant holding a control character is refused; the error names the entry without
+    quoting its bytes (it reached the broker's report and forged a log line).
+  - The broker's read limit for the POLICY frame did not count the roots and database paths
+    in front of the policy, so an exec section near the 1 MiB limit failed to start with a
+    misleading error.
+  - JS: a command field given under both spellings (`unixSockets` and `unix_sockets`,
+    `timeoutMs` and `timeout_ms`, ...) is refused (one was read, the other signed and shown by
+    `hull inspect`), and a `null` first spelling counts as absent, so a legacy `unix_sockets`
+    beside `unixSockets: null` is read instead of dropped.
 
 ### Deprecated
 
