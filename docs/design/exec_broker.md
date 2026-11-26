@@ -951,14 +951,23 @@ and `exec: degraded` when it applies.
 
 ## 15. Addendum: the authority of every executable the broker runs (design review)
 
-- **Status:** partly implemented. §1-§14 shipped in v0.26.0 (#1210-#1214). The native-command
-  part of this review is implemented as §3.1 (#1217): each command has a nested `manifest`, a
-  strict subset of the app manifest (`fs` today, resolved like the app's own), beside `path`,
-  `sha256`, `argv` and `host` (absolute host grants and `unix_sockets`). Hull callees (§15.3,
-  §15.4), an intersection with a callee's own authority, and nested calls (§15.5) remain
-  proposals. In this section **shipped** means code on main, **proposed** means new work, and
-  syntax marked `-- proposed` does not parse today: `cap/exec.c` refuses an unknown command key
-  at load.
+- **Status:** reviewed and decided (2026-11-26). §1-§14 shipped in v0.26.0 (#1210-#1214). The
+  native-command part of this review shipped in v0.27.0 as §3.1 (#1217, audit 53 fixes #1219):
+  each command has a nested `manifest`, a strict subset of the app manifest (`fs` today,
+  resolved like the app's own), beside `path`, `sha256`, `argv` and `host` (absolute host
+  grants and `unix_sockets`). The rest is decided as follows (§15.9 has the reasons):
+  - **Hull callees** (§15.3, §15.4) and an intersection with a callee's own authority:
+    **deferred, not scheduled.** The design below stands; it is built when a real callee fits
+    the rootless, no-network, no-command class, and not before.
+  - **Nested calls** (§15.5): **deferred** behind Hull callees. The running example's goal is
+    met today by a separate service under its own uid (§15.7).
+  - **macOS shared trust domain** (§15.6, the old slice 0): **moved to issue #1218**, which has
+    its own design and chooses between the interim refusal proposed here and per-command
+    isolation.
+
+  In this section **shipped** means code on main, **proposed** means designed but not
+  scheduled, and syntax marked `-- proposed` does not parse today: `cap/exec.c` refuses an
+  unknown command key at load.
 - **Question reviewed:** should each executable the broker launches carry a manifest in Hull's
   own vocabulary, so the broker confines it to that manifest, a Hull callee can run its own
   declared commands, and an operator can approve the whole command tree in one place?
@@ -1188,8 +1197,8 @@ per guarantee lost (§6.5's rule). Never accept a field and enforce less.
 **The macOS union deserves the same rule.** It is documented as a shared trust domain (§3.1,
 §6.4: one profile, so every command reaches every command's grants and may exec every
 declared binary), shown by `hull inspect` and logged at start (`exec: limit:`), and it runs.
-Per-command isolation on macOS is tracked in issue #1218; the proposal below is one option
-there.
+Per-command isolation on macOS is tracked in issue #1218, which has its own design; the
+proposal below is one option there, not a decision of this section.
 That is a guarantee §6.3 makes on Linux and macOS silently lacks, which is §6.5's definition of
 degraded. Proposed: when the commands' grants DIFFER (`fs`, `unix_sockets`), a macOS start is
 refused unless `--allow-degraded-sandbox`; identical grants need nothing, since the union then
@@ -1273,22 +1282,29 @@ at app start, where it is fatal.
 **Order.** The evidence changes the order the question proposed. The running example's
 security goal is met by §15.7 today, and nested calls need a Hull callee that runs at all. So:
 
-0. **Done (#1217):** native child manifests (§3.1): `manifest.fs` with app-relative and
-   `@state/` grants opened by descriptor, `host` for absolute grants, independent authority,
-   the legacy `fs` / `unix_sockets` keys read as `host` through 0.27.x, and `hull inspect`
-   showing both sets and the effective authority per platform.
-1. **Slice 0 (smallest, independently useful; issue #1218):** the macOS union becomes a
-   degraded guarantee (§15.6), plus a §1 note that layer 3 is per broker, not per caller. Code: a
-   grant comparison in `exec_broker_macos.c` and a `--allow-degraded-sandbox` check. Accept:
-   two commands with identical grants start on macOS; differing grants are refused, and start
-   with the flag, logging one `exec: degraded:` line; Linux is unchanged.
-2. **Slice 1: a Hull leaf callee, Linux only (§15.4, §15.3).** `signer` and
-   `manifest_sha256` (new command keys; a new command flag in the policy encoding, as
-   `stdin_max` was, so existing encodings and the fuzz corpus stay valid); the sidecar check
-   at policy load and the per-call re-hash; derived grants; the refusals of §15.6; `hull
-   inspect` verification. Worth building only once a real callee fits the rootless,
-   no-network, no-command class; otherwise wait for one.
-3. **Slice 2: nested calls (§15.5),** Linux only.
+0. **Done (v0.27.0, #1217 + #1219):** native child manifests (§3.1): `manifest.fs` with
+   app-relative and `@state/` grants opened by descriptor, `host` for absolute grants,
+   independent authority, the legacy `fs` / `unix_sockets` keys read as `host` through 0.27.x
+   (refused from 0.28.0), and `hull inspect` showing both sets and the effective authority per
+   platform.
+1. **macOS shared trust domain: moved to issue #1218.** This review proposed an interim rule
+   (§15.6: differing grants refused on macOS unless `--allow-degraded-sandbox`, plus a §1 note
+   that layer 3 is per broker, not per caller). #1218's design weighs it against per-command
+   isolation and decides; whichever lands, Linux is unchanged.
+2. **Slice 1: a Hull leaf callee, Linux only (§15.4, §15.3). Deferred, not scheduled.**
+   `signer` and `manifest_sha256` (new command keys; a new command flag in the policy
+   encoding, as `stdin_max` was, so existing encodings and the fuzz corpus stay valid); the
+   sidecar check at policy load and the per-call re-hash; derived grants; the refusals of
+   §15.6; `hull inspect` verification. The trigger to build it is a real callee in the
+   rootless, no-network, no-command class. None exists: the running example's callee needs
+   `nmcli` (slice 2) and, for its security goal, a second uid (§15.7), and hsctl / hscli
+   declare no commands.
+3. **Slice 2: nested calls (§15.5), Linux only. Deferred** behind slice 1: it needs a Hull
+   callee that runs at all, and the property it adds (no exec route from the caller to the
+   grandchild) is weaker than the separate-uid service of §15.7, which ships today.
+
+**Also not scheduled:** a Unix-socket listener and client (§15.7), the one feature that would
+close the separate-service design's loopback gap. Raise it when a deployment needs it.
 
 **Compatibility.** A manifest without the new keys encodes and behaves byte-for-byte as in
 v0.26.0 (§3.1 keeps that: a command with no `manifest` encodes to the v0.26.0 bytes, and the
