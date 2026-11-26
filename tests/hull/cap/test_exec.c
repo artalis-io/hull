@@ -1071,6 +1071,11 @@ UTEST(exec_child_audit53, unwalkable_root_containment_is_refused)
  * through but not list (mode 0711) still gets its directory grants. */
 UTEST(exec_child_audit53, a_search_only_ancestor_is_walked)
 {
+#if defined(__COSMOPOLITAN__)
+    /* No search-only open here: the walk falls back to O_RDONLY and refuses
+     * an unreadable ancestor (fail closed). Cosmo has no broker backend. */
+    UTEST_SKIP("no O_PATH / O_SEARCH walk on a cosmo build");
+#endif
     if (geteuid() == 0) { UTEST_SKIP("root ignores the directory mode"); }
     char root[] = "/tmp/hull-exec-a53s-XXXXXX";
     ASSERT_TRUE(mkdtemp(root) != NULL);
