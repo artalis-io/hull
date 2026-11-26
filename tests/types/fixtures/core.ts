@@ -67,6 +67,10 @@ export function manifest(): void {
     app.manifest({ exec: { a: { path: "/bin/true", manifest: { hosts: ["a.example"] } } } });
     // @ts-expect-error - the pin belongs on the command entry, not in its manifest
     app.manifest({ exec: { a: { path: "/bin/true", manifest: { sha256: "0".repeat(64) } } } });
+    // @ts-expect-error - the v0.26.0 fs on the entry is refused since 0.28.0: use host
+    app.manifest({ exec: { a: { path: "/bin/true", fs: { read: ["/etc"] } } } });
+    // @ts-expect-error - the v0.26.0 unixSockets on the entry is refused since 0.28.0
+    app.manifest({ exec: { a: { path: "/bin/true", unixSockets: true } } });
     const m = app.getManifest();
     const mods = m && m.modules;
     void mods;

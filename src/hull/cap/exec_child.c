@@ -16,7 +16,6 @@
 #include "hull/cap/exec.h"
 #include "hull/cap/fs_policy.h"
 #include "hull/shared/host.h"     /* hl_host_path_too_broad */
-#include "log.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -80,16 +79,6 @@ int hl_exec_child_grant_entry(HlExecBuf *b, const char *cmd, const char *list,
     else                                     /* never quote a control byte */
         hl_exec_b_fail(b, "exec.%s.manifest.fs.%s[%u] %s", cmd, list, idx, why);
     return -1;
-}
-
-void hl_exec_legacy_note(const char *cmd, const char *legacy, const char *replacement)
-{
-    static int warned;
-    if (warned) return;
-    warned = 1;
-    log_warn("[manifest] exec.%s.%s is the v0.26.0 spelling, taken as exec.%s.%s; "
-             "it is removed in 0.28.0 (`hull check` lists every use)",
-             cmd, legacy, cmd, replacement);
 }
 
 int hl_exec_child_grant_check(const char *raw, size_t n, char *why, size_t why_size)

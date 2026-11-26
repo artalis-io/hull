@@ -213,9 +213,12 @@ static int read_js_port_array(JSContext *ctx, JSValueConst obj, int *out)
 static const char *const MX_CMD_KEYS[] = {
     "path", "argv", "timeoutMs", "timeout_ms", "stdoutMax", "stdout_max",
     "stderrMax", "stderr_max", "env", "concurrency", "host", "manifest",
-    "stdinMax", "stdin_max", "sha256",
-    "fs", "unixSockets", "unix_sockets",   /* v0.26.0 spellings of host's fields */
-    NULL };
+    "stdinMax", "stdin_max", "sha256", NULL };
+/* The v0.26.0 spellings of host's fields, refused since 0.28.0: pairs of
+ * (removed key, replacement), named in the error. */
+static const char *const MX_CMD_REMOVED[] = {
+    "fs", "host", "unixSockets", "host.unixSockets",
+    "unix_sockets", "host.unix_sockets", NULL };
 static const char *const MX_HOST_KEYS[] = { "read", "write", "unixSockets",
                                             "unix_sockets", NULL };
 static const char *const MX_SLOT_KEYS[] = {
@@ -250,8 +253,18 @@ static JSPropertyEnum *mx_own_keys(JSContext *ctx, JSValueConst obj, uint32_t *n
     return tab;
 }
 
-static int mx_keys(JSContext *ctx, JSValueConst obj, const char *const *allowed,
-                   HlExecBuf *b, const char *where)
+/* A removed key's replacement (@p removed: pairs), or NULL. */
+static const char *mx_key_removed(const char *k, const char *const *removed)
+{
+    for (size_t i = 0; removed && removed[i]; i += 2)
+        if (strcmp(k, removed[i]) == 0) return removed[i + 1];
+    return NULL;
+}
+
+/* mx_keys, and a key @p removed names (pairs, may be NULL) is refused
+ * naming its replacement. */
+static int mx_keys_ex(JSContext *ctx, JSValueConst obj, const char *const *allowed,
+                      const char *const *removed, HlExecBuf *b, const char *where)
 {
     uint32_t n;
     JSPropertyEnum *tab = mx_own_keys(ctx, obj, &n);
@@ -259,7 +272,12 @@ static int mx_keys(JSContext *ctx, JSValueConst obj, const char *const *allowed,
     for (uint32_t i = 0; i < n && rc == 0; i++) {
         const char *k = JS_AtomToCString(ctx, tab[i].atom);
         if (!k) JS_FreeValue(ctx, JS_GetException(ctx));
-        if (!k || !mx_key_in(k, allowed)) {
+        const char *repl = k ? mx_key_removed(k, removed) : NULL;
+        if (repl) {
+            hl_exec_b_fail(b, "%s.%s: removed in 0.28.0, use %s.%s", where, k, where,
+                           repl);
+            rc = -1;
+        } else if (!k || !mx_key_in(k, allowed)) {
             hl_exec_b_fail(b, "%s: unknown key '%s'", where, k ? k : "(symbol)");
             rc = -1;
         }
@@ -267,6 +285,12 @@ static int mx_keys(JSContext *ctx, JSValueConst obj, const char *const *allowed,
     }
     if (tab) JS_FreePropertyEnum(ctx, tab, n);
     return rc;
+}
+
+static int mx_keys(JSContext *ctx, JSValueConst obj, const char *const *allowed,
+                   HlExecBuf *b, const char *where)
+{
+    return mx_keys_ex(ctx, obj, allowed, NULL, b, where);
 }
 
 /* An own property under either spelling (@p alt may be NULL). A null counts
@@ -515,20 +539,11 @@ static void mx_child_manifest(JSContext *ctx, JSValueConst t, const char *cmd,
     JS_FreeValue(ctx, m);
 }
 
-/* Whether an own property is present under either spelling. */
-static int mx_present(JSContext *ctx, JSValueConst obj, const char *key, const char *alt)
-{
-    JSValue v = mx_own2(ctx, obj, key, alt, NULL, NULL);
-    int p = !JS_IsUndefined(v) && !JS_IsNull(v);
-    JS_FreeValue(ctx, v);
-    return p;
-}
-
 static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *b)
 {
     char where[96];
     snprintf(where, sizeof where, "exec.%s", name);
-    if (mx_keys(ctx, t, MX_CMD_KEYS, b, where) != 0) return;
+    if (mx_keys_ex(ctx, t, MX_CMD_KEYS, MX_CMD_REMOVED, b, where) != 0) return;
     size_t pl;
     const char *path = mx_str(ctx, t, "path", &pl, b, where);
     if (!path && !b->failed) {
@@ -539,8 +554,7 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     int64_t so = mx_int(ctx, t, "stdoutMax", "stdout_max", b, where);
     int64_t se = mx_int(ctx, t, "stderrMax", "stderr_max", b, where);
     int64_t conc = mx_int(ctx, t, "concurrency", NULL, b, where);
-    /* host: { read, write, unixSockets }; the v0.26.0 spellings fs and
-     * unixSockets map onto it, never both for one grant. */
+    /* host: { read, write, unixSockets } */
     JSValue host = mjs_own(ctx, t, "host");
     int host_obj = mjs_is_obj(ctx, host);
     if (!host_obj && !JS_IsUndefined(host) && !JS_IsNull(host))
@@ -551,22 +565,8 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
         snprintf(hw, sizeof hw, "%s.host", where);
         (void)mx_keys(ctx, host, MX_HOST_KEYS, b, hw);
     }
-    int legacy_fs = mx_present(ctx, t, "fs", NULL);
-    int legacy_unix = mx_present(ctx, t, "unixSockets", "unix_sockets");
-    int host_rw = host_obj && (mx_present(ctx, host, "read", NULL) ||
-                               mx_present(ctx, host, "write", NULL));
-    int host_unix = host_obj && mx_present(ctx, host, "unixSockets", "unix_sockets");
-    if (legacy_fs && host_rw)
-        hl_exec_b_fail(b, "%s: fs and host.read / host.write both given; fs is the "
-                       "v0.26.0 spelling of host = { read, write }: keep host", where);
-    if (legacy_unix && host_unix)
-        hl_exec_b_fail(b, "%s: unix_sockets and host.unix_sockets both given; keep "
-                       "host.unix_sockets", where);
-    if (legacy_fs) hl_exec_legacy_note(name, "fs", "host");
-    if (legacy_unix) hl_exec_legacy_note(name, "unix_sockets", "host.unix_sockets");
-    int unix_sockets = legacy_unix
-        ? mx_bool(ctx, t, "unixSockets", "unix_sockets", b, where)
-        : host_obj ? mx_bool(ctx, host, "unixSockets", "unix_sockets", b, where) : 0;
+    int unix_sockets = host_obj
+        ? mx_bool(ctx, host, "unixSockets", "unix_sockets", b, where) : 0;
     int64_t stdin_max = mx_int(ctx, t, "stdinMax", "stdin_max", b, where);
     size_t hl;
     const char *pin = mx_str(ctx, t, "sha256", &hl, b, where);
@@ -611,19 +611,14 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     JS_FreeValue(ctx, env);
     hl_exec_b_count_end(b, mark, n_env < 0 ? 0 : (size_t)n_env);
 
-    /* The host grants: absolute paths (host.read / host.write, or the
-     * v0.26.0 fs: { read, write }), encoded as before. */
-    JSValue fs = legacy_fs ? mjs_own(ctx, t, "fs") : JS_DupValue(ctx, host);
+    /* The host grants: absolute paths (host.read / host.write). */
+    JSValue fs = JS_DupValue(ctx, host);
     if (mjs_is_obj(ctx, fs)) {
         char fw[192];
-        snprintf(fw, sizeof fw, "%s.%s", where, legacy_fs ? "fs" : "host");
-        if (!legacy_fs || mx_keys(ctx, fs, MX_FS_KEYS, b, fw) == 0) {
-            mx_str_list(ctx, fs, "read", b, fw);
-            mx_str_list(ctx, fs, "write", b, fw);
-        }
+        snprintf(fw, sizeof fw, "%s.host", where);
+        mx_str_list(ctx, fs, "read", b, fw);
+        mx_str_list(ctx, fs, "write", b, fw);
     } else {
-        if (legacy_fs)
-            hl_exec_b_fail(b, "%s: fs must be an object { read, write }", where);
         hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
         hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
     }

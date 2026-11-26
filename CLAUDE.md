@@ -2719,7 +2719,7 @@ command and field (`cap/exec_child.c`, called by both extractors). The broker gr
 `manifest.fs` entry as exactly the file or directory it names (`hl_exec_child_grant_resolve`: no
 symlink, must exist, never `.`, `@state` or a pattern), since a command has no capability layer
 to narrow a wider kernel grant the way the app's own is narrowed. The v0.26.0 `fs` /
-`unix_sockets` on the entry are read as `host`, with one WARN, until 0.28.0. No child can create a
+`unix_sockets` on the entry are refused since 0.28.0 (the error names `host` as the replacement). No child can create a
 process, so PDEATHSIG covers the whole job, and a broker killed with SIGKILL takes its children
 with it. That is the Linux backend (`cap/exec_broker_linux.c`); every host-specific step - the
 broker's death-with-the-server setup, the extra leaf check, the binary format, the lock, the exit

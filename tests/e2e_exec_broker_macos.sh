@@ -121,7 +121,7 @@ run_main "$FIX/a1u" <<EOF
 app.manifest({
   modules = { "hull/exec@1" },
   exec = {
-    unix = { path = "$PROBE", argv = { "unix" }, unix_sockets = true },
+    unix = { path = "$PROBE", argv = { "unix" }, host = { unix_sockets = true } },
     other = { path = "$PROBE", argv = { "unix" } },
   },
 })
