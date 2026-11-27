@@ -475,6 +475,25 @@ static void stream_throughput(Broker *b, uint32_t id, const char *label)
           (double)g.bytes[1] / (1024.0 * 1024.0) / dt);
 }
 
+/* exec_frames_stream.kill_drops_output: a stream read to its window, then
+ * credit and a KILL read together - nothing more comes for the id (review:
+ * the killed stream went on emitting within that credit). */
+static void stream_kill_drops(Broker *b, uint32_t id, const char *label)
+{
+    run_flags(b->fd, id, "y", NULL, NULL, RUN_STREAM);
+    Got g = { 0 };
+    collect(b->fd, id, &g, 800, 0, 0);
+    size_t before = g.bytes[1];
+    uint8_t two[16 + 5 + 16];
+    put32(two, MAGIC); put32(two + 4, CREDIT); put32(two + 8, id); put32(two + 12, 5);
+    two[16] = 1; put32(two + 17, 65536);
+    put32(two + 21, MAGIC); put32(two + 25, KILL); put32(two + 29, id); put32(two + 33, 0);
+    write_all(b->fd, two, sizeof two);
+    collect(b->fd, id, &g, 400, 0, 0);
+    CHECK(before == WINDOW && !g.last && g.bytes[1] == before, "%s: a killed stream "
+          "sends nothing more, credit or not (%zu more bytes)", label, g.bytes[1] - before);
+}
+
 static void stream_cases(const char *mode)
 {
     uint32_t t;
@@ -528,6 +547,17 @@ static void stream_cases(const char *mode)
         credit(b.fd, 5, 1, WINDOW + 1);
         collect(b.fd, 5, &g, 3000, 0, 0);
         CHECK(g.last == REFUSED, "credit past the window ends the call (last %u)", g.last);
+    }
+    /* exec_frames_stream.credit_not_received: credit for output the
+     * server never read (it reads nothing) ends the call, instead of
+     * letting the broker queue past the window (review). */
+    run_flags(b.fd, 25, "y", NULL, NULL, RUN_STREAM);
+    for (int i = 0; i < 1000; i++) { credit(b.fd, 25, 1, 4096); usleep(2000); }
+    {
+        Got g = { 0 };
+        collect(b.fd, 25, &g, 3000, 0, 0);
+        CHECK(g.last == REFUSED, "credit for output the server never received ends "
+              "the call (last %u)", g.last);
     }
     /* exec_frames_stream.stdin_unopened */
     run_flags(b.fd, 6, "y", NULL, NULL, RUN_STREAM);
@@ -603,6 +633,8 @@ static void stream_cases(const char *mode)
         collect(b.fd, 9, &g, 5000, 0, 1);
         CHECK(g.last == DONE && strstr(g.text, "got hello") && get32(g.done) == 0,
               "a line written to its stdin reaches it ('%s')", g.text);
+        CHECK(g.stdin_closed, "a child that exits with its stdin open: the server is "
+              "told stdin is closed before DONE");
     }
     /* exec_frames_stream.stdin_eof: cat echoes what it gets, then EOF ends it;
      * the credit for the streamed bytes comes back. */
@@ -653,6 +685,7 @@ static void stream_cases(const char *mode)
     run_flags(b.fd, 13, "e", NULL, NULL, 0);
     r = expect(b.fd, 13, &t, msg, sizeof msg, 3000);
     CHECK(r == 1 && t == DONE, "the broker takes calls afterwards");
+    stream_kill_drops(&b, 26, mode);
     stream_throughput(&b, 14, mode);
     broker_end(&b);
     hl_exec_buf_free(&p);
@@ -939,6 +972,7 @@ int main(int argc, char **argv)
     {
         HlExecBuf py = policy_yes_only();
         Broker by = broker_start(&py);
+        stream_kill_drops(&by, 2, "one command, no router");
         stream_throughput(&by, 1, "one command, no router");
         broker_end(&by);
         hl_exec_buf_free(&py);

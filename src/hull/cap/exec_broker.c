@@ -583,6 +583,8 @@ typedef struct {
 /* One stream output pipe (index 0 stdout, 1 stderr). */
 typedef struct {
     size_t   credit;            /* bytes the server will still take */
+    size_t   wire;              /* bytes sent (whole CHUNKs) not yet credited back:
+                                 * the server may credit only these */
     uint64_t total;             /* bytes read so far (within the cap) */
     uint64_t cap;               /* HL_EXEC_STREAM_NO_CAP = none */
     uint8_t *open;              /* bytes read, not yet a CHUNK (CHUNK_MAX) */
@@ -619,6 +621,8 @@ typedef struct {
     int       in_open;          /* HX_RUN_STDIN_OPEN: STDIN frames are taken */
     int       in_eof;           /* the server sent EOF: no more STDIN */
     int       in_closed;        /* the child closed its stdin (or exited) */
+    int       in_closed_tell;   /* ...and the server has not been told yet */
+    const char *fail_msg;       /* call_fail: REFUSED once the child is gone */
     size_t    in_granted;       /* stdin credit the server has not used */
     size_t    in_init_left;     /* bytes of the RUN's own stdin not yet written */
     size_t    in_ret;           /* stdin credit to give back */
@@ -925,6 +929,8 @@ static int flush_out(void)
         if (o < 0) { free(g_outq[-1 - o].buf); g_outq[-1 - o].buf = NULL; g_outq_n--; continue; }
         Job *j = &g_jobs[o];
         int final = j->q[0].final;
+        if (j->q[0].type == HX_CHUNK && (j->q[0].fd == 1 || j->q[0].fd == 2))
+            j->so[j->q[0].fd - 1].wire += j->q[0].len - HL_CHAN_HDR - 1;
         free(j->q[0].buf);
         memmove(j->q, j->q + 1, (size_t)(--j->qn) * sizeof j->q[0]);
         /* Delivered: its admission slot frees (a routed call's broker has
@@ -1201,18 +1207,21 @@ static void sub_kill(int ci, uint32_t id)
  * the server gets REFUSED as its last frame. */
 static void call_fail(Job *j, const char *msg)
 {
-    if (j->routed) {
-        sub_kill(j->ci, j->id);
-    } else {
-        job_kill(j);
-        if (j->out_fd >= 0) { close(j->out_fd); j->out_fd = -1; }
-        if (j->err_fd >= 0) { close(j->err_fd); j->err_fd = -1; }
-        if (j->in_fd >= 0) { close(j->in_fd); j->in_fd = -1; }
-        j->so[0].open_len = j->so[1].open_len = 0;
-    }
     job_drop_unsent(j);
     j->discard = 0;
-    job_reply_frame(j, HX_REFUSED, msg, strlen(msg));
+    if (j->routed) {
+        sub_kill(j->ci, j->id);
+        job_reply_frame(j, HX_REFUSED, msg, strlen(msg));
+        return;
+    }
+    /* Its slot is held until the child is reaped: REFUSED goes out then
+     * (the main loop), so concurrency counts the dying child. */
+    job_kill(j);
+    if (j->out_fd >= 0) { close(j->out_fd); j->out_fd = -1; }
+    if (j->err_fd >= 0) { close(j->err_fd); j->err_fd = -1; }
+    if (j->in_fd >= 0) { close(j->in_fd); j->in_fd = -1; }
+    j->so[0].open_len = j->so[1].open_len = 0;
+    j->fail_msg = msg;
 }
 
 /* ── One call ──────────────────────────────────────────────────────── */
@@ -1645,6 +1654,7 @@ static void kill_call(uint32_t id)
         }
         if (j->pid > 0) job_kill(j);
         j->discard = 1;
+        j->so[0].open_len = j->so[1].open_len = 0;   /* no more output for it */
         if (j->qn == 0 && job_settled(j)) job_free(j);
         return;
     }
@@ -1659,17 +1669,20 @@ static void stream_frame(uint32_t type, uint32_t id, const uint8_t *p, size_t le
     Job *j = NULL;
     for (int i = 0; i < HL_EXEC_MAX_INFLIGHT && !j; i++)
         if (g_jobs[i].used && g_jobs[i].id == id) j = &g_jobs[i];
-    if (!j || j->discard || j->queued) return;
+    if (!j || j->discard || j->queued || j->fail_msg) return;
     if (!j->stream) { call_fail(j, "exec: stream frames for a call that is not a stream"); return; }
     if (type == HX_CREDIT) {
         int fd = len == 5 ? p[0] : 0;
         if (fd != 1 && fd != 2) { call_fail(j, "exec: a malformed CREDIT"); return; }
         uint32_t bytes = hl_chan_get32(p + 1);
         StreamOut *so = &j->so[fd - 1];
-        if (bytes > HL_EXEC_STREAM_WINDOW - so->credit) {
+        /* Credit only for output the server has been sent: a server that
+         * credited bytes it never read could fill the queue (review). */
+        if (bytes > so->wire || bytes > HL_EXEC_STREAM_WINDOW - so->credit) {
             call_fail(j, "exec: credit past the stream's window");
             return;
         }
+        so->wire -= bytes;
         so->credit += bytes;
         if (j->routed && sub_credit(j->ci, id, (uint8_t)fd, bytes) != 0) sub_lost(j->ci);
         return;
@@ -1736,7 +1749,7 @@ static void stdin_closed(Job *j)
     if (!j->in_open || j->in_closed) return;
     j->in_closed = 1;
     j->in_len = j->in_off = 0;
-    (void)stdin_credit_push(j, HX_STDIN_CLOSED, 0);
+    j->in_closed_tell = 1;           /* sent by the main loop (a full queue retries) */
 }
 
 static void feed(Job *j)
@@ -1780,7 +1793,10 @@ static void stream_emit(Job *j, int k)
     StreamOut *so = &j->so[k];
     if (!so->open_len) return;
     size_t left = chunk_push(j, (uint8_t)(k + 1), so->open, so->open_len);
-    if (left) memmove(so->open, so->open + so->open_len - left, left);
+    if (left) {
+        memmove(so->open, so->open + so->open_len - left, left);
+        so->open_ms = hl_chan_mono_ms();    /* a full queue: try again later, not at once */
+    }
     so->open_len = left;
 }
 
@@ -1798,7 +1814,7 @@ static void stream_drain(Job *j, int k)
         ssize_t r;
         size_t room = HL_EXEC_STREAM_CHUNK_MAX - so->open_len;
         if (so->credit < room) room = so->credit;
-        if (!*cut && room == 0 && (j->timed_out || j->discard)) *cut = 1;
+        if (!*cut && (j->discard || (room == 0 && j->timed_out))) *cut = 1;
         if (*cut) {
             r = read(*fd, tmp, sizeof tmp);
         } else {
@@ -1844,6 +1860,8 @@ static void reap(void)
             if (!j->used || j->pid != p) continue;
             j->pid = 0;
             if (j->in_fd >= 0) { close(j->in_fd); j->in_fd = -1; }   /* nobody reads it */
+            j->in_len = j->in_off = 0;
+            if (j->in_open && !j->in_closed) j->in_closed_tell = 1;
             j->in_closed = 1;
             if (WIFEXITED(st)) { j->status = WEXITSTATUS(st); j->signo = 0; }
             else if (WIFSIGNALED(st)) { j->status = 0; j->signo = WTERMSIG(st); }
@@ -2107,7 +2125,9 @@ int hl_exec_broker_main(void)
             if (j->pid > 0 && !j->timed_out && j->deadline != UINT64_MAX)
                 t = j->deadline > now ? (int)(j->deadline - now > 86400000u ? 86400000u
                                                                     : j->deadline - now) : 0;
-            else if (j->pid > 0) t = 50;                   /* killed: reap soon */
+            else if (j->pid > 0 && (j->timed_out || j->discard || j->fail_msg ||
+                                    j->out_cut || j->err_cut))
+                t = 50;                                    /* killed: reap soon */
             else if (j->out_fd < 0 && j->err_fd < 0) t = 0;
             if (j->pid > 0 && j->pidfd < 0 && j->out_fd < 0 && j->err_fd < 0 &&
                 (t < 0 || t > 50)) t = 50;
@@ -2207,8 +2227,14 @@ int hl_exec_broker_main(void)
             for (int k = 0; k < 2; k++)
                 if (j->so[k].open_len && now - j->so[k].open_ms >= HL_EXEC_STREAM_COALESCE_MS)
                     stream_emit(j, k);
-            if (j->in_open && j->in_ret) feed(j);   /* credit a full queue kept back */
-            if (job_settled(j) && !j->queued) {
+            if (j->in_open && j->in_ret && j->in_fd >= 0) feed(j);   /* credit kept back */
+            if (j->in_closed_tell && !j->discard && !j->fail_msg && !j->queued &&
+                stdin_credit_push(j, HX_STDIN_CLOSED, 0) == 0)
+                j->in_closed_tell = 0;
+            if (job_settled(j) && !j->queued && j->fail_msg && !j->discard) {
+                job_drop_unsent(j);
+                job_reply_frame(j, HX_REFUSED, j->fail_msg, strlen(j->fail_msg));
+            } else if (job_settled(j) && !j->queued) {
                 if (j->discard) { if (j->qn == 0) job_free(j); }
                 else job_reply(j);
                 if (j->used && j->discard && j->qn == 0) job_free(j);
