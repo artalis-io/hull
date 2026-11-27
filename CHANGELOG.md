@@ -8,6 +8,16 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`hull/exec` on macOS: one slow command broker no longer stalls the others** (#1234). With
+  two or more declared commands, the router forwarded each call to its command's broker with a
+  blocking write. A broker still starting earlier calls held the router for up to 5 s, stalling
+  every other command's replies, and a write that timed out shut that command off until the app
+  restarted. Each command broker now has its own outgoing queue that the router writes as the
+  broker reads it, a call killed before its request went out is simply dropped, and only a broker
+  that takes nothing for 60 s is treated as lost.
+
 ## [0.28.0] - 2026-11-27
 
 `hull/exec` on macOS gives each declared command a sandbox of its own and runs every call under a
