@@ -14,10 +14,11 @@ release-artifact layout).
   the run started, after the kernel sandbox, so the sandbox allowed `bind(2)` on any address and
   port for the server's whole life: native code running inside Hull could open a listener of its
   own. Hull now binds and listens on `-b` / `-p` itself just before the sandbox applies and hands
-  the socket to Keel, and the sandbox then refuses every bind: on macOS (Seatbelt denies
-  `network-bind`) and on Linux 6.7+ (Landlock ABI 4, `LANDLOCK_ACCESS_NET_BIND_TCP` with no rule;
-  vendor/pledge patch 0006). An older Linux kernel still allows it; the `[sandbox] applied` line
-  reports `bind: refused` or `bind: kernel`. A port already taken is now reported before `app.main` runs (an app with
+  the socket to Keel, and the sandbox then refuses later binds: every bind on macOS (Seatbelt denies
+  `network-bind`), and TCP binds on Linux 6.7+ (Landlock ABI 4, `LANDLOCK_ACCESS_NET_BIND_TCP` with
+  no rule; vendor/pledge patch 0006). Landlock has no right for a UDP or Unix-socket bind, so on
+  Linux those stay possible. An older Linux kernel still allows a TCP bind; the `[sandbox] applied`
+  line reports `bind: refused` or `bind: kernel`. A port already taken is now reported before `app.main` runs (an app with
   both `app.main` and routes), not after it. A main-only CLI binds no port.
 
 - **`hull/exec` on macOS: each declared command has a sandbox of its own** (#1218,
@@ -56,9 +57,11 @@ release-artifact layout).
   percent-encoded (`http+unix://%40state%2Finfer.sock/v1/infer`), and Hull dials the resolved
   path, so a sidecar can live in the state directory. Each dial checks the path again (no
   symbolic link below the root, the file a socket); an undeclared socket is refused with code
-  `denied`, and a redirect may not leave the socket. On macOS the Seatbelt profile names the
-  sockets; on Linux the capability layer is the boundary (Landlock cannot restrict a connect by
-  path).
+  `denied`, and a redirect may not leave the socket; each redirect hop checks the path on disk
+  again. A JS app may also spell it `unix_sockets`; a list that is not one of at most 16
+  strings, or (JS) given in both spellings, refuses the app at load. `hull inspect` lists the
+  sockets and marks an absolute one. On macOS the Seatbelt profile names the sockets; on Linux
+  the capability layer is the boundary (Landlock cannot restrict a connect by path).
 
 - **`manifest.hosts` entries may name a port** (#1227). `"127.0.0.1:8081"`, `"*.internal:9000"`,
   `"*:443"`, `"10.0.0.0/8:5432"` and, for IPv6, `"[::1]:8081"` admit only that port; an entry
@@ -68,8 +71,11 @@ release-artifact layout).
   a DSN's or its backend's default), for `http.fetch` and the sync calls (every redirect hop
   too), `ws.connect`, `smtp.send`, `db.open`, `kv.open` and the `ssh` grants, which share the
   matcher. A malformed port (`0`, over 65535, a leading zero, letters) refuses the app at load,
-  naming the entry, and `limits.trusted_proxies` takes none. A refused call names the port when
-  an entry has one. Covered by `tests/e2e_host_port.sh` and `test_host_match`.
+  naming the entry, and `limits.trusted_proxies` takes none. So does an empty entry (`""`),
+  which was accepted before and matched nothing: remove it. A CIDR entry whose network or prefix
+  cannot match anything (`1.2.3.4/33`, a prefix with a sign or a space) is refused at load too;
+  it passed the check and then matched nothing. A refused call names the port when an entry has
+  one. Covered by `tests/e2e_host_port.sh` and `test_host_match`.
 
 ### Changed
 

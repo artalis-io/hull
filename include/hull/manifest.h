@@ -255,6 +255,10 @@ typedef struct HlManifest {
      * hl_manifest_check_env_refs, resolved by hl_http_unix_resolve. */
     const char *http_unix_sockets[HL_MANIFEST_MAX_HTTP_UNIX];
     int         http_unix_socket_count;
+    int         http_unix_invalid;  /* the extractor found the list not a
+                                       list of at most HL_MANIFEST_MAX_HTTP_UNIX
+                                       strings (or, JS, both spellings): the
+                                       load check refuses the app */
 
     /* Run limits (from manifest "limits" key). limits.vm_thread turns on
      * --vm-thread (cap/vm_thread.h); the grace and ceiling are in ms, 0 =

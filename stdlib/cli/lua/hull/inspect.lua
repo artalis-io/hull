@@ -157,6 +157,18 @@ local function main()
         if m.hosts and #m.hosts > 0 then
             print("  hosts:    " .. table.concat(m.hosts, ", "))
         end
+        -- http.unix_sockets (#1228): outbound authority like hosts. A socket
+        -- outside the app and state directories (an absolute entry, say
+        -- /var/run/docker.sock) reaches another service on this host.
+        local http = type(m.http) == "table" and m.http or nil
+        local socks = http and (http.unix_sockets or http.unixSockets)
+        if type(socks) == "table" and #socks > 0 then
+            for _, e in ipairs(socks) do
+                local abs = type(e) == "string" and e:sub(1, 1) == "/"
+                print((abs and "  [!] " or "      ") .. "http.unix_socket: " .. tostring(e) ..
+                      (abs and "  (outside the app and state directories)" or ""))
+            end
+        end
         -- W^X escape hatches - surface loudly so the auditor sees them.
         -- Accept both snake_case (Lua manifest) and camelCase (JS manifest).
         local adc = m.allow_dynamic_code or m.allowDynamicCode

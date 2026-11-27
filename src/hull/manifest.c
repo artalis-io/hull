@@ -408,13 +408,22 @@ int hl_manifest_check_env_refs(const HlManifest *m, char *err, size_t err_size)
                        m->limits.trusted_proxy_count, 1, err, err_size) != 0)
         return -1;
     /* http.unix_sockets (#1228): shape only; the paths are resolved (and the
-     * "@state/" ones need a state directory) when the HTTP client is set up. */
+     * "@state/" ones need a state directory) when the HTTP client is set up.
+     * A list the extractor could not take whole is refused, not shortened. */
+    if (m->http_unix_invalid) {
+        if (err && err_size)
+            snprintf(err, err_size, "manifest: http.unix_sockets (JS "
+                     "http.unixSockets) must be a list of at most %d strings, "
+                     "given once", HL_MANIFEST_MAX_HTTP_UNIX);
+        return -1;
+    }
     for (int i = 0; i < m->http_unix_socket_count; i++) {
         char why[64];
         if (!hl_http_unix_entry_valid(m->http_unix_sockets[i], why, sizeof why)) {
-            snprintf(err, err_size, "manifest: \"%s\" in http.unix_sockets is "
-                     "not a socket path (it holds %s)",
-                     m->http_unix_sockets[i] ? m->http_unix_sockets[i] : "", why);
+            if (err && err_size)
+                snprintf(err, err_size, "manifest: \"%s\" in http.unix_sockets is "
+                         "not a socket path (it holds %s)",
+                         m->http_unix_sockets[i] ? m->http_unix_sockets[i] : "", why);
             return -1;
         }
     }

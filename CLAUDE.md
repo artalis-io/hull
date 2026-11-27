@@ -2518,11 +2518,15 @@ whole life. serve.c now binds and listens on `-b` / `-p` itself right before pha
 (`hl_serve_prebind_listener`, for an app that will serve; a main-only CLI binds nothing) and
 hands the socket to Keel as an adopted `KlHttpServerConfig.listen_fd` (set on
 `s->server.config` before `kl_http_server_run`; Hull closes it if the run is never entered).
-`--agent-api` and `--vm-thread`'s standby use that same listener. The sandbox then refuses
-every bind (`HlSandboxPolicy.allow_bind` 0): Seatbelt adds `(deny network-bind)` after
-`(allow network-inbound)`, which alone admits bind; Linux handles `LANDLOCK_ACCESS_NET_BIND_TCP`
-with no rule on Landlock ABI 4+ (vendor/pledge HULL PATCH 0006; an older kernel still allows it
-and the applied line says `bind: kernel`). A cosmo APE (its own libc unveil) and OpenBSD keep
+`--agent-api` and `--vm-thread`'s standby use that same listener; a run that ends before Keel
+adopted it (a stop during start-up) closes it in `hl_serve_run`, and a listener that came out
+as descriptor 0 is moved up first (Keel adopts only `listen_fd > 0`). The sandbox then refuses
+later binds (`HlSandboxPolicy.allow_bind` 0): on macOS EVERY bind - Seatbelt adds `(deny
+network-bind)` after `(allow network-inbound)`, which alone admits bind; on Linux only TCP
+binds - Landlock handles `LANDLOCK_ACCESS_NET_BIND_TCP` with no rule on ABI 4+ (vendor/pledge
+HULL PATCH 0006; an older kernel still allows it and the applied line says `bind: kernel`).
+Landlock has no right for a UDP or AF_UNIX bind, and seccomp cannot refuse them (musl's
+resolver binds its UDP socket), so under `inet` / `unix` a Linux process can still bind those. A cosmo APE (its own libc unveil) and OpenBSD keep
 the `inet` promise's bind. `hl_embed_seal` keeps bind (`allow_bind = net_inbound`): an embedder
 may bind after the seal. The port stays an operator setting, not a manifest field.
 

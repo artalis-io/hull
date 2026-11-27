@@ -3119,6 +3119,18 @@ static int hl_serve_prebind_listener(HlServerState *s)
         log_error("[hull:c] socket: %s", strerror(errno));
         return -1;
     }
+    /* Keel adopts only listen_fd > 0 (0 means "none"): started with stdin
+     * closed, the socket is descriptor 0 and Keel would bind its own after
+     * the sandbox, where the bind is refused. Move it up (audit). */
+    if (fd == 0) {
+        int up = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+        (void)o->close(sp->context, fd);
+        if (up < 0) {
+            log_error("[hull:c] socket: %s", strerror(errno));
+            return -1;
+        }
+        fd = (KlSocketHandle)up;
+    }
     if (o->set_cloexec) o->set_cloexec(sp->context, fd);
     if (o->set_reuseaddr) (void)o->set_reuseaddr(sp->context, fd, 1);
     if (o->set_reuseport) (void)o->set_reuseport(sp->context, fd, 1);
@@ -3149,6 +3161,17 @@ static int hl_serve_run(HlServerState *s)
 
     s->run_entered = 1;   /* Keel owns the adopted listener from here */
     int rc = kl_http_server_run(&s->server);
+    /* A run that ended before Keel adopted the listener (a stop asked for
+     * during start-up, a failed getsockname) leaves it Hull's: Keel sets
+     * bound_port only once it has adopted it, and closes only the listener
+     * it holds (audit). */
+    if (s->prebound && s->server.bound_port == 0 &&
+        s->server.listen_fd != s->prebound_fd) {
+        const KlSocketProvider *sp = hl_serve_sockets(s);
+        if (sp && sp->ops && sp->ops->close)
+            (void)sp->ops->close(sp->context, s->prebound_fd);
+        s->prebound = 0;
+    }
     if (rc < 0)
         log_error("[hull:c] server exited with error: %s",
                   kl_strerror(s->server.last_error));

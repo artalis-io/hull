@@ -660,10 +660,26 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
         out->http_timeout_ms = (uint32_t)lua_wasm_limit(L, http_idx,
                                                         "timeout_ms",
                                                         (lua_Integer)INT32_MAX);
-        /* http.unix_sockets: the sockets an http+unix:// URL may dial (#1228). */
-        read_string_array(L, http_idx, "unix_sockets", out->http_unix_sockets,
-                          &out->http_unix_socket_count, HL_MANIFEST_MAX_HTTP_UNIX,
-                          alloc);
+        /* http.unix_sockets: the sockets an http+unix:// URL may dial (#1228).
+         * Anything but a list of at most the cap of strings (a number is not
+         * taken as a path) marks it invalid: refused at load, not shortened. */
+        lua_getfield(L, http_idx, "unix_sockets");
+        if (lua_istable(L, -1)) {
+            int us = lua_gettop(L);
+            lua_Integer n = (lua_Integer)lua_rawlen(L, us);
+            if (n > HL_MANIFEST_MAX_HTTP_UNIX) out->http_unix_invalid = 1;
+            for (lua_Integer i = 1; !out->http_unix_invalid && i <= n; i++) {
+                lua_rawgeti(L, us, i);
+                const char *copy = lua_type(L, -1) == LUA_TSTRING
+                    ? hl_manifest_strdup(alloc, mstr(L, -1)) : NULL;
+                if (copy) out->http_unix_sockets[out->http_unix_socket_count++] = copy;
+                else out->http_unix_invalid = 1;
+                lua_pop(L, 1);
+            }
+        } else if (!lua_isnil(L, -1)) {
+            out->http_unix_invalid = 1;
+        }
+        lua_pop(L, 1); /* pop unix_sockets */
     }
     lua_pop(L, 1); /* pop http */
 

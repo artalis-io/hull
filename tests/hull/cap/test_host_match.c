@@ -256,6 +256,25 @@ UTEST(host_match_port, unknown_port_never_matches_a_ported_pattern)
     EXPECT_TRUE(hl_host_match("127.0.0.1", "127.0.0.1"));
 }
 
+/* Audit: a CIDR entry whose network or prefix cannot match anything passed
+ * the load check (only the port was looked at), then matched nothing. */
+UTEST(host_match_port, cidr_audit_a_malformed_cidr_is_invalid_at_load)
+{
+    static const char *const bad[] = {
+        "1.2.3.4/33:80", "1.2.3.4/33", "[::1/200]:443", "::1/129",
+        "1.2.3/8", "01.2.3.4/8", "1.2.3.4/", "1.2.3.4/+8", "1.2.3.4/ 8",
+        "1.2.3.4/8x", "1.2.3.4/0008", "fe80::1%en0/64", "/8", "host/8",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        EXPECT_FALSE(hl_host_pattern_valid(bad[i]));
+    EXPECT_TRUE(hl_host_pattern_valid("10.0.0.0/8"));
+    EXPECT_TRUE(hl_host_pattern_valid("10.0.0.0/8:443"));
+    EXPECT_TRUE(hl_host_pattern_valid("[2001:db8::/32]:443"));
+    EXPECT_TRUE(hl_host_pattern_valid("2001:db8::/32"));
+    EXPECT_TRUE(hl_host_match_port("10.0.0.0/8:443", "10.1.2.3", 443));
+    EXPECT_FALSE(hl_host_match_port("1.2.3.4/+8", "1.2.3.4", 0));
+}
+
 UTEST(host_match_port, malformed_ports_match_nothing)
 {
     static const char *const bad[] = {

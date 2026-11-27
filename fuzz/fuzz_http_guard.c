@@ -304,12 +304,16 @@ static void mode_redirect(Fields *fl, uint8_t flags)
         if (!ref_redirect_safe(h[i].name)) secrets = 1;
     int n_ok = kl_url_parse(next, &n) == 0;
     /* #1228: a chain on a Unix socket stays on that socket (its path known,
-     * below the origin buffer), and a TCP chain never moves onto one. */
+     * below the origin buffer), and a TCP chain never moves onto one. Each
+     * hop's socket must still be a declared one that passes its on-disk
+     * check (audit): cfg declares none here, so no socket hop is allowed. */
     int on_socket = n_ok && ((o_ok && o.is_unix) || n.is_unix);
+    int ui = on_socket && n.is_unix ? hl_http_unix_find(&cfg.unix_sockets, n.unix_path) : -1;
     int hop_ok = on_socket
         ? (o_ok && o.is_unix && n.is_unix &&
            strlen(o.unix_path) < HL_HTTP_GUARD_ORIGIN_MAX &&
-           strcmp(o.unix_path, n.unix_path) == 0)
+           strcmp(o.unix_path, n.unix_path) == 0 &&
+           ui >= 0 && hl_http_unix_path_ok(&cfg.unix_sockets, ui))
         : n_ok && hl_http_check_host(&cfg, n.host, n.host_len, n.port) == 0;
     int want = n_ok && hop_ok &&
                !(o_ok && o.is_https && !n.is_https) &&

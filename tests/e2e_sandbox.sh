@@ -203,6 +203,26 @@ else
     fail "hull did not start with manifest app"
 fi
 
+# ── Test 1b: started with stdin closed (audit, #1226) ───────────────
+# The listener is bound before phase 2; with descriptor 0 closed the socket
+# was descriptor 0, which Keel reads as "no listener" and replaced with a bind
+# of its own after the sandbox, where it is refused: the server never started.
+
+echo ""
+echo "=== Test 1b: Hull started with stdin closed ==="
+
+LOGFILE1B="$WORKDIR/hull_stdin_closed.log"
+"$HULL" -l debug -p 19886 -d "$WORKDIR/test1b.db" "$WORKDIR/app.lua" >"$LOGFILE1B" 2>&1 <&- &
+SERVER_PID=$!
+if wait_for_server 19886; then
+    RESP=$(curl -s "http://127.0.0.1:19886/health")
+    check_contains "serves with stdin closed" "$RESP" "ok"
+    stop_server
+else
+    stop_server
+    fail "hull did not start with stdin closed"; tail -5 "$LOGFILE1B"
+fi
+
 # ── Test 2: Hull without manifest - default-deny sandbox ────────────
 
 echo ""

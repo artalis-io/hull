@@ -278,6 +278,15 @@ int hl_http_redirect_allowed(const char *next_url, void *data)
                              "redirect off or onto a Unix socket refused");
             return -1;
         }
+        /* Keel dials again for each hop: the path is checked on disk again
+         * too, as at the first dial (no link below its root, a socket). */
+        int ui = hl_http_unix_find(&g->cfg->unix_sockets, parsed.unix_path);
+        if (ui < 0 || !hl_http_unix_path_ok(&g->cfg->unix_sockets, ui)) {
+            redirect_refused(next_url, "unix_socket",
+                             "redirect to a Unix socket that no longer passes "
+                             "its check refused");
+            return -1;
+        }
     } else if (hl_http_check_host(g->cfg, parsed.host, parsed.host_len, parsed.port) != 0) {
         redirect_refused(next_url, "host",
                          "redirect to a host outside manifest.hosts refused");
