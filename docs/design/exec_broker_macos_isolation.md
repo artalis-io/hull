@@ -162,10 +162,15 @@ Two consequences, accepted in phase 1 (review, #1218):
   command's broker still holds the killed child until it is reaped (milliseconds: it gets
   `SIGKILL`). For that moment the router's tree-wide caps under-count by one call; the command
   broker's own caps still hold.
-- Forwarding is a bounded blocking write (a `RUN` 5 s, a `KILL` 1 s). A command broker always
-  reads its channel, so this never deadlocks, but a large-stdin `RUN` to a slow broker stalls
-  the router for that time, and a write that times out marks that command's broker lost. A
-  per-command output queue would remove both; not needed until a deployment shows it.
+- Forwarding never blocks the router (#1234; phase 1 used a bounded blocking write, a `RUN`
+  5 s and a `KILL` 1 s, which stalled every command behind one slow broker and marked that
+  broker lost when it timed out). Each command broker has its own outgoing queue (at most one
+  `RUN` and one `KILL` per call in flight), written as that broker takes it, on `POLLOUT` in the
+  router's loop. A `RUN` sits in the queue under the reservation step 1 made for it. A `KILL` of
+  a call whose `RUN` has not started on the wire drops that `RUN` (the broker never sees the
+  call); a `RUN` already partly written goes out whole first, its bytes counted in the
+  reservation until then. A broker that takes no byte of a waiting frame for 60 s is wedged and
+  is dropped: it reads every frame as it comes, after at most about 4 s of starting each call.
 
 A reply larger than the call's reservation (plus its 24-byte head) is taken as a broker gone
 wrong: that command's broker is dropped. `PROBE` frames are relayed in test builds only.

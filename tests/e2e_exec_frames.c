@@ -23,6 +23,12 @@
  *      same read - the live call completes, the new call gets its own reply,
  *      the router takes more calls, the lost command is refused (review of
  *      #1218: the killed slot stayed queued and freed the next call)
+ *  11. macOS router: one command's broker stops reading (SIGSTOP) with a
+ *      RUN larger than the socket buffer queued for it - another command's
+ *      call still completes on time, and once the broker reads again (after
+ *      the 5 s the old blocking write allowed) its call completes too, not
+ *      "the command broker is gone"; a KILL of a call whose RUN never went
+ *      out yields no reply and frees its slot (#1234)
  *
  * Usage: e2e_exec_frames <path to hull> [degraded]
  *
@@ -188,6 +194,26 @@ static HlExecBuf policy_sl_s1(void)
         hl_exec_b_fixed(&b, args[i], strlen(args[i]));
         hl_exec_b_count_end(&b, m, 1);
     }
+    if (hl_exec_b_finish(&b) != 0) { fprintf(stderr, "policy: %s\n", b.err); exit(2); }
+    return b;
+}
+
+/* Commands "c" (cat, stdin up to 1 MiB, stdout 2 MiB, concurrency 4) and
+ * "s1" (sleep 1, concurrency 4), in that order. */
+static HlExecBuf policy_cat_s1(void)
+{
+    HlExecBuf b;
+    hl_exec_b_init(&b, NULL);
+    hl_exec_b_cmd(&b, "c", 1, "/bin/cat", 8, 60000, 2 * 1024 * 1024, -1, 4, 0,
+                  1024 * 1024, NULL, 0);
+    for (int k = 0; k < 3; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    hl_exec_b_cmd(&b, "s1", 2, SLEEP_BIN, strlen(SLEEP_BIN), 60000, -1, -1, 4, 0, -1,
+                  NULL, 0);
+    for (int k = 0; k < 3; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    size_t m = hl_exec_b_count_begin(&b);
+    hl_exec_b_fixed(&b, "1", 1);
+    hl_exec_b_count_end(&b, m, 1);
     if (hl_exec_b_finish(&b) != 0) { fprintf(stderr, "policy: %s\n", b.err); exit(2); }
     return b;
 }
@@ -510,6 +536,56 @@ int main(int argc, char **argv)
     r = expect(b.fd, 5, &t, msg, sizeof msg, 3000);
     CHECK(r == 1 && t == REFUSED && strstr(msg, "command broker is gone"),
           "a call to the lost command is refused (%s)", msg);
+    broker_end(&b);
+    hl_exec_buf_free(&p);
+
+    /* 11. exec_frames_router.stopped_broker_holds_nothing (#1234) */
+    p = policy_cat_s1();
+    b = broker_start(&p);
+    nsub = children_of(b.pid, subs, 4);
+    CHECK(nsub == 2, "two commands: the router has one broker each (%d)", nsub);
+    pid_t cat_broker = nsub == 2 ? (subs[0] < subs[1] ? subs[0] : subs[1]) : -1;
+    size_t big = 512 * 1024;                 /* far past the socket buffer */
+    char *in = malloc(big + 1);
+    memset(in, 'x', big);
+    in[big] = 0;
+    if (cat_broker > 0) kill(cat_broker, SIGSTOP);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    run_in(b.fd, 1, "c", NULL, in);          /* waits in the router's queue */
+    run_in(b.fd, 2, "c", NULL, in);          /* never starts on the wire... */
+    send_frame(b.fd, KILL, 2, NULL, 0, NULL, 0);   /* ...and is killed */
+    run(b.fd, 3, "s1", NULL);
+    r = expect(b.fd, 3, &t, msg, sizeof msg, 3000);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+    CHECK(r == 1 && t == DONE && ms < 2500,
+          "another command's call completes while one broker is stopped (r %d, %ld ms)",
+          r, ms);
+    usleep(5000000);                         /* past the old 5 s write deadline */
+    if (cat_broker > 0) kill(cat_broker, SIGCONT);
+    {
+        uint32_t ty, id; uint8_t *buf; size_t len;
+        int got1 = 0, got2 = 0;
+        size_t out_len = 0;
+        for (;;) {
+            int rr = read_frame(b.fd, &ty, &id, &buf, &len, 4000);
+            if (rr != 1) break;
+            if (id == 1) { got1 = 1; t = ty; if (ty == DONE && len >= 20) out_len = get32(buf + 16); }
+            if (id == 2) got2 = 1;
+            free(buf);
+            if (got1) break;
+        }
+        CHECK(got1 && t == DONE && out_len == big,
+              "the stopped broker's call completes once it reads again (type %u, %zu bytes)",
+              got1 ? t : 0, out_len);
+        r = expect(b.fd, 2, &t, msg, sizeof msg, 500);
+        CHECK(!got2 && r == 0, "the killed call's RUN never went out: no reply");
+    }
+    run_in(b.fd, 4, "c", NULL, "hi");
+    r = expect(b.fd, 4, &t, msg, sizeof msg, 4000);
+    CHECK(r == 1 && t == DONE, "the command takes calls afterwards");
+    free(in);
     broker_end(&b);
     hl_exec_buf_free(&p);
 #endif
