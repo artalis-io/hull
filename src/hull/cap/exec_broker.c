@@ -736,9 +736,9 @@ static void kill_all(void)
 
 /* Command @p ci's broker is gone (EOF, a write it did not take, a frame it
  * should not send): every call routed to it that has no reply yet fails,
- * and later calls to it are refused. Its running calls are its own to end:
- * on SIGKILL they run on (the documented limit; it cannot be reaped from
- * here without signalling grandchildren, §4.4). */
+ * and later calls to it are refused. Its running calls are not the
+ * router's to end: each one's keeper sees that broker go and ends it, however
+ * it went (exec_broker_macos_isolation.md §4.6). */
 static void sub_lost(int ci)
 {
     Sub *s = &g_subs[ci];
