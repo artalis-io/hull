@@ -820,11 +820,31 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     if (mjs_is_obj(ctx, http_val)) {
         out->http_timeout_ms = (uint32_t)mjs_wasm_limit(ctx, http_val, "timeoutMs",
                                                         (int64_t)INT32_MAX);
-        /* http.unixSockets: the sockets an http+unix:// URL may dial (#1228). */
-        out->http_unix_socket_count =
-            read_js_string_array(ctx, http_val, "unixSockets",
-                                 out->http_unix_sockets,
-                                 HL_MANIFEST_MAX_HTTP_UNIX, alloc);
+        /* http.unixSockets: the sockets an http+unix:// URL may dial (#1228).
+         * The Lua spelling unix_sockets is taken too, as exec's host takes
+         * both; both at once, anything but an array, a non-string entry or
+         * more than the cap marks the list invalid (refused at load). */
+        JSValue us_c = mjs_own(ctx, http_val, "unixSockets");
+        JSValue us_s = mjs_own(ctx, http_val, "unix_sockets");
+        int has_c = !JS_IsUndefined(us_c), has_s = !JS_IsUndefined(us_s);
+        if (has_c && has_s) {
+            out->http_unix_invalid = 1;
+        } else if (has_c || has_s) {
+            JSValueConst arr = has_c ? us_c : us_s;
+            int32_t n = JS_IsArray(ctx, arr) == 1 ? mjs_len(ctx, arr) : -1;
+            if (n < 0 || n > HL_MANIFEST_MAX_HTTP_UNIX) out->http_unix_invalid = 1;
+            for (int32_t i = 0; !out->http_unix_invalid && i < n; i++) {
+                JSValue elem = mjs_elem(ctx, arr, (uint32_t)i);
+                const char *str = JS_IsString(elem) ? mjs_str(ctx, elem) : NULL;
+                const char *copy = str ? hl_manifest_strdup(alloc, str) : NULL;
+                if (str) JS_FreeCString(ctx, str);
+                if (copy) out->http_unix_sockets[out->http_unix_socket_count++] = copy;
+                else out->http_unix_invalid = 1;
+                JS_FreeValue(ctx, elem);
+            }
+        }
+        JS_FreeValue(ctx, us_c);
+        JS_FreeValue(ctx, us_s);
     }
     JS_FreeValue(ctx, http_val);
 

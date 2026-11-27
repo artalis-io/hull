@@ -166,10 +166,11 @@ int hl_host_literal_ok(const char *host)
     return hl_host_ip_canonical(host);
 }
 
-/* CIDR match: @p pattern is "net/prefix". Matches only when @p host is an IP
- * literal in the same family and inside the range. Returns 0 for a hostname
- * host (it is not an IP literal) or a malformed pattern. */
-static int cidr_match(const char *pattern, const char *host)
+/* Parse a CIDR pattern "net/prefix": a canonical IP literal with no zone
+ * (audit 42) and a decimal prefix within its family's width, digits only.
+ * 1 with @p netb / @p family / @p nbytes / @p prefix set, else 0. */
+static int cidr_parse(const char *pattern, unsigned char netb[16], int *family,
+                      int *nbytes, int *prefix)
 {
     const char *slash = strchr(pattern, '/');
     if (!slash) return 0;
@@ -180,26 +181,36 @@ static int cidr_match(const char *pattern, const char *host)
     memcpy(net, pattern, nl);
     net[nl] = '\0';
 
-    char *end = NULL;
-    long prefix = strtol(slash + 1, &end, 10);
-    if (end == slash + 1 || *end != '\0' || prefix < 0) return 0;
+    const char *d = slash + 1;
+    int p = 0, nd = 0;
+    for (; *d >= '0' && *d <= '9' && nd < 4; d++, nd++) p = p * 10 + (*d - '0');
+    if (nd == 0 || nd > 3 || *d != '\0') return 0;
 
-    unsigned char netb[16], hostb[16];
-    int family, nbytes;
-    /* Both sides canonical (audit 42); neither carries a zone. */
-    if (!hl_host_ip_canonical(net) || strchr(net, '%') ||
-        !hl_host_ip_canonical(host) || strchr(host, '%'))
-        return 0;
+    if (!hl_host_ip_canonical(net) || strchr(net, '%')) return 0;
     if (inet_pton(AF_INET, net, netb) == 1) {
-        family = AF_INET; nbytes = 4;
-        if (prefix > 32) return 0;
+        *family = AF_INET; *nbytes = 4;
+        if (p > 32) return 0;
     } else if (inet_pton(AF_INET6, net, netb) == 1) {
-        family = AF_INET6; nbytes = 16;
-        if (prefix > 128) return 0;
+        *family = AF_INET6; *nbytes = 16;
+        if (p > 128) return 0;
     } else {
         return 0;
     }
+    *prefix = p;
+    return 1;
+}
 
+/* CIDR match: @p pattern is "net/prefix". Matches only when @p host is an IP
+ * literal in the same family and inside the range. Returns 0 for a hostname
+ * host (it is not an IP literal) or a malformed pattern. */
+static int cidr_match(const char *pattern, const char *host)
+{
+    unsigned char netb[16], hostb[16];
+    int family, nbytes, prefix;
+    if (!cidr_parse(pattern, netb, &family, &nbytes, &prefix)) return 0;
+    /* The host canonical too (audit 42), with no zone. */
+    if (!hl_host_ip_canonical(host) || strchr(host, '%'))
+        return 0;
     if (inet_pton(family, host, hostb) != 1)
         return 0;   /* host is not an IP literal of this family */
 
@@ -271,7 +282,16 @@ int hl_host_pattern_valid(const char *pattern)
 {
     char host[256];
     int port;
-    return pattern && pattern[0] && split_pattern(pattern, host, sizeof host, &port);
+    if (!pattern || !pattern[0] || !split_pattern(pattern, host, sizeof host, &port))
+        return 0;
+    /* A CIDR host part is checked here too: "1.2.3.4/33:80" matched nothing
+     * at run time but passed the load check (audit). */
+    if (strchr(host, '/')) {
+        unsigned char netb[16];
+        int family, nbytes, prefix;
+        return cidr_parse(host, netb, &family, &nbytes, &prefix);
+    }
+    return 1;
 }
 
 int hl_host_pattern_has_port(const char *pattern)

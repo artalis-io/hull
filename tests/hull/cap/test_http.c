@@ -15,7 +15,11 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <stdio.h>
+#include <limits.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <keel/url.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -151,6 +155,60 @@ UTEST(redirect, a_hop_elsewhere_is_refused)
         "http://169.254.169.254/latest/meta-data/", &g));
     ASSERT_EQ(-1, hl_http_redirect_allowed("http://10.0.0.5:6379/", &g));
     ASSERT_EQ(-1, hl_http_redirect_allowed("http://api.example.com.evil.net/", &g));
+}
+
+/* #1228 audit: Keel dials again for every redirect hop, so a hop on a socket
+ * chain re-runs the on-disk check: a path that turned into a link below its
+ * root since the first dial is refused, as the first dial would refuse it. */
+UTEST(redirect, http_unix_audit_a_hop_rechecks_the_socket_path)
+{
+    char tmpl[] = "/tmp/hux_redir.XXXXXX";
+    char *made = mkdtemp(tmpl);
+    ASSERT_TRUE(made != NULL);
+    char root[PATH_MAX], run[PATH_MAX + 8], sock[PATH_MAX + 16], moved[PATH_MAX + 8];
+    ASSERT_TRUE(realpath(made, root) != NULL);
+    snprintf(run, sizeof run, "%s/run", root);
+    snprintf(sock, sizeof sock, "%s/s.sock", run);
+    snprintf(moved, sizeof moved, "%s/run2", root);
+    ASSERT_EQ(0, mkdir(run, 0700));
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    ASSERT_TRUE(fd >= 0);
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sun_family = AF_UNIX;
+    snprintf(sa.sun_path, sizeof sa.sun_path, "%s", sock);
+    ASSERT_EQ(0, bind(fd, (struct sockaddr *)&sa, sizeof sa));
+
+    const char *entries[] = { "run/s.sock" };
+    HlHttpConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    char err[256];
+    ASSERT_EQ(0, hl_http_unix_resolve(&cfg.unix_sockets, entries, 1, root, NULL,
+                                      err, sizeof err));
+    char url[PATH_MAX * 3 + 64];
+    size_t o = (size_t)snprintf(url, sizeof url, "http+unix://");
+    for (const char *c = cfg.unix_sockets.resolved[0]; *c && o + 4 < sizeof url; c++)
+        o += (size_t)(*c == '/' ? snprintf(url + o, sizeof url - o, "%%2F")
+                                : snprintf(url + o, sizeof url - o, "%c", *c));
+    snprintf(url + o, sizeof url - o, "/next");
+    KlUrl origin;
+    ASSERT_EQ(0, kl_url_parse(url, &origin));
+    HlHttpRedirectGuard g;
+    hl_http_redirect_guard_init(&g, &cfg, &origin, NULL, 0, 0);
+    EXPECT_EQ(0, hl_http_redirect_allowed(url, &g));   /* the same socket: followed */
+
+    /* run/ becomes a link to where the socket now is: refused. */
+    ASSERT_EQ(0, rename(run, moved));
+    ASSERT_EQ(0, symlink("run2", run));
+    EXPECT_EQ(-1, hl_http_redirect_allowed(url, &g));
+
+    close(fd);
+    char p2[PATH_MAX + 32];
+    snprintf(p2, sizeof p2, "%s/s.sock", moved);
+    unlink(p2);
+    unlink(run);
+    rmdir(moved);
+    rmdir(root);
 }
 
 UTEST(redirect, an_unparseable_hop_is_refused)

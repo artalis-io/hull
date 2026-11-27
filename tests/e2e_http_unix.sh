@@ -190,6 +190,63 @@ else
     fail "an entry with '..' refuses the app at load" "rc=$rc $(tail -2 "$T/bad.log" | tr '\n' ' ')"
 fi
 
+echo "-- the list is taken whole or refused --"
+# A JS app may use the Lua spelling (exec's host takes both); a non-string
+# entry, more than 16 entries or both spellings refuse the app at load
+# instead of being dropped (audit).
+mkdir -p "$T/snake/run"
+cat > "$T/snake/app.js" <<EOF2
+import { app } from "hull:app";
+import { httpClient } from "hull:http-client";
+import { log } from "hull:log";
+app.manifest({ modules: ["hull/http-client@1", "hull/log@1"],
+               http: { unix_sockets: ["$T/js/run/svc.sock"] } });
+app.main(async () => {
+    const r = await httpClient.async.get("http+unix://" + encodeURIComponent("$T/js/run/svc.sock") + "/p");
+    log.info("R snake ok " + r.status + " " + r.body);
+    return 0;
+});
+EOF2
+( cd "$T/snake" && "$HULL" app.js > "$T/snake.log" 2>&1 ) || true
+got=$(line "$T/snake.log" snake)
+[ "$got" = "ok 200 uds:/p" ] && pass "js: http.unix_sockets (the Lua spelling) is taken" \
+    || fail "js: http.unix_sockets (the Lua spelling) is taken" "$got $(tail -2 "$T/snake.log" | tr '\n' ' ')"
+refused() {  # refused <label> <dir> <entry file> <body>
+    mkdir -p "$T/$2"
+    printf '%s\n' "$4" > "$T/$2/$3"
+    rc=0
+    ( cd "$T/$2" && "$HULL" "$3" > "$T/$2.log" 2>&1 ) || rc=$?
+    if [ "$rc" -ne 0 ] && grep -q 'must be a list of at most 16 strings' "$T/$2.log"; then pass "$1"
+    else fail "$1" "rc=$rc $(tail -2 "$T/$2.log" | tr '\n' ' ')"; fi
+}
+SEVENTEEN='"a.sock","b.sock","c.sock","d.sock","e.sock","f.sock","g.sock","h.sock","i.sock","j.sock","k.sock","l.sock","m.sock","n.sock","o.sock","p.sock","q.sock"'
+refused "lua: a non-string entry refuses the app" lnum app.lua \
+    'local app = require("hull.app") app.manifest({ modules = { "hull/http-client@1" }, http = { unix_sockets = { "a.sock", 123 } } }) app.main(function() return 0 end)'
+refused "lua: a 17th entry refuses the app" l17 app.lua \
+    "local app = require(\"hull.app\") app.manifest({ modules = { \"hull/http-client@1\" }, http = { unix_sockets = { $SEVENTEEN } } }) app.main(function() return 0 end)"
+refused "js: a non-string entry refuses the app" jnum app.js \
+    'import { app } from "hull:app"; app.manifest({ modules: ["hull/http-client@1"], http: { unixSockets: ["a.sock", 123] } }); app.main(() => 0);'
+refused "js: a 17th entry refuses the app" j17 app.js \
+    "import { app } from \"hull:app\"; app.manifest({ modules: [\"hull/http-client@1\"], http: { unixSockets: [$SEVENTEEN] } }); app.main(() => 0);"
+refused "js: both spellings refuse the app" jboth app.js \
+    'import { app } from "hull:app"; app.manifest({ modules: ["hull/http-client@1"], http: { unixSockets: ["a.sock"], unix_sockets: ["a.sock"] } }); app.main(() => 0);'
+
+echo "-- hull inspect --"
+# The sockets are outbound authority: hull inspect lists them, and marks an
+# absolute one (outside the app and state directories). Both spellings.
+for sp in unix_sockets unixSockets; do
+    mkdir -p "$T/insp_$sp"
+    printf '{"manifest":{"modules":["hull/http-client@1"],"http":{"%s":["run/svc.sock","/var/run/docker.sock"]}}}\n' \
+        "$sp" > "$T/insp_$sp/package.sig"
+    out=$("$HULL" inspect "$T/insp_$sp" 2>&1) || true
+    if printf '%s\n' "$out" | grep -qF "http.unix_socket: run/svc.sock" &&
+       printf '%s\n' "$out" | grep -qF "[!] http.unix_socket: /var/run/docker.sock"; then
+        pass "hull inspect lists http.$sp and marks an absolute socket"
+    else
+        fail "hull inspect lists http.$sp and marks an absolute socket" "$out"
+    fi
+done
+
 echo ""
 echo "e2e_http_unix: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
