@@ -133,6 +133,12 @@ int hl_exec_plat_exit_watch(pid_t pid);
  * closing the call's kill pipe. Linux: 0 (PR_SET_PDEATHSIG). */
 int hl_exec_plat_keeper(void);
 
+/* The keeper's signal dispositions, set first thing in the keeper, before
+ * it forks the job (the broker forks it with every signal blocked, so none
+ * lands before this): nothing but SIGKILL may end a keeper while its job
+ * runs. Unblocks the signals once they are set. Linux: nothing to do. */
+void hl_exec_plat_keeper_signals(void);
+
 /* The keeper's wait, once the job is forked: until the job exits, the read
  * end @p kill_r turns readable (a byte or EOF: the broker ended the call or
  * is gone) or @p broker exits. On either of the last two it kills the job

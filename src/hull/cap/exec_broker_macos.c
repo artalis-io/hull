@@ -424,11 +424,13 @@ static void keeper_end(pid_t job, int kill_it)
     keeper_exit_as(st);
 }
 
-void hl_exec_plat_keeper_run(pid_t broker, pid_t job, int kill_r)
+void hl_exec_plat_keeper_signals(void)
 {
     /* Nothing but SIGKILL may end the keeper while its job runs: a signal
-     * to the broker's process group, or one the job's exit raises, would
-     * leave the job without anyone to end it. Faults keep their default. */
+     * to the broker's process group (a Ctrl-C, a closed terminal) would
+     * leave the job without anyone to end it. Faults keep their default.
+     * The broker forked this process with every signal blocked, so one sent
+     * before this point is pending and is discarded by SIG_IGN. */
     struct rlimit core = { 0, 0 };
     setrlimit(RLIMIT_CORE, &core);
     for (int s = 1; s < 32; s++) {
@@ -437,6 +439,13 @@ void hl_exec_plat_keeper_run(pid_t broker, pid_t job, int kill_r)
             s == SIGABRT || s == SIGSYS) continue;
         signal(s, SIG_IGN);
     }
+    sigset_t none;
+    sigemptyset(&none);
+    sigprocmask(SIG_SETMASK, &none, NULL);
+}
+
+void hl_exec_plat_keeper_run(pid_t broker, pid_t job, int kill_r)
+{
     int kq = kqueue();
     if (kq >= 0) {
         struct kevent ev[3];

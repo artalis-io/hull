@@ -388,6 +388,7 @@ static pid_t keeper_fork(int how, int *kill_w, int *pid_r)
     pid_t broker = getpid();
     pid_t k = fork();
     if (k == 0) {
+        hl_exec_plat_keeper_signals();
         close(kp[1]);
         close(pp[0]);
         pid_t j = fork();
@@ -395,7 +396,9 @@ static pid_t keeper_fork(int how, int *kill_w, int *pid_r)
             close(kp[0]);
             switch (how) {
             case 0: usleep(50000); _exit(7);                     /* exits 7 */
-            case 1: usleep(50000); raise(SIGTERM); _exit(1);     /* dies by SIGTERM */
+            case 1:                                              /* dies by SIGTERM */
+                signal(SIGTERM, SIG_DFL);   /* as child_run resets every signal */
+                usleep(50000); raise(SIGTERM); _exit(1);
             default: for (;;) pause();                           /* runs until killed */
             }
         }
@@ -516,6 +519,30 @@ UTEST(exec_macos, the_keeper_ignores_a_group_signal)
     waitpid(k, NULL, 0);
     EXPECT_TRUE(gone_within(j, 1000));
     kill(j, SIGKILL);                      /* never leave a job behind */
+}
+
+/* The broker forks a keeper with every signal blocked; a group signal that
+ * lands before the keeper set its dispositions stays pending and is
+ * discarded, so the keeper lives on to end its job (audit: a Ctrl-C in that
+ * window left the job running with nobody to end it). */
+UTEST(exec_macos, a_signal_before_the_keeper_is_ready_does_not_end_it)
+{
+    sigset_t all, was;
+    sigfillset(&all);
+    sigprocmask(SIG_SETMASK, &all, &was);
+    pid_t k = fork();
+    if (k == 0) {
+        raise(SIGTERM);                    /* the group signal, in the window */
+        raise(SIGHUP);
+        hl_exec_plat_keeper_signals();
+        _exit(42);                         /* still alive: it would fork the job now */
+    }
+    sigprocmask(SIG_SETMASK, &was, NULL);
+    ASSERT_TRUE(k > 0);
+    int st = 0;
+    ASSERT_EQ(k, waitpid(k, &st, 0));
+    EXPECT_TRUE(WIFEXITED(st));
+    EXPECT_EQ(42, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
 }
 
 /* ── The router (exec_broker_macos_isolation.md §4.2) ──────────────── */

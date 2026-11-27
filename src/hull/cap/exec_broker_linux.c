@@ -449,6 +449,8 @@ int hl_exec_plat_router(void) { return 0; }   /* a domain per child (§6.3) */
 
 int hl_exec_plat_keeper(void) { return 0; }   /* PR_SET_PDEATHSIG instead */
 
+void hl_exec_plat_keeper_signals(void) { }
+
 void hl_exec_plat_keeper_run(pid_t broker, pid_t job, int kill_r)
 {
     (void)broker; (void)job; (void)kill_r;

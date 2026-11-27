@@ -878,6 +878,7 @@ static void keeper_start(const Cmd *cmd, int bfd, int in_r, int out_w, int err_w
                          int ep, int kill_r, int pid_w, char *const argv[],
                          char *const envp[], pid_t broker)
 {
+    hl_exec_plat_keeper_signals();                 /* before anything can end it */
     if (getppid() != broker) _exit(127);           /* the broker died already */
     const int keep[] = { bfd, in_r, out_w, err_w, ep, kill_r, pid_w, g_devnull };
     for (int fd = 3; fd < 1024; fd++) {
@@ -1074,16 +1075,23 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     int kp[2] = { -1, -1 }, pp[2] = { -1, -1 };   /* the keeper's kill / pid pipes */
     int keeper = hl_exec_plat_keeper();
     pid_t pid = -1;
+    /* A keeper is forked with every signal blocked: until it has set its
+     * dispositions (hl_exec_plat_keeper_signals), a signal to the process
+     * group would end it and leave its job with nobody to end it. */
+    sigset_t all, was;
+    sigfillset(&all);
+    if (keeper) sigprocmask(SIG_SETMASK, &all, &was);
     if (pipe_cloexec(op) == 0 && pipe_cloexec(epp) == 0 && pipe_cloexec(ep) == 0 &&
         (in_len == 0 || pipe_cloexec(ip) == 0) &&
         (!keeper || (pipe_cloexec(kp) == 0 && pipe_cloexec(pp) == 0)))
         pid = fork();
+    int fork_errno = errno;
+    if (pid != 0 && keeper) sigprocmask(SIG_SETMASK, &was, NULL);
     if (pid == 0 && keeper)
         keeper_start(cmd, bfd, ip[0], op[1], epp[1], ep[1], kp[0], pp[1], argv, envp,
                      getppid());
     if (pid == 0)
         child_run(cmd, bfd, ip[0], op[1], epp[1], ep[1], argv, envp, getppid());
-    int fork_errno = errno;
     if (kp[0] >= 0) close(kp[0]);
     if (pp[1] >= 0) close(pp[1]);
     close(bfd);
