@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #include "hull/cap/exec.h"
+#include "hull/cap/exec_broker.h"
 
 #ifdef HL_EXEC_BROKER_SUPPORTED
 #include "hull/cap/exec_platform.h"
