@@ -375,6 +375,176 @@ UTEST(exec_macos, the_child_steps_are_no_ops_here)
     EXPECT_EQ(0, hl_exec_plat_leaf_check(-1, "/bin/ls", NULL, 0));
 }
 
+/* ── The keeper (exec_broker_macos_isolation.md §4.6) ──────────────── */
+
+/* Fork a keeper (the test plays the broker): it forks a job that runs
+ * behaviour @p how names (0: exit 7, 1: die by SIGTERM, 2: run until
+ * killed), reports the job's pid on @p *pid_r, and waits in
+ * hl_exec_plat_keeper_run. *kill_w is the call's kill pipe. */
+static pid_t keeper_fork(int how, int *kill_w, int *pid_r)
+{
+    int kp[2], pp[2];
+    if (pipe(kp) != 0 || pipe(pp) != 0) return -1;
+    pid_t broker = getpid();
+    pid_t k = fork();
+    if (k == 0) {
+        hl_exec_plat_keeper_signals();
+        close(kp[1]);
+        close(pp[0]);
+        pid_t j = fork();
+        if (j == 0) {
+            close(kp[0]);
+            switch (how) {
+            case 0: usleep(50000); _exit(7);                     /* exits 7 */
+            case 1:                                              /* dies by SIGTERM */
+                signal(SIGTERM, SIG_DFL);   /* as child_run resets every signal */
+                usleep(50000); raise(SIGTERM); _exit(1);
+            default: for (;;) pause();                           /* runs until killed */
+            }
+        }
+        if (write(pp[1], &j, sizeof j) < 0) { /* the case fails */ }
+        close(pp[1]);
+        hl_exec_plat_keeper_run(broker, j, kp[0]);
+    }
+    close(kp[0]);
+    close(pp[1]);
+    *kill_w = kp[1];
+    *pid_r = pp[0];
+    return k;
+}
+
+static pid_t read_pid(int fd)
+{
+    pid_t j = -1;
+    struct pollfd pf = { fd, POLLIN, 0 };
+    if (poll(&pf, 1, 5000) != 1 || read(fd, &j, sizeof j) != (ssize_t)sizeof j) j = -1;
+    close(fd);
+    return j;
+}
+
+static int gone_within(pid_t p, int ms)
+{
+    for (int i = 0; i < ms / 10; i++) {
+        if (kill(p, 0) != 0 && errno == ESRCH) return 1;
+        usleep(10000);
+    }
+    return 0;
+}
+
+UTEST(exec_macos, the_keeper_exits_as_its_job_did)
+{
+    int kw, pr, st;
+    pid_t k = keeper_fork(0, &kw, &pr);
+    ASSERT_TRUE(k > 0);
+    EXPECT_TRUE(read_pid(pr) > 0);
+    ASSERT_EQ(k, waitpid(k, &st, 0));
+    EXPECT_TRUE(WIFEXITED(st));
+    EXPECT_EQ(7, WEXITSTATUS(st));
+    close(kw);
+
+    k = keeper_fork(1, &kw, &pr);
+    ASSERT_TRUE(k > 0);
+    EXPECT_TRUE(read_pid(pr) > 0);
+    ASSERT_EQ(k, waitpid(k, &st, 0));
+    EXPECT_TRUE(WIFSIGNALED(st));
+    EXPECT_EQ(SIGTERM, WTERMSIG(st));
+    close(kw);
+}
+
+UTEST(exec_macos, closing_the_kill_pipe_ends_the_job)
+{
+    int kw, pr, st;
+    pid_t k = keeper_fork(2, &kw, &pr);
+    ASSERT_TRUE(k > 0);
+    pid_t j = read_pid(pr);
+    ASSERT_TRUE(j > 0);
+    usleep(50000);
+    EXPECT_EQ(0, kill(j, 0));              /* it runs */
+    close(kw);                             /* the broker ends the call */
+    ASSERT_EQ(k, waitpid(k, &st, 0));
+    EXPECT_TRUE(WIFSIGNALED(st));
+    EXPECT_EQ(SIGKILL, WTERMSIG(st));
+    EXPECT_TRUE(gone_within(j, 1000));     /* reaped by its keeper */
+    kill(j, SIGKILL);                      /* never leave a job behind */
+}
+
+/* The broker killed with SIGKILL: B plays the broker, forks the keeper and
+ * dies; the keeper sees it go and ends the job. */
+UTEST(exec_macos, a_broker_killed_with_sigkill_takes_its_job)
+{
+    int pp[2];
+    ASSERT_EQ(0, pipe(pp));
+    pid_t b = fork();
+    ASSERT_TRUE(b >= 0);
+    if (b == 0) {
+        close(pp[0]);
+        int kw, pr;
+        pid_t k = keeper_fork(2, &kw, &pr);
+        pid_t j = k > 0 ? read_pid(pr) : -1;
+        pid_t both[2] = { k, j };
+        if (write(pp[1], both, sizeof both) < 0) { /* the case fails */ }
+        for (;;) pause();                  /* kw stays open: only death closes it */
+    }
+    close(pp[1]);
+    pid_t both[2] = { -1, -1 };
+    struct pollfd pf = { pp[0], POLLIN, 0 };
+    ASSERT_EQ(1, poll(&pf, 1, 5000));
+    ASSERT_EQ((ssize_t)sizeof both, read(pp[0], both, sizeof both));
+    close(pp[0]);
+    ASSERT_TRUE(both[0] > 0 && both[1] > 0);
+    usleep(50000);
+    EXPECT_EQ(0, kill(both[1], 0));        /* the job runs */
+    kill(b, SIGKILL);
+    waitpid(b, NULL, 0);
+    EXPECT_TRUE(gone_within(both[1], 2000));
+    EXPECT_TRUE(gone_within(both[0], 2000));
+    kill(both[1], SIGKILL);                /* never leave a job behind */
+}
+
+UTEST(exec_macos, the_keeper_ignores_a_group_signal)
+{
+    int kw, pr;
+    pid_t k = keeper_fork(2, &kw, &pr);
+    ASSERT_TRUE(k > 0);
+    pid_t j = read_pid(pr);
+    ASSERT_TRUE(j > 0);
+    usleep(50000);
+    kill(k, SIGTERM);
+    kill(k, SIGHUP);
+    kill(k, SIGINT);
+    usleep(100000);
+    EXPECT_EQ(0, kill(k, 0));
+    EXPECT_EQ(0, kill(j, 0));
+    close(kw);
+    waitpid(k, NULL, 0);
+    EXPECT_TRUE(gone_within(j, 1000));
+    kill(j, SIGKILL);                      /* never leave a job behind */
+}
+
+/* The broker forks a keeper with every signal blocked; a group signal that
+ * lands before the keeper set its dispositions stays pending and is
+ * discarded, so the keeper lives on to end its job (audit: a Ctrl-C in that
+ * window left the job running with nobody to end it). */
+UTEST(exec_macos, a_signal_before_the_keeper_is_ready_does_not_end_it)
+{
+    sigset_t all, was;
+    sigfillset(&all);
+    sigprocmask(SIG_SETMASK, &all, &was);
+    pid_t k = fork();
+    if (k == 0) {
+        raise(SIGTERM);                    /* the group signal, in the window */
+        raise(SIGHUP);
+        hl_exec_plat_keeper_signals();
+        _exit(42);                         /* still alive: it would fork the job now */
+    }
+    sigprocmask(SIG_SETMASK, &was, NULL);
+    ASSERT_TRUE(k > 0);
+    int st = 0;
+    ASSERT_EQ(k, waitpid(k, &st, 0));
+    EXPECT_TRUE(WIFEXITED(st));
+    EXPECT_EQ(42, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+}
+
 /* ── The router (exec_broker_macos_isolation.md §4.2) ──────────────── */
 
 UTEST(exec_macos, the_router_profile_has_no_exec_fork_or_file_rule)

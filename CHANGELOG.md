@@ -28,11 +28,13 @@ release-artifact layout).
   command's argv shape. With two or more commands the broker is now a router: it starts one
   broker per command, each holding that command's policy alone and applying that command's
   profile, then locks itself with no exec, no fork and no file access. A command now reaches
-  only its own grants, as on Linux. An app with one command is unchanged. A router killed with
-  `SIGKILL` no longer leaves running commands; a command's broker killed with `SIGKILL` leaves
-  that command's running calls (the startup `exec: limit:` line says so), and later calls to
-  that command fail with "the command broker is gone". Each extra broker costs about 4 MB and a
-  few ms of start. A macOS app whose command relied on another command's grants (never a
+  only its own grants, as on Linux. An app with one command is unchanged. Every call now runs
+  under a keeper, the command's parent, which kills and reaps it when its broker goes: a broker,
+  a command broker or a router killed with `SIGKILL` no longer leaves running commands (it did
+  before, as macOS has no parent-death signal). Only a keeper itself killed with `SIGKILL`
+  leaves its one call running until it exits (the startup `exec: limit:` line says so). Later
+  calls to a lost command fail with "the command broker is gone". Each extra broker costs about
+  4 MB and 1.6 ms of start, a keeper about 0.85 MB per running call. A macOS app whose command relied on another command's grants (never a
   documented guarantee) loses them; `hull inspect` prints each command's own authority on both
   platforms.
 

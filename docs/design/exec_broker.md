@@ -706,11 +706,12 @@ directory. A command that legitimately needs one of them names it in `fs.read`.
 
   So each command gets its own grants, its own `unix_sockets` and `process-exec` of its own
   binary only, as on Linux. Until the router (v0.27.0 and before) every command got the union
-  of all the commands' grants and could exec every declared binary. A broker killed with
-  `SIGKILL` leaves its running calls (§7); the router reports it at start as `exec: limit: no
-  parent-death signal on macOS: a command's broker killed with SIGKILL leaves that command's
-  running calls ...`. A command broker lost while serving fails its waiting calls ("the
-  command broker is gone") and refuses later calls to its command; the other commands go on.
+  of all the commands' grants and could exec every declared binary. Each call runs under a
+  keeper, the job's parent, which ends it when the broker goes (§7); what is left is reported
+  at start as `exec: limit: no parent-death signal on macOS: each call's keeper ends it when
+  the broker goes; a keeper killed with SIGKILL leaves its call running ...`. A command broker
+  lost while serving fails its waiting calls ("the command broker is gone") and refuses later
+  calls to its command; the other commands go on.
   The router holds the admission caps for the tree; each command broker checks them again.
 - **No process creation, kept.** `(allow process-fork (process-path (param "SELF")))`: the
   fork right is filtered to the broker's own image. The broker forks; anything it execs gets
@@ -726,8 +727,9 @@ directory. A command that legitimately needs one of them names it in `fs.read`.
   and anything else. Every dynamic Mach-O's loader is `/usr/lib/dyld`, checked like a
   `PT_INTERP`.
 - **No PR_SET_PDEATHSIG.** See §7: the broker watches the server's pid with kqueue
-  (`EVFILT_PROC`, `NOTE_EXIT`) on top of the channel's EOF, and each child's exit with a
-  kqueue in place of a pidfd.
+  (`EVFILT_PROC`, `NOTE_EXIT`) on top of the channel's EOF; each call runs under a keeper
+  that watches the broker the same way and ends the job; the broker watches each keeper's
+  exit with a kqueue in place of a pidfd.
 
 **OpenBSD: not supported.** Linux's pledge / unveil polyfill does not stand in for it: the
 Linux broker uses Landlock and seccomp directly, since the polyfill cannot express per-binary
@@ -799,17 +801,25 @@ there is narrower:
   channel, `hl_exec_broker_stop()`, and the server's exit, which the broker sees through a
   kqueue `EVFILT_PROC` / `NOTE_EXIT` watch on the server's pid as well as through the EOF
   (`hl_exec_plat_broker_init`). A server killed with `SIGKILL` therefore takes its commands;
-- a **broker** killed with `SIGKILL` runs no code, and its running commands live on until
-  they exit. That is at most one process per call in flight (`HL_EXEC_MAX_INFLIGHT`), still
-  under its `RLIMIT_CPU`, unable to fork, inside the Seatbelt profile. The waiting calls fail
-  with "the command broker is gone". The broker reports it at start (`exec: limit: no
-  parent-death signal on macOS`), and `e2e_exec_broker_macos.sh` asserts both sides of it.
-  With two or more commands the ROUTER is the broker the server sees, and a router killed with
-  `SIGKILL` takes every running command: each command broker sees the router go (EOF and a
-  kqueue watch on its pid) and kills its jobs. Only a command broker killed with `SIGKILL`
-  leaves running calls, that command's only; the router does not reap them (it would need to
-  signal its grandchildren; [exec_broker_macos_isolation.md](exec_broker_macos_isolation.md)
-  Q2).
+- a **broker** killed with `SIGKILL` runs no code, so each call runs under a KEEPER
+  (`hl_exec_plat_keeper`, [exec_broker_macos_isolation.md](exec_broker_macos_isolation.md)
+  §4.6): the broker forks the keeper (its own image, never exec'd), the keeper keeps only the
+  job's descriptors, forks the job and waits. The keeper is the job's parent, so it reaps it:
+  a late kill cannot hit a reused pid, and signalling a child is all the profile lets it do.
+  It watches its call's kill pipe (the broker holds the only write end: closing it ends the
+  call, and the broker's death closes it), the broker's pid (kqueue `NOTE_EXIT`) and the job
+  (`NOTE_EXIT`). When the broker goes, however it goes, the keeper kills the job's process
+  group and reaps it; when the job exits, the keeper exits the same way (the code, or the
+  signal), so the broker's `waitpid` reads the job's status. It ignores every signal but
+  `SIGKILL`, `SIGSTOP`, `SIGCHLD` and the faults. With two or more commands the ROUTER is the
+  broker the server sees; a router killed with `SIGKILL` takes every running command (each
+  command broker sees it go and ends its calls), and a command broker killed with `SIGKILL`
+  takes its own (its keepers see it go). What is left: a **keeper** killed with `SIGKILL`
+  leaves its one job running until it exits, still under its `RLIMIT_CPU`, unable to fork,
+  inside its command's profile; its call is answered once the job exits. Reported at start
+  (`exec: limit: no parent-death signal on macOS: each call's keeper ends it ...`), and
+  `e2e_exec_broker_macos.sh` asserts both sides. A keeper costs about 0.85 MB per running
+  call.
 
 `--vm-thread`: the channel is watched by the loop thread, and the result is delivered as an
 async resume (an offloaded entry), so nothing new crosses threads.

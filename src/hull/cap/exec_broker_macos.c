@@ -22,12 +22,13 @@
  * "union" is always one command's own grants
  * (docs/design/exec_broker_macos_isolation.md).
  *
- * What macOS cannot give (reported at start as an "exec: limit:" line): a
- * child outliving a broker killed with SIGKILL (no PR_SET_PDEATHSIG).
- * A child cannot fork, so that is at most one process per call in flight,
- * still under its CPU limit. Every other end of the broker - the server
- * gone (a kqueue watch on its pid, and the channel's EOF), a teardown, a
- * crash it survives - kills each job's process group first.
+ * macOS has no PR_SET_PDEATHSIG, so each call runs under a KEEPER: the
+ * broker forks it (this image, never exec'd) and it forks the job, so it is
+ * the job's parent. It watches the broker (its kill pipe's EOF, a kqueue
+ * watch) and kills and reaps the job when the broker goes, however it goes,
+ * SIGKILL included. What is left (reported at start as an "exec: limit:"
+ * line): a KEEPER killed with SIGKILL leaves its job running until it exits;
+ * the job cannot fork and stays under its CPU limit.
  *
  * The child execs the checked PATH (macOS has no fexecve / execveat): the
  * file was checked on a descriptor just before, and only root can swap a
@@ -49,8 +50,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <poll.h>
 #include <sys/event.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* sandbox.h is deprecated since macOS 10.8; the same two entry points
@@ -322,9 +327,10 @@ int hl_exec_plat_lock(HlExecBrokerCmd *cmds, int n, unsigned flags,
     }
     /* Several commands under a sandbox are routed, one broker each
      * (hl_exec_plat_router); here n is 1, or the sandbox is off. */
-    hl_exec_report_line(r, "exec: limit: no parent-death signal on macOS: a "
-                        "broker killed with SIGKILL leaves a running command "
-                        "until it exits (it cannot fork; its CPU limit holds)");
+    hl_exec_report_line(r, "exec: limit: no parent-death signal on macOS: each "
+                        "call's keeper ends it when the broker goes; a keeper "
+                        "killed with SIGKILL leaves its call running until it "
+                        "exits (it cannot fork; its CPU limit holds)");
 
     char *profile = NULL, **params = NULL;
     if (hl_exec_macos_profile(cmds, n, self, &profile, &params) != 0) {
@@ -365,10 +371,10 @@ int hl_exec_plat_router_lock(HlExecReport *r)
         if (err) sandbox_free_error(err);
         return -1;
     }
-    hl_exec_report_line(r, "exec: limit: no parent-death signal on macOS: a "
-                        "command's broker killed with SIGKILL leaves that "
-                        "command's running calls until they exit (they cannot "
-                        "fork; their CPU limit holds)");
+    hl_exec_report_line(r, "exec: limit: no parent-death signal on macOS: each "
+                        "call's keeper ends it when the broker goes; a keeper "
+                        "killed with SIGKILL leaves its call running until it "
+                        "exits (it cannot fork; its CPU limit holds)");
     return 0;
 }
 
@@ -384,6 +390,96 @@ int hl_exec_plat_exit_watch(pid_t pid)
     }
     (void)fcntl(kq, F_SETFD, FD_CLOEXEC);
     return kq;
+}
+
+int hl_exec_plat_keeper(void) { return 1; }
+
+/* Leave as the job left: the same exit code, or the same signal. */
+static void keeper_exit_as(int st) __attribute__((noreturn));
+static void keeper_exit_as(int st)
+{
+    if (WIFSIGNALED(st)) {
+        int sig = WTERMSIG(st);
+        signal(sig, SIG_DFL);
+        sigset_t one;
+        sigemptyset(&one);
+        sigaddset(&one, sig);
+        sigprocmask(SIG_UNBLOCK, &one, NULL);
+        kill(getpid(), sig);
+        _exit(128 + sig);                 /* a signal whose default is not to end */
+    }
+    _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 127);
+}
+
+/* Kill the job (when asked), wait for it, and leave as it left. */
+static void keeper_end(pid_t job, int kill_it) __attribute__((noreturn));
+static void keeper_end(pid_t job, int kill_it)
+{
+    int st = 0;
+    if (kill_it) {
+        kill(-job, SIGKILL);              /* its group, once it ran setsid */
+        kill(job, SIGKILL);               /* and itself, in case it had not */
+    }
+    while (waitpid(job, &st, 0) < 0 && errno == EINTR) { }
+    keeper_exit_as(st);
+}
+
+void hl_exec_plat_keeper_signals(void)
+{
+    /* Nothing but SIGKILL may end the keeper while its job runs: a signal
+     * to the broker's process group (a Ctrl-C, a closed terminal) would
+     * leave the job without anyone to end it. Faults keep their default.
+     * The broker forked this process with every signal blocked, so one sent
+     * before this point is pending and is discarded by SIG_IGN. */
+    struct rlimit core = { 0, 0 };
+    setrlimit(RLIMIT_CORE, &core);
+    for (int s = 1; s < 32; s++) {
+        if (s == SIGKILL || s == SIGSTOP || s == SIGCHLD || s == SIGSEGV ||
+            s == SIGBUS || s == SIGILL || s == SIGFPE || s == SIGTRAP ||
+            s == SIGABRT || s == SIGSYS) continue;
+        signal(s, SIG_IGN);
+    }
+    sigset_t none;
+    sigemptyset(&none);
+    sigprocmask(SIG_SETMASK, &none, NULL);
+}
+
+void hl_exec_plat_keeper_run(pid_t broker, pid_t job, int kill_r)
+{
+    int kq = kqueue();
+    if (kq >= 0) {
+        struct kevent ev[3];
+        EV_SET(&ev[0], (uintptr_t)job, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+        EV_SET(&ev[1], (uintptr_t)kill_r, EVFILT_READ, EV_ADD, 0, 0, NULL);
+        EV_SET(&ev[2], (uintptr_t)broker, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+        for (int i = 0; i < 3; i++) {
+            if (kevent(kq, &ev[i], 1, NULL, 0, NULL) == 0) continue;
+            if (errno == ESRCH) keeper_end(job, i != 0);   /* already gone */
+            if (i == 2) continue;         /* the kill pipe's EOF says it too */
+            close(kq);
+            kq = -1;
+            break;
+        }
+    }
+    if (getppid() != broker) keeper_end(job, 1);   /* the broker went first */
+    for (;;) {
+        if (kq >= 0) {
+            struct kevent got;
+            int n = kevent(kq, NULL, 0, &got, 1, NULL);
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0) { close(kq); kq = -1; continue; }
+            if (n == 0) continue;
+            if (got.filter == EVFILT_PROC && got.ident == (uintptr_t)job) keeper_end(job, 0);
+            keeper_end(job, 1);           /* the kill pipe, or the broker gone */
+        }
+        /* No kqueue: poll the pipe, and look at the job and the broker. */
+        struct pollfd pf = { kill_r, POLLIN, 0 };
+        if (poll(&pf, 1, 20) > 0) keeper_end(job, 1);
+        int st;
+        pid_t w = waitpid(job, &st, WNOHANG);
+        if (w == job) keeper_exit_as(st);
+        if (getppid() != broker) keeper_end(job, 1);
+    }
 }
 
 int hl_exec_plat_child_death(void) { return 0; }
