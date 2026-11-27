@@ -533,6 +533,9 @@ jobs:
       - name: host:port manifest.hosts entries (#1227) E2E tests
         timeout-minutes: 2
         run: make e2e-host-port
+      - name: http.fetch over a declared Unix socket (#1228) E2E tests
+        timeout-minutes: 2
+        run: make e2e-http-unix
       - name: Declared commands (hull/exec, stubs + matcher) E2E tests
         timeout-minutes: 2
         run: make e2e-exec

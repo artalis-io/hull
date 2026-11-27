@@ -2547,7 +2547,18 @@ static int hl_serve_wire_caps(HlServerState *s)
         return -1;
     }
 
-    if (s->manifest.hosts_count > 0) {
+    if (s->manifest.hosts_count > 0 || s->manifest.http_unix_socket_count > 0) {
+        /* http.unix_sockets (#1228): resolved against the app and state
+         * directories now; the config, and so the set, is sealed below. */
+        char uerr[256];
+        if (hl_http_unix_resolve(&s->http_cfg_storage.unix_sockets,
+                                 s->policy->http_unix_sockets,
+                                 s->policy->http_unix_socket_count, s->app_dir,
+                                 s->state_dir[0] ? s->state_dir : NULL,
+                                 uerr, sizeof uerr) != 0) {
+            log_error("[hull:c] %s", uerr);
+            return -1;
+        }
         s->http_cfg_storage.allowed_hosts     = s->policy->hosts;
         s->http_cfg_storage.count             = s->manifest.hosts_count;
         /* The app-wide default (manifest http.timeout_ms); 0 = 30 s. Each
@@ -2679,6 +2690,19 @@ static int hl_serve_apply_sandbox(HlServerState *s)
          * grant it here so a DB-only app isn't SIGKILLed on connect. */
         hl_sandbox_policy_add_default_dsn(&sandbox_policy,
                                           s->cfg.no_db ? NULL : s->cfg.db_path);
+#ifdef HL_ENABLE_HTTP_CLIENT
+        /* http.unix_sockets, resolved (#1228): the sockets the kernel grant
+         * names. The pointers into the sealed config outlive the apply. */
+        const char *usock[HL_HTTP_UNIX_MAX];
+        {
+            HlRuntime *urt = hl_app_context_runtime(s->app);
+            const HlHttpUnixSet *us = urt && urt->http_cfg ? &urt->http_cfg->unix_sockets : NULL;
+            int un = us ? us->count : 0;
+            for (int k = 0; k < un; k++) usock[k] = us->resolved[k];
+            sandbox_policy.unix_sockets      = un ? usock : NULL;
+            sandbox_policy.unix_socket_count = un;
+        }
+#endif
 #ifdef HL_ENABLE_DB
         {
             HlRuntime *irt = hl_app_context_runtime(s->app);

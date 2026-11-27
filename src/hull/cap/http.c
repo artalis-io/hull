@@ -46,14 +46,48 @@ int hl_http_check_host(const HlHttpConfig *cfg,
            ? 0 : -1;
 }
 
+int hl_http_check_url(const HlHttpConfig *cfg, const KlUrl *u, int *unix_idx)
+{
+    if (unix_idx) *unix_idx = -1;
+    if (!cfg || !u) return -1;
+    if (!u->is_unix)
+        return hl_http_check_host(cfg, u->host, u->host_len, u->port);
+    int i = hl_http_unix_find(&cfg->unix_sockets, u->unix_path);
+    if (i < 0 || !hl_http_unix_path_ok(&cfg->unix_sockets, i))
+        return -1;
+    if (unix_idx) *unix_idx = i;
+    return 0;
+}
+
+const char *hl_http_dial_url(const HlHttpConfig *cfg, const char *url,
+                             int unix_idx, char **owned)
+{
+    *owned = NULL;
+    if (unix_idx < 0) return url;
+    *owned = hl_http_unix_rewrite(&cfg->unix_sockets, unix_idx, url);
+    return *owned;
+}
+
 int hl_http_url_denied(const HlHttpConfig *cfg, const char *url,
                        HlHttpDenial *out)
 {
     KlUrl parsed;
     if (!out || !url || kl_url_parse(url, &parsed) != 0)
         return 0;
-    if (cfg && hl_http_check_host(cfg, parsed.host, parsed.host_len, parsed.port) == 0)
+    if (cfg && hl_http_check_url(cfg, &parsed, NULL) == 0)
         return 0;
+    out->is_unix = parsed.is_unix;
+    if (parsed.is_unix) {
+        /* The decoded path, non-printable bytes as '?' (#1228). */
+        size_t k = 0;
+        for (const unsigned char *c = (const unsigned char *)parsed.unix_path;
+             *c && k < sizeof out->shown - 1; c++)
+            out->shown[k++] = (*c > 0x20 && *c < 0x7f && *c != '\'') ? (char)*c : '?';
+        out->shown[k] = '\0';
+        snprintf(out->host, sizeof out->host, "%s", out->shown);
+        out->unset_ref[0] = '\0';
+        return 1;
+    }
     int ported = 0;
     char var[128];
     for (int i = 0; cfg && i < cfg->count && !ported; i++) {
@@ -230,8 +264,21 @@ int hl_http_redirect_allowed(const char *next_url, void *data)
 {
     const HlHttpRedirectGuard *g = (const HlHttpRedirectGuard *)data;
     KlUrl parsed;
-    if (!g || !g->cfg || !next_url || kl_url_parse(next_url, &parsed) != 0 ||
-        hl_http_check_host(g->cfg, parsed.host, parsed.host_len, parsed.port) != 0) {
+    if (!g || !g->cfg || !next_url || kl_url_parse(next_url, &parsed) != 0) {
+        redirect_refused(next_url, "host",
+                         "redirect to a host outside manifest.hosts refused");
+        return -1;
+    }
+    /* #1228: a chain that began on a Unix socket stays on that socket, and a
+     * TCP chain never moves onto one. */
+    if (g->origin_unix || parsed.is_unix) {
+        if (!g->origin_unix || !parsed.is_unix || !g->origin_known ||
+            strcmp(g->origin_host, parsed.unix_path) != 0) {
+            redirect_refused(next_url, "unix_socket",
+                             "redirect off or onto a Unix socket refused");
+            return -1;
+        }
+    } else if (hl_http_check_host(g->cfg, parsed.host, parsed.host_len, parsed.port) != 0) {
         redirect_refused(next_url, "host",
                          "redirect to a host outside manifest.hosts refused");
         return -1;
@@ -359,8 +406,9 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
     if (kl_url_parse(url, &parsed) != 0)
         return -1;
 
-    /* Check host allowlist */
-    if (hl_http_check_host(cfg, parsed.host, parsed.host_len, parsed.port) != 0) {
+    /* Check host allowlist (or, for http+unix://, http.unix_sockets) */
+    int unix_idx = -1;
+    if (hl_http_check_url(cfg, &parsed, &unix_idx) != 0) {
         ShJsonWriter w = hl_audit_begin("http.request");
         sh_json_write_kv_string(&w, "method", method);
         char red_url[512];   /* no userinfo, query or fragment (audit 17) */
@@ -368,6 +416,14 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
         sh_json_write_kv_string(&w, "url", red_url);
         sh_json_write_kv_string(&w, "result", "denied");
         hl_audit_end(&w);
+        return -1;
+    }
+    /* An http+unix:// URL goes to Keel with its resolved path (#1228), and the
+     * redirect guard compares against that path. */
+    char *owned_url = NULL;
+    url = hl_http_dial_url(cfg, url, unix_idx, &owned_url);
+    if (!url || (owned_url && kl_url_parse(url, &parsed) != 0)) {
+        free(owned_url);
         return -1;
     }
 
@@ -455,5 +511,6 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
         sh_json_write_kv_int(&w, "result", rc);
         hl_audit_end(&w);
     }
+    free(owned_url);
     return rc;
 }

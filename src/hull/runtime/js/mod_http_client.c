@@ -291,7 +291,10 @@ static int js_http_body_get(JSContext *ctx, JSValueConst v, JsHttpBody *b,
 static JSValue js_http_throw_denied(JSContext *ctx, const char *what,
                                     const HlHttpDenial *d)
 {
-    if (d->unset_ref[0])
+    if (d->is_unix)   /* #1228 */
+        JS_ThrowTypeError(ctx, "%s: socket '%s' is not in http.unixSockets (or "
+                          "a path to it holds a symbolic link)", what, d->shown);
+    else if (d->unset_ref[0])
         JS_ThrowTypeError(ctx, "%s: host '%s' is not in manifest.hosts (its "
                           "entry %s names an unset variable)", what, d->shown,
                           d->unset_ref);

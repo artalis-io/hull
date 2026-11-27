@@ -766,6 +766,11 @@ $(BUILDDIR)/test_sandbox_grant: $(TESTDIR)/hull/test_sandbox_grant.c $(SANDBOX_O
 $(BUILDDIR)/test_hex: $(TESTDIR)/hull/test_hex.c $(HEX_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HEX_OBJ)
 
+# http.unix_sockets: entry shape, resolution, the dial-time path check and the
+# URL rewrite (shared/http_unix.h, #1228). libc-only.
+$(BUILDDIR)/test_http_unix: $(TESTDIR)/hull/test_http_unix.c $(HTTP_UNIX_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HTTP_UNIX_OBJ) $(LDFLAGS)
+
 $(BUILDDIR)/test_base64: $(TESTDIR)/hull/test_base64.c $(BASE64_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BASE64_OBJ)
 
@@ -831,8 +836,8 @@ $(BUILDDIR)/test_seal_arena: $(TESTDIR)/hull/test_seal_arena.c $(SH_SEAL_ARENA_O
 # Links only manifest.o (the shared / runtime-free part) - manifest_lua
 # and manifest_js are NOT needed since the fixture builds the manifest
 # by hand, and pulling them in would force a QuickJS + Lua link.
-$(BUILDDIR)/test_manifest_seal: $(TESTDIR)/hull/test_manifest_seal.c $(BUILDDIR)/manifest.o $(BUILDDIR)/cap_exec.o $(HOST_MATCH_OBJ) $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDDIR)/manifest.o $(BUILDDIR)/cap_exec.o $(HOST_MATCH_OBJ) $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(KEEL_LIB) -lpthread
+$(BUILDDIR)/test_manifest_seal: $(TESTDIR)/hull/test_manifest_seal.c $(BUILDDIR)/manifest.o $(BUILDDIR)/cap_exec.o $(HOST_MATCH_OBJ) $(HTTP_UNIX_OBJ) $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDDIR)/manifest.o $(BUILDDIR)/cap_exec.o $(HOST_MATCH_OBJ) $(HTTP_UNIX_OBJ) $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(KEEL_LIB) -lpthread
 
 # QuickJS HULL PATCH 0009 test seam (audit 40): test_js links a second copy
 # of quickjs.c built with -DQJS_HULL_TEST_HOOKS, which compiles in
@@ -1410,7 +1415,7 @@ fuzz/fuzz_log_escape: fuzz/fuzz_log_escape.c $(SRCDIR)/hull/shared/cli_log.c $(V
 # cross-origin redirect-safe header list, each against a reference. Keel's
 # url.c is linked for real (the oracle compares with its parse); the request
 # functions are stubbed in the harness, so no Keel client / mbedTLS link.
-fuzz/fuzz_http_guard: fuzz/fuzz_http_guard.c fuzz/fuzz_http_guard_stubs.c fuzz/fuzz_meter_stubs.c $(SRCDIR)/hull/cap/http.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SRCDIR)/hull/utils/host_match.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c $(VENDDIR)/log.c/log.c vendor/keel/src/url.c vendor/keel/src/kl_cstr.c
+fuzz/fuzz_http_guard: fuzz/fuzz_http_guard.c fuzz/fuzz_http_guard_stubs.c fuzz/fuzz_meter_stubs.c $(SRCDIR)/hull/cap/http.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SRCDIR)/hull/utils/host_match.c $(SRCDIR)/hull/shared/http_unix.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c $(VENDDIR)/log.c/log.c vendor/keel/src/url.c vendor/keel/src/kl_cstr.c
 	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -Ivendor/keel/src -I$(VENDDIR)/log.c -o $@ $^
 
 # DSN redaction for error messages (cap/db_select.c, audits 9 / 10): the
@@ -1661,9 +1666,12 @@ e2e-host-denied: $(BUILDDIR)/hull
 # app reaches its own server through it, and the same host on another port
 # is refused coded denied (http.fetch, sync http.get, ws.connect); a
 # malformed port refuses the app at load. Both runtimes.
-.PHONY: e2e-host-port
+.PHONY: e2e-host-port e2e-http-unix
 e2e-host-port: $(BUILDDIR)/hull
 	sh tests/e2e_host_port.sh
+
+e2e-http-unix: $(BUILDDIR)/hull
+	sh tests/e2e_http_unix.sh
 
 # hull/exec PR 1 (docs/design/exec_broker.md): the manifest's exec section,
 # the argument matcher and the hull test stubs, both runtimes.

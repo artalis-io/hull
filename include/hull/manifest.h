@@ -48,6 +48,7 @@ typedef struct HlAllocator HlAllocator;
 #define HL_MANIFEST_MAX_NET_PORTS  16
 #define HL_MANIFEST_MAX_SSH_USERS  16
 #define HL_MANIFEST_MAX_CORS_ORIGINS 16
+#define HL_MANIFEST_MAX_HTTP_UNIX 16
 #define HL_MANIFEST_MAX_MODULES 32
 #define HL_MANIFEST_MAX_DATABASES 16
 #define HL_MANIFEST_MAX_DB_HOSTS   16
@@ -247,6 +248,13 @@ typedef struct HlManifest {
      * whole-request timeout for http.fetch / http.get / ... in ms.
      * 0 = not set (HL_HTTP_DEFAULT_TIMEOUT_MS). See hull/limits/http.h. */
     uint32_t    http_timeout_ms;
+    /* http.unix_sockets (JS http.unixSockets, #1228): the AF_UNIX sockets
+     * http.fetch / http.* may dial with an http+unix:// URL. Each is an
+     * absolute path (used as given), "@state/<rel>" (under the state
+     * directory) or "<rel>" (under the app directory); checked at load by
+     * hl_manifest_check_env_refs, resolved by hl_http_unix_resolve. */
+    const char *http_unix_sockets[HL_MANIFEST_MAX_HTTP_UNIX];
+    int         http_unix_socket_count;
 
     /* Run limits (from manifest "limits" key). limits.vm_thread turns on
      * --vm-thread (cap/vm_thread.h); the grace and ceiling are in ms, 0 =

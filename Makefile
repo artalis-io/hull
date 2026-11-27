@@ -1120,6 +1120,12 @@ CAP_OBJS += $(MAIN_SIGNAL_OBJ)
 # CAP_OBJS like host.
 STATE_DIR_OBJ := $(BUILDDIR)/state_dir.o
 CAP_OBJS += $(STATE_DIR_OBJ)
+# http_unix checks and resolves manifest http.unix_sockets, the AF_UNIX
+# sockets an http+unix:// URL may dial (shared/http_unix.h, #1228): the
+# manifest's load check and the HTTP feature's dial paths. libc-only; rides
+# CAP_OBJS like host.
+HTTP_UNIX_OBJ := $(BUILDDIR)/http_unix.o
+CAP_OBJS += $(HTTP_UNIX_OBJ)
 # child_channel is a helper process on one inherited socket: spawn with fd 3,
 # length-framed messages under deadlines, reap / kill (shared/child_channel.h).
 # Used by the GPU compile helper and the build plugin runner. libc-only; rides
@@ -3435,6 +3441,9 @@ $(MAIN_SIGNAL_OBJ): $(SRCDIR)/hull/shared/main_signal.c $(INCDIR)/hull/shared/ma
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(STATE_DIR_OBJ): $(SRCDIR)/hull/shared/state_dir.c $(INCDIR)/hull/shared/state_dir.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(HTTP_UNIX_OBJ): $(SRCDIR)/hull/shared/http_unix.c $(INCDIR)/hull/shared/http_unix.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(CHILD_CHANNEL_OBJ): $(SRCDIR)/hull/shared/child_channel.c $(INCDIR)/hull/shared/child_channel.h | $(BUILDDIR)

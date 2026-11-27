@@ -302,8 +302,16 @@ static void mode_redirect(Fields *fl, uint8_t flags)
     int secrets = !o_ok || body_len > 0;
     for (int i = 0; i < nh; i++)
         if (!ref_redirect_safe(h[i].name)) secrets = 1;
-    int want = kl_url_parse(next, &n) == 0 &&
-               hl_http_check_host(&cfg, n.host, n.host_len, n.port) == 0 &&
+    int n_ok = kl_url_parse(next, &n) == 0;
+    /* #1228: a chain on a Unix socket stays on that socket (its path known,
+     * below the origin buffer), and a TCP chain never moves onto one. */
+    int on_socket = n_ok && ((o_ok && o.is_unix) || n.is_unix);
+    int hop_ok = on_socket
+        ? (o_ok && o.is_unix && n.is_unix &&
+           strlen(o.unix_path) < HL_HTTP_GUARD_ORIGIN_MAX &&
+           strcmp(o.unix_path, n.unix_path) == 0)
+        : n_ok && hl_http_check_host(&cfg, n.host, n.host_len, n.port) == 0;
+    int want = n_ok && hop_ok &&
                !(o_ok && o.is_https && !n.is_https) &&
                (!secrets || (o_ok && ref_same_origin(&o, &n)));
     if (got != want) {

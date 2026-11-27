@@ -817,9 +817,15 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
      * a number of at least 1 (capped); anything else is absent. The bindings
      * clamp it to each path's ceiling (hull/limits/http.h). */
     JSValue http_val = mjs_own(ctx, manifest, "http");
-    if (mjs_is_obj(ctx, http_val))
+    if (mjs_is_obj(ctx, http_val)) {
         out->http_timeout_ms = (uint32_t)mjs_wasm_limit(ctx, http_val, "timeoutMs",
                                                         (int64_t)INT32_MAX);
+        /* http.unixSockets: the sockets an http+unix:// URL may dial (#1228). */
+        out->http_unix_socket_count =
+            read_js_string_array(ctx, http_val, "unixSockets",
+                                 out->http_unix_sockets,
+                                 HL_MANIFEST_MAX_HTTP_UNIX, alloc);
+    }
     JS_FreeValue(ctx, http_val);
 
     /* limits: { vmThread, vmThreadGraceMs, vmThreadCeilingMs, requestMs,

@@ -370,6 +370,13 @@ declare namespace Hull {
         http?: {
             /** Whole-request timeout in ms (default 30 s; clamped to 10 min async / 60 s sync). */
             timeoutMs?: number;
+            /**
+             * AF_UNIX sockets an `http+unix://` URL may dial (#1228), at most 16:
+             * an absolute path, `"@state/<rel>"` or an app-relative path. Name one
+             * in the URL by this spelling, percent-encoded
+             * (`http+unix://%40state%2Finfer.sock/v1/infer`).
+             */
+            unixSockets?: string[];
         };
         /** Content-Security-Policy `res.html` adds, or `false` for none. */
         csp?: string | false;

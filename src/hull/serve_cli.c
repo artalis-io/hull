@@ -925,7 +925,20 @@ int hull_serve(int argc, char **argv)
                         NULL, &seal_arena);
     }
 
-    if (manifest.hosts_count > 0) {
+    if (manifest.hosts_count > 0 || manifest.http_unix_socket_count > 0) {
+        /* http.unix_sockets (#1228): resolved against the app and state
+         * directories now; sealed with the config below. */
+        char uerr[256];
+        if (hl_http_unix_resolve(&http_cfg.unix_sockets, policy->http_unix_sockets,
+                                 policy->http_unix_socket_count,
+                                 hl_app_context_app_dir(ctx),
+                                 hl_app_context_state_dir(ctx),
+                                 uerr, sizeof uerr) != 0) {
+            log_error("[hull:cli] %s", uerr);
+            if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
+            return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
+                            NULL, &seal_arena);
+        }
         http_cfg.allowed_hosts     = policy->hosts;
         http_cfg.count             = policy->hosts_count;
         /* The app-wide default (manifest http.timeout_ms); 0 = 30 s. Each
@@ -989,6 +1002,19 @@ int hull_serve(int argc, char **argv)
          * db.async's worker connection and a reconnect need the socket
          * (audit 25 - serve.c granted it, this runner did not). */
         hl_sandbox_policy_add_default_dsn(&sandbox_policy, db_path);
+#ifdef HL_ENABLE_HTTP_CLIENT
+        /* http.unix_sockets, resolved (#1228): the sockets the kernel grant
+         * names. The pointers into the sealed config outlive the apply. */
+        const char *usock[HL_HTTP_UNIX_MAX];
+        {
+            HlRuntime *urt = rt;
+            const HlHttpUnixSet *us = urt && urt->http_cfg ? &urt->http_cfg->unix_sockets : NULL;
+            int un = us ? us->count : 0;
+            for (int k = 0; k < un; k++) usock[k] = us->resolved[k];
+            sandbox_policy.unix_sockets      = un ? usock : NULL;
+            sandbox_policy.unix_socket_count = un;
+        }
+#endif
 #ifdef HL_ENABLE_DB
         sandbox_policy.internal_db_path =
             hl_db_internal_sandbox_path(rt->db_registry);

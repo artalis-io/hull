@@ -655,10 +655,16 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
      * wasm, an integer of at least 1 (capped); anything else is absent. The
      * bindings clamp it to each path's ceiling (hull/limits/http.h). */
     lua_getfield(L, manifest_idx, "http");
-    if (lua_istable(L, -1))
-        out->http_timeout_ms = (uint32_t)lua_wasm_limit(L, lua_gettop(L),
+    if (lua_istable(L, -1)) {
+        int http_idx = lua_gettop(L);
+        out->http_timeout_ms = (uint32_t)lua_wasm_limit(L, http_idx,
                                                         "timeout_ms",
                                                         (lua_Integer)INT32_MAX);
+        /* http.unix_sockets: the sockets an http+unix:// URL may dial (#1228). */
+        read_string_array(L, http_idx, "unix_sockets", out->http_unix_sockets,
+                          &out->http_unix_socket_count, HL_MANIFEST_MAX_HTTP_UNIX,
+                          alloc);
+    }
     lua_pop(L, 1); /* pop http */
 
     /* limits = { vm_thread = true, vm_thread_grace_ms = N,

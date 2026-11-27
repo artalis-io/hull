@@ -2002,6 +2002,59 @@ app.manifest({
 })
 ```
 
+### Local services over a Unix socket (`http.unix_sockets`)
+
+A sidecar on the same host is better reached over a Unix-domain socket than a
+loopback port: file permissions decide who can connect, and there is no port
+for another local process to reach or to collide on. `http.fetch` and the sync
+`http.*` calls dial a socket the manifest declares under `http.unix_sockets`
+(JS `http.unixSockets`), at most 16 entries:
+
+| Entry | The socket |
+|---|---|
+| `"/run/inkleberry.sock"` | that absolute path, as given |
+| `"@state/infer.sock"` | under the app's state directory (needs `state = { name = ... }`) |
+| `"run/svc.sock"` | under the app directory |
+
+A relative part has no empty, `.` or `..` component and does not start in
+`.hull`; a malformed entry refuses the app at load, naming it. The URL scheme is
+`http+unix://` (or `https+unix://`), and the authority is the entry's own
+spelling, percent-encoded; the path, query and fragment are the request's.
+Hull dials the resolved path, so the app never needs to know where its state
+directory is. Keel sends `Host: localhost`.
+
+```lua
+app.manifest({
+    modules = { "hull/http-client@1" },
+    state = { name = "myapp" },
+    http = { unix_sockets = { "@state/infer.sock" } },
+})
+local http = require("hull.http-client")
+local r = http.async.post("http+unix://%40state%2Finfer.sock/v1/infer", body)
+```
+
+```javascript
+app.manifest({
+    modules: ["hull/http-client@1"],
+    state: { name: "myapp" },
+    http: { unixSockets: ["@state/infer.sock"] },
+});
+const r = await httpClient.async.post("http+unix://%40state%2Finfer.sock/v1/infer", body);
+```
+
+At each call the path is checked again: below the app or state directory no
+component may be a symbolic link, an absolute entry's last component may not be
+one, and the file, if it exists, must be a socket. A socket the manifest does
+not declare, or one that fails the check, is refused with code `denied`
+(`socket 'run/other.sock' is not in http.unix_sockets`). A redirect may not
+leave the socket, and a TCP request may not redirect onto one. The whole-request
+timeout, the in-flight cap and the refusal codes are those of any request. The
+kernel sandbox names the declared sockets on macOS (Seatbelt allows
+`network-outbound` to exactly those paths when the app declares no `hosts`); on
+Linux the `unix` promise allows `AF_UNIX`, and Landlock cannot restrict
+`connect(2)` by path, so there Hull's check is the boundary. A socket path is at
+most 103 bytes once resolved (macOS's limit).
+
 ### Outbound HTTP timeout (`hull/http-client`)
 
 Every outbound request - the async `http.async.get` / `post` / `put` / `patch` /

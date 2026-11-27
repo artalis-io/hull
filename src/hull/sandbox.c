@@ -790,12 +790,28 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
                  "(allow system-socket)\n");
         if (!policy->allow_bind)
             SBPL_LIT("(deny network-bind)\n");
-    } else if (policy->network_outbound) {
+    } else if (policy->network_outbound || policy->unix_socket_count > 0) {
         SBPL_LIT("; Network (outbound only - CLI mode)\n"
                  "(allow system-socket)\n");
     }
     if (policy->network_outbound) {
         SBPL_LIT("(allow network-outbound)\n");
+    } else if (policy->unix_socket_count > 0) {
+        /* http.unix_sockets (#1228): exactly the declared sockets. */
+        static const char *const ukey[] = {
+            "USOCK_0", "USOCK_1", "USOCK_2", "USOCK_3", "USOCK_4", "USOCK_5",
+            "USOCK_6", "USOCK_7", "USOCK_8", "USOCK_9", "USOCK_10", "USOCK_11",
+            "USOCK_12", "USOCK_13", "USOCK_14", "USOCK_15",
+        };
+        int n = policy->unix_socket_count;
+        if (n > (int)(sizeof ukey / sizeof ukey[0])) return -1;
+        SBPL_LIT("; http.unix_sockets\n");
+        for (int k = 0; k < n; k++) {
+            if (!policy->unix_sockets || !policy->unix_sockets[k]) return -1;
+            PARAM_ADD(ukey[k], policy->unix_sockets[k]);
+            SBPL_FMT("(allow network-outbound (remote unix-socket "
+                     "(path-literal (param \"%s\"))))\n", ukey[k]);
+        }
     }
     SBPL_LIT("\n");
 
@@ -1907,6 +1923,14 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         (policy->network_inbound || policy->network_outbound)) {
         int n = snprintf(promises + plen, sizeof(promises) - (size_t)plen,
                          " inet");
+        if (n > 0) plen += n;
+    }
+    /* http.unix_sockets (#1228): AF_UNIX sockets. network_outbound already
+     * adds `unix` with the DNS promises on Linux. */
+    if (plen > 0 && (size_t)plen < sizeof(promises) &&
+        policy->unix_socket_count > 0 && !policy->network_outbound) {
+        int n = snprintf(promises + plen, sizeof(promises) - (size_t)plen,
+                         " unix");
         if (n > 0) plen += n;
     }
     /* `tty` covers tcsetattr / tcgetattr / TIOCGWINSZ / ioctl(TCGETS) on the
