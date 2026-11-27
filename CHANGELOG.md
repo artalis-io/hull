@@ -8,6 +8,14 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-11-27
+
+`hull/exec` on macOS gives each declared command a sandbox of its own and runs every call under a
+keeper, so a killed broker takes its calls; the v0.26.0 command-entry keys `fs` and
+`unix_sockets` are now refused (breaking). The sandbox refuses a second listener,
+`http.fetch` reaches declared Unix-domain sockets, `manifest.hosts` entries may name a port,
+and Keel moves to 3.6.0.
+
 ### Security
 
 - **The sandbox refuses a second listener** (#1226). Keel bound the server's listener only when
