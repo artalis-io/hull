@@ -125,6 +125,22 @@ int hl_exec_plat_router_lock(HlExecReport *r);
  * 50 ms tick). The broker closes it. */
 int hl_exec_plat_exit_watch(pid_t pid);
 
+/* Does each call run under a KEEPER (macOS: no parent-death signal)? The
+ * broker forks a keeper - this image, never exec'd - and the keeper forks
+ * the job, so the keeper is the job's parent: it kills and reaps the job
+ * when the broker goes (pid reuse cannot make it hit another process, and
+ * signalling a child is all its sandbox allows). The broker ends a call by
+ * closing the call's kill pipe. Linux: 0 (PR_SET_PDEATHSIG). */
+int hl_exec_plat_keeper(void);
+
+/* The keeper's wait, once the job is forked: until the job exits, the read
+ * end @p kill_r turns readable (a byte or EOF: the broker ended the call or
+ * is gone) or @p broker exits. On either of the last two it kills the job
+ * and reaps it. Then it exits as the job did (the same code, or the same
+ * signal), so the broker reads the job's status from its own waitpid. */
+void hl_exec_plat_keeper_run(pid_t broker, pid_t job, int kill_r)
+    __attribute__((noreturn));
+
 /* ── The child, between fork and exec ──────────────────────────────── */
 
 /* Stage numbers the child reports when a step fails. */
@@ -136,9 +152,10 @@ int hl_exec_plat_exit_watch(pid_t pid);
 #define HL_EXEC_STAGE_CHDIR     6
 #define HL_EXEC_STAGE_FILTER    7   /* the per-command syscall filter */
 #define HL_EXEC_STAGE_EXEC      8
+#define HL_EXEC_STAGE_KEEPER    9   /* the keeper could not fork the job */
 
 /* Step 1: die with the broker (Linux: PR_SET_PDEATHSIG; macOS: nothing to
- * set - a child cannot outlive its broker's channel unnoticed, and cannot
+ * set - the job's keeper kills it when the broker goes, and it cannot
  * fork). 0, or -1 with errno. */
 int hl_exec_plat_child_death(void);
 

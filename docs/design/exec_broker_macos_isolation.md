@@ -187,22 +187,47 @@ bounded by its command's caps times its `concurrency`.
 | server exits or is SIGKILLed | the broker sees NOTE_EXIT / EOF, kills every job's process group | the router sees it and exits; each sub-broker sees NOTE_EXIT on the router plus EOF, and kills its jobs |
 | `hl_exec_broker_stop()` / EOF | the broker kills every job | the router closes every sub-broker channel; each kills its jobs |
 | the broker (router) is SIGKILLed | **its running jobs live on** until they exit | each sub-broker sees EOF and NOTE_EXIT on the router and kills its jobs: **no job outlives it** |
-| one sub-broker is SIGKILLed | n/a | **its own running jobs live on** (at most its `concurrency`); the router sees the channel close, fails that command's waiting calls with "the command broker is gone", and refuses later calls to it |
+| one sub-broker is SIGKILLed | n/a | phase 1: **its own running jobs live on** (at most its `concurrency`). Phase 2: each job's keeper sees it go and kills the job (§4.6). Either way the router sees the channel close, fails that command's waiting calls with "the command broker is gone", and refuses later calls to it |
+| one call's keeper is SIGKILLed (phase 2) | n/a | **that one job lives on** until it exits; its call is answered then |
 
-So the gap narrows from "the broker" to "one command's sub-broker", and to that command's jobs
-only. A job still cannot fork, still runs under its `RLIMIT_CPU`, and is now inside its own
-profile rather than the union.
-
-Closing the last row is open question Q2 (§7).
+Phase 1 narrowed the gap from "the broker" to "one command's sub-broker". Phase 2 (§4.6)
+narrows it to "one call's keeper", a process that runs no logic but its wait. A job still
+cannot fork, still runs under its `RLIMIT_CPU`, and is inside its own profile.
 
 ### 4.5 What is reported
 
 - The union line `exec: limit: macOS runs every command in ONE shared sandbox ...` is removed.
-- The parent-death line becomes: `exec: limit: no parent-death signal on macOS: a command's
-  sub-broker killed with SIGKILL leaves that command's running calls until they exit (they
-  cannot fork; their CPU limit holds)`.
+- The parent-death line becomes (phase 2, §4.6): `exec: limit: no parent-death signal on
+  macOS: each call's keeper ends it when the broker goes; a keeper killed with SIGKILL leaves
+  its call running until it exits (it cannot fork; its CPU limit holds)`.
 - `hull inspect` "Effective authority" prints each command's own grants on macOS, as on Linux,
   and drops the union.
+
+### 4.6 The keeper (phase 2, Q2)
+
+Every call, with one command or many, runs under a keeper:
+
+1. The broker makes the call's pipes as before, plus a kill pipe and a pid pipe, and forks.
+   The child is the keeper: this image, never exec'd.
+2. The keeper closes every descriptor but the job's (binary, stdin, stdout, stderr, error
+   pipe, `/dev/null`) and its two pipes, forks the job, closes the job's descriptors, writes
+   the job's pid to the pid pipe (the broker uses it for the test hooks' `PROBE`) and waits.
+3. The job runs exactly as the broker's child did (`child_run`: `setsid`, rlimits, exec).
+4. The keeper's wait is a kqueue on the job's exit, the kill pipe and the broker's exit. The
+   broker holds the kill pipe's only write end: it ends a call (KILL, the timeout, its own
+   teardown) by closing it, and its death closes it. On either, the keeper kills the job's
+   process group and reaps it. When the job exits, the keeper exits the same way.
+
+Why it closes Q2: the keeper is the job's PARENT. Its sandbox lets it signal its children,
+and it reaps the job itself, so a late kill can never hit a reused pid. The router needs no
+new signal rights. The keeper ignores every signal but `SIGKILL`, `SIGSTOP`, `SIGCHLD` and the
+faults, so a signal to the broker's process group does not end it.
+
+Cost: one process per running call, about **0.85 MB** of footprint (measured), and one extra
+fork. What is left: a keeper killed with `SIGKILL` leaves its job, reported at start:
+`exec: limit: no parent-death signal on macOS: each call's keeper ends it when the broker
+goes; a keeper killed with SIGKILL leaves its call running until it exits (it cannot fork;
+its CPU limit holds)`.
 
 ## 5. Equivalence with Linux
 
@@ -213,7 +238,7 @@ Closing the last row is open question Q2 (§7).
 | `AF_UNIX` only under its own `host.unix_sockets` | any command's flag opens it for all | **own flag only** |
 | device ioctls only on its own `host.write` devices | union | **own only** |
 | no process creation | yes (`process-fork` SELF only) | yes, unchanged |
-| no job outlives the broker | no: a SIGKILLed broker leaves its jobs | no, narrower: a SIGKILLed sub-broker leaves that command's jobs |
+| no job outlives the broker | no: a SIGKILLed broker leaves its jobs | **yes** with the keeper (§4.6); a SIGKILLed keeper leaves its one job |
 | the broker cannot widen its own policy after `READY` | yes | yes: the router can neither exec nor fork; a sub-broker's profile is fixed |
 | a broker bug cannot exec command B for command A | no (one profile executes every binary) | **yes**: each sub-broker's profile executes one binary. The router executes nothing |
 
@@ -240,10 +265,20 @@ construction (every descriptor is `CLOEXEC`).
 
 ## 7. Open questions
 
-- **Q1. Start time and memory, measured.** N = 2, 8, 32 on an M-series Mac and on the macOS CI
-  runner: wall time to `READY`, and each sub-broker's footprint. Measured in phase 1 and
-  recorded here. The cap stays 32 (§10); revisit only if the measurement is far from the
-  estimate.
+- **Q1. Start time and memory, measured.** Measured 2026-11-27 on an M-series Mac (macOS 26,
+  arm64): an `app.main` that returns at once, best of 5, with N `/bin/echo` commands; footprint
+  is `footprint`'s `phys_footprint` of each running broker.
+
+  | N | app start | over N = 1 | per command broker | all command brokers |
+  |---|---|---|---|---|
+  | 1 | 55.0 ms | - | (single broker) | - |
+  | 2 | 66.9 ms | +11.9 ms | 4.0 MB | 7.8 MB |
+  | 8 | 70.4 ms | +15.4 ms | 4.0 MB | 31.6 MB |
+  | 32 | 105.7 ms | +50.7 ms | 4.0 MB | 126 MB |
+
+  The spawns overlap; each extra broker adds about 1.6 ms of start. The router itself is about
+  4 MB too. The estimate (§6) holds, so the cap stays 32. A keeper (§4.6) is about 0.85 MB per
+  running call. The macOS CI runner was not measured.
 - **Q2. Reaping a dead sub-broker's jobs.** The router could kill the process groups of a dead
   sub-broker's jobs. Each sub-broker would report `STARTED {id, pgid}`, and the router would
   `killpg` them on NOTE_EXIT of that sub-broker. Two problems:
@@ -253,7 +288,8 @@ construction (every descriptor is `CLOEXEC`).
   - once the sub-broker is dead, nobody reaps the job. Its pid can be reused after it exits,
     so a late `killpg` can hit an unrelated group.
 
-  Decided: not in phase 1. Keep the narrowed limit and its report line.
+  Decided: not in phase 1. Reopened and closed in phase 2 by the keeper (§4.6), which needs
+  neither: it is the job's parent.
 - **Q3. Linux.** Should Linux adopt the router for uniformity? Decided: no. Linux's per-child
   domain is already per command, and PDEATHSIG gives the stronger lifetime guarantee. The router
   would add processes for no gain.
@@ -293,7 +329,8 @@ has no `process-exec`, no `process-fork` and no file rule.
    tests above. One PR, macOS only. CHANGELOG under **Security**: on macOS each command now runs
    in its own sandbox; a command that relied on another command's grants (never documented as
    a guarantee) loses them.
-2. **Phase 2 (only if Q2 is reopened):** reaping a dead sub-broker's jobs.
+2. **Phase 2 (Q2 reopened, #1218):** the keeper (§4.6). Every call on macOS runs under one,
+   so a broker or sub-broker killed with `SIGKILL` takes its running calls. Linux unchanged.
 
 No manifest, frame or server change. Linux behaviour and encodings are byte-for-byte unchanged.
 `exec_broker.md` §6.4 and §7 get updated in phase 1, and §15.6's interim proposal is marked as
@@ -306,7 +343,7 @@ superseded.
 | 1 | Approach | C, router plus one sub-broker per command (§4); A, B and D rejected (§3) |
 | 2 | How a sub-broker starts | exec of this binary (clean image), not fork (§6) |
 | 3 | An app with one command | keeps today's single broker; the router starts at two commands (§4.1) |
-| 4 | A SIGKILLed sub-broker's running jobs | not reaped in phase 1; documented, narrowed limit (§4.4, Q2) |
+| 4 | A SIGKILLed sub-broker's running jobs | not reaped in phase 1; phase 2: killed and reaped by each call's keeper (§4.6) |
 | 5 | macOS command cap | 32, as on Linux; Q1 measures it in phase 1 |
 | 6 | Linux | unchanged (Q3) |
 | 7 | Policy given to a sub-broker | the original entry bytes behind a one-command header, never re-encoded (§4.2) |
