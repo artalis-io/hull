@@ -35,6 +35,7 @@
 #endif
 
 typedef struct HlAsyncBackendCtx HlAsyncBackendCtx;
+typedef struct HlAsyncCtx HlAsyncCtx;
 
 /* ── The broker process ────────────────────────────────────────────── */
 
@@ -98,6 +99,9 @@ typedef struct HlExecReply {
     uint8_t *out;   size_t out_len;   uint8_t out_cut;
     uint8_t *err;   size_t err_len;   uint8_t err_cut;
     char     msg[256];            /* BUSY / REFUSED / LOST: why */
+    /* A stream's DONE: the bytes each pipe wrote (within its cap). */
+    int      stream;
+    uint64_t out_bytes, err_bytes;
 } HlExecReply;
 
 typedef void (*HlExecDoneFn)(void *ud, HlExecReply *r);
@@ -120,8 +124,6 @@ void hl_exec_cancel(uint32_t id);
 
 /* ── One exec.run, as an async op (both runtimes) ──────────────────── */
 
-typedef struct HlAsyncCtx HlAsyncCtx;
-
 /* The op's driver: the call's id while the broker has it, then the reply.
  * The ctx owns it (free_driver): freeing it while the call is still
  * pending sends KILL, so every cancel path - a client gone, a teardown, a
@@ -142,6 +144,81 @@ int hl_exec_op_start(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop,
                      const char *const *args, const size_t *lens, size_t n,
                      const void *in, size_t in_len,
                      uint32_t timeout_ms, char *why, size_t why_size);
+
+/* ── One exec.stream (docs/design/exec_stream.md), both runtimes ──── */
+
+/* A streamed call, held by the binding's stream object (one reference) and
+ * by each wait parked on it. Output arrives as chunks the app takes one at
+ * a time; each taken chunk gives its credit back to the broker, so an app
+ * that stops reading stops the command. Every wake-up of a parked wait goes
+ * through a 0 ms loop timer, never inline from the caller of close(). */
+typedef struct HlExecStream HlExecStream;
+
+typedef struct HlExecChunk {
+    struct HlExecChunk *next;
+    uint8_t  fd;                   /* 1 stdout, 2 stderr */
+    size_t   len;
+    uint8_t  data[];
+} HlExecChunk;
+
+/* Start a streamed call of @p name (a stream command: the caller has
+ * matched it with hl_exec_check_call). @p in (at most HL_EXEC_STDIN_CEIL)
+ * is written first; with @p stdin_open stdin then stays open for
+ * hl_exec_stream_write until hl_exec_stream_close_write; @p stdin_max is the
+ * command's stdin total (the RUN's bytes count toward it). The broker times
+ * the command; a broker lost mid-call ends every stream with LOST. The
+ * stream, or NULL (nothing submitted; @p why says why). */
+HlExecStream *hl_exec_stream_start(HlAsyncBackendCtx *loop, const char *name,
+                                   size_t name_len, const char *const *args,
+                                   const size_t *lens, size_t n,
+                                   const void *in, size_t in_len, int stdin_open,
+                                   uint64_t stdin_max, char *why, size_t why_size);
+void hl_exec_stream_retain(HlExecStream *s);
+/* Drop a reference; the last one closes the call (KILL) and frees it. */
+void hl_exec_stream_release(HlExecStream *s);
+/* The next chunk, or NULL when none is queued; the caller frees it with
+ * free(). Taking it gives its credit back. */
+HlExecChunk *hl_exec_stream_take(HlExecStream *s);
+/* The length of the next chunk, or (size_t)-1 when none is queued. */
+size_t hl_exec_stream_peek(const HlExecStream *s);
+/* No chunk will ever come again (and none is queued). */
+int hl_exec_stream_drained(const HlExecStream *s);
+/* The command's result once it ended (DONE, or why not), else NULL. */
+const HlExecReply *hl_exec_stream_result(const HlExecStream *s);
+/* Queue @p n bytes (at most HL_EXEC_STREAM_WRITE_MAX) for its stdin; what
+ * the credit allows goes out now, the rest as credit comes back. 1 = all
+ * sent, 0 = some wait (wait HL_EXEC_WAIT_WRITE), -1 = refused (@p why:
+ * stdin not open, closed by the child or by close_write, or past its
+ * stdin_max; @p code gets "stdin_closed" / "stdin_too_large" / "busy"). */
+int  hl_exec_stream_write(HlExecStream *s, const void *p, size_t n,
+                          char *why, size_t why_size, const char **code);
+/* Is a write still waiting for credit? */
+int  hl_exec_stream_writing(const HlExecStream *s);
+/* After a write waited: 1 when its bytes all went out, 0 when the stdin
+ * closed first (the child closed it, or the call ended). */
+int  hl_exec_stream_write_ok(const HlExecStream *s);
+/* EOF on its stdin, once queued bytes are sent. 0, or -1 (@p why). */
+int  hl_exec_stream_close_write(HlExecStream *s, char *why, size_t why_size);
+/* Kill the command and drop what is queued; later reads end, the result
+ * says SIGKILL. Idempotent. Parked waits are woken from the loop. */
+void hl_exec_stream_close(HlExecStream *s);
+int  hl_exec_stream_closed(const HlExecStream *s);
+
+#define HL_EXEC_WAIT_READ   0
+#define HL_EXEC_WAIT_WRITE  1
+#define HL_EXEC_WAIT_RESULT 2
+/* Park @p ctx until stream @p s has what @p kind waits for (a chunk or the
+ * end; the write drained or refused; the result). The ctx owns the wait
+ * (free_driver): freed before it was woken - a client gone, a teardown - it
+ * closes the stream. 0, or -1 (another wait of that kind is parked: busy). */
+int  hl_exec_stream_wait(HlAsyncCtx *ctx, HlExecStream *s, int kind);
+/* As hl_exec_stream_wait, with @p on_free(@p ud) run when the wait is
+ * retired, on every path (a JS binding drops its pin on the handle there). */
+int  hl_exec_stream_wait_ex(HlAsyncCtx *ctx, HlExecStream *s, int kind,
+                            void (*on_free)(void *ud), void *ud);
+/* The stream a wait's driver (ctx->driver) belongs to, and its ud. */
+HlExecStream *hl_exec_stream_of_wait(void *driver);
+void *hl_exec_stream_wait_ud(void *driver);
 
 /* Calls in flight (the binding's fast admission check). */
 int hl_exec_inflight(void);

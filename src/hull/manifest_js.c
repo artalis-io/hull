@@ -213,7 +213,7 @@ static int read_js_port_array(JSContext *ctx, JSValueConst obj, int *out)
 static const char *const MX_CMD_KEYS[] = {
     "path", "argv", "timeoutMs", "timeout_ms", "stdoutMax", "stdout_max",
     "stderrMax", "stderr_max", "env", "concurrency", "host", "manifest",
-    "stdinMax", "stdin_max", "sha256", NULL };
+    "stdinMax", "stdin_max", "sha256", "stream", NULL };
 /* The v0.26.0 spellings of host's fields, refused since 0.28.0: pairs of
  * (removed key, replacement), named in the error. */
 static const char *const MX_CMD_REMOVED[] = {
@@ -322,7 +322,9 @@ static int64_t mx_int(JSContext *ctx, JSValueConst obj, const char *key,
         JS_ToFloat64(ctx, &d, v);   /* a number: runs no app code */
         if (!(d == d))                              /* NaN */
             hl_exec_b_fail(b, "%s: %s must be an integer", where, key);
-        else if (d < 0 || d > 4294967295.0)         /* out of range: refused */
+        /* A stream command's totals are u64 (exec_stream.md §3); any other
+         * field past its own range is refused by validation. */
+        else if (d < 0 || d > 9007199254740991.0)   /* out of range: refused */
             out = -2;
         else if (d != (double)(int64_t)d)           /* in range: a defined cast */
             hl_exec_b_fail(b, "%s: %s must be an integer", where, key);
@@ -570,8 +572,14 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     int64_t stdin_max = mx_int(ctx, t, "stdinMax", "stdin_max", b, where);
     size_t hl;
     const char *pin = mx_str(ctx, t, "sha256", &hl, b, where);
-    hl_exec_b_cmd(b, name, strlen(name), path, pl, timeout, so, se, conc,
-                  unix_sockets, stdin_max, pin, hl);
+    /* stream: true - exec.stream may run it (docs/design/exec_stream.md §3). */
+    int stream = mx_bool(ctx, t, "stream", NULL, b, where);
+    if (stream)
+        hl_exec_b_cmd_stream(b, name, strlen(name), path, pl, timeout, so, se, conc,
+                             unix_sockets, stdin_max, pin, hl);
+    else
+        hl_exec_b_cmd(b, name, strlen(name), path, pl, timeout, so, se, conc,
+                      unix_sockets, stdin_max, pin, hl);
     if (pin) JS_FreeCString(ctx, pin);
     if (path) JS_FreeCString(ctx, path);
 

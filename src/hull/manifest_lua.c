@@ -123,7 +123,7 @@ static int read_port_array(lua_State *L, int table_idx, int *out)
 
 static const char *const EXEC_CMD_KEYS[] = {
     "path", "argv", "timeout_ms", "stdout_max", "stderr_max", "env",
-    "concurrency", "host", "manifest", "stdin_max", "sha256", NULL };
+    "concurrency", "host", "manifest", "stdin_max", "sha256", "stream", NULL };
 /* The v0.26.0 spellings of host's fields, refused since 0.28.0: pairs of
  * (removed key, replacement), named in the error. */
 static const char *const EXEC_CMD_REMOVED[] = {
@@ -409,8 +409,15 @@ static void lx_cmd(lua_State *L, int t, const char *name, HlExecBuf *b)
     int64_t stdin_max = lx_int(L, t, "stdin_max", b, where);
     size_t hl;
     const char *pin = lx_str(L, t, "sha256", &hl, b, where);
-    hl_exec_b_cmd(b, name, strlen(name), path, pl, timeout, so, se, conc,
-                  unix_sockets, stdin_max, pin, hl);
+    /* stream = true: exec.stream may run it, with its own limits
+     * (docs/design/exec_stream.md §3). */
+    int stream = lx_bool(L, t, "stream", b, where);
+    if (stream)
+        hl_exec_b_cmd_stream(b, name, strlen(name), path, pl, timeout, so, se, conc,
+                             unix_sockets, stdin_max, pin, hl);
+    else
+        hl_exec_b_cmd(b, name, strlen(name), path, pl, timeout, so, se, conc,
+                      unix_sockets, stdin_max, pin, hl);
     lua_settop(L, base);
 
     /* env = { NAME = "value" }, sorted by name */

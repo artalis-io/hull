@@ -304,11 +304,18 @@ declare namespace Hull {
         path: string;
         /** Fixed arguments (strings) and slots, in order. */
         argv?: Array<string | ManifestExecSlot>;
-        /** 100..60000 ms (default 5000). */
+        /**
+         * 100..60000 ms (default 5000). A `stream` command: 0 (no time limit)
+         * or 100 up to 2^32-2 ms; `exec.run` of it is still held to 60 s.
+         */
         timeoutMs?: number;
-        /** Up to 16 MiB (default 64 KiB). */
+        /**
+         * Up to 16 MiB (default 64 KiB). A `stream` command: the total it may
+         * write over a call's life, any size (no cap when omitted); `exec.run`
+         * of it buffers at most 16 MiB.
+         */
         stdoutMax?: number;
-        /** Up to 1 MiB (default 16 KiB). */
+        /** Up to 1 MiB (default 16 KiB). A `stream` command: as `stdoutMax`. */
         stderrMax?: number;
         /** Literal environment values (no `"$VAR"`; LD_*, DYLD_*, PATH, IFS refused). */
         env?: Record<string, string>;
@@ -340,8 +347,15 @@ declare namespace Hull {
         /**
          * The bytes a call may write to the command's stdin (`exec.run`'s
          * `stdin` option), 1..1048576. Without it the command reads /dev/null.
+         * A `stream` command: the total over a call's life, any size.
          */
         stdinMax?: number;
+        /**
+         * `exec.stream` may run it: output read as it is written, stdin
+         * written as you go, its own time limit and totals. `exec.run` still
+         * runs it, under the `exec.run` limits.
+         */
+        stream?: boolean;
         /**
          * SHA-256 of the main executable, 64 hex characters. The broker checks it
          * at start and before every call.

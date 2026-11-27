@@ -59,6 +59,8 @@
  * the largest CHUNK / STDIN frame. */
 #define HL_EXEC_STREAM_WINDOW       (256u * 1024u)
 #define HL_EXEC_STREAM_CHUNK_MAX    (64u * 1024u)
+/* The bytes one exec.stream write() may take. */
+#define HL_EXEC_STREAM_WRITE_MAX    (1024u * 1024u)
 /* Small writes wait this long for more before a CHUNK goes out. */
 #define HL_EXEC_STREAM_COALESCE_MS  20u
 

@@ -2917,6 +2917,9 @@ jobs:
       - name: Command broker E2E (sandbox, deaths, admission)
         timeout-minutes: 5
         run: HULL_REQUIRE_EXEC_BROKER=1 sh tests/e2e_exec_broker.sh
+      - name: exec.run pipes and exec.stream E2E (both runtimes)
+        timeout-minutes: 5
+        run: HULL_REQUIRE_EXEC_BROKER=1 sh tests/e2e_exec_stream.sh
 
   exec-broker-macos:
     needs: [classify]
@@ -2939,6 +2942,9 @@ jobs:
       - name: Command broker E2E (Seatbelt, deaths, admission)
         timeout-minutes: 5
         run: HULL_REQUIRE_EXEC_BROKER=1 sh tests/e2e_exec_broker_macos.sh
+      - name: exec.run pipes and exec.stream E2E (both runtimes)
+        timeout-minutes: 5
+        run: HULL_REQUIRE_EXEC_BROKER=1 sh tests/e2e_exec_stream.sh
 
   postgres-feature:
     needs: [classify]

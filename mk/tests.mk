@@ -1691,6 +1691,12 @@ e2e-exec-broker: $(BUILDDIR)/hull
 e2e-exec-broker-macos: $(BUILDDIR)/hull
 	sh tests/e2e_exec_broker_macos.sh
 
+# exec.run's pipe handling and exec.stream, both runtimes, through the real
+# broker (tests/e2e_exec_stream.sh): needs `make HL_EXEC_TEST_HOOKS=1`.
+.PHONY: e2e-exec-stream
+e2e-exec-stream: $(BUILDDIR)/hull
+	sh tests/e2e_exec_stream.sh
+
 # http-client's async.stream + hull/sse-client, both runtimes: a response
 # handed over as it arrives, its timeouts, buffer and size caps, close, a
 # denied host, and a stream awaited inside a request handler.

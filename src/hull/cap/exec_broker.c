@@ -1837,7 +1837,12 @@ static void stream_drain(Job *j, int k)
             so->credit -= keep;
             so->total += keep;
             so->open_len += keep;
-            if (so->open_len == HL_EXEC_STREAM_CHUNK_MAX) stream_emit(j, k);
+            /* Out at once when the app has caught up (every byte before these
+             * credited back): a reply to a request must not wait the
+             * coalescing delay. Coalesced only while the app lags. */
+            if (so->open_len == HL_EXEC_STREAM_CHUNK_MAX ||
+                HL_EXEC_STREAM_WINDOW - so->credit == so->open_len)
+                stream_emit(j, k);
             continue;
         }
         if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
@@ -2257,7 +2262,11 @@ typedef struct {
     char         name[HL_EXEC_NAME_MAX + 1];
     HlExecDoneFn fn;
     void        *ud;
+    HlExecStream *stream;        /* a streamed call (fn unused) */
 } Pending;
+
+static void stream_lost(HlExecStream *s, const char *why, int wake);
+static void stream_deliver(Pending *pd, uint32_t type, const uint8_t *p, size_t len);
 
 static int       g_fd = -1;
 static pid_t     g_pid = -1;
@@ -2312,6 +2321,13 @@ static void fail_all(const char *why)
     for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
         Pending *p = &g_pend[i];
         if (!p->used) continue;
+        if (p->stream) {
+            HlExecStream *st = p->stream;
+            p->used = 0;
+            p->stream = NULL;
+            stream_lost(st, why, 1);
+            continue;
+        }
         HlExecDoneFn fn = p->fn;
         void *ud = p->ud;
         p->used = 0;
@@ -2341,7 +2357,12 @@ void hl_exec_broker_stop(void)
     }
     /* A stop is a teardown: every pending call is cancelled by its own path
      * (the server's connections, the runtime's detached ops), and its
-     * cancel finds nothing to send now. Nothing is resumed from here. */
+     * cancel finds nothing to send now. Nothing is resumed from here: a
+     * stream only learns it is over (its waits are cancelled by their own
+     * teardown). */
+    for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++)
+        if (g_pend[i].used && g_pend[i].stream)
+            stream_lost(g_pend[i].stream, "exec: the command broker was stopped", 0);
     memset(g_pend, 0, sizeof g_pend);
 }
 
@@ -2439,11 +2460,10 @@ static void deliver(uint32_t type, uint32_t id, const uint8_t *p, size_t len)
 #endif
         return;
     }
-    /* A stream's frames (exec_stream.md) have no server side yet: the
-     * server sends no stream RUN, so none can come. */
-    if (type != HX_DONE && type != HX_BUSY && type != HX_REFUSED) return;
     Pending *pd = pend_find(id);
     if (!pd) return;                       /* cancelled meanwhile */
+    if (pd->stream) { stream_deliver(pd, type, p, len); return; }
+    if (type != HX_DONE && type != HX_BUSY && type != HX_REFUSED) return;
     HlExecReply *r = calloc(1, sizeof *r);
     HlExecDoneFn fn = pd->fn;
     void *ud = pd->ud;
@@ -2512,11 +2532,27 @@ static void on_readable(int fd, unsigned ready, void *user)
     }
 }
 
+static int submit_ex(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
+                     const char *const *args, const size_t *lens, size_t n,
+                     const void *in, size_t in_len, unsigned rflags,
+                     HlExecDoneFn fn, void *ud, HlExecStream *stream,
+                     uint32_t *id_out, char *why, size_t why_size);
+
 int hl_exec_submit(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
                    const char *const *args, const size_t *lens, size_t n,
                    const void *in, size_t in_len,
                    HlExecDoneFn fn, void *ud, uint32_t *id_out,
                    char *why, size_t why_size)
+{
+    return submit_ex(loop, name, name_len, args, lens, n, in, in_len, 0, fn, ud, NULL,
+                     id_out, why, why_size);
+}
+
+static int submit_ex(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
+                     const char *const *args, const size_t *lens, size_t n,
+                     const void *in, size_t in_len, unsigned rflags,
+                     HlExecDoneFn fn, void *ud, HlExecStream *stream,
+                     uint32_t *id_out, char *why, size_t why_size)
 {
     if (g_fd < 0 || !g_ready) {
         snprintf(why, why_size, "exec: the command broker is not running");
@@ -2563,7 +2599,7 @@ int hl_exec_submit(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
     off += 4;
     if (in_len) memcpy(buf + off, in, in_len);
     off += in_len;
-    buf[off++] = 0;                               /* RUN flags: not a stream */
+    buf[off++] = (uint8_t)rflags;                 /* RUN flags */
     uint32_t id = g_next_id++;
     if (g_next_id == 0) g_next_id = 1;
     int rc = hl_chan_write_frame(g_fd, HX_MAGIC, HX_RUN, id, buf, off, NULL, 0,
@@ -2579,6 +2615,7 @@ int hl_exec_submit(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
     slot->name[name_len] = '\0';
     slot->fn = fn;
     slot->ud = ud;
+    slot->stream = stream;
     *id_out = id;
     return 0;
 }
@@ -2588,9 +2625,393 @@ void hl_exec_cancel(uint32_t id)
     Pending *p = pend_find(id);
     if (!p) return;
     p->used = 0;
+    p->stream = NULL;
     if (g_fd >= 0)
         (void)hl_chan_write_frame(g_fd, HX_MAGIC, HX_KILL, id, NULL, 0, NULL, 0,
                                   hl_chan_mono_ms() + 200);
+}
+
+/* ── One exec.stream (docs/design/exec_stream.md) ──────────────────── */
+
+typedef struct ExecWait {
+    HlExecStream *s;
+    HlAsyncCtx   *ctx;
+    int           kind;
+    int           done;          /* woken: the ctx is completing */
+    uint64_t      timer;         /* the pending 0 ms wake, 0 = none */
+    void        (*on_free)(void *ud);
+    void         *ud;
+} ExecWait;
+
+struct HlExecStream {
+    int          refs;
+    uint32_t     id;
+    int          live;           /* the broker has the call (a Pending holds it) */
+    HlAsyncBackendCtx *loop;
+    HlExecChunk *head, *tail;
+    HlExecReply *result;
+    int          closed;
+    int          stdin_open, stdin_eof_want, stdin_eof_sent, stdin_closed;
+    uint64_t     stdin_sent, stdin_max;
+    uint32_t     credit;         /* stdin bytes the broker will take */
+    uint8_t     *wbuf;
+    size_t       wlen, woff;
+    int          wfail;          /* a write's bytes were dropped unsent */
+    ExecWait    *w[3];
+};
+
+static void wait_fire(void *user)
+{
+    ExecWait *w = user;
+    w->timer = 0;
+    w->done = 1;
+    /* Off the stream before the resume: the resumed code may wait again
+     * (the ctx itself is freed only after it has run). */
+    if (w->s->w[w->kind] == w) w->s->w[w->kind] = NULL;
+    HlAsyncCtx *ctx = w->ctx;
+    if (ctx->detached) hl_async_ctx_resume_detached(ctx);
+    else hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
+}
+
+static int wait_ready(const HlExecStream *s, int kind)
+{
+    switch (kind) {
+    case HL_EXEC_WAIT_READ:  return s->head || hl_exec_stream_drained(s);
+    case HL_EXEC_WAIT_WRITE: return s->woff >= s->wlen || s->stdin_closed || !s->live;
+    default:                 return s->result != NULL;
+    }
+}
+
+/* Wake the waits of @p s whose condition now holds, from the loop. */
+static void stream_wake(HlExecStream *s)
+{
+    for (int k = 0; k < 3; k++) {
+        ExecWait *w = s->w[k];
+        if (!w || w->done || w->timer || !wait_ready(s, k) || !s->loop) continue;
+        w->timer = hl_async_backend()->timer_add(s->loop, 0, wait_fire, w);
+    }
+}
+
+static void stream_drop_queue(HlExecStream *s)
+{
+    while (s->head) {
+        HlExecChunk *c = s->head;
+        s->head = c->next;
+        free(c);
+    }
+    s->tail = NULL;
+    if (s->woff < s->wlen) s->wfail = 1;
+    free(s->wbuf);
+    s->wbuf = NULL;
+    s->wlen = s->woff = 0;
+}
+
+/* The call ended without a DONE (the broker lost or stopped). */
+static void stream_lost(HlExecStream *s, const char *why, int wake)
+{
+    s->live = 0;
+    s->stdin_closed = 1;
+    if (s->woff < s->wlen) s->wfail = 1;
+    if (!s->result && (s->result = calloc(1, sizeof *s->result)) != NULL) {
+        s->result->kind = HL_EXEC_R_LOST;
+        s->result->stream = 1;
+        snprintf(s->result->msg, sizeof s->result->msg, "%s", why);
+    }
+    if (wake) stream_wake(s);
+}
+
+/* Send what the stdin credit allows; EOF once everything queued is out. */
+static void stdin_flush(HlExecStream *s)
+{
+    while (s->live && s->woff < s->wlen && s->credit > 0) {
+        size_t n = s->wlen - s->woff;
+        if (n > s->credit) n = s->credit;
+        if (n > HL_EXEC_STREAM_CHUNK_MAX) n = HL_EXEC_STREAM_CHUNK_MAX;
+        uint8_t fl = (s->stdin_eof_want && s->woff + n == s->wlen) ? HX_STDIN_EOF : 0;
+        if (hl_chan_write_frame(g_fd, HX_MAGIC, HX_STDIN, s->id, &fl, 1, s->wbuf + s->woff,
+                                n, hl_chan_mono_ms() + 1000) != 0) {
+            stream_lost(s, "exec: the command broker is not answering", 0);
+            return;
+        }
+        s->woff += n;
+        s->credit -= (uint32_t)n;
+        if (fl) s->stdin_eof_sent = 1;
+    }
+    if (s->woff >= s->wlen) {
+        free(s->wbuf);
+        s->wbuf = NULL;
+        s->wlen = s->woff = 0;
+        if (s->live && s->stdin_eof_want && !s->stdin_eof_sent) {
+            uint8_t fl = HX_STDIN_EOF;
+            if (hl_chan_write_frame(g_fd, HX_MAGIC, HX_STDIN, s->id, &fl, 1, NULL, 0,
+                                    hl_chan_mono_ms() + 1000) != 0)
+                stream_lost(s, "exec: the command broker is not answering", 0);
+            s->stdin_eof_sent = 1;
+        }
+    }
+}
+
+static uint64_t get64le(const uint8_t *p)
+{
+    return (uint64_t)hl_chan_get32(p) | (uint64_t)hl_chan_get32(p + 4) << 32;
+}
+
+/* A frame from the broker for streamed call @p pd. */
+static void stream_deliver(Pending *pd, uint32_t type, const uint8_t *p, size_t len)
+{
+    HlExecStream *s = pd->stream;
+    if (type == HX_CHUNK) {
+        if (len < 2 || (p[0] != 1 && p[0] != 2)) return;
+        HlExecChunk *c = malloc(sizeof *c + len - 1);
+        if (!c) { hl_exec_stream_close(s); return; }   /* better than a silent gap */
+        c->next = NULL;
+        c->fd = p[0];
+        c->len = len - 1;
+        memcpy(c->data, p + 1, len - 1);
+        if (s->tail) s->tail->next = c; else s->head = c;
+        s->tail = c;
+        stream_wake(s);
+        return;
+    }
+    if (type == HX_STDIN_CREDIT) {
+        if (len != 5) return;
+        s->credit += hl_chan_get32(p + 1);
+        if (p[0] & HX_STDIN_CLOSED) {
+            s->stdin_closed = 1;
+            if (s->woff < s->wlen) s->wfail = 1;
+            free(s->wbuf);
+            s->wbuf = NULL;
+            s->wlen = s->woff = 0;
+        } else {
+            stdin_flush(s);
+        }
+        stream_wake(s);
+        return;
+    }
+    if (type != HX_DONE && type != HX_BUSY && type != HX_REFUSED) return;
+    pd->used = 0;
+    pd->stream = NULL;
+    s->live = 0;
+    s->stdin_closed = 1;
+    if (s->woff < s->wlen) s->wfail = 1;
+    HlExecReply *r = calloc(1, sizeof *r);
+    if (r) {
+        r->stream = 1;
+        if (type == HX_DONE && len >= 32) {
+            r->kind = HL_EXEC_R_DONE;
+            r->status = (int32_t)hl_chan_get32(p);
+            int signo = (int)hl_chan_get32(p + 4);
+            if (signo) {
+                char b[16];
+                snprintf(r->signal, sizeof r->signal, "%s", sig_name(signo, b, sizeof b));
+            }
+            r->timed_out = p[8];
+            r->out_cut = p[9];
+            r->err_cut = p[10];
+            r->duration_ms = hl_chan_get32(p + 12);
+            r->out_bytes = get64le(p + 16);
+            r->err_bytes = get64le(p + 24);
+        } else if (type == HX_DONE) {
+            r->kind = HL_EXEC_R_LOST;
+            snprintf(r->msg, sizeof r->msg, "exec: a malformed reply from the broker");
+        } else {
+            r->kind = type == HX_BUSY ? HL_EXEC_R_BUSY : HL_EXEC_R_REFUSED;
+            size_t n = len < sizeof r->msg - 1 ? len : sizeof r->msg - 1;
+            if (n) memcpy(r->msg, p, n);
+            r->msg[n] = '\0';
+        }
+    }
+    hl_exec_reply_free(s->result);
+    s->result = r;
+    stream_wake(s);
+}
+
+HlExecStream *hl_exec_stream_start(HlAsyncBackendCtx *loop, const char *name,
+                                   size_t name_len, const char *const *args,
+                                   const size_t *lens, size_t n,
+                                   const void *in, size_t in_len, int stdin_open,
+                                   uint64_t stdin_max, char *why, size_t why_size)
+{
+    HlExecStream *s = calloc(1, sizeof *s);
+    if (!s) { snprintf(why, why_size, "exec: out of memory"); return NULL; }
+    s->refs = 1;
+    s->stdin_open = stdin_open;
+    s->stdin_max = stdin_max;
+    s->stdin_sent = in_len;
+    if (!stdin_open) s->stdin_closed = 1;
+    unsigned fl = HX_RUN_STREAM | (stdin_open ? HX_RUN_STDIN_OPEN : 0);
+    if (submit_ex(loop, name, name_len, args, lens, n, in, in_len, fl, NULL, NULL, s,
+                  &s->id, why, why_size) != 0) {
+        free(s);
+        return NULL;
+    }
+    s->live = 1;
+    s->loop = g_loop;
+    return s;
+}
+
+void hl_exec_stream_retain(HlExecStream *s) { if (s) s->refs++; }
+
+void hl_exec_stream_release(HlExecStream *s)
+{
+    if (!s || --s->refs > 0) return;
+    hl_exec_stream_close(s);
+    stream_drop_queue(s);
+    hl_exec_reply_free(s->result);
+    free(s);
+}
+
+HlExecChunk *hl_exec_stream_take(HlExecStream *s)
+{
+    HlExecChunk *c = s->head;
+    if (!c) return NULL;
+    s->head = c->next;
+    if (!s->head) s->tail = NULL;
+    c->next = NULL;
+    /* The app has it now: the broker may read that much more. */
+    if (s->live) {
+        uint8_t pl[5];
+        pl[0] = c->fd;
+        hl_chan_put32(pl + 1, (uint32_t)c->len);
+        if (hl_chan_write_frame(g_fd, HX_MAGIC, HX_CREDIT, s->id, pl, 5, NULL, 0,
+                                hl_chan_mono_ms() + 1000) != 0)
+            stream_lost(s, "exec: the command broker is not answering", 1);
+    }
+    return c;
+}
+
+size_t hl_exec_stream_peek(const HlExecStream *s)
+{
+    return s->head ? s->head->len : (size_t)-1;
+}
+
+int hl_exec_stream_drained(const HlExecStream *s)
+{
+    return !s->head && (s->result != NULL || s->closed);
+}
+
+const HlExecReply *hl_exec_stream_result(const HlExecStream *s) { return s->result; }
+int hl_exec_stream_closed(const HlExecStream *s) { return s->closed; }
+int hl_exec_stream_writing(const HlExecStream *s) { return s->woff < s->wlen; }
+int hl_exec_stream_write_ok(const HlExecStream *s) { return !s->wfail && s->woff >= s->wlen; }
+
+int hl_exec_stream_write(HlExecStream *s, const void *p, size_t n,
+                         char *why, size_t why_size, const char **code)
+{
+    *code = "stdin_closed";
+    if (!s->stdin_open) {
+        snprintf(why, why_size, "exec.stream: stdin is not open (pass stdin_open)");
+        return -1;
+    }
+    if (s->stdin_closed || s->stdin_eof_want || !s->live) {
+        snprintf(why, why_size, "exec.stream: the command's stdin is closed");
+        return -1;
+    }
+    if (s->woff < s->wlen) {
+        *code = "busy";
+        snprintf(why, why_size, "exec.stream: a write is already waiting");
+        return -1;
+    }
+    if (n > HL_EXEC_STREAM_WRITE_MAX || n > s->stdin_max - s->stdin_sent) {
+        *code = "stdin_too_large";
+        snprintf(why, why_size, n > HL_EXEC_STREAM_WRITE_MAX
+                 ? "exec.stream: a write is at most %u bytes"
+                 : "exec.stream: stdin past the command's stdin_max (%u)",
+                 n > HL_EXEC_STREAM_WRITE_MAX ? (unsigned)HL_EXEC_STREAM_WRITE_MAX
+                                              : (unsigned)(s->stdin_max > UINT32_MAX
+                                                           ? UINT32_MAX : s->stdin_max));
+        return -1;
+    }
+    if (n == 0) return 1;
+    s->wbuf = malloc(n);
+    if (!s->wbuf) { *code = "busy"; snprintf(why, why_size, "exec.stream: out of memory"); return -1; }
+    memcpy(s->wbuf, p, n);
+    s->wlen = n;
+    s->woff = 0;
+    s->wfail = 0;
+    s->stdin_sent += n;
+    stdin_flush(s);
+    return s->woff >= s->wlen ? 1 : 0;
+}
+
+int hl_exec_stream_close_write(HlExecStream *s, char *why, size_t why_size)
+{
+    if (!s->stdin_open) {
+        snprintf(why, why_size, "exec.stream: stdin is not open (pass stdin_open)");
+        return -1;
+    }
+    if (s->stdin_eof_want) return 0;
+    s->stdin_eof_want = 1;
+    if (s->live && !s->stdin_closed) stdin_flush(s);
+    return 0;
+}
+
+void hl_exec_stream_close(HlExecStream *s)
+{
+    if (!s || s->closed) return;
+    s->closed = 1;
+    if (s->live) {
+        hl_exec_cancel(s->id);       /* KILL; the broker sends nothing more */
+        s->live = 0;
+    }
+    s->stdin_closed = 1;
+    stream_drop_queue(s);
+    if (!s->result && (s->result = calloc(1, sizeof *s->result)) != NULL) {
+        s->result->kind = HL_EXEC_R_DONE;
+        s->result->stream = 1;
+        snprintf(s->result->signal, sizeof s->result->signal, "SIGKILL");
+    }
+    stream_wake(s);
+}
+
+static void wait_free(void *driver)
+{
+    ExecWait *w = driver;
+    if (!w) return;
+    HlExecStream *s = w->s;
+    if (w->timer && s->loop) hl_async_backend()->timer_cancel(s->loop, w->timer);
+    if (s->w[w->kind] == w) s->w[w->kind] = NULL;
+    /* Freed before it was woken: a client gone, a cancelled run, a
+     * teardown. Nothing will read the stream: end it. */
+    if (!w->done) hl_exec_stream_close(s);
+    if (w->on_free) w->on_free(w->ud);
+    free(w);
+    hl_exec_stream_release(s);
+}
+
+int hl_exec_stream_wait(HlAsyncCtx *ctx, HlExecStream *s, int kind)
+{
+    return hl_exec_stream_wait_ex(ctx, s, kind, NULL, NULL);
+}
+
+int hl_exec_stream_wait_ex(HlAsyncCtx *ctx, HlExecStream *s, int kind,
+                           void (*on_free)(void *ud), void *ud)
+{
+    if (kind < 0 || kind > 2 || s->w[kind]) return -1;
+    ExecWait *w = calloc(1, sizeof *w);
+    if (!w) return -1;
+    w->s = s;
+    w->ctx = ctx;
+    w->kind = kind;
+    w->on_free = on_free;
+    w->ud = ud;
+    hl_exec_stream_retain(s);
+    s->w[kind] = w;
+    ctx->driver = w;
+    ctx->free_driver = wait_free;
+    if (!s->loop) s->loop = g_loop;
+    stream_wake(s);                  /* already ready: woken from the loop */
+    return 0;
+}
+
+HlExecStream *hl_exec_stream_of_wait(void *driver)
+{
+    return driver ? ((ExecWait *)driver)->s : NULL;
+}
+
+void *hl_exec_stream_wait_ud(void *driver)
+{
+    return driver ? ((ExecWait *)driver)->ud : NULL;
 }
 
 
@@ -2702,6 +3123,54 @@ int hl_exec_submit(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
     return -1;
 }
 void hl_exec_cancel(uint32_t id) { (void)id; }
+HlExecStream *hl_exec_stream_start(HlAsyncBackendCtx *loop, const char *name,
+                                   size_t name_len, const char *const *args,
+                                   const size_t *lens, size_t n,
+                                   const void *in, size_t in_len, int stdin_open,
+                                   uint64_t stdin_max, char *why, size_t why_size)
+{
+    (void)loop; (void)name; (void)name_len; (void)args; (void)lens; (void)n;
+    (void)in; (void)in_len; (void)stdin_open; (void)stdin_max;
+    snprintf(why, why_size, "exec: this host has no command broker");
+    return NULL;
+}
+void hl_exec_stream_retain(HlExecStream *s) { (void)s; }
+void hl_exec_stream_release(HlExecStream *s) { (void)s; }
+HlExecChunk *hl_exec_stream_take(HlExecStream *s) { (void)s; return NULL; }
+size_t hl_exec_stream_peek(const HlExecStream *s) { (void)s; return (size_t)-1; }
+int hl_exec_stream_drained(const HlExecStream *s) { (void)s; return 1; }
+const HlExecReply *hl_exec_stream_result(const HlExecStream *s) { (void)s; return NULL; }
+int hl_exec_stream_write(HlExecStream *s, const void *p, size_t n,
+                         char *why, size_t why_size, const char **code)
+{
+    (void)s; (void)p; (void)n;
+    *code = "stdin_closed";
+    snprintf(why, why_size, "exec: this host has no command broker");
+    return -1;
+}
+int hl_exec_stream_writing(const HlExecStream *s) { (void)s; return 0; }
+int hl_exec_stream_write_ok(const HlExecStream *s) { (void)s; return 0; }
+int hl_exec_stream_close_write(HlExecStream *s, char *why, size_t why_size)
+{
+    (void)s;
+    snprintf(why, why_size, "exec: this host has no command broker");
+    return -1;
+}
+void hl_exec_stream_close(HlExecStream *s) { (void)s; }
+int hl_exec_stream_closed(const HlExecStream *s) { (void)s; return 1; }
+int hl_exec_stream_wait(HlAsyncCtx *ctx, HlExecStream *s, int kind)
+{
+    (void)ctx; (void)s; (void)kind;
+    return -1;
+}
+HlExecStream *hl_exec_stream_of_wait(void *driver) { (void)driver; return NULL; }
+int hl_exec_stream_wait_ex(HlAsyncCtx *ctx, HlExecStream *s, int kind,
+                           void (*on_free)(void *ud), void *ud)
+{
+    (void)ctx; (void)s; (void)kind; (void)on_free; (void)ud;
+    return -1;
+}
+void *hl_exec_stream_wait_ud(void *driver) { (void)driver; return NULL; }
 int hl_exec_op_start(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop,
                      const char *name, size_t name_len,
                      const char *const *args, const size_t *lens, size_t n,

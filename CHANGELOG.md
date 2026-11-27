@@ -17,8 +17,16 @@ release-artifact layout).
   writes it. Each pipe is held to a 256 KiB credit window, so an app that stops reading stops the
   command and Hull never holds more. Credit or stdin past those bounds, or a stream request for a
   command that is not a stream command, ends the call. `exec.run` on a stream command still works,
-  under the usual 60 s and 16 MiB limits. There is no app-facing API yet: `exec.stream` and the
-  manifest key arrive in the next PR.
+  under the usual 60 s and 16 MiB limits.
+- **`exec.stream`** (Lua `exec.stream(name, args, { stdin, stdin_open })`, JS
+  `exec.stream(name, args, { stdin, stdinOpen })`), for commands declared with `stream = true`.
+  It returns a stream object at once: `read()` (a chunk `{ fd, data }`, or nil / null at the
+  end), `write()`, `close_write()` / `closeWrite()`, `close()`, `result()`, and `for await` in
+  JS. An app that stops reading stops the command. A stream that is closed, collected, or whose
+  request goes away kills its command. A chunk goes out as soon as the app has caught up, so a
+  request / reply over stdin and stdout waits for no coalescing delay. Not in this release: a
+  `hull test` stub form, an audit record, and a liveness check for a wedged broker on a stream
+  with no time limit.
 
 ### Fixed
 

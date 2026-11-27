@@ -1,7 +1,8 @@
 # Streamed, long-running declared commands (`exec.stream`)
 
-- **Status:** reviewed (2026-11-27, decisions in §11). PR 1 (policy, broker, router) implemented;
-  the bindings (PR 2) are not.
+- **Status:** reviewed (2026-11-27, decisions in §11). PR 1 (policy, broker, router) and PR 2
+  (`exec.stream` in both runtimes) implemented; PR 3 (test stubs, inspect, lint, docs) is not.
+  §12 records why `exec.run` keeps its own path.
 - **Parent design:** [exec_broker.md](exec_broker.md) (§2 API, §3 manifest, §5 broker, §7 lifetime,
   §12 audit) and [exec_broker_macos_isolation.md](exec_broker_macos_isolation.md) (the router).
 - **Scope:** a second way to call a declared command, opted into per command. The sandbox, the
@@ -106,7 +107,7 @@ while true do
 end
 local r = s:result()                 -- parks until the command has ended
 -- r = { status, signal, timed_out, stdout_truncated, stderr_truncated,
---       stdout_bytes, stderr_bytes, duration_ms }
+--       stdout_length, stderr_length, duration_ms }
 ```
 
 JS:
@@ -117,7 +118,7 @@ const s = exec.stream("unit-log", ["hs-api.service"]);
 for await (const chunk of s) {          // { fd: "stdout" | "stderr", data: Uint8Array }
   if (new TextDecoder().decode(chunk.data).includes("Started")) { s.close(); break; }
 }
-const r = await s.result;               // same fields, camelCase
+const r = await s.result();             // same fields, camelCase (stdoutLength, ...)
 ```
 
 - `exec.stream` itself does not wait: it submits the call and returns the stream object. It goes
@@ -145,8 +146,11 @@ const r = await s.result;               // same fields, camelCase
   collected unclosed (Lua `__gc` / `__close`, JS a class finalizer), so an abandoned stream never
   holds its slot until the timeout.
 - `chunk.data` is a Lua string / JS `Uint8Array`, at most `HL_EXEC_STREAM_CHUNK_MAX` (64 KiB).
-  Small writes are coalesced by the broker up to that size, or 20 ms after the first byte,
-  whichever comes first, so a command that writes byte by byte does not cost a run per byte.
+  A chunk goes out at once when the app has caught up (every byte before it credited back), so
+  a reply to a request written on stdin waits for nothing. While the app lags, small writes are
+  coalesced up to that size, or 20 ms after the first byte, so a command that writes byte by
+  byte does not cost a run per byte (PR 2; 50 stdin / stdout round trips took ~7 ms, ~1 s
+  with the 20 ms delay on every reply).
 - Each chunk is charged before it is handed to the app: `HL_WORK_EXEC_CHUNK_UNITS` (320, a WS
   frame's measured floor) plus 1 unit per 8 bytes.
 
@@ -189,8 +193,10 @@ granted credit, or past `stdin_max`, is a protocol error: the broker kills the c
 (`EPIPE`) makes the broker drop what it holds and report it in the next `STDIN_CREDIT` (flag
 `closed`), which fails the app's pending and later writes with `stdin_closed`.
 
-Off-heap accounting in the server: a chunk waiting for the app is held on the VM's off-heap total
-(`HlOffheapHold`, as `http.fetch` bodies are), so the window is also bounded by the heap limit.
+Off-heap accounting in the server (not in PR 2): a chunk waiting for the app is not yet held on
+the VM's off-heap total. What it holds is bounded by the windows (two per stream, eight streams,
+4 MiB in all), not by the heap limit; holding it there as `http.fetch` bodies are is a
+follow-up.
 
 ## 6. Protocol
 
@@ -235,17 +241,18 @@ nearly full.
   the declared authority; `hull build` / `hull check` warn about a stream command with no time
   limit or one over 60 s, and about one with no output cap (`hull/exec_lint.lua`), naming them.
 - The server's wedged-broker backstop (`exec_op_deadline`) cannot be the command's timeout plus a
-  grace when there is none. For a stream it becomes a liveness check: a stream that has had no
-  frame for `HL_EXEC_STREAM_PROBE_MS` (30 s) sends `PROBE` on the channel; no answer within the
-  existing probe grace fails every call on that broker as a lost broker, as today. A stream with a
-  timeout also keeps the old deadline (timeout plus grace, from the call's start).
+  grace when there is none. PR 2 has no backstop for a stream: a broker that dies ends every
+  stream (its channel's EOF, `LOST`), and one alive but wedged leaves a parked read waiting until
+  the app closes the stream or its request goes. The planned liveness check - a stream with no
+  frame for 30 s sends `PROBE`, no answer fails the broker as lost - is a follow-up.
 - The run deadline does not apply to the time a read is parked (no run is going), exactly as for
   `http.fetch`.
 
 ## 8. Audit, inspect, tests
 
-- `--audit`: today's one record per call, written when the call starts, plus one `exec.stream.end`
-  record with status, byte counts, truncation and duration. Chunks are not logged.
+- `--audit`: `exec.run` writes no audit record today, so neither does `exec.stream`; an
+  `exec.run` / `exec.stream` start and end record is a follow-up for both. Chunks would not be
+  logged.
 - `hull inspect` and the startup report show `stream` and the timeout for each stream command.
 - `hull test`: `test.exec_stub(name, result_or_fn)` gains a stream form: a stub result may carry
   `chunks = { { fd = "stdout", data = "..." }, ... }`, delivered in order, one per read, then the
@@ -292,9 +299,10 @@ New tests (each fails on the code before its PR):
    `STDIN_CREDIT` / stream `DONE` in the broker and the router, credit enforcement both ways,
    the window / chunk / coalescing measurement (§11.3). Tests: `e2e_exec_frames.c`
    cases, `fuzz_exec_policy` corpus entries.
-2. **PR 2, bindings:** `exec.stream` (with `write` / `close_write`) in both runtimes, the
-   server's per-stream queue and credit return, the liveness probe, wait gate, finalizers, teardown, charges, audit records, manifest extractors, types.
-   Tests: `tests/e2e_exec_stream.sh`.
+2. **PR 2, bindings (done):** `exec.stream` (with `write` / `close_write`) in both runtimes,
+   the server's per-stream queue and credit return, wait gate, finalizers, teardown, charges,
+   manifest extractors, types, and the emit-at-once rule (§4). Not in it: the liveness probe
+   (§7), audit records (§8), the off-heap hold (§5). Tests: `tests/e2e_exec_stream.sh`.
 3. **PR 3, test stubs and docs:** the stream form of `test.exec_stub`, `hull inspect`, the lint,
    docs/app_api_reference.md, CLAUDE.md, CHANGELOG.
 
@@ -322,3 +330,48 @@ New tests (each fails on the code before its PR):
    A 64 KiB window halves the routed rate (one extra hop per window); 1 MiB buys nothing and
    holds four times the memory. Linux CI prints the same line for its direct broker.
 4. **Streamed stdin: built** (§4, §5.1, §6), in PR 1 (protocol) and PR 2 (bindings).
+
+## 12. `exec.run` and `exec.stream`: one implementation, two pipe policies
+
+Reviewed in PR 2: should `exec.run` be built on the stream path (start a stream, collect it,
+return the result) for every command? No. It shares everything below the pipe policy, and the
+pipe policy stays separate on purpose.
+
+**What both share.** In the broker, one `run_call` (admission, `hl_exec_check_call` again, the
+binary re-opened and pinned, the child confined and started under a keeper on macOS), one `Job`
+with one poll loop that feeds stdin and drains stdout and stderr together, one per-call frame
+queue, one kill / reap / timeout path. On the server, one submission (`submit_ex`), one pending
+table that admission and `hl_exec_inflight` count, one cancel (`hl_exec_cancel`) and one lost /
+stopped broker path. Both runtimes park both through `HlAsyncCtx`. The two differ only in how a
+pipe is read (`drain` vs `stream_drain` in `cap/exec_broker.c`) and how the end is reported (a
+buffered `DONE` vs byte counts).
+
+**Why `exec.run` does not go through the stream path:**
+
+1. **The `stream = true` check would stop meaning anything at the boundary that enforces it.**
+   `run_call` refuses a stream RUN for a command without `HL_EXEC_CMD_STREAM` ("is not a stream
+   command"). If ordinary commands took stream RUNs for `exec.run`, the broker would have to take
+   them, and the server - which the broker does not trust after READY - could then read an
+   ordinary command's output as it comes and drive its stdin interactively. The limits could be
+   held, but the interactive shape is what `stream = true` grants.
+2. **The limits would move from the broker to the server.** On a plain RUN the broker applies
+   `exec.run`'s limits from the policy's u32 fields: the 60 s timeout, `stdout_max` up to
+   16 MiB, `stderr_max` up to 1 MiB, `stdin_max` up to 1 MiB, each the command's own if lower.
+   A stream RUN carries the stream's own limits (no time limit, any total), so collecting a
+   stream into an `exec.run` result would leave the 60 s / 16 MiB clamps to the server.
+3. **Overflow behaves differently, and callers see it.** `drain` keeps up to the cap, drops the
+   rest, sets `*_truncated`, and lets the command run on to its exit, so `exec.run` returns its
+   real status. `stream_drain` kills the command when a total is reached (a stream that never
+   ends cannot be left running). A command whose output overflowed under `exec.run` would have
+   started returning `signal = SIGKILL`.
+4. **Nothing to gain on the hard part.** The concurrent pipe handling is already in the shared
+   poll loop: stdin is written on POLLOUT while stdout and stderr are read on POLLIN, output is
+   counted as it arrives, and a job is done only once both pipes reached EOF and the child was
+   reaped (`job_settled`), so output written just before the child exits is kept.
+   `tests/e2e_exec_stream.sh` pins it: a command that writes 300000 bytes to stderr before
+   reading a 900000-byte stdin returns both byte-exact, with its status, and the server answers
+   another request meanwhile.
+
+So `exec.run` of a stream command also stays on the plain RUN: buffered, under `exec.run`'s
+limits, held by the broker. What remains duplicated is the two pipe readers (`drain` /
+`stream_drain`), the two `DONE` encodings, and the two result builders in each binding.
