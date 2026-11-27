@@ -1571,7 +1571,7 @@ All vendored. No external dependencies:
 | SQLite | `vendor/sqlite/` | Embedded database |
 | mbedTLS | `vendor/mbedtls/` | TLS client |
 | TweetNaCl | `vendor/tweetnacl/` | Ed25519 + NaCl crypto |
-| pledge/unveil | `vendor/pledge/` | Linux kernel sandbox polyfill. **Patched in tree** (five fixes, marked `HULL PATCH NNNN`: rseq allowed, TRUNCATE a file right, seccomp filters + the Landlock domain applied to every thread - audit 42, and the termios2 ioctls glibc 2.42 uses under `tty`); see [docs/pledge_patches.md](docs/pledge_patches.md) |
+| pledge/unveil | `vendor/pledge/` | Linux kernel sandbox polyfill. **Patched in tree** (six fixes, marked `HULL PATCH NNNN`: rseq allowed, TRUNCATE a file right, seccomp filters + the Landlock domain applied to every thread - audit 42, the termios2 ioctls glibc 2.42 uses under `tty`, and no TCP bind after the seal - #1226); see [docs/pledge_patches.md](docs/pledge_patches.md) |
 | log.c | `vendor/log.c/` | Logging |
 | sh_arena | `vendor/sh_arena/` | Arena allocator |
 | sh_json | `vendor/sh_json/` | Streaming JSON writer + arena-based parser |
@@ -2511,6 +2511,20 @@ Two-phase sandbox in `sandbox.c`:
 Violation = SIGABRT on OpenBSD, SIGKILL on Linux/Cosmo, EPERM on macOS. `--no-sandbox` flag disables kernel enforcement for debugging.
 
 **Every thread carries the sandbox (audit 42).** Linux attaches a seccomp filter and a Landlock domain per THREAD, and upstream jart/pledge installed both on the calling thread only. Hull's worker pool started its threads before either phase, so the threads running `worker.dispatch` VMs, parsing `db.async` replies and running `compute.async` WASM had no filter and no domain - and with one address space that voided the sandbox for the process. Three layers now: (1) every pledge / unveil seccomp filter is installed with `SECCOMP_FILTER_FLAG_TSYNC` (`hull_seccomp_install`, vendor/pledge HULL PATCH 0003; `stdio` allows `seccomp(2)` only as SET_MODE_FILTER + TSYNC, which can only narrow); (2) `unveil(NULL, NULL)` applies the Landlock domain with `LANDLOCK_RESTRICT_SELF_TSYNC` where the kernel has it (ABI 8+), else asks every other thread in `/proc/self/task` to restrict itself through a `SIGRTMAX - 3` handler (patch 0004), counting any thread that does not (signal blocked) in `hull_unveil_unsynced_threads` - which `hl_sandbox_apply` treats as an incomplete backend: refused unless `--allow-degraded-sandbox`; the `[sandbox] applied` line ends `threads: single|tsync|signal`; (3) the pool's workers start on the first submit, not at pool creation (`async/keel.c`, `async/poll.c`), so they are born inside the phase-2 sandbox - the only layer for a cosmo APE, whose libc pledge is per-thread and unpatched. A new thread Hull starts before phase 2 is reached only through (1) and (2): prefer starting it on first use. With pool threads now sandboxed, a pool thread's own connection to the `-d` database is opened under Landlock, so the Linux branch also unveils that database's existing `-wal` / `-shm` / `-journal` files (regular files only, `rw`), as Seatbelt already granted them; it had worked only because the pool ran outside the sandbox. Details: [docs/pledge_patches.md](docs/pledge_patches.md); gates: `tests/e2e_sandbox.sh` Test 6 (`sandbox_violation.c`: a pre-existing thread's forbidden open refused by seccomp and by Landlock, also built with `-DHULL_UNVEIL_TEST_NO_TSYNC=1`) and Test 8 (every task of a running server reads `Seccomp: 2` with the main thread's filter count).
+
+**No bind after phase 2 (#1226).** Keel binds its listener only when the server starts running,
+after the sandbox, so the sandbox allowed `bind(2)` on any address and port for the server's
+whole life. serve.c now binds and listens on `-b` / `-p` itself right before phase 2
+(`hl_serve_prebind_listener`, for an app that will serve; a main-only CLI binds nothing) and
+hands the socket to Keel as an adopted `KlHttpServerConfig.listen_fd` (set on
+`s->server.config` before `kl_http_server_run`; Hull closes it if the run is never entered).
+`--agent-api` and `--vm-thread`'s standby use that same listener. The sandbox then refuses
+every bind (`HlSandboxPolicy.allow_bind` 0): Seatbelt adds `(deny network-bind)` after
+`(allow network-inbound)`, which alone admits bind; Linux handles `LANDLOCK_ACCESS_NET_BIND_TCP`
+with no rule on Landlock ABI 4+ (vendor/pledge HULL PATCH 0006; an older kernel still allows it
+and the applied line says `bind: kernel`). A cosmo APE (its own libc unveil) and OpenBSD keep
+the `inet` promise's bind. `hl_embed_seal` keeps bind (`allow_bind = net_inbound`): an embedder
+may bind after the seal. The port stays an operator setting, not a manifest field.
 
 Under `network_outbound` the kernel sandbox unveils only the named resolver files (`/etc/resolv.conf`, `hosts`, `nsswitch.conf`, `services`, `gai.conf`, `host.conf`, the systemd-resolved / nscd sockets); it also unveiled all of `/etc` (`shadow`, SSH host keys; audit 24). CA bundles are read into memory before the sandbox applies. Every `gpu.devices` entry counts as listed whatever its type, and a `devices` value that is not a list disables gpu, so a list with no valid index fails closed instead of granting every device (audit 24) - on every entry point, whatever `modules` says: the extractor records `HlManifest.gpu_devices_invalid` and the one admit decision, `hl_gpu_manifest_admit` (`module_resolver.c`, called by serve.c and the app context; `hl_gpu_manifest_dynamic_shaders` decides the compile helper's stop the same way), withholds the GPU context, whose device allowlist is then empty too (audit 46: with `hull/gpu` in `modules` the admit read the module set alone and no restriction applied, so the app got every device).
 

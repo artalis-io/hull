@@ -103,6 +103,7 @@ WORKDIR=$(mktemp -d)
 UNAME_S=$(uname -s)
 SANDBOX_EXPECTED=0
 SANDBOX_TYPE=""
+PLATFORM_CC=""
 if [ "$UNAME_S" = "Linux" ]; then
     SANDBOX_EXPECTED=1
     SANDBOX_TYPE="pledge"
@@ -176,9 +177,23 @@ if wait_for_server 19880; then
         if [ "$SANDBOX_TYPE" = "seatbelt" ]; then
             check_contains "sandbox mentions seatbelt" "$LOG" "seatbelt:"
             check_contains "sandbox network-outbound (hosts declared)" "$LOG" "network-outbound"
+            # #1226: the listener is bound before phase 2; no second bind.
+            check_contains "seatbelt refuses bind after the listener" "$LOG" "bind: refused"
         else
             check_contains "sandbox mentions pledge" "$LOG" "pledge:"
             check_contains "sandbox dns promise (hosts declared)" "$LOG" "dns"
+            # #1226: native Linux on Landlock ABI 4+ (Linux 6.7+) handles TCP
+            # bind with no rule; an older kernel reports "bind: kernel". A
+            # cosmo APE uses its own libc unveil and prints no bind field.
+            if [ "$UNAME_S" = "Linux" ] && [ "${PLATFORM_CC#*cosmocc}" = "${PLATFORM_CC:-}" ]; then
+                KREL=$(uname -r | awk -F. '{ printf "%d", $1 * 100 + $2 }')
+                if [ "$KREL" -ge 607 ] && [ -r /sys/kernel/security/lsm ] &&
+                   grep -q landlock /sys/kernel/security/lsm; then
+                    check_contains "landlock refuses bind after the listener" "$LOG" "bind: refused"
+                else
+                    check_contains "bind state reported" "$LOG" "bind: "
+                fi
+            fi
         fi
     else
         check_contains "sandbox not available log" "$LOG" "NO kernel sandbox on this host"

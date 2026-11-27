@@ -939,6 +939,11 @@ typedef struct {
 
     /* Init flags for cleanup ordering */
     int                  server_init;  /* kl_http_server_init succeeded */
+    /* The listener Hull bound before phase 2 (#1226), handed to Keel as an
+     * adopted listen_fd; Keel owns it once kl_http_server_run was entered. */
+    KlSocketHandle       prebound_fd;
+    int                  prebound;     /* prebound_fd is set */
+    int                  run_entered;  /* kl_http_server_run was called */
     int                  app_loaded;   /* rt->vt->load_app() succeeded */
     int                  manifest_extracted; /* extract_manifest called */
 
@@ -2645,6 +2650,8 @@ static void hl_serve_undo_caps(HlServerState *s)
 }
 
 /* Phase 2: apply the OS-level sandbox built from the resolved manifest. */
+static int hl_serve_prebind_listener(HlServerState *s);   /* #1226 */
+
 static int hl_serve_apply_sandbox(HlServerState *s)
 {
 #ifdef HL_ENABLE_WASM
@@ -2652,6 +2659,15 @@ static int hl_serve_apply_sandbox(HlServerState *s)
      * exists when phase 2 applies (audit 43); the next arm restarts it. */
     hl_wasm_watchdog_quiesce();
 #endif
+    {
+        /* An app that will serve binds its listener now, before phase 2
+         * (#1226); a main-only CLI binds nothing. */
+        HlRuntime *prt = hl_app_context_runtime(s->app);
+        int serves = !(prt && prt->vt && prt->vt->has_main && prt->vt->has_main(prt)
+                       && (!prt->vt->has_server_handlers
+                           || !prt->vt->has_server_handlers(prt)));
+        if (serves && hl_serve_prebind_listener(s) != 0) return -1;
+    }
     if (!s->cfg.no_sandbox) {
         HlSandboxPolicy sandbox_policy;
         hl_sandbox_policy_from_manifest(&sandbox_policy, &s->manifest);
@@ -3036,6 +3052,69 @@ static void hl_serve_log_listening(void *user)
              s->cfg.bind_addr, port > 0 ? port : s->cfg.port, rt->vt->name);
 }
 
+/* The socket provider the server uses: the conn-limit decorator when it is
+ * installed, else the built-in one. */
+static const KlSocketProvider *hl_serve_sockets(HlServerState *s)
+{
+    if (s->server.config.sockets) return s->server.config.sockets;
+#ifdef _WIN32
+    return kl_socket_provider_winsock();
+#else
+    return kl_socket_provider_posix();
+#endif
+}
+
+/* Bind and listen on -b / -p before the phase-2 sandbox (#1226) and hand the
+ * socket to Keel as an adopted listen_fd, read by kl_http_server_run. Keel
+ * itself binds only when the run starts, after phase 2, so without this the
+ * sandbox had to allow bind(2) - any address, any port - for the server's
+ * whole life. With it nothing binds after phase 2, and the sandbox refuses
+ * every bind (HlSandboxPolicy.allow_bind 0). Mirrors Keel's own TCP bind
+ * (kl_http_server_bind_tcp): close-on-exec, SO_REUSEADDR, best-effort
+ * SO_REUSEPORT, dual-stack on an IPv6 address, backlog 128. Called only for
+ * an app that will serve: a main-only CLI binds no port. */
+static int hl_serve_prebind_listener(HlServerState *s)
+{
+    if (s->prebound) return 0;
+    const KlSocketProvider *sp = hl_serve_sockets(s);
+    const KlSocketOps *o = sp ? sp->ops : NULL;
+    if (!o || !o->socket || !o->bind || !o->listen || !o->close) {
+        log_error("[hull:c] the socket provider cannot bind a listener");
+        return -1;
+    }
+    const char *addr = s->cfg.bind_addr ? s->cfg.bind_addr : "127.0.0.1";
+    KlSockAddr sa;
+    if (s->cfg.port < 0 || s->cfg.port > 65535 ||
+        kl_sockaddr_parse(&sa, addr, (uint16_t)s->cfg.port) != 0) {
+        log_error("[hull:c] invalid bind address '%s'", addr);
+        return -1;
+    }
+    int v6 = kl_sockaddr_family(&sa) == KL_AF_INET6;
+    KlSocketHandle fd = o->socket(sp->context, v6 ? AF_INET6 : AF_INET, SOCK_STREAM, 0);
+    if (!kl_handle_valid(fd)) {
+        log_error("[hull:c] socket: %s", strerror(errno));
+        return -1;
+    }
+    if (o->set_cloexec) o->set_cloexec(sp->context, fd);
+    if (o->set_reuseaddr) (void)o->set_reuseaddr(sp->context, fd, 1);
+    if (o->set_reuseport) (void)o->set_reuseport(sp->context, fd, 1);
+    if (v6 && o->set_ipv6only) (void)o->set_ipv6only(sp->context, fd, 0);
+    if (o->bind(sp->context, fd, &sa) != 0) {
+        log_error("[hull:c] bind failed on %s:%d: %s", addr, s->cfg.port, strerror(errno));
+        (void)o->close(sp->context, fd);
+        return -1;
+    }
+    if (o->listen(sp->context, fd, 128) != 0) {
+        log_error("[hull:c] listen %s:%d: %s", addr, s->cfg.port, strerror(errno));
+        (void)o->close(sp->context, fd);
+        return -1;
+    }
+    s->prebound_fd = fd;
+    s->prebound = 1;
+    s->server.config.listen_fd = fd;
+    return 0;
+}
+
 /* Phase 4: enter the event loop until the server stops. -1 when the server
  * could not start (the bind failed, the port is taken) or the loop failed,
  * so the process exits non-zero instead of 0 for a server that never ran. */
@@ -3044,6 +3123,7 @@ static int hl_serve_run(HlServerState *s)
     if (kl_timer_add(&s->server.ev, 0, hl_serve_log_listening, s) < 0)
         hl_serve_log_listening(s);   /* no timer: say it now, as before */
 
+    s->run_entered = 1;   /* Keel owns the adopted listener from here */
     int rc = kl_http_server_run(&s->server);
     if (rc < 0)
         log_error("[hull:c] server exited with error: %s",
@@ -3078,6 +3158,15 @@ static void hl_serve_free_server(HlServerState *s)
     hl_serve_stop_runtime_async(s);
     if (s->async_ctx) hl_async_backend_keel_orphan(s->async_ctx);
     if (s->net_ctx) hl_net_backend_keel_orphan(s->net_ctx);
+    /* A listener bound for a run that never started is still Hull's
+     * (#1226); once the run was entered Keel adopted and closes it. */
+    if (s->prebound && !s->run_entered) {
+        const KlSocketProvider *sp = hl_serve_sockets(s);
+        if (sp && sp->ops && sp->ops->close)
+            (void)sp->ops->close(sp->context, s->prebound_fd);
+        s->server.config.listen_fd = 0;
+    }
+    s->prebound = 0;
     kl_http_server_free(&s->server);
     s->server_init = 0;
     s->server_tls_ctx = NULL;   /* the server destroyed it */
