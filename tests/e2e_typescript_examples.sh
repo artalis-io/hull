@@ -70,19 +70,32 @@ rc=0; (cd "$cli" && "$HULL" app.ts -- nope) > "$WORK/nope.txt" 2>&1 || rc=$?
 [ "$rc" -eq 1 ] && has "$WORK/nope.txt" "unknown command 'nope'" &&
     ok "cli_modular_ts: an unknown command exits 1" || { bad "unknown command (rc $rc)"; cat "$WORK/nope.txt"; }
 
-port=$((20000 + $$ % 20000))
-serve_check() {   # $1 = directory, $2 = command; checks the task routes on $port
+# A port the kernel reports free right now, picked fresh for each server: a
+# fixed formula ($$-derived) could land on a port another process holds (it
+# overlapped Linux's ephemeral range), and the checks then talked to that
+# process or the server failed to bind. Without python3, a port below the
+# ephemeral ranges (Linux 32768+, macOS 49152+).
+free_port() {
+    python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()' 2>/dev/null ||
+        echo $((20000 + ($$ + $1) % 12000))
+}
+serve_check() {   # $1 = directory, $2 = command, $3 = attempt salt; checks the task routes
+    port=$(free_port "$3")
     (cd "$1" && exec $2 -p "$port") > "$WORK/srv.log" 2>&1 &
     pid=$!
-    n=0; until curl -s "http://127.0.0.1:$port/tasks" > /dev/null 2>&1 || [ $n -ge 50 ]; do
+    # Wait only while OUR server is alive: an answer on the port from another
+    # process must not count as this server's.
+    n=0; until curl -s "http://127.0.0.1:$port/tasks" > /dev/null 2>&1 || [ $n -ge 50 ] ||
+               ! kill -0 "$pid" 2>/dev/null; do
         sleep 0.1; n=$((n+1)); done
+    kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; return 1; }
     curl -s -X POST -H 'Content-Type: application/json' -d '{"title":"Buy milk"}' \
         "http://127.0.0.1:$port/tasks" > "$WORK/post.json" 2>/dev/null || true
     curl -s -H 'Accept-Language: hu' "http://127.0.0.1:$port/tasks/99999" > "$WORK/404.json" 2>/dev/null || true
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
     has "$WORK/post.json" '"title":"Buy milk"' && has "$WORK/404.json" 'feladat nem tal'
 }
-serve_check "$rest" "$HULL app.ts" && ok "rest_api_ts: the routes answer, in the request's language" ||
+serve_check "$rest" "$HULL app.ts" 0 && ok "rest_api_ts: the routes answer, in the request's language" ||
     { bad "rest_api_ts served from source"; cat "$WORK/srv.log" "$WORK/post.json" "$WORK/404.json"; }
 
 echo "== typescript examples: hull manifest, hull deploy"
@@ -132,8 +145,7 @@ else
     mkdir -p "$WORK/out" "$WORK/srv"
     rc=0; "$HULL" build --no-verify-platform "$rest" -o "$WORK/out/rest" > "$WORK/b_rest.txt" 2>&1 || rc=$?
     cp "$WORK/out/rest" "$WORK/srv/app" 2>/dev/null || true
-    port=$((port + 1))
-    [ "$rc" -eq 0 ] && serve_check "$WORK/srv" "./app" &&
+    [ "$rc" -eq 0 ] && serve_check "$WORK/srv" "./app" 1 &&
         ok "rest_api_ts: the built server answers" ||
         { bad "rest_api_ts: built server (rc $rc)"; cat "$WORK/b_rest.txt" "$WORK/srv.log"; }
 fi
