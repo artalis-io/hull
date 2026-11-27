@@ -8,6 +8,8 @@
 #ifndef HL_LIMITS_EXEC_H
 #define HL_LIMITS_EXEC_H
 
+#include <stdint.h>
+
 /* The policy (one encoded `exec` section). */
 #define HL_EXEC_MAX_COMMANDS        32
 #define HL_EXEC_NAME_MAX            64          /* [a-z0-9][a-z0-9-]{0,63} */
@@ -46,6 +48,19 @@
 #define HL_EXEC_MAX_ARG_BYTES       (64u * 1024u)
 /* The arguments a call may pass (every slot, a repeat slot at its max). */
 #define HL_EXEC_MAX_CALL_ARGS       (HL_EXEC_MAX_ARGV + HL_EXEC_MAX_REPEAT)
+
+/* A stream command (`stream = true`, docs/design/exec_stream.md). Its timeout
+ * may be 0 (none) or any value from the floor up; its totals have no Hull
+ * ceiling (Hull holds only the windows below, whatever the command does). */
+#define HL_EXEC_STREAM_TIMEOUT_MAX_MS 0xFFFFFFFEu
+#define HL_EXEC_STREAM_NO_CAP       UINT64_MAX    /* an output total not declared */
+#define HL_EXEC_STREAM_TOTAL_MAX    (UINT64_C(1) << 63)
+/* What one stream may hold in flight per pipe (stdout, stderr, stdin), and
+ * the largest CHUNK / STDIN frame. */
+#define HL_EXEC_STREAM_WINDOW       (256u * 1024u)
+#define HL_EXEC_STREAM_CHUNK_MAX    (64u * 1024u)
+/* Small writes wait this long for more before a CHUNK goes out. */
+#define HL_EXEC_STREAM_COALESCE_MS  20u
 
 /* Admission, held by the broker (PR 2) and mirrored by the binding. */
 #define HL_EXEC_MAX_INFLIGHT        8

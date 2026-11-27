@@ -8,6 +8,18 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- **`hull/exec`: the broker side of streamed, long-running commands** (docs/design/exec_stream.md,
+  PR 1 of 3). A declared command can be marked `stream = true` in the encoded policy, with its own
+  timeout (any length, or none) and output and stdin totals (any size). The command broker and the
+  macOS router stream such a call's output in chunks as it is written and take its stdin as the app
+  writes it. Each pipe is held to a 256 KiB credit window, so an app that stops reading stops the
+  command and Hull never holds more. Credit or stdin past those bounds, or a stream request for a
+  command that is not a stream command, ends the call. `exec.run` on a stream command still works,
+  under the usual 60 s and 16 MiB limits. There is no app-facing API yet: `exec.stream` and the
+  manifest key arrive in the next PR.
+
 ### Fixed
 
 - **`hull/exec` on macOS: one slow command broker no longer stalls the others** (#1234). With

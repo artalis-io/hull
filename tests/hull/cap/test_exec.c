@@ -663,6 +663,106 @@ UTEST(exec_stdin, a_truncated_stdin_max_is_refused)
     hl_exec_buf_free(&b);
 }
 
+
+/* ── Stream commands (stream = true, docs/design/exec_stream.md §3) ── */
+
+static int build_stream(HlExecBuf *b, int64_t timeout, int64_t so, int64_t se,
+                        int64_t si)
+{
+    hl_exec_b_init(b, NULL);
+    hl_exec_b_cmd_stream(b, S("unit-log"), S("/usr/bin/journalctl"), timeout, so, se,
+                         -1, 1, si, PIN_HEX, 64);
+    for (int k = 0; k < 4; k++) hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
+    return hl_exec_b_finish(b);
+}
+
+UTEST(exec_stream, limits_are_encoded_and_exec_run_limits_derived)
+{
+    HlExecBuf b;
+    HlExecCmd c;
+    /* no time limit, no output cap, 4 GiB of stdin */
+    ASSERT_EQ(0, build_stream(&b, 0, -1, -1, (int64_t)4 << 30));
+    ASSERT_EQ(0, hl_exec_policy_at(b.data, b.len, 0, &c));
+    EXPECT_TRUE(c.flags & HL_EXEC_CMD_STREAM);
+    EXPECT_TRUE(c.flags & HL_EXEC_CMD_STDIN);
+    EXPECT_TRUE(c.sha256 != NULL);
+    EXPECT_EQ(0u, c.stream_timeout_ms);
+    EXPECT_EQ(HL_EXEC_STREAM_NO_CAP, c.stream_stdout_max);
+    EXPECT_EQ(HL_EXEC_STREAM_NO_CAP, c.stream_stderr_max);
+    EXPECT_EQ((uint64_t)4 << 30, c.stream_stdin_max);
+    /* what exec.run gets on it: its own ceilings */
+    EXPECT_EQ((uint32_t)HL_EXEC_TIMEOUT_MAX_MS, c.timeout_ms);
+    EXPECT_EQ(HL_EXEC_STDOUT_CEIL, c.stdout_max);
+    EXPECT_EQ(HL_EXEC_STDERR_CEIL, c.stderr_max);
+    EXPECT_EQ(HL_EXEC_STDIN_CEIL, c.stdin_max);
+    EXPECT_EQ(0, c.n_argv);
+    hl_exec_buf_free(&b);
+    /* small limits pass through to exec.run unchanged */
+    ASSERT_EQ(0, build_stream(&b, 3000, 1000, 10, -1));
+    ASSERT_EQ(0, hl_exec_policy_at(b.data, b.len, 0, &c));
+    EXPECT_EQ(3000u, c.stream_timeout_ms);
+    EXPECT_EQ(3000u, c.timeout_ms);
+    EXPECT_EQ(1000u, c.stdout_max);
+    EXPECT_EQ(10u, c.stderr_max);
+    EXPECT_FALSE(c.flags & HL_EXEC_CMD_STDIN);
+    EXPECT_EQ(0u, c.stream_stdin_max);
+    hl_exec_buf_free(&b);
+    /* a long timeout is the stream's; exec.run clamps it */
+    ASSERT_EQ(0, build_stream(&b, 7 * 24 * 3600 * 1000LL, -1, -1, -1));
+    ASSERT_EQ(0, hl_exec_policy_at(b.data, b.len, 0, &c));
+    EXPECT_EQ(7u * 24 * 3600 * 1000, c.stream_timeout_ms);
+    EXPECT_EQ((uint32_t)HL_EXEC_TIMEOUT_MAX_MS, c.timeout_ms);
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_stream, out_of_range_limits_fail_the_build)
+{
+    HlExecBuf b;
+    EXPECT_EQ(-1, build_stream(&b, 50, -1, -1, -1));            /* under the floor */
+    EXPECT_TRUE(strstr(b.err, "timeout_ms") != NULL);
+    EXPECT_EQ(-1, build_stream(&b, (int64_t)1 << 32, -1, -1, -1));
+    EXPECT_TRUE(strstr(b.err, "timeout_ms") != NULL);
+    EXPECT_EQ(-1, build_stream(&b, 0, -7, -1, -1));
+    EXPECT_TRUE(strstr(b.err, "stdout_max") != NULL);
+    EXPECT_EQ(-1, build_stream(&b, 0, -1, -7, -1));
+    EXPECT_TRUE(strstr(b.err, "stderr_max") != NULL);
+    EXPECT_EQ(-1, build_stream(&b, 0, -1, -1, -7));
+    EXPECT_TRUE(strstr(b.err, "stdin_max") != NULL);
+}
+
+UTEST(exec_stream, exec_run_limits_that_disagree_are_refused)
+{
+    HlExecBuf b;
+    ASSERT_EQ(0, build_stream(&b, 0, 1000, 10, 64));
+    /* the timeout u32 after the two strings: a forged exec.run timeout */
+    size_t at = 4 + 2 + (2 + strlen("unit-log") + 1) + (2 + strlen("/usr/bin/journalctl") + 1);
+    EXPECT_EQ(0, hl_exec_policy_validate(b.data, b.len, NULL, 0));
+    b.data[at] ^= 0x01;
+    char err[256];
+    EXPECT_EQ(-1, hl_exec_policy_validate(b.data, b.len, err, sizeof err));
+    b.data[at] ^= 0x01;
+    b.data[at + 4] ^= 0x01;                                      /* stdout_max */
+    EXPECT_EQ(-1, hl_exec_policy_validate(b.data, b.len, err, sizeof err));
+    b.data[at + 4] ^= 0x01;
+    EXPECT_EQ(0, hl_exec_policy_validate(b.data, b.len, NULL, 0));
+    /* every truncation inside the stream limits */
+    for (size_t cut = 1; cut < b.len; cut++)
+        EXPECT_EQ(-1, hl_exec_policy_validate(b.data, cut, NULL, 0));
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_stream, a_plain_command_has_no_stream_limits)
+{
+    HlExecBuf b;
+    HlExecCmd c;
+    ASSERT_EQ(0, build_stdin(&b, 64, NULL));
+    ASSERT_EQ(0, hl_exec_policy_at(b.data, b.len, 0, &c));
+    EXPECT_FALSE(c.flags & HL_EXEC_CMD_STREAM);
+    EXPECT_EQ(0u, c.stream_timeout_ms);
+    EXPECT_EQ(0u, c.stream_stdin_max);
+    hl_exec_buf_free(&b);
+}
+
 /* ── The child manifest (exec.<name>.manifest, §3) ─────────────────── */
 
 /* gpu-query as v0.26.0 encodes it (host fs + unix_sockets, no child

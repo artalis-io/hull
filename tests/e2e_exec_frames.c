@@ -29,6 +29,15 @@
  *      the 5 s the old blocking write allowed) its call completes too, not
  *      "the command broker is gone"; a KILL of a call whose RUN never went
  *      out yields no reply and frees its slot (#1234)
+ *  12. streams (docs/design/exec_stream.md), through the router on macOS and
+ *      the one broker on Linux: a stream RUN to a non-stream command, an open
+ *      stdin without a stream, exec.run of a stream command, the credit
+ *      window both ways (output stops at one window, credit lets exactly that
+ *      much more through, credit past the window ends the call), stdin
+ *      without an open stdin or past its credit, the total cap, the timeout
+ *      (read or not), KILLed unread streams freeing their slots, output before
+ *      the end, a stdin round trip and EOF, and the throughput of 200 MiB
+ *      through the window (macOS also without the router)
  *
  * Usage: e2e_exec_frames <path to hull> [degraded]
  *
@@ -64,6 +73,13 @@
 #define DONE    5u
 #define BUSY    6u
 #define REFUSED 7u
+#define CHUNK   9u
+#define CREDIT 10u
+#define STDIN  11u
+#define STDIN_CREDIT 12u
+#define RUN_STREAM 1u
+#define RUN_STDIN_OPEN 2u
+#define WINDOW  (256u * 1024u)
 
 static const char *g_hull;
 static unsigned g_flags;
@@ -274,9 +290,10 @@ static void broker_end(Broker *b)
     waitpid(b->pid, &st, 0);
 }
 
-/* RUN with @p arg (NULL = none) and @p in on stdin (NULL = none). */
-static void run_in(int fd, uint32_t id, const char *name, const char *arg,
-                   const char *in)
+/* RUN with @p arg (NULL = none), @p in on stdin (NULL = none) and RUN
+ * flags @p flags. */
+static void run_flags(int fd, uint32_t id, const char *name, const char *arg,
+                      const char *in, unsigned flags)
 {
     uint8_t p[256];
     size_t nl = strlen(name), off = 0;
@@ -289,7 +306,19 @@ static void run_in(int fd, uint32_t id, const char *name, const char *arg,
     }
     size_t il = in ? strlen(in) : 0;
     put32(p + off, (uint32_t)il); off += 4;
-    send_frame(fd, RUN, id, p, off, in, il);
+    uint8_t fl = (uint8_t)flags;
+    uint8_t *all = malloc(off + il + 1);
+    memcpy(all, p, off);
+    if (il) memcpy(all + off, in, il);
+    all[off + il] = fl;
+    send_frame(fd, RUN, id, all, off + il + 1, NULL, 0);
+    free(all);
+}
+
+static void run_in(int fd, uint32_t id, const char *name, const char *arg,
+                   const char *in)
+{
+    run_flags(fd, id, name, arg, in, 0);
 }
 
 static void run(int fd, uint32_t id, const char *name, const char *arg)
@@ -312,6 +341,321 @@ static int expect(int fd, uint32_t want_id, uint32_t *type, char *msg, size_t ms
         }
         free(buf);
     }
+}
+
+/* ── Streams (docs/design/exec_stream.md) ──────────────────────────── */
+
+/* One stream command: no slots, its fixed argv. */
+static void stream_cmd(HlExecBuf *b, const char *name, const char *path,
+                       const char *const *fixed, int nfixed, int64_t timeout,
+                       int64_t out_max, int64_t in_max)
+{
+    hl_exec_b_cmd_stream(b, name, strlen(name), path, strlen(path), timeout, out_max, -1,
+                         4, 0, in_max, NULL, 0);
+    for (int k = 0; k < 3; k++) hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
+    size_t m = hl_exec_b_count_begin(b);
+    for (int i = 0; i < nfixed; i++) hl_exec_b_fixed(b, fixed[i], strlen(fixed[i]));
+    hl_exec_b_count_end(b, m, (size_t)nfixed);
+}
+
+/* The stream suite's commands: "y" yes (no limits), "yt" yes (1 s), "yc"
+ * yes (stdout_max 100000), "b" bash reading one line, "c" cat (stdin up to
+ * 1 MiB), and "e", echo, which is not a stream command. */
+static HlExecBuf policy_streams(void)
+{
+    HlExecBuf b;
+    hl_exec_b_init(&b, NULL);
+    stream_cmd(&b, "y", "/usr/bin/yes", NULL, 0, 0, -1, -1);
+    stream_cmd(&b, "yt", "/usr/bin/yes", NULL, 0, 1000, -1, -1);
+    stream_cmd(&b, "yc", "/usr/bin/yes", NULL, 0, 10000, 100000, -1);
+    static const char *const bash_argv[] = { "-c", "echo a; read x; echo \"got $x\"" };
+    stream_cmd(&b, "b", "/bin/bash", bash_argv, 2, 10000, -1, 1024 * 1024);
+    stream_cmd(&b, "c", "/bin/cat", NULL, 0, 30000, -1, 1024 * 1024);
+    hl_exec_b_cmd(&b, "e", 1, "/bin/echo", 9, 60000, -1, -1, 2, 0, -1, NULL, 0);
+    for (int k = 0; k < 3; k++) hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    size_t m = hl_exec_b_count_begin(&b);
+    hl_exec_b_fixed(&b, "hi", 2);
+    hl_exec_b_count_end(&b, m, 1);
+    if (hl_exec_b_finish(&b) != 0) { fprintf(stderr, "policy: %s\n", b.err); exit(2); }
+    return b;
+}
+
+/* A policy of "y" alone (macOS: no router). */
+static HlExecBuf policy_yes_only(void)
+{
+    HlExecBuf b;
+    hl_exec_b_init(&b, NULL);
+    stream_cmd(&b, "y", "/usr/bin/yes", NULL, 0, 0, -1, -1);
+    if (hl_exec_b_finish(&b) != 0) { fprintf(stderr, "policy: %s\n", b.err); exit(2); }
+    return b;
+}
+
+static void credit(int fd, uint32_t id, uint8_t pipe, uint32_t bytes)
+{
+    uint8_t p[5];
+    p[0] = pipe;
+    put32(p + 1, bytes);
+    send_frame(fd, CREDIT, id, p, 5, NULL, 0);
+}
+
+static void stdin_send(int fd, uint32_t id, uint8_t flags, const char *data, size_t n)
+{
+    send_frame(fd, STDIN, id, &flags, 1, data, n);
+}
+
+/* What came for call @p id until its last frame or @p ms of quiet. */
+typedef struct {
+    size_t   bytes[3];          /* CHUNK bytes per pipe (1, 2) */
+    char     text[256];         /* the first stdout bytes */
+    size_t   text_len;
+    uint32_t stdin_credit;      /* STDIN_CREDIT bytes */
+    int      stdin_closed;
+    uint32_t last;              /* DONE / REFUSED / BUSY, 0 = none */
+    uint8_t  done[64];          /* the DONE (or REFUSED) payload */
+    size_t   done_len;
+    int      chunks_after_last; /* frames for the id after its last frame */
+} Got;
+
+/* Read frames for @p id: return on its last frame, after @p ms of quiet,
+ * or once @p until stdout bytes came (0 = no such stop). Credit is given
+ * back for every CHUNK when @p give. */
+static void collect(int fd, uint32_t id, Got *g, int ms, size_t until, int give)
+{
+    for (;;) {
+        uint32_t t, rid; uint8_t *buf; size_t len;
+        int r = read_frame(fd, &t, &rid, &buf, &len, ms);
+        if (r != 1) return;
+        if (rid != id) { free(buf); continue; }
+        if (g->last) { g->chunks_after_last++; free(buf); continue; }
+        if (t == CHUNK && len >= 1) {
+            uint8_t pipe = buf[0];
+            if (pipe <= 2) g->bytes[pipe] += len - 1;
+            if (pipe == 1)
+                for (size_t i = 1; i < len && g->text_len < sizeof g->text - 1; i++)
+                    g->text[g->text_len++] = (char)buf[i];
+            g->text[g->text_len] = 0;
+            if (give) credit(fd, id, pipe, (uint32_t)(len - 1));
+        } else if (t == STDIN_CREDIT && len == 5) {
+            g->stdin_credit += get32(buf + 1);
+            g->stdin_closed |= buf[0] & 1;
+        } else if (t == DONE || t == REFUSED || t == BUSY) {
+            g->last = t;
+            g->done_len = len < sizeof g->done ? len : sizeof g->done;
+            memcpy(g->done, buf, g->done_len);
+            free(buf);
+            return;
+        }
+        free(buf);
+        if (until && g->bytes[1] >= until) return;
+    }
+}
+
+static uint64_t get64(const uint8_t *p) { return get32(p) | (uint64_t)get32(p + 4) << 32; }
+
+static double now_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* 200 MiB of `yes` through the window, credit given back for each CHUNK:
+ * the throughput (MiB/s), printed for the window / chunk sizing. */
+static void stream_throughput(Broker *b, uint32_t id, const char *label)
+{
+    const size_t total = 200u * 1024u * 1024u;
+    double t0 = now_s();
+    run_flags(b->fd, id, "y", NULL, NULL, RUN_STREAM);
+    Got g = { 0 };
+    collect(b->fd, id, &g, 5000, total, 1);
+    double dt = now_s() - t0;
+    send_frame(b->fd, KILL, id, NULL, 0, NULL, 0);
+    CHECK(g.bytes[1] >= total, "%s: 200 MiB streamed through a 256 KiB window "
+          "(%zu MiB in %.2f s, %.0f MiB/s)", label, g.bytes[1] >> 20, dt,
+          (double)g.bytes[1] / (1024.0 * 1024.0) / dt);
+}
+
+static void stream_cases(const char *mode)
+{
+    uint32_t t;
+    char msg[512];
+    int r;
+    HlExecBuf p = policy_streams();
+    Broker b = broker_start(&p);
+    printf("== streams (%s)\n", mode);
+
+    /* exec_frames_stream.not_a_stream_command */
+    run_flags(b.fd, 1, "e", NULL, NULL, RUN_STREAM);
+    r = expect(b.fd, 1, &t, msg, sizeof msg, 3000);
+    CHECK(r == 1 && t == REFUSED && strstr(msg, "not a stream command"),
+          "a stream RUN to a non-stream command is refused (%s)", msg);
+    /* exec_frames_stream.stdin_open_needs_stream */
+    run_flags(b.fd, 2, "c", NULL, NULL, RUN_STDIN_OPEN);
+    r = expect(b.fd, 2, &t, msg, sizeof msg, 3000);
+    CHECK(r == 1 && t == REFUSED, "an open stdin without a stream is refused (%s)", msg);
+    /* exec.run of a stream command still runs, under exec.run's limits. */
+    run_flags(b.fd, 3, "yt", NULL, NULL, 0);
+    {
+        Got g = { 0 };
+        collect(b.fd, 3, &g, 5000, 0, 0);
+        CHECK(g.last == DONE && g.done_len >= 20 && get32(g.done + 16) == 16u << 20 &&
+              g.done[9], "exec.run of a stream command with no output cap buffers up "
+              "to exec.run's 16 MiB ceiling (%u bytes, cut %d)", g.done_len >= 20 ? get32(g.done + 16) : 0,
+              g.done_len >= 20 ? g.done[9] : -1);
+    }
+
+    /* exec_frames_stream.window: no credit back -> exactly one window, then
+     * nothing; credit -> exactly that much more. */
+    run_flags(b.fd, 4, "y", NULL, NULL, RUN_STREAM);
+    {
+        Got g = { 0 };
+        collect(b.fd, 4, &g, 800, 0, 0);
+        CHECK(g.bytes[1] == WINDOW && !g.last, "with no credit back the stream stops "
+              "at one window (%zu bytes)", g.bytes[1]);
+        credit(b.fd, 4, 1, 65536);
+        collect(b.fd, 4, &g, 800, 0, 0);
+        CHECK(g.bytes[1] == WINDOW + 65536 && !g.last, "64 KiB of credit lets exactly "
+              "64 KiB more through (%zu bytes)", g.bytes[1]);
+        send_frame(b.fd, KILL, 4, NULL, 0, NULL, 0);
+        collect(b.fd, 4, &g, 400, 0, 0);
+        CHECK(!g.last, "a killed stream gets no reply");
+    }
+    /* exec_frames_stream.credit_past_window */
+    run_flags(b.fd, 5, "y", NULL, NULL, RUN_STREAM);
+    {
+        Got g = { 0 };
+        collect(b.fd, 5, &g, 500, 0, 0);
+        credit(b.fd, 5, 1, WINDOW + 1);
+        collect(b.fd, 5, &g, 3000, 0, 0);
+        CHECK(g.last == REFUSED, "credit past the window ends the call (last %u)", g.last);
+    }
+    /* exec_frames_stream.stdin_unopened */
+    run_flags(b.fd, 6, "y", NULL, NULL, RUN_STREAM);
+    {
+        Got g = { 0 };
+        stdin_send(b.fd, 6, 0, "x", 1);
+        collect(b.fd, 6, &g, 3000, 0, 1);
+        CHECK(g.last == REFUSED, "STDIN to a call that did not open stdin ends it");
+    }
+    /* exec_frames_stream.total_cap: yc's 100000 bytes, then the command is
+     * killed and DONE says so. */
+    run_flags(b.fd, 7, "yc", NULL, NULL, RUN_STREAM);
+    {
+        Got g = { 0 };
+        collect(b.fd, 7, &g, 5000, 0, 1);
+        CHECK(g.last == DONE && g.bytes[1] == 100000 && g.done_len >= 32 &&
+              g.done[11] == 1 && g.done[9] == 1 && get64(g.done + 16) == 100000 &&
+              get32(g.done + 4) == SIGKILL && g.chunks_after_last == 0,
+              "the total cap: 100000 bytes, then killed, cut, counted in DONE "
+              "(%zu bytes, signal %u)", g.bytes[1], g.done_len >= 8 ? get32(g.done + 4) : 0);
+    }
+    /* exec_frames_stream.timeout */
+    run_flags(b.fd, 8, "yt", NULL, NULL, RUN_STREAM);
+    {
+        Got g = { 0 };
+        double t0 = now_s();
+        collect(b.fd, 8, &g, 4000, 0, 1);
+        double dt = now_s() - t0;
+        CHECK(g.last == DONE && g.done[8] == 1 && dt > 0.8 && dt < 3.0,
+              "a stream times out by its own timeout (%.2f s, timed_out %d)", dt,
+              g.done_len > 8 ? g.done[8] : -1);
+    }
+    /* exec_frames_stream.timeout_unread: a consumer that never gives credit
+     * back still gets DONE at the timeout (the rest is dropped, cut). */
+    run_flags(b.fd, 15, "yt", NULL, NULL, RUN_STREAM);
+    {
+        Got g = { 0 };
+        collect(b.fd, 15, &g, 4000, 0, 0);
+        CHECK(g.last == DONE && g.done[8] == 1 && g.done[9] == 1 && g.bytes[1] == WINDOW,
+              "an unread stream still ends at its timeout, cut at one window "
+              "(%zu bytes, timed_out %d)", g.bytes[1], g.done_len > 8 ? g.done[8] : -1);
+    }
+    /* exec_frames_stream.kill_unread: a KILL frees the slot of a stream the
+     * app stopped reading (y has concurrency 4: four more run). */
+    for (uint32_t id = 16; id < 20; id++) run_flags(b.fd, id, "y", NULL, NULL, RUN_STREAM);
+    usleep(300000);
+    for (uint32_t id = 16; id < 20; id++) send_frame(b.fd, KILL, id, NULL, 0, NULL, 0);
+    usleep(300000);
+    {
+        /* One at a time, each left running unread (it then sends nothing
+         * more), so all four are in flight together. */
+        int ok = 1;
+        for (uint32_t id = 20; id < 24; id++) {
+            run_flags(b.fd, id, "y", NULL, NULL, RUN_STREAM);
+            Got g = { 0 };
+            collect(b.fd, id, &g, 800, 0, 0);
+            ok &= g.bytes[1] == WINDOW && !g.last;
+        }
+        for (uint32_t id = 20; id < 24; id++) send_frame(b.fd, KILL, id, NULL, 0, NULL, 0);
+        CHECK(ok, "KILLed unread streams free their slots: four more run");
+    }
+    usleep(300000);
+    /* exec_frames_stream.stdin_round_trip: bash prints, waits for a line on
+     * its stdin, then prints it: output before the end, stdin as it goes. */
+    run_flags(b.fd, 9, "b", NULL, NULL, RUN_STREAM | RUN_STDIN_OPEN);
+    {
+        Got g = { 0 };
+        collect(b.fd, 9, &g, 1000, 2, 1);
+        CHECK(g.text_len == 2 && memcmp(g.text, "a\n", 2) == 0 && !g.last &&
+              g.stdin_credit == WINDOW, "output arrives before the command ends, with "
+              "the stdin window granted ('%s', credit %u)", g.text, g.stdin_credit);
+        stdin_send(b.fd, 9, 0, "hello\n", 6);
+        collect(b.fd, 9, &g, 5000, 0, 1);
+        CHECK(g.last == DONE && strstr(g.text, "got hello") && get32(g.done) == 0,
+              "a line written to its stdin reaches it ('%s')", g.text);
+    }
+    /* exec_frames_stream.stdin_eof: cat echoes what it gets, then EOF ends it;
+     * the credit for the streamed bytes comes back. */
+    run_flags(b.fd, 10, "c", NULL, "init-", RUN_STREAM | RUN_STDIN_OPEN);
+    {
+        Got g = { 0 };
+        while (!g.stdin_credit && !g.last) collect(b.fd, 10, &g, 3000, 0, 1);
+        stdin_send(b.fd, 10, 1, "rest", 4);   /* within the grant, as a server waits for */
+        collect(b.fd, 10, &g, 5000, 0, 1);
+        CHECK(g.last == DONE && g.text_len == 9 && memcmp(g.text, "init-rest", 9) == 0 &&
+              get32(g.done) == 0 && g.stdin_credit == WINDOW + 4,
+              "the RUN's stdin, then streamed stdin, then EOF: cat ends ('%s', credit %u)",
+              g.text, g.stdin_credit);
+    }
+    /* exec_frames_stream.stdin_backpressure: cat with no output credit
+     * returned stops reading its stdin once its stdout is full, so the stdin
+     * credit stops too. */
+    run_flags(b.fd, 12, "c", NULL, NULL, RUN_STREAM | RUN_STDIN_OPEN);
+    {
+        Got g = { 0 };
+        char *big = malloc(65536);
+        memset(big, 'q', 65536);
+        uint32_t sent = 0;
+        collect(b.fd, 12, &g, 300, 0, 0);         /* the first grant */
+        for (int round = 0; round < 40; round++) {
+            while (sent + 65536 <= g.stdin_credit) {
+                stdin_send(b.fd, 12, 0, big, 65536);
+                sent += 65536;
+            }
+            collect(b.fd, 12, &g, 200, 0, 0);
+        }
+        CHECK(!g.last && g.bytes[1] == WINDOW && sent < 4u * 1024 * 1024,
+              "a child that cannot write stops taking stdin: %u bytes sent, %zu out",
+              sent, g.bytes[1]);
+        /* exec_frames_stream.stdin_past_credit: the credit left, and a byte. */
+        uint32_t left = g.stdin_credit - sent;
+        while (left > 0) {
+            uint32_t n = left > 65536 ? 65536 : left;
+            stdin_send(b.fd, 12, 0, big, n);
+            left -= n;
+        }
+        stdin_send(b.fd, 12, 0, big, 1);
+        free(big);
+        collect(b.fd, 12, &g, 3000, 0, 0);
+        CHECK(g.last == REFUSED, "stdin past its credit ends the call (last %u)", g.last);
+    }
+    /* After all that the broker takes calls. */
+    run_flags(b.fd, 13, "e", NULL, NULL, 0);
+    r = expect(b.fd, 13, &t, msg, sizeof msg, 3000);
+    CHECK(r == 1 && t == DONE, "the broker takes calls afterwards");
+    stream_throughput(&b, 14, mode);
+    broker_end(&b);
+    hl_exec_buf_free(&p);
 }
 
 int main(int argc, char **argv)
@@ -588,6 +932,19 @@ int main(int argc, char **argv)
     free(in);
     broker_end(&b);
     hl_exec_buf_free(&p);
+#endif
+
+#ifdef __APPLE__
+    stream_cases("router: six commands, one broker each");
+    {
+        HlExecBuf py = policy_yes_only();
+        Broker by = broker_start(&py);
+        stream_throughput(&by, 1, "one command, no router");
+        broker_end(&by);
+        hl_exec_buf_free(&py);
+    }
+#else
+    stream_cases("one broker");
 #endif
 
     printf("e2e_exec_frames: %s\n", g_fail ? "FAILED" : "ok");
