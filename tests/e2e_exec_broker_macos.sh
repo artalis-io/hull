@@ -24,11 +24,12 @@
 #     refused at start;
 #   - a sha256 pin: a match runs, a mismatch refuses the start, a binary
 #     rewritten in place fails the next call; a replaced binary is ESTALE;
-#   - orderly shutdown and server death take the running command; broker
-#     death (SIGKILL) leaves it (no parent-death signal on macOS: the
-#     documented limit) and the waiting call fails cleanly; with several
-#     commands, the router's death takes the command, and a command broker's
-#     death leaves only that command's call (the narrowed limit);
+#   - orderly shutdown, server death and broker death (SIGKILL) take the
+#     running command: each call runs under a keeper, its parent, which
+#     kills and reaps it when the broker goes (macOS has no parent-death
+#     signal), and the waiting call fails cleanly; with several commands,
+#     the router's death and a command broker's death take the command too;
+#     a KEEPER killed with SIGKILL leaves its call (the documented limit);
 #   - a client that hangs up mid-call takes the command, single broker
 #     and router (#1224);
 #   - admission by raw frames (tests/e2e_exec_frames.c).
@@ -124,8 +125,8 @@ if printf '%s\n' "$out" | grep -qF "ONE shared sandbox"; then
 else
     pass "no shared sandbox: each command has its own broker"
 fi
-check_line "the start report names the missing parent-death signal, per command broker" \
-    "exec: limit: no parent-death signal on macOS: a command's broker killed with SIGKILL"
+check_line "the start report names the keeper's limit, per command broker" \
+    "exec: limit: no parent-death signal on macOS: each call's keeper ends it when the broker goes"
 
 # unix_sockets on one command opens AF_UNIX to that command only: each has
 # its own broker and profile (docs/design/exec_broker_macos_isolation.md).
@@ -450,27 +451,45 @@ app.get("/ready", function(req, res)
 end)
 EOF
 
-death_case() {  # death_case <label> <what to kill: broker|term|server>
+death_case() {  # death_case <label> <what to kill: broker|keeper|term|server>
     start_server "$FIX/d_$2" < "$FIX/ready_app.lua" || return
     (curl -s -m 20 "http://127.0.0.1:$PORT/ready" > "$FIX/d_$2/resp" 2>&1 &)
     probe=$(log_pid 'exec probe ready pid=\([0-9]*\)') || { sleep 1; fail "$1: the probe never got ready" "$(cat "$SLOG"; echo "resp: $(cat "$FIX/d_$2/resp" 2>&1)")"; kill -9 "$SPID"; return; }
     PIDS="$PIDS $probe"
     broker=$(log_pid 'exec broker pid \([0-9]*\)')
+    keeper=$(ps -o ppid= -p "$probe" | tr -d ' ')
+    if [ "$(ps -o ppid= -p "$keeper" | tr -d ' ')" = "$broker" ] && [ "$keeper" != "$broker" ]; then
+        pass "$1: the command runs under a keeper, the broker's child"
+    else
+        fail "$1: the command runs under a keeper, the broker's child" "probe $probe, its parent $keeper, the broker $broker"
+    fi
     case "$2" in
         broker) kill -9 "$broker" ;;
+        keeper) kill -9 "$keeper" ;;
         term)   kill -TERM "$SPID"; wait "$SPID" 2>/dev/null || true ;;
         server) kill -9 "$SPID" ;;
     esac
     if [ "$2" = broker ]; then
-        # The documented limit: no parent-death signal on macOS, so the
-        # command runs on; it cannot fork, and its CPU limit holds.
-        sleep 0.3
-        if kill -0 "$probe" 2>/dev/null; then pass "$1"; else fail "$1" "probe $probe is gone (the limit text is stale)"; fi
-        kill -9 "$probe" 2>/dev/null || true
+        if gone_within "$probe"; then pass "$1"; else fail "$1" "probe $probe still alive"; kill -9 "$probe" 2>/dev/null || true; fi
+        gone_within "$keeper" || fail "$1: the keeper outlived its job" "keeper $keeper"
+        for i in $(seq 1 40); do [ -s "$FIX/d_$2/resp" ] && break; sleep 0.05; done
         case "$(cat "$FIX/d_$2/resp")" in
             *"command broker is gone"*) pass "the waiting call fails cleanly when the broker dies" ;;
             *) fail "the waiting call fails cleanly when the broker dies" "$(cat "$FIX/d_$2/resp")" ;;
         esac
+        kill -TERM "$SPID" 2>/dev/null || true
+    elif [ "$2" = keeper ]; then
+        # The documented limit: nobody is left to end the command (no
+        # parent-death signal on macOS); it cannot fork, its CPU limit holds.
+        sleep 0.3
+        if kill -0 "$probe" 2>/dev/null; then pass "$1"; else fail "$1" "probe $probe is gone (the limit text is stale)"; fi
+        kill -9 "$probe" 2>/dev/null || true
+        for i in $(seq 1 40); do [ -s "$FIX/d_$2/resp" ] && break; sleep 0.05; done
+        if [ -s "$FIX/d_$2/resp" ]; then pass "the waiting call gets a reply once the command is gone"
+        else fail "the waiting call gets a reply once the command is gone" "no reply"; fi
+        again=$(curl -s -m 5 "http://127.0.0.1:$PORT/ready" & sleep 1; p2=$(sed -n 's/.*exec probe ready pid=\([0-9]*\).*/\1/p' "$SLOG" | tail -1); [ -n "$p2" ] && [ "$p2" != "$probe" ] && echo "again:$p2" && kill -9 "$p2")
+        case "$again" in *again:*) pass "the broker runs the command again after a keeper died" ;;
+                         *) fail "the broker runs the command again after a keeper died" "$again" ;; esac
         kill -TERM "$SPID" 2>/dev/null || true
     else
         if gone_within "$probe"; then pass "$1"; else fail "$1" "probe $probe still alive"; kill -9 "$probe" 2>/dev/null || true; fi
@@ -482,7 +501,8 @@ death_case() {  # death_case <label> <what to kill: broker|term|server>
 echo "== deaths, after exec"
 death_case "orderly shutdown (SIGTERM) takes the command" term
 death_case "server death (kill -9) takes the broker and the command" server
-death_case "broker death (kill -9) leaves the command (documented limit)" broker
+death_case "broker death (kill -9) takes the command (its keeper ends it)" broker
+death_case "a keeper's death (kill -9) leaves its call (documented limit)" keeper
 
 # Two commands: a router and one broker each.
 cat > "$FIX/ready2_app.lua" <<EOF
@@ -524,15 +544,20 @@ death_case2() {  # death_case2 <label> <router|sub>
     probe=$(log_pid 'exec probe ready pid=\([0-9]*\)') || { sleep 1; fail "$1: the probe never got ready" "$(cat "$SLOG")"; kill -9 "$SPID"; return; }
     PIDS="$PIDS $probe"
     router=$(log_pid 'exec broker pid \([0-9]*\)')
-    sub=$(ps -o ppid= -p "$probe" | tr -d ' ')
+    keeper=$(ps -o ppid= -p "$probe" | tr -d ' ')
+    sub=$(ps -o ppid= -p "$keeper" | tr -d ' ')
+    if [ "$(ps -o ppid= -p "$sub" | tr -d ' ')" = "$router" ]; then
+        pass "$1: router -> command broker -> keeper -> command"
+    else
+        fail "$1: router -> command broker -> keeper -> command" "probe $probe keeper $keeper sub $sub router $router"
+    fi
     if [ "$2" = router ]; then
         kill -9 "$router"
         if gone_within "$probe"; then pass "$1"; else fail "$1" "probe $probe still alive"; kill -9 "$probe" 2>/dev/null || true; fi
     else
         kill -9 "$sub"
-        sleep 0.3
-        if kill -0 "$probe" 2>/dev/null; then pass "$1"; else fail "$1" "probe $probe is gone (the limit text is stale)"; fi
-        kill -9 "$probe" 2>/dev/null || true
+        if gone_within "$probe"; then pass "$1"; else fail "$1" "probe $probe still alive"; kill -9 "$probe" 2>/dev/null || true; fi
+        gone_within "$keeper" || fail "$1: the keeper outlived its job" "keeper $keeper"
         for i in $(seq 1 40); do [ -s "$FIX/e_$2/resp" ] && break; sleep 0.05; done
         case "$(cat "$FIX/e_$2/resp")" in
             *"command broker is gone"*) pass "the waiting call fails cleanly when its command's broker dies" ;;
@@ -553,7 +578,7 @@ death_case2() {  # death_case2 <label> <router|sub>
 
 echo "== deaths, two commands"
 death_case2 "router death (kill -9) takes the command (its broker sees it go)" router
-death_case2 "a command broker's death (kill -9) leaves only that call (documented limit)" sub
+death_case2 "a command broker's death (kill -9) takes its command (its keeper ends it)" sub
 
 # A client that hangs up while its call runs takes the command (#1224):
 # Keel 3.5+ cancels a suspended request on the client's FIN, and the op's

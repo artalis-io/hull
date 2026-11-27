@@ -2753,10 +2753,13 @@ the command's broker. Each broker's profile: deny default, `process-exec` of eac
 path, `process-fork` only for the broker's own image (`process-path`, so a command gets EPERM from
 fork / vfork / posix_spawn; a command that is this hull binary is refused), reads of the system
 trees and `fs.read`, writes of `/dev/null` and `fs.write`, `AF_UNIX` only with `unix_sockets`; a
-64-bit Mach-O only; `execve` of the checked path. Its limit, logged at start as `exec: limit:`:
-a command broker killed with SIGKILL leaves its running calls (no PDEATHSIG; a kqueue watch on
-its parent's pid and the channel's EOF take them on every other end, a SIGKILLed router
-included). OpenBSD has no backend. `exec.run` parks like `hull.sleep` (attached or detached `HlAsyncCtx`, `hl_exec_op_start`);
+64-bit Mach-O only; `execve` of the checked path. macOS has no PDEATHSIG, so every call runs
+under a KEEPER (`hl_exec_plat_keeper`, docs/design/exec_broker_macos_isolation.md §4.6): the broker
+forks it (its own image, never exec'd), it forks the job and is its parent, and it kills and reaps
+the job when its kill pipe closes (the broker ends a call by closing it; its death closes it) or the
+broker's pid exits - so a broker, a command broker or a router killed with SIGKILL takes its running
+calls. Its limit, logged at start as `exec: limit:`: a KEEPER killed with SIGKILL leaves its one
+job running until it exits. OpenBSD has no backend. `exec.run` parks like `hull.sleep` (attached or detached `HlAsyncCtx`, `hl_exec_op_start`);
 the op's free sends `KILL`, so every cancel path stops the child; a broker lost while serving fails
 the waiting calls, and teardown stops it in step (1) while the loop is alive. Under `hull test` only
 stubs answer. `hull build` / `hull check` warn about risky commands (`hull/exec_lint.lua`; never a

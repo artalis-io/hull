@@ -472,11 +472,14 @@ int main(int argc, char **argv)
     usleep(300000);
     pid_t target = -1;                       /* sl's broker: the one with a child */
     for (int i = 0; i < nsub; i++) {
-        pid_t kids[2];
-        if (children_of(subs[i], kids, 2) > 0 && target < 0) {
-            /* s1's sleep may still run too: sl's child runs 30 s. */
+        pid_t keepers[2], jobs[2];
+        /* broker -> keeper -> command; s1's sleep may still run too: sl's
+         * command runs 30 s. */
+        int nk = children_of(subs[i], keepers, 2);
+        for (int k = 0; k < nk && target < 0; k++) {
+            if (children_of(keepers[k], jobs, 2) < 1) continue;
             char cmd[96];
-            snprintf(cmd, sizeof cmd, "ps -o args= -p %d | grep -q ' 30$'", (int)kids[0]);
+            snprintf(cmd, sizeof cmd, "ps -o args= -p %d | grep -q ' 30$'", (int)jobs[0]);
             if (system(cmd) == 0) target = subs[i];
         }
     }

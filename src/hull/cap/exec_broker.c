@@ -547,7 +547,9 @@ typedef struct {
     int      used;
     uint32_t id;
     int      ci;
-    pid_t    pid;               /* 0 once reaped */
+    pid_t    pid;               /* 0 once reaped (its keeper's, under one) */
+    pid_t    job_pid;           /* the command itself (its keeper's child) */
+    int      kill_fd;           /* under a keeper: closing it ends the call */
     int      pidfd;             /* readable once it exits; -1 = none */
     int      out_fd, err_fd;    /* -1 once closed */
     int      in_fd;             /* the child's stdin pipe, -1 once written */
@@ -649,6 +651,7 @@ static void job_reply_frame(Job *j, uint32_t type, const void *body, size_t len)
 
 static void job_free(Job *j)
 {
+    if (j->kill_fd >= 0) close(j->kill_fd);
     if (j->pidfd >= 0) close(j->pidfd);
     if (j->in_fd >= 0) close(j->in_fd);
     free(j->in);
@@ -660,7 +663,7 @@ static void job_free(Job *j)
     if (j->ci >= 0 && g_cmds[j->ci].running > 0) g_cmds[j->ci].running--;
     g_reserved -= j->reserved;
     memset(j, 0, sizeof *j);
-    j->out_fd = j->err_fd = j->pidfd = j->in_fd = -1;
+    j->out_fd = j->err_fd = j->pidfd = j->in_fd = j->kill_fd = -1;
     j->ci = -1;
 }
 
@@ -715,19 +718,27 @@ static int flush_out(void)
     return 0;
 }
 
+/* End job @p j's command: through its keeper (close the kill pipe: the
+ * keeper kills and reaps it), else its process group. */
+static void job_kill(Job *j)
+{
+    if (j->kill_fd >= 0) { close(j->kill_fd); j->kill_fd = -1; }
+    else if (j->pid > 0) kill(-j->pid, SIGKILL);
+}
+
 static void kill_all(void)
 {
     for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++)
-        if (g_jobs[i].used && g_jobs[i].pid > 0) kill(-g_jobs[i].pid, SIGKILL);
+        if (g_jobs[i].used && g_jobs[i].pid > 0) job_kill(&g_jobs[i]);
 }
 
 /* ── The router's side of a call ───────────────────────────────────── */
 
 /* Command @p ci's broker is gone (EOF, a write it did not take, a frame it
  * should not send): every call routed to it that has no reply yet fails,
- * and later calls to it are refused. Its running calls are its own to end:
- * on SIGKILL they run on (the documented limit; it cannot be reaped from
- * here without signalling grandchildren, §4.4). */
+ * and later calls to it are refused. Its running calls are not the
+ * router's to end: each one's keeper sees that broker go and ends it, however
+ * it went (exec_broker_macos_isolation.md §4.6). */
 static void sub_lost(int ci)
 {
     Sub *s = &g_subs[ci];
@@ -786,7 +797,7 @@ static void route_call(int slot, int ci, uint32_t id, const uint8_t *p, size_t l
     }
     Job *j = &g_jobs[slot];
     memset(j, 0, sizeof *j);
-    j->out_fd = j->err_fd = j->pidfd = j->in_fd = -1;
+    j->out_fd = j->err_fd = j->pidfd = j->in_fd = j->kill_fd = -1;
     j->used = 1;
     j->routed = 1;
     j->id = id;
@@ -856,7 +867,54 @@ fail:;
 
 static const char *const STAGE[] = { "", "parent-death signal", "setsid",
                                      "no_new_privs", "sandbox", "stdio", "chdir",
-                                     "syscall filter", "exec" };
+                                     "syscall filter", "exec", "keeper" };
+
+/* The keeper (macOS, exec_platform.h hl_exec_plat_keeper): forked by the
+ * broker, it keeps only what the job needs, forks the job, tells the broker
+ * its pid on @p pid_w, drops everything, and waits (hl_exec_plat_keeper_run).
+ * It is the job's parent, so it reaps it: the broker's death cannot leave
+ * the job, nor a late kill hit a reused pid. */
+static void keeper_start(const Cmd *cmd, int bfd, int in_r, int out_w, int err_w,
+                         int ep, int kill_r, int pid_w, char *const argv[],
+                         char *const envp[], pid_t broker)
+{
+    hl_exec_plat_keeper_signals();                 /* before anything can end it */
+    if (getppid() != broker) _exit(127);           /* the broker died already */
+    const int keep[] = { bfd, in_r, out_w, err_w, ep, kill_r, pid_w, g_devnull };
+    for (int fd = 3; fd < 1024; fd++) {
+        int k = 0;
+        for (size_t i = 0; i < sizeof keep / sizeof keep[0]; i++)
+            if (keep[i] == fd) { k = 1; break; }
+        if (!k) close(fd);
+    }
+    pid_t job = fork();
+    if (job == 0) {
+        close(kill_r);
+        close(pid_w);
+        child_run(cmd, bfd, in_r, out_w, err_w, ep, argv, envp, getppid());
+    }
+    if (job < 0) {
+        int e = errno;
+        unsigned char msg[5] = { HL_EXEC_STAGE_KEEPER, (unsigned char)e,
+                                 (unsigned char)(e >> 8), (unsigned char)(e >> 16),
+                                 (unsigned char)(e >> 24) };
+        if (write(ep, msg, sizeof msg) < 0) { /* nothing to do */ }
+        _exit(126);
+    }
+    /* The job holds its own copies: the broker sees the pipes close, and
+     * the error pipe's EOF, only from the job. */
+    close(bfd);
+    if (in_r >= 0) close(in_r);
+    close(out_w);
+    close(err_w);
+    close(ep);
+    if (g_devnull >= 0) close(g_devnull);
+    uint8_t p4[4];
+    hl_chan_put32(p4, (uint32_t)job);
+    if (write(pid_w, p4, sizeof p4) < 0) { /* the broker reads 0 */ }
+    close(pid_w);
+    hl_exec_plat_keeper_run(broker, job, kill_r);
+}
 
 /* A close-on-exec pipe (pipe2 is not on every host; the broker is single-
  * threaded, so nothing can fork between the two calls). */
@@ -1014,13 +1072,28 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
 
     int op[2] = { -1, -1 }, epp[2] = { -1, -1 }, ep[2] = { -1, -1 };
     int ip[2] = { -1, -1 };              /* stdin, only when the call sends some */
+    int kp[2] = { -1, -1 }, pp[2] = { -1, -1 };   /* the keeper's kill / pid pipes */
+    int keeper = hl_exec_plat_keeper();
     pid_t pid = -1;
+    /* A keeper is forked with every signal blocked: until it has set its
+     * dispositions (hl_exec_plat_keeper_signals), a signal to the process
+     * group would end it and leave its job with nobody to end it. */
+    sigset_t all, was;
+    sigfillset(&all);
+    if (keeper) sigprocmask(SIG_SETMASK, &all, &was);
     if (pipe_cloexec(op) == 0 && pipe_cloexec(epp) == 0 && pipe_cloexec(ep) == 0 &&
-        (in_len == 0 || pipe_cloexec(ip) == 0))
+        (in_len == 0 || pipe_cloexec(ip) == 0) &&
+        (!keeper || (pipe_cloexec(kp) == 0 && pipe_cloexec(pp) == 0)))
         pid = fork();
+    int fork_errno = errno;
+    if (pid != 0 && keeper) sigprocmask(SIG_SETMASK, &was, NULL);
+    if (pid == 0 && keeper)
+        keeper_start(cmd, bfd, ip[0], op[1], epp[1], ep[1], kp[0], pp[1], argv, envp,
+                     getppid());
     if (pid == 0)
         child_run(cmd, bfd, ip[0], op[1], epp[1], ep[1], argv, envp, getppid());
-    int fork_errno = errno;
+    if (kp[0] >= 0) close(kp[0]);
+    if (pp[1] >= 0) close(pp[1]);
     close(bfd);
     for (size_t i = 0; i < no; i++) free(owned[i]);
     for (size_t i = 0; i < nenv; i++) free(envbufs[i]);
@@ -1029,6 +1102,8 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     if (ep[1] >= 0) close(ep[1]);
     if (ip[0] >= 0) close(ip[0]);
     if (pid < 0) {
+        if (kp[1] >= 0) close(kp[1]);
+        if (pp[0] >= 0) close(pp[0]);
         if (ip[1] >= 0) close(ip[1]);
         if (op[0] >= 0) close(op[0]);
         if (epp[0] >= 0) close(epp[0]);
@@ -1044,8 +1119,19 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     ssize_t got = 0;
     if (poll(&epf, 1, 2000) > 0) got = read(ep[0], em, sizeof em);
     close(ep[0]);
+    /* Under a keeper: the job's pid (written right after its fork). */
+    pid_t job_pid = pid;
+    if (pp[0] >= 0) {
+        uint8_t p4[4];
+        struct pollfd ppf = { pp[0], POLLIN, 0 };
+        job_pid = 0;
+        if (poll(&ppf, 1, 2000) > 0 && read(pp[0], p4, sizeof p4) == (ssize_t)sizeof p4)
+            job_pid = (pid_t)hl_chan_get32(p4);
+        close(pp[0]);
+    }
     if (got == (ssize_t)sizeof em) {
         int e = em[1] | (em[2] << 8) | (em[3] << 16) | (em[4] << 24);
+        if (kp[1] >= 0) close(kp[1]);    /* the keeper ends its job, then itself */
         waitpid(pid, NULL, 0);
         if (ip[1] >= 0) close(ip[1]);
         close(op[0]);
@@ -1064,6 +1150,8 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     j->id = id;
     j->ci = ci;
     j->pid = pid;
+    j->job_pid = job_pid;
+    j->kill_fd = kp[1];
     j->out_fd = op[0];
     j->err_fd = epp[0];
     /* Readable the moment it exits, so the reply goes out then rather than
@@ -1086,7 +1174,7 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     j->reserved = reserve;
     g_reserved += reserve;
     cmd->running++;
-    if (!j->out || !j->err || (in_len && !j->in)) { kill(-pid, SIGKILL); j->discard = 1; }
+    if (!j->out || !j->err || (in_len && !j->in)) { job_kill(j); j->discard = 1; }
 }
 
 static void kill_call(uint32_t id)
@@ -1108,7 +1196,7 @@ static void kill_call(uint32_t id)
             if (lost) sub_lost(ci);
             return;
         }
-        if (j->pid > 0) kill(-j->pid, SIGKILL);
+        if (j->pid > 0) job_kill(j);
         j->discard = 1;
         if (j->queued && j->reply_off == 0) {
             /* not started on the wire: drop it */
@@ -1365,7 +1453,8 @@ int hl_exec_broker_main(void)
     (void)fcntl(g_chan, F_SETFD, FD_CLOEXEC);
     hl_chan_set_nonblock(g_chan);
     for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
-        g_jobs[i].out_fd = g_jobs[i].err_fd = g_jobs[i].pidfd = g_jobs[i].in_fd = -1;
+        g_jobs[i].out_fd = g_jobs[i].err_fd = g_jobs[i].pidfd = g_jobs[i].in_fd =
+            g_jobs[i].kill_fd = -1;
         g_jobs[i].ci = -1;
     }
 
@@ -1465,7 +1554,7 @@ int hl_exec_broker_main(void)
                 memmem(j->out, j->out_len, mark, sizeof mark - 1)) {
                 j->probe_sent = 1;
                 uint8_t pid4[4];
-                put_u32(pid4, (uint32_t)j->pid);
+                put_u32(pid4, (uint32_t)(j->job_pid > 0 ? j->job_pid : j->pid));
                 size_t fl;
                 uint8_t *f = frame_make(HX_PROBE, j->id, pid4, 4, NULL, 0, &fl);
                 if (f) {
@@ -1488,7 +1577,7 @@ int hl_exec_broker_main(void)
             Job *j = &g_jobs[i];
             if (!j->used || j->routed) continue;   /* replied to by sub_frame */
             if (j->pid > 0 && !j->timed_out && now >= j->deadline) {
-                kill(-j->pid, SIGKILL);
+                job_kill(j);
                 j->timed_out = 1;
             }
             if (j->pid == 0 && j->out_fd < 0 && j->err_fd < 0 && !j->queued) {
