@@ -1415,7 +1415,7 @@ fuzz/fuzz_log_escape: fuzz/fuzz_log_escape.c $(SRCDIR)/hull/shared/cli_log.c $(V
 # cross-origin redirect-safe header list, each against a reference. Keel's
 # url.c is linked for real (the oracle compares with its parse); the request
 # functions are stubbed in the harness, so no Keel client / mbedTLS link.
-fuzz/fuzz_http_guard: fuzz/fuzz_http_guard.c fuzz/fuzz_http_guard_stubs.c fuzz/fuzz_meter_stubs.c $(SRCDIR)/hull/cap/http.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SRCDIR)/hull/utils/host_match.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c $(VENDDIR)/log.c/log.c vendor/keel/src/url.c vendor/keel/src/kl_cstr.c
+fuzz/fuzz_http_guard: fuzz/fuzz_http_guard.c fuzz/fuzz_http_guard_stubs.c fuzz/fuzz_meter_stubs.c $(SRCDIR)/hull/cap/http.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SRCDIR)/hull/utils/host_match.c $(SRCDIR)/hull/shared/http_unix.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c $(VENDDIR)/log.c/log.c vendor/keel/src/url.c vendor/keel/src/kl_cstr.c
 	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -Ivendor/keel/src -I$(VENDDIR)/log.c -o $@ $^
 
 # DSN redaction for error messages (cap/db_select.c, audits 9 / 10): the
