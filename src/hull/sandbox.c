@@ -344,6 +344,10 @@ extern int __pledge_mode;
  * how many it could not reach. */
 extern int hull_unveil_unsynced_threads;
 extern int hull_unveil_sync_mode;
+/* vendor/pledge HULL PATCH 0006 (#1226): set before the first unveil() to
+ * refuse every TCP bind (Landlock ABI 4+); _handled says whether it applied. */
+extern int hull_unveil_handle_net_bind;
+extern int hull_unveil_net_bind_handled;
 extern int landlock_create_ruleset(const void *attr, size_t size,
                                     unsigned int flags);
 
@@ -777,9 +781,15 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
      * `system-socket` rule is needed for any socket creation so it
      * stays whenever any network rule is wanted. */
     if (policy->network_inbound) {
+        /* The listener is already bound (phase 7), so only accept is left
+         * (#1226). network-inbound alone also admits bind(2) - measured on
+         * macOS 26 - so the bind is denied explicitly after it (the last
+         * matching rule wins) unless the policy asks for it. */
         SBPL_LIT("; Network (server socket already bound)\n"
-                 "(allow network-inbound network-bind)\n"
+                 "(allow network-inbound)\n"
                  "(allow system-socket)\n");
+        if (!policy->allow_bind)
+            SBPL_LIT("(deny network-bind)\n");
     } else if (policy->network_outbound || policy->unix_socket_count > 0) {
         SBPL_LIT("; Network (outbound only - CLI mode)\n"
                  "(allow system-socket)\n");
@@ -1518,9 +1528,10 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
             return -1;
         }
 
-        log_debug("[sandbox] applied (seatbelt: %d read, %d write%s)",
+        log_debug("[sandbox] applied (seatbelt: %d read, %d write%s; bind: %s)",
                  policy->fs_read_count, policy->fs_write_count,
-                 policy->network_outbound ? ", network-outbound" : "");
+                 policy->network_outbound ? ", network-outbound" : "",
+                 policy->allow_bind ? "allowed" : "refused");
         return 0;
     }
 #endif /* __APPLE__ */
@@ -1536,6 +1547,11 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     /* Made (mkdir) before the first unveil: on OpenBSD that call already
      * hides everything not yet unveiled. */
     const char *sqlite_tmp = sb_sqlite_temp_dir();
+#endif
+
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+    /* Read when the first unveil() creates the Landlock ruleset (#1226). */
+    hull_unveil_handle_net_bind = !policy->allow_bind;
 #endif
 
     /* App directory: readable (templates, static assets, source) - unless
@@ -1985,11 +2001,16 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         /* threads: how the Landlock domain reached the threads that already
          * existed - "single" (none), "tsync" (Landlock TSYNC) or "signal"
          * (each restricted itself). Seccomp always reaches all (TSYNC). */
+        /* bind: "refused" (Landlock ABI 4+ handles TCP bind, no rule),
+         * "allowed" (the policy asked for it), "kernel" (older Landlock:
+         * the inet promise still allows it; #1226). */
         log_debug("[sandbox] applied (unveil: %d read, %d write; pledge: %s; "
-                 "threads: %s)",
+                 "threads: %s; bind: %s)",
                  policy->fs_read_count, policy->fs_write_count, promises,
                  hull_unveil_sync_mode == 1 ? "tsync"
-                 : hull_unveil_sync_mode == 2 ? "signal" : "single");
+                 : hull_unveil_sync_mode == 2 ? "signal" : "single",
+                 hull_unveil_net_bind_handled ? "refused"
+                 : policy->allow_bind ? "allowed" : "kernel");
 #else
         log_debug("[sandbox] applied (unveil: %d read, %d write; pledge: %s)",
                  policy->fs_read_count, policy->fs_write_count, promises);

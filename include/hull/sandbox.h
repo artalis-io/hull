@@ -61,6 +61,15 @@ typedef struct HlSandboxPolicy {
      * outbound sockets still need it). */
     int network_inbound;
 
+    /* 1 lets the process bind sockets after the sandbox applies. The two
+     * runners leave it 0: their listener is bound before phase 2 (the
+     * server init), so nothing in the process binds after it and a second
+     * listener on any port is refused - Seatbelt drops network-bind, Linux
+     * Landlock ABI 4+ handles LANDLOCK_ACCESS_NET_BIND_TCP with no rule
+     * (vendor/pledge HULL PATCH 0006; #1226). An embedder that may bind
+     * after hl_embed_seal keeps it (embed.c sets it from net_inbound). */
+    int allow_bind;
+
     /* http.unix_sockets, resolved (#1228): the AF_UNIX sockets the app may
      * connect to. With no outbound grant otherwise, Seatbelt allows
      * network-outbound to exactly these paths and Linux adds the `unix`

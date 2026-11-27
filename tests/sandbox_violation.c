@@ -64,6 +64,9 @@ extern int unveil(const char *path, const char *permissions);
 extern int pledge(const char *promises, const char *execpromises);
 extern int unveil(const char *path, const char *permissions);
 extern int __pledge_mode;
+/* vendor/pledge HULL PATCH 0006 (#1226) */
+extern int hull_unveil_handle_net_bind;
+extern int hull_unveil_net_bind_handled;
 
 #define PLEDGE_PENALTY_RETURN_EPERM 0x0002
 #define PLEDGE_STDERR_LOGGING       0x0010
@@ -1148,6 +1151,84 @@ static void test_seatbelt_allow(void)
 
 #endif /* HAS_SEATBELT */
 
+#if HAS_PLEDGE_MODE
+/* ── HULL PATCH 0006 (#1226): no TCP bind after the seal ───────────── */
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+static int bind_loopback_any(int fd)
+{
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    return bind(fd, (struct sockaddr *)&a, sizeof a);
+}
+
+/* Exit: 0 second bind refused (EACCES) and the earlier listener accepts,
+ * 1 second bind allowed (and the listener accepts), 77 Landlock below ABI 4,
+ * >= 2 a setup failure. */
+static int test_bind_child(int refuse)
+{
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0 || bind_loopback_any(lfd) != 0 || listen(lfd, 4) != 0) _exit(2);
+    struct sockaddr_in la;
+    socklen_t ll = sizeof la;
+    if (getsockname(lfd, (struct sockaddr *)&la, &ll) != 0) _exit(3);
+
+    hull_unveil_handle_net_bind = refuse;
+    if (unveil("/tmp", "r") != 0) _exit(errno == ENOSYS ? 77 : 4);
+    if (unveil(NULL, NULL) != 0) _exit(5);
+    if (refuse && !hull_unveil_net_bind_handled) _exit(77);
+
+    int bfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (bfd < 0) _exit(6);
+    int rc = bind_loopback_any(bfd);
+    int bind_errno = errno;
+    int cfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (cfd < 0 || connect(cfd, (struct sockaddr *)&la, ll) != 0) _exit(7);
+    if (accept(lfd, NULL, NULL) < 0) _exit(8);
+    if (rc == 0) _exit(1);
+    _exit(bind_errno == EACCES ? 0 : 9);
+}
+
+static int run_bind_child(int refuse)
+{
+    pid_t pid = fork();
+    if (pid == 0) test_bind_child(refuse);
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
+static void test_bind_refused(void)
+{
+    printf("\n=== Landlock TCP bind refusal (HULL PATCH 0006) ===\n");
+    int code = run_bind_child(1);
+    if (code == 0)
+        pass("a TCP bind after the seal is refused (EACCES); the earlier listener accepts");
+    else if (code == 77)
+        pass("bind refusal SKIPPED - Landlock below ABI 4");
+    else if (code == 1)
+        fail("a TCP bind after the seal was allowed");
+    else {
+        char buf[96];
+        snprintf(buf, sizeof buf, "bind refusal child exited %d", code);
+        fail(buf);
+    }
+    code = run_bind_child(0);
+    if (code == 1 || code == 77)
+        pass("without the flag a TCP bind is still allowed");
+    else {
+        char buf[96];
+        snprintf(buf, sizeof buf, "bind control child exited %d", code);
+        fail(buf);
+    }
+}
+#endif
+
 /* ── Main ─────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -1168,6 +1249,7 @@ int main(void)
     test_wx_anon_rw();
 #if HAS_PLEDGE_MODE
     test_preexisting_threads();
+    test_bind_refused();
 #endif
 #ifdef HL_HAVE_TTY_TERMIOS2_TEST
     test_tty_termios2();

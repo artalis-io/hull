@@ -554,3 +554,82 @@ UTEST(sandbox_internal_db, seatbelt_allows_only_the_internal_files_after_the_den
 #endif
 
 UTEST_MAIN()
+
+/* #1226: the listener is bound before the sandbox applies, so the runners'
+ * profile grants accept (network-inbound) and denies bind, which
+ * network-inbound alone admits; an embedder that asks for it (allow_bind)
+ * keeps it. */
+#if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <stdint.h>
+
+extern int sandbox_init_with_parameters(const char *profile, uint64_t flags,
+                                        const char *const parameters[],
+                                        char **errorbuf);
+
+static int bind_loopback(int fd)
+{
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    return bind(fd, (struct sockaddr *)&a, sizeof a);
+}
+
+/* In a child: listen on a port bound before the profile, apply the profile,
+ * then try a second bind and accept a connection on the first. Exit status:
+ * 0 bind refused (EPERM) + accept ok, 1 bind allowed + accept ok, >= 10 a
+ * setup or accept failure. */
+static int run_bind_child(const char *profile, const char **params)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        int lfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (lfd < 0 || bind_loopback(lfd) != 0 || listen(lfd, 4) != 0) _exit(10);
+        struct sockaddr_in la;
+        socklen_t ll = sizeof la;
+        if (getsockname(lfd, (struct sockaddr *)&la, &ll) != 0) _exit(11);
+        char *err = NULL;
+        if (sandbox_init_with_parameters(profile, 0, params, &err) != 0) _exit(12);
+        int bfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (bfd < 0) _exit(13);
+        int rc = bind_loopback(bfd);
+        int bind_errno = errno;
+        int cfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (cfd < 0 || connect(cfd, (struct sockaddr *)&la, ll) != 0) _exit(14);
+        int afd = accept(lfd, NULL, NULL);
+        if (afd < 0) _exit(15);
+        if (rc == 0) _exit(1);
+        _exit(bind_errno == EPERM ? 0 : 16);
+    }
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
+UTEST(sandbox_bind, seatbelt_refuses_bind_after_the_listener)
+{
+    static char buf[16384];
+    const char *params[256];
+    HlSandboxPolicy p;
+    hl_sandbox_policy_from_manifest(&p, NULL);
+    p.network_inbound = 1;
+    p.network_outbound = 1;   /* the child connects to its own listener */
+
+    ASSERT_EQ(hl_sandbox_seatbelt_profile_for_test(&p, NULL, 0, buf, sizeof buf,
+                                                   params, 256), 0);
+    EXPECT_TRUE(strstr(buf, "(allow network-inbound)\n") != NULL);
+    EXPECT_TRUE(strstr(buf, "(deny network-bind)\n") != NULL);
+    EXPECT_EQ(run_bind_child(buf, params), 0);
+
+    p.allow_bind = 1;
+    ASSERT_EQ(hl_sandbox_seatbelt_profile_for_test(&p, NULL, 0, buf, sizeof buf,
+                                                   params, 256), 0);
+    EXPECT_TRUE(strstr(buf, "network-bind") == NULL);
+    EXPECT_EQ(run_bind_child(buf, params), 1);
+}
+#endif
