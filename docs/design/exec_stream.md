@@ -1,6 +1,7 @@
 # Streamed, long-running declared commands (`exec.stream`)
 
-- **Status:** design, reviewed (2026-11-27, decisions in §11). Nothing implemented.
+- **Status:** reviewed (2026-11-27, decisions in §11). PR 1 (policy, broker, router) implemented;
+  the bindings (PR 2) are not.
 - **Parent design:** [exec_broker.md](exec_broker.md) (§2 API, §3 manifest, §5 broker, §7 lifetime,
   §12 audit) and [exec_broker_macos_isolation.md](exec_broker_macos_isolation.md) (the router).
 - **Scope:** a second way to call a declared command, opted into per command. The sandbox, the
@@ -72,7 +73,7 @@ exec = {
 | `timeout_ms` | 100..60000 (default 5000) | `0` (no time limit) or 100..2^32-1 (default 5000); no Hull ceiling |
 | `stdout_max` | ..16 MiB: what is buffered | any size up to 2^63, or omitted for no cap: the total the call may write, never buffered whole |
 | `stderr_max` | ..1 MiB | same as `stdout_max` |
-| `stdin_max` | ..1 MiB, one buffer | same as `stdout_max`; the total the app may write over the call's life |
+| `stdin_max` | ..1 MiB, one buffer | any size up to 2^63: the total the app may write over the call's life; omitted = `/dev/null` (stdin always needs a declared total) |
 | `concurrency` | 1..8 | 1..8; the process-wide `HL_EXEC_MAX_INFLIGHT` (8) still counts both kinds |
 
 Validation lives in `cap/exec.c` next to the existing checks; both extractors read the key (JS
@@ -308,7 +309,16 @@ New tests (each fails on the code before its PR):
    60 s for a command with no time limit). It adds no authority (same matcher, stricter bounds)
    and lets one entry serve a quick snapshot and a follow; refusing it would mean declaring the
    same binary twice.
-3. **Window and chunk sizes: measured in PR 1** (200 MiB through the window, Linux and macOS,
-   direct and routed) before the constants are settled; 256 KiB / 64 KiB / 20 ms are the starting
-   point.
+3. **Window and chunk sizes: 256 KiB / 64 KiB / 20 ms, measured in PR 1.** 200 MiB of `yes`
+   through the raw broker protocol, credit returned for each CHUNK as it arrived (macOS,
+   Apple M-series, `tests/e2e_exec_frames.c` prints it):
+
+   | Window | One broker | Router (6 commands) |
+   |---|---|---|
+   | 64 KiB | ~455 MiB/s | ~220 MiB/s |
+   | 256 KiB | ~590 MiB/s | ~430 MiB/s |
+   | 1 MiB | 170-500 MiB/s | 120-390 MiB/s (noisy) |
+
+   A 64 KiB window halves the routed rate (one extra hop per window); 1 MiB buys nothing and
+   holds four times the memory. Linux CI prints the same line for its direct broker.
 4. **Streamed stdin: built** (§4, §5.1, §6), in PR 1 (protocol) and PR 2 (bindings).

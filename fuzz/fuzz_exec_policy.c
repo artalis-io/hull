@@ -38,6 +38,20 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             if (hl_exec_policy_at(buf, size, i, &c) != 0) abort();
             (void)strlen(c.name);
             (void)strlen(c.path);
+            /* exec.run's limits on a stream command are never past its
+             * ceilings, and are exactly those derived from the stream's. */
+            if (c.timeout_ms > HL_EXEC_TIMEOUT_MAX_MS || c.stdout_max > HL_EXEC_STDOUT_CEIL ||
+                c.stderr_max > HL_EXEC_STDERR_CEIL || c.stdin_max > HL_EXEC_STDIN_CEIL)
+                abort();
+            if (c.flags & HL_EXEC_CMD_STREAM) {
+                HlExecStreamBase bs = hl_exec_stream_base(c.stream_timeout_ms,
+                                                          c.stream_stdout_max,
+                                                          c.stream_stderr_max,
+                                                          c.stream_stdin_max);
+                if (bs.timeout_ms != c.timeout_ms || bs.stdout_max != c.stdout_max ||
+                    bs.stderr_max != c.stderr_max || bs.stdin_max != c.stdin_max)
+                    abort();
+            }
             const uint8_t *cur = c.env;
             for (unsigned k = 0; k < (unsigned)c.n_env * 2; k++)
                 (void)hl_exec_next_str(&cur, NULL);

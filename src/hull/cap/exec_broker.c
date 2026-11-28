@@ -6,19 +6,33 @@
  *
  *   server -> broker   POLICY  u32 flags, the encoded policy (cap/exec.h)
  *                      RUN     id; u16 name_len, name, u16 n,
- *                              (u32 len, bytes) * n, u32 stdin_len, stdin
+ *                              (u32 len, bytes) * n, u32 stdin_len, stdin,
+ *                              u8 flags (HX_RUN_STREAM, HX_RUN_STDIN_OPEN)
  *                      KILL    id
+ *                      CREDIT  id; u8 fd (1 stdout, 2 stderr), u32 bytes
+ *                      STDIN   id; u8 flags (0x1 EOF after), bytes
  *   broker -> server   READY   text: one report line per '\n'
  *                      REFUSED id (0 = the policy); text
  *                      BUSY    id; text
  *                      DONE    id; u32 status, u32 signo, u8 timed_out,
  *                              u8 out_cut, u8 err_cut, u8 0, u32 duration_ms,
  *                              u32 out_len, out, u32 err_len, err
+ *                              (a stream's DONE: byte 11 is 1 and the two
+ *                              outputs are replaced by u64 out_bytes,
+ *                              u64 err_bytes)
+ *                      CHUNK   id; u8 fd, bytes      (a stream's output)
+ *                      STDIN_CREDIT id; u8 flags (0x1 the child closed its
+ *                              stdin), u32 bytes
  *                      PROBE   id; u32 pid            (test builds only)
  *
  * The broker trusts nothing the server sends after READY: every RUN is
  * matched again, admission (in-flight calls, per-command concurrency, live
  * ids, buffered output) is decided here, and a second POLICY ends it.
+ *
+ * A stream (docs/design/exec_stream.md) never holds more than
+ * HL_EXEC_STREAM_WINDOW per pipe: output is read only while the server has
+ * credit for it, and stdin is taken only within the credit granted. Credit or
+ * stdin past those bounds is a protocol error that ends the call.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -63,9 +77,18 @@
 #define HX_BUSY    6u
 #define HX_REFUSED 7u
 #define HX_PROBE   8u
+#define HX_CHUNK   9u
+#define HX_CREDIT 10u
+#define HX_STDIN  11u
+#define HX_STDIN_CREDIT 12u
+
+#define HX_RUN_STREAM     0x1u
+#define HX_RUN_STDIN_OPEN 0x2u
+#define HX_STDIN_EOF      0x1u
+#define HX_STDIN_CLOSED   0x1u   /* STDIN_CREDIT: the child closed its stdin */
 
 #define HX_RUN_MAX    (HL_EXEC_MAX_ARG_BYTES + 4u * HL_EXEC_MAX_CALL_ARGS + \
-                       HL_EXEC_STDIN_CEIL + 128u)
+                       HL_EXEC_STDIN_CEIL + 129u)
 #define HX_REPLY_MAX  (HL_EXEC_STDOUT_CEIL + HL_EXEC_STDERR_CEIL + 64u)
 
 /* Log a report, one record per line. */
@@ -543,6 +566,32 @@ static int cmd_load(Cmd *cmd, char *why, size_t why_size)
 
 /* ── Jobs ──────────────────────────────────────────────────────────── */
 
+/* A frame waiting to go to the server for one call. A call's frames go out
+ * in order (its CHUNKs, then its DONE), interleaved with other calls'. */
+typedef struct {
+    uint8_t *buf; size_t len, cap, off;
+    uint32_t type;
+    uint8_t  fd;                /* CHUNK: 1 / 2; STDIN_CREDIT: its flags */
+    uint8_t  final;             /* the call's last frame: delivered, the job frees */
+} JobOut;
+/* Per stream pipe, at most WINDOW / CHUNK_MAX full CHUNKs and one part-full
+ * one wait (a new CHUNK is merged into the last one while it fits and has
+ * not started), plus the one being sent; one STDIN_CREDIT (merged likewise);
+ * the final frame. */
+#define HX_JOBQ ((int)(2 * (HL_EXEC_STREAM_WINDOW / HL_EXEC_STREAM_CHUNK_MAX + 2) + 4))
+
+/* One stream output pipe (index 0 stdout, 1 stderr). */
+typedef struct {
+    size_t   credit;            /* bytes the server will still take */
+    size_t   wire;              /* bytes sent (whole CHUNKs) not yet credited back:
+                                 * the server may credit only these */
+    uint64_t total;             /* bytes read so far (within the cap) */
+    uint64_t cap;               /* HL_EXEC_STREAM_NO_CAP = none */
+    uint8_t *open;              /* bytes read, not yet a CHUNK (CHUNK_MAX) */
+    size_t   open_len;
+    uint64_t open_ms;           /* when its first byte was read */
+} StreamOut;
+
 typedef struct {
     int      used;
     uint32_t id;
@@ -552,18 +601,33 @@ typedef struct {
     int      kill_fd;           /* under a keeper: closing it ends the call */
     int      pidfd;             /* readable once it exits; -1 = none */
     int      out_fd, err_fd;    /* -1 once closed */
-    int      in_fd;             /* the child's stdin pipe, -1 once written */
-    uint8_t *in;   size_t in_len, in_off;
+    int      in_fd;             /* the child's stdin pipe, -1 once closed */
+    uint8_t *in;   size_t in_len, in_off, in_cap;
     uint8_t *out;  size_t out_len;  int out_cut;
     uint8_t *err;  size_t err_len;  int err_cut;
-    uint64_t start_ms, deadline;
+    uint64_t start_ms, deadline;   /* deadline UINT64_MAX = none */
     int      timed_out;
     int      status, signo;
     int      discard;           /* KILLed: no reply */
-    uint8_t *reply; size_t reply_len, reply_off;
-    int      queued;
-    size_t   reserved;          /* stdout_max + stderr_max, held until freed */
+    JobOut   q[HX_JOBQ];        /* FIFO, q[0] goes out first */
+    int      qn;
+    int      queued;            /* the final frame is queued */
+    size_t   reserved;          /* what admission counted for it, held until freed */
     int      routed;            /* run by its command's own broker (the router) */
+    /* A stream (HX_RUN_STREAM). The router keeps the same counts for a
+     * routed one, to hold its command's broker to the windows too. */
+    int       stream;
+    StreamOut so[2];
+    int       in_open;          /* HX_RUN_STDIN_OPEN: STDIN frames are taken */
+    int       in_eof;           /* the server sent EOF: no more STDIN */
+    int       in_closed;        /* the child closed its stdin (or exited) */
+    int       in_closed_tell;   /* ...and the server has not been told yet */
+    const char *fail_msg;       /* call_fail: REFUSED once the child is gone */
+    size_t    in_granted;       /* stdin credit the server has not used */
+    size_t    in_init_left;     /* bytes of the RUN's own stdin not yet written */
+    size_t    in_ret;           /* stdin credit to give back */
+    uint64_t  in_total;         /* streamed stdin taken so far */
+    uint64_t  in_total_max;
 #ifdef HL_EXEC_TEST_HOOKS
     int      probe_sent;
 #endif
@@ -578,12 +642,15 @@ static int    g_chan = 3;
  * to 2 s on its error pipe) stalled every other command's replies, and a
  * write that timed out lost the command for good. */
 typedef struct {
-    uint8_t *buf; size_t len, off;
+    uint8_t *buf; size_t len, cap, off;
     uint32_t type, id;
+    uint8_t  fd;                /* CREDIT: the pipe */
     size_t   hold;              /* bytes counted in g_reserved for it, if any */
 } SubOut;
-/* At most one RUN per call in flight, plus a KILL for each. */
-#define HX_SUBQ (2 * HL_EXEC_MAX_INFLIGHT)
+/* Per call in flight: its RUN, a KILL, one CREDIT per pipe (merged) and
+ * its waiting STDIN (full frames, one part-full, one being sent). */
+#define HX_SUBQ ((int)(HL_EXEC_MAX_INFLIGHT * \
+                       (4 + HL_EXEC_STREAM_WINDOW / HL_EXEC_STREAM_CHUNK_MAX + 2)))
 /* A broker that has taken no byte of a waiting frame for this long is
  * wedged (it reads every frame as it comes, after at most ~4 s of starting
  * each of its HL_EXEC_MAX_INFLIGHT calls). */
@@ -610,14 +677,18 @@ typedef struct { uint8_t *buf; size_t len, off; } Out;
 #define HX_OUTQ 64
 static Out    g_outq[HX_OUTQ];
 static int    g_outq_n;
-static int    g_order[HX_OUTQ + HL_EXEC_MAX_INFLIGHT];  /* -1-k = small k, j = job j */
+/* What goes out next: -1-k = small frame k, j = the next frame of job j
+ * (one entry per frame in its queue). */
+static int    g_order[HX_OUTQ + HL_EXEC_MAX_INFLIGHT * HX_JOBQ];
 static int    g_order_n;
 
-static uint8_t *frame_make(uint32_t type, uint32_t id, const void *a, size_t alen,
-                           const void *b, size_t blen, size_t *len)
+/* A frame with room for @p cap payload bytes (at least alen + blen). */
+static uint8_t *frame_make_cap(uint32_t type, uint32_t id, const void *a, size_t alen,
+                               const void *b, size_t blen, size_t cap, size_t *len)
 {
+    if (cap < alen + blen) cap = alen + blen;
     size_t n = HL_CHAN_HDR + alen + blen;
-    uint8_t *f = malloc(n);
+    uint8_t *f = malloc(HL_CHAN_HDR + cap);
     if (!f) return NULL;
     hl_chan_put32(f, HX_MAGIC);
     hl_chan_put32(f + 4, type);
@@ -627,6 +698,12 @@ static uint8_t *frame_make(uint32_t type, uint32_t id, const void *a, size_t ale
     if (blen) memcpy(f + HL_CHAN_HDR + alen, b, blen);
     *len = n;
     return f;
+}
+
+static uint8_t *frame_make(uint32_t type, uint32_t id, const void *a, size_t alen,
+                           const void *b, size_t blen, size_t *len)
+{
+    return frame_make_cap(type, id, a, alen, b, blen, 0, len);
 }
 
 static void queue_frame(uint32_t type, uint32_t id, const void *data, size_t dlen)
@@ -651,21 +728,112 @@ static void queue_small(uint32_t type, uint32_t id, const char *text)
 
 static void job_free(Job *j);
 
-/* The reply of routed job @p j: a frame its command's broker sent, or one
- * the router makes when that broker is gone. */
+/* Append @p f (its whole length @p len, room @p cap) to job @p j's queue.
+ * -1 when the queue is full (the frame is freed). */
+static int job_push(Job *j, uint8_t *f, size_t len, size_t cap, uint32_t type,
+                    uint8_t fd, int final)
+{
+    if (j->qn >= HX_JOBQ) { free(f); return -1; }
+    j->q[j->qn++] = (JobOut){ f, len, cap, 0, type, fd, (uint8_t)final };
+    g_order[g_order_n++] = (int)(j - g_jobs);
+    if (final) j->queued = 1;
+    return 0;
+}
+
+/* Drop job @p j's frames that have not started on the wire (every one but a
+ * part-sent q[0]), and their places in g_order (its last entries there). */
+static void job_drop_unsent(Job *j)
+{
+    int keep = (j->qn > 0 && j->q[0].off > 0) ? 1 : 0;
+    int drop = j->qn - keep;
+    int idx = (int)(j - g_jobs);
+    for (int k = g_order_n - 1; k >= 0 && drop > 0; k--)
+        if (g_order[k] == idx) {
+            memmove(g_order + k, g_order + k + 1, (size_t)(g_order_n - k - 1) * sizeof g_order[0]);
+            g_order_n--;
+            drop--;
+        }
+    for (int k = keep; k < j->qn; k++) {
+        if (j->q[k].final) j->queued = 0;
+        free(j->q[k].buf);
+    }
+    j->qn = keep;
+}
+
+/* The final frame of job @p j: its reply, or one the router makes. When it
+ * cannot be held, the slot frees now (nothing else would) and a small frame
+ * says so. */
 static void job_reply_frame(Job *j, uint32_t type, const void *body, size_t len)
 {
-    j->reply = frame_make(type, j->id, body, len, NULL, 0, &j->reply_len);
-    if (!j->reply) {
-        /* No reply to hold: free the slot now (nothing else would) and say
-         * so in a small frame. */
+    size_t fl;
+    uint8_t *f = frame_make(type, j->id, body, len, NULL, 0, &fl);
+    if (!f || j->qn >= HX_JOBQ) {
+        free(f);
         uint32_t id = j->id;
-        job_free(j);
+        job_drop_unsent(j);
+        if (j->qn == 0) job_free(j);
+        else j->discard = 1;
         queue_small(HX_REFUSED, id, "exec: out of memory");
         return;
     }
-    j->queued = 1;
-    g_order[g_order_n++] = (int)(j - g_jobs);
+    (void)job_push(j, f, fl, fl - HL_CHAN_HDR, type, 0, 1);
+}
+
+/* Bytes for stream pipe @p fd (1 / 2) of job @p j, as CHUNK frames: merged
+ * into its last CHUNK of that pipe while it fits and has not started, else
+ * new frames. The bytes that did not fit (a full queue, out of memory), or 0. */
+static size_t chunk_push(Job *j, uint8_t fd, const uint8_t *data, size_t n)
+{
+    for (int k = j->qn - 1; k >= 0 && n > 0; k--) {
+        JobOut *o = &j->q[k];
+        if (o->type != HX_CHUNK || o->fd != fd) continue;
+        if (o->off == 0) {
+            size_t have = o->len - HL_CHAN_HDR, room = o->cap - have;
+            size_t take = n < room ? n : room;
+            if (take) {
+                memcpy(o->buf + o->len, data, take);
+                o->len += take;
+                hl_chan_put32(o->buf + 12, (uint32_t)(have + take));
+                data += take;
+                n -= take;
+            }
+        }
+        break;                   /* only the last CHUNK of the pipe */
+    }
+    while (n > 0) {
+        if (j->qn >= HX_JOBQ - 1) return n;   /* the final frame's slot stays free */
+        size_t take = n < HL_EXEC_STREAM_CHUNK_MAX ? n : HL_EXEC_STREAM_CHUNK_MAX;
+        size_t fl;
+        uint8_t *f = frame_make_cap(HX_CHUNK, j->id, &fd, 1, data, take,
+                                    1 + HL_EXEC_STREAM_CHUNK_MAX, &fl);
+        if (!f) return n;
+        (void)job_push(j, f, fl, 1 + HL_EXEC_STREAM_CHUNK_MAX, HX_CHUNK, fd, 0);
+        data += take;
+        n -= take;
+    }
+    return 0;
+}
+
+/* Give the server back @p bytes of stdin credit (and the CLOSED flag), merged
+ * into a waiting STDIN_CREDIT of job @p j. 0, or -1 (queue full: kept for later). */
+static int stdin_credit_push(Job *j, uint8_t flags, uint32_t bytes)
+{
+    for (int k = j->qn - 1; k >= 0; k--) {
+        JobOut *o = &j->q[k];
+        if (o->type != HX_STDIN_CREDIT || o->off != 0) continue;
+        uint8_t *pl = o->buf + HL_CHAN_HDR;
+        pl[0] |= flags;
+        hl_chan_put32(pl + 1, hl_chan_get32(pl + 1) + bytes);
+        return 0;
+    }
+    if (j->qn >= HX_JOBQ - 1) return -1;
+    uint8_t pl[5];
+    pl[0] = flags;
+    hl_chan_put32(pl + 1, bytes);
+    size_t fl;
+    uint8_t *f = frame_make(HX_STDIN_CREDIT, j->id, pl, 5, NULL, 0, &fl);
+    if (!f) return -1;
+    return job_push(j, f, fl, 5, HX_STDIN_CREDIT, 0, 0);
 }
 
 static void job_free(Job *j)
@@ -678,7 +846,18 @@ static void job_free(Job *j)
     if (j->err_fd >= 0) close(j->err_fd);
     free(j->out);
     free(j->err);
-    free(j->reply);
+    free(j->so[0].open);
+    free(j->so[1].open);
+    job_drop_unsent(j);
+    /* A part-sent frame cannot be taken back: the caller frees a job only
+     * once its queue is empty or the channel is gone. */
+    for (int k = 0; k < j->qn; k++) free(j->q[k].buf);
+    int idx = (int)(j - g_jobs);
+    for (int k = g_order_n - 1; k >= 0; k--)
+        if (g_order[k] == idx) {
+            memmove(g_order + k, g_order + k + 1, (size_t)(g_order_n - k - 1) * sizeof g_order[0]);
+            g_order_n--;
+        }
     if (j->ci >= 0 && g_cmds[j->ci].running > 0) g_cmds[j->ci].running--;
     g_reserved -= j->reserved;
     memset(j, 0, sizeof *j);
@@ -688,16 +867,28 @@ static void job_free(Job *j)
 
 static void put_u32(uint8_t *p, uint32_t v) { hl_chan_put32(p, v); }
 
+static void put_u64(uint8_t *p, uint64_t v)
+{
+    hl_chan_put32(p, (uint32_t)v);
+    hl_chan_put32(p + 4, (uint32_t)(v >> 32));
+}
+
 static void job_reply(Job *j)
 {
-    uint8_t head[24];
+    uint8_t head[36];
     put_u32(head, (uint32_t)j->status);
     put_u32(head + 4, (uint32_t)j->signo);
     head[8] = (uint8_t)j->timed_out;
     head[9] = (uint8_t)j->out_cut;
     head[10] = (uint8_t)j->err_cut;
-    head[11] = 0;
+    head[11] = (uint8_t)(j->stream ? 1 : 0);
     put_u32(head + 12, (uint32_t)(hl_chan_mono_ms() - j->start_ms));
+    if (j->stream) {
+        put_u64(head + 16, j->so[0].total);
+        put_u64(head + 24, j->so[1].total);
+        job_reply_frame(j, HX_DONE, head, 32);
+        return;
+    }
     put_u32(head + 16, (uint32_t)j->out_len);
     size_t n = 20 + j->out_len + 4 + j->err_len;
     uint8_t *body = malloc(n ? n : 1);
@@ -706,11 +897,15 @@ static void job_reply(Job *j)
     if (j->out_len) memcpy(body + 20, j->out, j->out_len);
     put_u32(body + 20 + j->out_len, (uint32_t)j->err_len);
     if (j->err_len) memcpy(body + 24 + j->out_len, j->err, j->err_len);
-    j->reply = frame_make(HX_DONE, j->id, body, n, NULL, 0, &j->reply_len);
+    job_reply_frame(j, HX_DONE, body, n);
     free(body);
-    if (!j->reply) { j->discard = 1; return; }
-    j->queued = 1;
-    g_order[g_order_n++] = (int)(j - g_jobs);
+}
+
+/* Is job @p j done with its command and its pipes (nothing more to read)? */
+static int job_settled(const Job *j)
+{
+    return j->pid == 0 && j->out_fd < 0 && j->err_fd < 0 &&
+           j->so[0].open_len == 0 && j->so[1].open_len == 0;
 }
 
 /* Write what the channel takes. -1 when the server is gone. */
@@ -720,7 +915,7 @@ static int flush_out(void)
         int o = g_order[0];
         uint8_t *buf; size_t len, *off;
         if (o < 0) { Out *q = &g_outq[-1 - o]; buf = q->buf; len = q->len; off = &q->off; }
-        else { Job *j = &g_jobs[o]; buf = j->reply; len = j->reply_len; off = &j->reply_off; }
+        else { JobOut *q = &g_jobs[o].q[0]; buf = q->buf; len = q->len; off = &q->off; }
         while (*off < len) {
             ssize_t w = send(g_chan, buf + *off, len - *off, MSG_NOSIGNAL | MSG_DONTWAIT);
             if (w < 0) {
@@ -730,9 +925,18 @@ static int flush_out(void)
             }
             *off += (size_t)w;
         }
-        if (o < 0) { free(g_outq[-1 - o].buf); g_outq[-1 - o].buf = NULL; g_outq_n--; }
-        else job_free(&g_jobs[o]);   /* delivered: its admission slot frees */
         memmove(g_order, g_order + 1, (size_t)(--g_order_n) * sizeof g_order[0]);
+        if (o < 0) { free(g_outq[-1 - o].buf); g_outq[-1 - o].buf = NULL; g_outq_n--; continue; }
+        Job *j = &g_jobs[o];
+        int final = j->q[0].final;
+        if (j->q[0].type == HX_CHUNK && (j->q[0].fd == 1 || j->q[0].fd == 2))
+            j->so[j->q[0].fd - 1].wire += j->q[0].len - HL_CHAN_HDR - 1;
+        free(j->q[0].buf);
+        memmove(j->q, j->q + 1, (size_t)(--j->qn) * sizeof j->q[0]);
+        /* Delivered: its admission slot frees (a routed call's broker has
+         * already ended it; a discarded one's command is gone). */
+        if (final || (j->discard && j->qn == 0 && (j->routed || job_settled(j))))
+            job_free(j);
     }
     return 0;
 }
@@ -775,46 +979,85 @@ static void sub_lost(int ci)
     for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
         Job *j = &g_jobs[i];
         if (!j->used || !j->routed || j->ci != ci || j->queued) continue;
-        if (j->discard) job_free(j);
-        else job_reply_frame(j, HX_REFUSED, msg, strlen(msg));
+        if (j->discard) {
+            job_drop_unsent(j);
+            if (j->qn == 0) job_free(j);
+        } else {
+            job_reply_frame(j, HX_REFUSED, msg, strlen(msg));
+        }
     }
 }
 
-/* A frame from command @p ci's broker: a reply ends the call routed under
- * its id; a test probe goes straight on to the server. */
-static void sub_frame(int ci, uint32_t type, uint32_t id, const uint8_t *p, size_t len)
-{
-#ifdef HL_EXEC_TEST_HOOKS
-    if (type == HX_PROBE) { queue_frame(HX_PROBE, id, p, len); return; }
-#endif
-    if (type != HX_DONE && type != HX_BUSY && type != HX_REFUSED) { sub_lost(ci); return; }
-    for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
-        Job *j = &g_jobs[i];
-        if (!j->used || !j->routed || j->id != id) continue;
-        if (j->ci != ci) { sub_lost(ci); return; }   /* not its call */
-        if (j->queued) return;
-        if (j->discard) { job_free(j); return; }
-        /* A reply holds the call's output, at most what was reserved for it
-         * (the DONE head is 24 bytes); more is a broker gone wrong. */
-        if (len > j->reserved + 24 + 1024) { sub_lost(ci); return; }
-        job_reply_frame(j, type, p, len);
-        return;
-    }
-    /* No such call: it was KILLed and freed meanwhile. */
-}
-
-/* Queue a frame for command @p ci's broker. -1 when its queue is full or
- * memory is short (neither happens with the admission caps: at most one RUN
- * and one KILL per call in flight). */
-static int sub_queue(int ci, uint32_t type, uint32_t id, const void *p, size_t len)
+/* Queue a frame for command @p ci's broker, with room for @p cap payload
+ * bytes. -1 when its queue is full or memory is short (neither happens with
+ * the admission caps and the windows: see HX_SUBQ). */
+static int sub_queue_cap(int ci, uint32_t type, uint32_t id, uint8_t fd,
+                         const void *a, size_t alen, const void *b, size_t blen,
+                         size_t cap)
 {
     Sub *s = &g_subs[ci];
     if (s->fd < 0 || s->qn >= HX_SUBQ) return -1;
     size_t n;
-    uint8_t *f = frame_make(type, id, p, len, NULL, 0, &n);
+    uint8_t *f = frame_make_cap(type, id, a, alen, b, blen, cap, &n);
     if (!f) return -1;
     if (s->qn == 0) s->progress_ms = hl_chan_mono_ms();
-    s->q[s->qn++] = (SubOut){ f, n, 0, type, id, 0 };
+    if (cap < alen + blen) cap = alen + blen;
+    s->q[s->qn++] = (SubOut){ f, n, cap, 0, type, id, fd, 0 };
+    return 0;
+}
+
+static int sub_queue(int ci, uint32_t type, uint32_t id, const void *p, size_t len)
+{
+    return sub_queue_cap(ci, type, id, 0, p, len, NULL, 0, 0);
+}
+
+/* Forward @p bytes of credit for pipe @p fd of call @p id, merged into a
+ * CREDIT for it that has not started. */
+static int sub_credit(int ci, uint32_t id, uint8_t fd, uint32_t bytes)
+{
+    Sub *s = &g_subs[ci];
+    for (int k = s->qn - 1; k >= 0; k--) {
+        SubOut *o = &s->q[k];
+        if (o->type != HX_CREDIT || o->id != id || o->fd != fd || o->off) continue;
+        uint8_t *pl = o->buf + HL_CHAN_HDR;
+        hl_chan_put32(pl + 1, hl_chan_get32(pl + 1) + bytes);
+        return 0;
+    }
+    uint8_t pl[5];
+    pl[0] = fd;
+    hl_chan_put32(pl + 1, bytes);
+    return sub_queue(ci, HX_CREDIT, id, pl, 5);
+}
+
+/* Forward stdin bytes (and EOF) for call @p id, merged into its last STDIN
+ * while that has not started and fits. */
+static int sub_stdin(int ci, uint32_t id, uint8_t flags, const uint8_t *data, size_t n)
+{
+    Sub *s = &g_subs[ci];
+    for (int k = s->qn - 1; k >= 0; k--) {
+        SubOut *o = &s->q[k];
+        if (o->type != HX_STDIN || o->id != id) continue;
+        uint8_t *pl = o->buf + HL_CHAN_HDR;
+        if (o->off == 0 && !(pl[0] & HX_STDIN_EOF)) {
+            size_t have = o->len - HL_CHAN_HDR, room = o->cap - have;
+            size_t take = n < room ? n : room;
+            memcpy(o->buf + o->len, data, take);
+            o->len += take;
+            hl_chan_put32(o->buf + 12, (uint32_t)(have + take));
+            data += take;
+            n -= take;
+            if (n == 0) { pl[0] |= flags; return 0; }
+        }
+        break;
+    }
+    do {
+        size_t take = n < HL_EXEC_STREAM_CHUNK_MAX ? n : HL_EXEC_STREAM_CHUNK_MAX;
+        uint8_t fl = take == n ? flags : 0;
+        if (sub_queue_cap(ci, HX_STDIN, id, 0, &fl, 1, data, take,
+                          1 + HL_EXEC_STREAM_CHUNK_MAX) != 0) return -1;
+        data += take;
+        n -= take;
+    } while (n > 0);
     return 0;
 }
 
@@ -841,11 +1084,69 @@ static int sub_flush(int ci)
     return 0;
 }
 
+/* A frame from command @p ci's broker: a reply ends the call routed under
+ * its id, a stream's CHUNK / STDIN_CREDIT goes on to the server within the
+ * windows the router holds it to, a test probe goes straight on. */
+static void sub_frame(int ci, uint32_t type, uint32_t id, const uint8_t *p, size_t len)
+{
+#ifdef HL_EXEC_TEST_HOOKS
+    if (type == HX_PROBE) { queue_frame(HX_PROBE, id, p, len); return; }
+#endif
+    if (type != HX_DONE && type != HX_BUSY && type != HX_REFUSED &&
+        type != HX_CHUNK && type != HX_STDIN_CREDIT) { sub_lost(ci); return; }
+    for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
+        Job *j = &g_jobs[i];
+        if (!j->used || !j->routed || j->id != id) continue;
+        if (j->ci != ci) { sub_lost(ci); return; }   /* not its call */
+        if (j->queued || j->discard) return;         /* ended here already */
+        if (type == HX_CHUNK) {
+            size_t n = len - 1;
+            int fd = len >= 2 ? p[0] : 0;
+            if (!j->stream || (fd != 1 && fd != 2) || n > HL_EXEC_STREAM_CHUNK_MAX ||
+                n > j->so[fd - 1].credit) { sub_lost(ci); return; }
+            j->so[fd - 1].credit -= n;
+            j->so[fd - 1].total += n;
+            if (chunk_push(j, (uint8_t)fd, p + 1, n) != 0) sub_lost(ci);
+            return;
+        }
+        if (type == HX_STDIN_CREDIT) {
+            if (!j->stream || !j->in_open || len != 5) { sub_lost(ci); return; }
+            uint32_t bytes = hl_chan_get32(p + 1);
+            if (bytes > HL_EXEC_STREAM_WINDOW - j->in_granted) { sub_lost(ci); return; }
+            j->in_granted += bytes;
+            if (p[0] & HX_STDIN_CLOSED) j->in_closed = 1;
+            if (stdin_credit_push(j, p[0] & HX_STDIN_CLOSED, bytes) != 0) sub_lost(ci);
+            return;
+        }
+        /* A reply holds the call's output, at most what was reserved for it
+         * (the DONE head is 24 bytes); more is a broker gone wrong. */
+        if (len > j->reserved + 24 + 1024) { sub_lost(ci); return; }
+        job_reply_frame(j, type, p, len);
+        return;
+    }
+    /* No such call: it was KILLed and freed meanwhile. */
+}
+
+/* Set up job @p j as a stream when @p rflags asks for one: the windows, and
+ * (unless @p routed: its broker grants that) the stdin credit. */
+static void stream_init(Job *j, const Cmd *cmd, unsigned rflags, size_t in_len, int routed)
+{
+    if (!(rflags & HX_RUN_STREAM)) return;
+    j->stream = 1;
+    j->so[0].credit = j->so[1].credit = HL_EXEC_STREAM_WINDOW;
+    j->so[0].cap = cmd->c.stream_stdout_max;
+    j->so[1].cap = cmd->c.stream_stderr_max;
+    j->in_open = (rflags & HX_RUN_STDIN_OPEN) ? 1 : 0;
+    j->in_total = in_len;
+    j->in_total_max = cmd->c.stream_stdin_max;
+    j->in_granted = (j->in_open && !routed) ? HL_EXEC_STREAM_WINDOW : 0;
+}
+
 /* Forward an admitted, matched RUN to its command's broker, as one job: it
  * is queued and goes out as that broker takes it, never holding the router
  * (#1234). */
 static void route_call(int slot, int ci, uint32_t id, const uint8_t *p, size_t len,
-                       size_t reserve)
+                       size_t reserve, unsigned rflags, size_t in_len)
 {
     char msg[160];
     if (g_subs[ci].fd < 0) {
@@ -867,30 +1168,60 @@ static void route_call(int slot, int ci, uint32_t id, const uint8_t *p, size_t l
     j->reserved = reserve;
     g_reserved += reserve;
     g_cmds[ci].running++;
+    stream_init(j, &g_cmds[ci], rflags, in_len, 1);
     if (sub_flush(ci) != 0) sub_lost(ci);   /* replies REFUSED for this job */
 }
 
 /* KILL routed call @p id, run by command @p ci's broker. Its RUN, if not
  * started on the wire, is simply dropped (that broker never saw the call);
- * one partly written goes out whole first, its bytes counted until then. */
+ * one partly written goes out whole first, its bytes counted until then.
+ * The call's own waiting frames to that broker (CREDIT, STDIN) go too. */
 static void sub_kill(int ci, uint32_t id)
 {
     Sub *s = &g_subs[ci];
     if (s->fd < 0) return;
+    int started = 1;
     for (int k = 0; k < s->qn; k++) {
         SubOut *o = &s->q[k];
-        if (o->type != HX_RUN || o->id != id) continue;
+        if (o->id != id || o->type == HX_KILL) continue;
         if (o->off == 0) {
+            if (o->type == HX_RUN) started = 0;
+            g_reserved -= o->hold;
             free(o->buf);
             memmove(s->q + k, s->q + k + 1, (size_t)(s->qn - k - 1) * sizeof s->q[0]);
             s->qn--;
-            return;
+            k--;
+            continue;
         }
-        o->hold = o->len;   /* its job is freed now; the frame still holds memory */
-        g_reserved += o->hold;
-        break;
+        if (o->type == HX_RUN) {
+            o->hold = o->len;   /* its job is freed now; the frame still holds memory */
+            g_reserved += o->hold;
+        }
     }
+    if (!started) return;
     if (sub_queue(ci, HX_KILL, id, NULL, 0) != 0 || sub_flush(ci) != 0) sub_lost(ci);
+}
+
+/* End call @p j for a protocol error the server made (credit or stdin past
+ * its bounds): its command is killed, what it had waiting is dropped, and
+ * the server gets REFUSED as its last frame. */
+static void call_fail(Job *j, const char *msg)
+{
+    job_drop_unsent(j);
+    j->discard = 0;
+    if (j->routed) {
+        sub_kill(j->ci, j->id);
+        job_reply_frame(j, HX_REFUSED, msg, strlen(msg));
+        return;
+    }
+    /* Its slot is held until the child is reaped: REFUSED goes out then
+     * (the main loop), so concurrency counts the dying child. */
+    job_kill(j);
+    if (j->out_fd >= 0) { close(j->out_fd); j->out_fd = -1; }
+    if (j->err_fd >= 0) { close(j->err_fd); j->err_fd = -1; }
+    if (j->in_fd >= 0) { close(j->in_fd); j->in_fd = -1; }
+    j->so[0].open_len = j->so[1].open_len = 0;
+    j->fail_msg = msg;
 }
 
 /* ── One call ──────────────────────────────────────────────────────── */
@@ -901,8 +1232,9 @@ static void sub_kill(int ci, uint32_t id)
  * hl_exec_plat_child_* (exec_platform.h); the order matters: die with the
  * broker before anything else, confine before stdio moves, the syscall
  * filter last. */
-static void child_run(const Cmd *cmd, int bfd, int in_r, int out_w, int err_w,
-                      int ep, char *const argv[], char *const envp[], pid_t broker)
+static void child_run(const Cmd *cmd, uint32_t timeout_ms, int bfd, int in_r, int out_w,
+                      int err_w, int ep, char *const argv[], char *const envp[],
+                      pid_t broker)
 {
     unsigned char stage = 0;
     int e = 0, st;
@@ -931,9 +1263,11 @@ static void child_run(const Cmd *cmd, int bfd, int in_r, int out_w, int err_w,
     umask(077);
     struct rlimit core = { 0, 0 };
     setrlimit(RLIMIT_CORE, &core);
-    rlim_t cpu = (cmd->c.timeout_ms + 999) / 1000 + 1;
-    struct rlimit rcpu = { cpu, cpu };
-    setrlimit(RLIMIT_CPU, &rcpu);
+    if (timeout_ms) {                              /* 0: a stream with no time limit */
+        rlim_t cpu = ((rlim_t)timeout_ms + 999) / 1000 + 1;
+        struct rlimit rcpu = { cpu, cpu };
+        setrlimit(RLIMIT_CPU, &rcpu);
+    }
     struct rlimit nofile = { 256, 256 };
     setrlimit(RLIMIT_NOFILE, &nofile);
     if (cmd->c.n_fs_write == 0 && cmd->n_app_write == 0) {
@@ -960,9 +1294,9 @@ static const char *const STAGE[] = { "", "parent-death signal", "setsid",
  * its pid on @p pid_w, drops everything, and waits (hl_exec_plat_keeper_run).
  * It is the job's parent, so it reaps it: the broker's death cannot leave
  * the job, nor a late kill hit a reused pid. */
-static void keeper_start(const Cmd *cmd, int bfd, int in_r, int out_w, int err_w,
-                         int ep, int kill_r, int pid_w, char *const argv[],
-                         char *const envp[], pid_t broker)
+static void keeper_start(const Cmd *cmd, uint32_t timeout_ms, int bfd, int in_r,
+                         int out_w, int err_w, int ep, int kill_r, int pid_w,
+                         char *const argv[], char *const envp[], pid_t broker)
 {
     hl_exec_plat_keeper_signals();                 /* before anything can end it */
     if (getppid() != broker) _exit(127);           /* the broker died already */
@@ -977,7 +1311,7 @@ static void keeper_start(const Cmd *cmd, int bfd, int in_r, int out_w, int err_w
     if (job == 0) {
         close(kill_r);
         close(pid_w);
-        child_run(cmd, bfd, in_r, out_w, err_w, ep, argv, envp, getppid());
+        child_run(cmd, timeout_ms, bfd, in_r, out_w, err_w, ep, argv, envp, getppid());
     }
     if (job < 0) {
         int e = errno;
@@ -1034,7 +1368,7 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     }
 
     /* Decode: u16 name_len, name, u16 n, (u32 len, bytes) * n,
-     * u32 stdin_len, stdin */
+     * u32 stdin_len, stdin, u8 flags */
     const char *args[HL_EXEC_MAX_CALL_ARGS];
     size_t lens[HL_EXEC_MAX_CALL_ARGS];
     if (len < 4) { queue_small(HX_REFUSED, id, "exec: malformed RUN"); return; }
@@ -1060,8 +1394,17 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     if (off + 4 > len) { queue_small(HX_REFUSED, id, "exec: malformed RUN"); return; }
     size_t in_len = hl_chan_get32(p + off);
     off += 4;
-    if (in_len != len - off) { queue_small(HX_REFUSED, id, "exec: malformed RUN"); return; }
+    if (len - off < 1 || in_len != len - off - 1) {
+        queue_small(HX_REFUSED, id, "exec: malformed RUN");
+        return;
+    }
     const uint8_t *in = p + off;
+    unsigned rflags = p[len - 1];
+    if ((rflags & ~(HX_RUN_STREAM | HX_RUN_STDIN_OPEN)) ||
+        ((rflags & HX_RUN_STDIN_OPEN) && !(rflags & HX_RUN_STREAM))) {
+        queue_small(HX_REFUSED, id, "exec: malformed RUN");
+        return;
+    }
 
     HlExecCmd c;
     char err[256], msg[320];
@@ -1076,10 +1419,19 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
         if (strcmp(g_cmds[i].c.name, c.name) == 0) { ci = i; break; }
     if (ci < 0) { queue_small(HX_REFUSED, id, "exec: unknown command"); return; }
     Cmd *cmd = &g_cmds[ci];
+    int stream = (rflags & HX_RUN_STREAM) != 0, in_open = (rflags & HX_RUN_STDIN_OPEN) != 0;
+    if (stream && !(cmd->c.flags & HL_EXEC_CMD_STREAM)) {
+        snprintf(msg, sizeof msg, "exec.%s: is not a stream command (it declares no "
+                 "stream = true)", cmd->c.name);
+        queue_small(HX_REFUSED, id, msg);
+        return;
+    }
     /* stdin: the command's own cap, checked here too (the binding's check is
-     * only a fast path). */
-    if (in_len > cmd->c.stdin_max) {
-        snprintf(msg, sizeof msg, cmd->c.stdin_max
+     * only a fast path). A stream's is its total, of which the RUN may carry
+     * up to the exec.run ceiling (more goes in STDIN frames). */
+    uint64_t in_max = stream ? cmd->c.stream_stdin_max : cmd->c.stdin_max;
+    if (in_len > in_max || (in_open && in_max == 0)) {
+        snprintf(msg, sizeof msg, in_max
                  ? "exec.%s: stdin is longer than its stdin_max"
                  : "exec.%s: takes no stdin (it declares no stdin_max)", cmd->c.name);
         queue_small(HX_REFUSED, id, msg);
@@ -1089,14 +1441,17 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
         queue_small(HX_BUSY, id, "exec: the command's concurrency is reached");
         return;
     }
-    /* Its output caps and its stdin, held until the reply is delivered. */
-    size_t reserve = (size_t)cmd->c.stdout_max + cmd->c.stderr_max + in_len;
+    /* Its output caps and its stdin, held until the reply is delivered; a
+     * stream holds its windows instead. */
+    size_t reserve = stream
+        ? 2u * HL_EXEC_STREAM_WINDOW + in_len + (in_open ? HL_EXEC_STREAM_WINDOW : 0u)
+        : (size_t)cmd->c.stdout_max + cmd->c.stderr_max + in_len;
     if (reserve > HL_EXEC_MAX_BUFFERED - g_reserved) {
         queue_small(HX_BUSY, id, "exec: too much output held for delivery");
         return;
     }
     if (g_router) {                      /* its own broker runs it */
-        route_call(free_slot, ci, id, p, len, reserve);
+        route_call(free_slot, ci, id, p, len, reserve, rflags, in_len);
         return;
     }
 
@@ -1168,16 +1523,17 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     sigfillset(&all);
     if (keeper) sigprocmask(SIG_SETMASK, &all, &was);
     if (pipe_cloexec(op) == 0 && pipe_cloexec(epp) == 0 && pipe_cloexec(ep) == 0 &&
-        (in_len == 0 || pipe_cloexec(ip) == 0) &&
+        ((in_len == 0 && !in_open) || pipe_cloexec(ip) == 0) &&
         (!keeper || (pipe_cloexec(kp) == 0 && pipe_cloexec(pp) == 0)))
         pid = fork();
     int fork_errno = errno;
     if (pid != 0 && keeper) sigprocmask(SIG_SETMASK, &was, NULL);
+    uint32_t timeout = stream ? cmd->c.stream_timeout_ms : cmd->c.timeout_ms;
     if (pid == 0 && keeper)
-        keeper_start(cmd, bfd, ip[0], op[1], epp[1], ep[1], kp[0], pp[1], argv, envp,
-                     getppid());
+        keeper_start(cmd, timeout, bfd, ip[0], op[1], epp[1], ep[1], kp[0], pp[1], argv,
+                     envp, getppid());
     if (pid == 0)
-        child_run(cmd, bfd, ip[0], op[1], epp[1], ep[1], argv, envp, getppid());
+        child_run(cmd, timeout, bfd, ip[0], op[1], epp[1], ep[1], argv, envp, getppid());
     if (kp[0] >= 0) close(kp[0]);
     if (pp[1] >= 0) close(pp[1]);
     close(bfd);
@@ -1245,22 +1601,35 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     j->pidfd = hl_exec_plat_exit_watch(pid);
     hl_chan_set_nonblock(j->out_fd);
     hl_chan_set_nonblock(j->err_fd);
-    j->out = malloc(cmd->c.stdout_max ? cmd->c.stdout_max : 1);
-    j->err = malloc(cmd->c.stderr_max ? cmd->c.stderr_max : 1);
+    stream_init(j, cmd, rflags, in_len, 0);
+    int oom = 0;
+    if (!stream) {
+        j->out = malloc(cmd->c.stdout_max ? cmd->c.stdout_max : 1);
+        j->err = malloc(cmd->c.stderr_max ? cmd->c.stderr_max : 1);
+        oom = !j->out || !j->err;
+    }
     j->in_fd = ip[1];
-    if (in_len) {
+    if (in_len || in_open) {
         /* Written as the pipe takes it (the main loop); a command that exits
-         * or closes its stdin first just leaves the rest unwritten. */
+         * or closes its stdin first just leaves the rest unwritten. An open
+         * stdin has room for one window more. */
         hl_chan_set_nonblock(j->in_fd);
-        j->in = malloc(in_len);
+        j->in_cap = in_len + (in_open ? HL_EXEC_STREAM_WINDOW : 0);
+        j->in = malloc(j->in_cap);
         if (j->in) { memcpy(j->in, in, in_len); j->in_len = in_len; }
+        else oom = 1;
+        j->in_init_left = in_len;
     }
     j->start_ms = hl_chan_mono_ms();
-    j->deadline = j->start_ms + cmd->c.timeout_ms;
+    j->deadline = timeout ? j->start_ms + timeout : UINT64_MAX;
     j->reserved = reserve;
     g_reserved += reserve;
     cmd->running++;
-    if (!j->out || !j->err || (in_len && !j->in)) { job_kill(j); j->discard = 1; }
+    if (oom) { job_kill(j); j->discard = 1; return; }
+    if (in_open && stdin_credit_push(j, 0, HL_EXEC_STREAM_WINDOW) != 0) {
+        job_kill(j);
+        j->discard = 1;
+    }
 }
 
 static void kill_call(uint32_t id)
@@ -1268,32 +1637,86 @@ static void kill_call(uint32_t id)
     for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
         Job *j = &g_jobs[i];
         if (!j->used || j->id != id) continue;
-        if (j->routed && !j->queued) {
+        /* What has not started on the wire is dropped; a part-sent frame
+         * goes out whole, and the job frees once it has. */
+        job_drop_unsent(j);
+        if (j->routed) {
             /* Its broker kills the child and sends no reply; the slot frees
              * now (that broker holds its own caps meanwhile). Freed BEFORE a
              * failed write can mark the broker lost, which would otherwise
              * queue a reply for this slot (review: the freed slot stayed in
              * g_order). */
             int ci = j->ci;
-            job_free(j);
+            if (j->qn == 0) job_free(j);
+            else j->discard = 1;
             sub_kill(ci, id);
             return;
         }
         if (j->pid > 0) job_kill(j);
         j->discard = 1;
-        if (j->queued && j->reply_off == 0) {
-            /* not started on the wire: drop it */
-            for (int k = 0; k < g_order_n; k++)
-                if (g_order[k] == i) {
-                    memmove(g_order + k, g_order + k + 1,
-                            (size_t)(g_order_n - k - 1) * sizeof g_order[0]);
-                    g_order_n--;
-                    break;
-                }
-            job_free(j);
-        }
+        j->so[0].open_len = j->so[1].open_len = 0;   /* no more output for it */
+        if (j->qn == 0 && job_settled(j)) job_free(j);
         return;
     }
+}
+
+/* A CREDIT or STDIN frame from the server for call @p id (§5, §5.1 of
+ * exec_stream.md). A call that has ended, or is not known, takes nothing
+ * (the server's frame crossed its end); one that is not a stream, or credit
+ * or stdin past its bounds, ends the call. */
+static void stream_frame(uint32_t type, uint32_t id, const uint8_t *p, size_t len)
+{
+    Job *j = NULL;
+    for (int i = 0; i < HL_EXEC_MAX_INFLIGHT && !j; i++)
+        if (g_jobs[i].used && g_jobs[i].id == id) j = &g_jobs[i];
+    if (!j || j->discard || j->queued || j->fail_msg) return;
+    if (!j->stream) { call_fail(j, "exec: stream frames for a call that is not a stream"); return; }
+    if (type == HX_CREDIT) {
+        int fd = len == 5 ? p[0] : 0;
+        if (fd != 1 && fd != 2) { call_fail(j, "exec: a malformed CREDIT"); return; }
+        uint32_t bytes = hl_chan_get32(p + 1);
+        StreamOut *so = &j->so[fd - 1];
+        /* Credit only for output the server has been sent: a server that
+         * credited bytes it never read could fill the queue (review). */
+        if (bytes > so->wire || bytes > HL_EXEC_STREAM_WINDOW - so->credit) {
+            call_fail(j, "exec: credit past the stream's window");
+            return;
+        }
+        so->wire -= bytes;
+        so->credit += bytes;
+        if (j->routed && sub_credit(j->ci, id, (uint8_t)fd, bytes) != 0) sub_lost(j->ci);
+        return;
+    }
+    /* STDIN */
+    if (len < 1 || len - 1 > HL_EXEC_STREAM_CHUNK_MAX) { call_fail(j, "exec: a malformed STDIN"); return; }
+    uint8_t flags = p[0];
+    size_t n = len - 1;
+    if (!j->in_open || j->in_eof || (flags & ~HX_STDIN_EOF)) {
+        call_fail(j, "exec: stdin the call did not open");
+        return;
+    }
+    if (n > j->in_granted) { call_fail(j, "exec: stdin past its credit"); return; }
+    if (n > j->in_total_max - j->in_total) {
+        call_fail(j, "exec: stdin longer than its stdin_max");
+        return;
+    }
+    j->in_granted -= n;
+    j->in_total += n;
+    if (flags & HX_STDIN_EOF) j->in_eof = 1;
+    if (j->routed) {
+        if (sub_stdin(j->ci, id, flags, p + 1, n) != 0) sub_lost(j->ci);
+        return;
+    }
+    if (j->in_closed || j->in_fd < 0) return;   /* the child stopped reading */
+    if (j->in_off > 0) {
+        memmove(j->in, j->in + j->in_off, j->in_len - j->in_off);
+        j->in_len -= j->in_off;
+        j->in_off = 0;
+    }
+    if (n > j->in_cap - j->in_len) { call_fail(j, "exec: stdin past its credit"); return; }
+    if (n) memcpy(j->in + j->in_len, p + 1, n);
+    j->in_len += n;
+    if (j->in_eof && j->in_len == 0) { close(j->in_fd); j->in_fd = -1; }
 }
 
 /* Read what a pipe has into its buffer, keeping only up to @p cap. */
@@ -1317,20 +1740,113 @@ static void drain(int *fd, uint8_t *buf, size_t *len, size_t cap, int *cut)
 }
 
 /* Write what the child's stdin pipe takes; close it once everything is
- * written, or when the child stopped reading (EPIPE: SIGPIPE is ignored). */
+ * written (an open stream stdin: once the server sent EOF), or when the
+ * child stopped reading (EPIPE: SIGPIPE is ignored). An open stdin gives its
+ * credit back as the pipe takes the streamed bytes. */
+static void stdin_closed(Job *j)
+{
+    if (j->in_fd >= 0) { close(j->in_fd); j->in_fd = -1; }
+    if (!j->in_open || j->in_closed) return;
+    j->in_closed = 1;
+    j->in_len = j->in_off = 0;
+    j->in_closed_tell = 1;           /* sent by the main loop (a full queue retries) */
+}
+
 static void feed(Job *j)
 {
+    int gone = 0;
     while (j->in_off < j->in_len) {
         ssize_t w = write(j->in_fd, j->in + j->in_off, j->in_len - j->in_off);
-        if (w > 0) { j->in_off += (size_t)w; continue; }
+        if (w > 0) {
+            size_t c = (size_t)w;
+            size_t init = c < j->in_init_left ? c : j->in_init_left;
+            j->in_init_left -= init;
+            j->in_ret += c - init;
+            j->in_off += c;
+            continue;
+        }
         if (w < 0 && errno == EINTR) continue;
-        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        gone = 1;
         break;
     }
-    close(j->in_fd);
-    j->in_fd = -1;
-    free(j->in);
-    j->in = NULL;
+    if (gone) { stdin_closed(j); return; }
+    if (j->in_off == j->in_len) {
+        j->in_off = j->in_len = 0;
+        if ((!j->in_open || j->in_eof) && j->in_fd >= 0) {
+            close(j->in_fd);
+            j->in_fd = -1;
+            if (!j->in_open) { free(j->in); j->in = NULL; }
+        }
+    }
+    if (j->in_open && j->in_ret &&
+        (j->in_len == 0 || j->in_ret >= HL_EXEC_STREAM_WINDOW / 4) &&
+        stdin_credit_push(j, 0, (uint32_t)j->in_ret) == 0) {
+        j->in_granted += j->in_ret;
+        j->in_ret = 0;
+    }
+}
+
+/* Move stream pipe @p k's (0 stdout, 1 stderr) waiting bytes into CHUNKs. */
+static void stream_emit(Job *j, int k)
+{
+    StreamOut *so = &j->so[k];
+    if (!so->open_len) return;
+    size_t left = chunk_push(j, (uint8_t)(k + 1), so->open, so->open_len);
+    if (left) {
+        memmove(so->open, so->open + so->open_len - left, left);
+        so->open_ms = hl_chan_mono_ms();    /* a full queue: try again later, not at once */
+    }
+    so->open_len = left;
+}
+
+/* Read stream pipe @p k while it has credit. Once its command is ended -
+ * past its total cap, timed out, or KILLed - what credit does not cover is
+ * read and dropped to EOF (marked cut), so the call ends whether or not the
+ * app reads: back pressure holds a running command, never an ended one. */
+static void stream_drain(Job *j, int k)
+{
+    int *fd = k ? &j->err_fd : &j->out_fd;
+    int *cut = k ? &j->err_cut : &j->out_cut;
+    StreamOut *so = &j->so[k];
+    uint8_t tmp[16384];
+    for (;;) {
+        ssize_t r;
+        size_t room = HL_EXEC_STREAM_CHUNK_MAX - so->open_len;
+        if (so->credit < room) room = so->credit;
+        if (!*cut && (j->discard || (room == 0 && j->timed_out))) *cut = 1;
+        if (*cut) {
+            r = read(*fd, tmp, sizeof tmp);
+        } else {
+            if (room == 0) return;
+            if (!so->open && !(so->open = malloc(HL_EXEC_STREAM_CHUNK_MAX))) {
+                call_fail(j, "exec: out of memory");
+                return;
+            }
+            r = read(*fd, so->open + so->open_len, room);
+        }
+        if (r > 0) {
+            if (*cut) continue;
+            size_t keep = (size_t)r;
+            if (so->cap != HL_EXEC_STREAM_NO_CAP && keep > so->cap - so->total) {
+                keep = (size_t)(so->cap - so->total);
+                *cut = 1;
+                if (j->pid > 0) job_kill(j);   /* past its declared total */
+            }
+            if (keep && so->open_len == 0) so->open_ms = hl_chan_mono_ms();
+            so->credit -= keep;
+            so->total += keep;
+            so->open_len += keep;
+            if (so->open_len == HL_EXEC_STREAM_CHUNK_MAX) stream_emit(j, k);
+            continue;
+        }
+        if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (r < 0 && errno == EINTR) continue;
+        close(*fd);
+        *fd = -1;
+        stream_emit(j, k);
+        return;
+    }
 }
 
 static void reap(void)
@@ -1344,6 +1860,9 @@ static void reap(void)
             if (!j->used || j->pid != p) continue;
             j->pid = 0;
             if (j->in_fd >= 0) { close(j->in_fd); j->in_fd = -1; }   /* nobody reads it */
+            j->in_len = j->in_off = 0;
+            if (j->in_open && !j->in_closed) j->in_closed_tell = 1;
+            j->in_closed = 1;
             if (WIFEXITED(st)) { j->status = WEXITSTATUS(st); j->signo = 0; }
             else if (WIFSIGNALED(st)) { j->status = 0; j->signo = WTERMSIG(st); }
         }
@@ -1585,16 +2104,39 @@ int hl_exec_broker_main(void)
         for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
             Job *j = &g_jobs[i];
             if (!j->used || j->routed) continue;   /* its broker times it */
-            if (j->out_fd >= 0) { pf[np] = (struct pollfd){ j->out_fd, POLLIN, 0 }; map[np++] = i; }
-            if (j->err_fd >= 0) { pf[np] = (struct pollfd){ j->err_fd, POLLIN, 0 }; map[np++] = i; }
+            /* A stream's pipe is read only while it has credit (or past its
+             * cap, to drop the rest): the child blocks, Hull holds nothing more. */
+            for (int k = 0; k < 2; k++) {
+                int fd = k ? j->err_fd : j->out_fd;
+                if (fd < 0) continue;
+                if (j->stream && !(k ? j->err_cut : j->out_cut) && !j->timed_out &&
+                    !j->discard &&
+                    (j->so[k].credit == 0 || j->so[k].open_len == HL_EXEC_STREAM_CHUNK_MAX))
+                    continue;
+                pf[np] = (struct pollfd){ fd, POLLIN, 0 };
+                map[np++] = i;
+            }
             if (j->pidfd >= 0 && j->pid > 0) { pf[np] = (struct pollfd){ j->pidfd, POLLIN, 0 }; map[np++] = i; }
-            if (j->in_fd >= 0) { pf[np] = (struct pollfd){ j->in_fd, POLLOUT, 0 }; map[np++] = i; }
+            if (j->in_fd >= 0 && j->in_off < j->in_len) {
+                pf[np] = (struct pollfd){ j->in_fd, POLLOUT, 0 };
+                map[np++] = i;
+            }
             int t = -1;
-            if (j->pid > 0 && !j->timed_out) t = j->deadline > now ? (int)(j->deadline - now) : 0;
-            else if (j->pid > 0) t = 50;                   /* killed: reap soon */
+            if (j->pid > 0 && !j->timed_out && j->deadline != UINT64_MAX)
+                t = j->deadline > now ? (int)(j->deadline - now > 86400000u ? 86400000u
+                                                                    : j->deadline - now) : 0;
+            else if (j->pid > 0 && (j->timed_out || j->discard || j->fail_msg ||
+                                    j->out_cut || j->err_cut))
+                t = 50;                                    /* killed: reap soon */
             else if (j->out_fd < 0 && j->err_fd < 0) t = 0;
             if (j->pid > 0 && j->pidfd < 0 && j->out_fd < 0 && j->err_fd < 0 &&
                 (t < 0 || t > 50)) t = 50;
+            for (int k = 0; k < 2; k++)            /* a waiting part-chunk */
+                if (j->so[k].open_len) {
+                    uint64_t due = j->so[k].open_ms + HL_EXEC_STREAM_COALESCE_MS;
+                    int tk = due > now ? (int)(due - now) : 0;
+                    if (t < 0 || tk < t) t = tk;
+                }
             if (t >= 0 && (timeout < 0 || t < timeout)) timeout = t;
         }
         int pr = poll(pf, (nfds_t)np, timeout);
@@ -1608,6 +2150,8 @@ int hl_exec_broker_main(void)
                 if (rc != HL_CHAN_DONE) goto out;   /* EOF or a protocol error */
                 if (rd.type == HX_RUN) run_call(rd.id, rd.buf, rd.len);
                 else if (rd.type == HX_KILL) kill_call(rd.id);
+                else if (rd.type == HX_CREDIT || rd.type == HX_STDIN)
+                    stream_frame(rd.type, rd.id, rd.buf, rd.len);
                 else { hl_chan_frame_reset(&rd); goto out; }   /* a second POLICY ends it */
                 hl_chan_frame_reset(&rd);
                 if (g_outq_n >= HX_OUTQ - 2) break;
@@ -1633,7 +2177,13 @@ int hl_exec_broker_main(void)
             Job *j = &g_jobs[map[k]];
             Cmd *cmd = &g_cmds[j->ci];
             if (pf[k].fd == j->pidfd) continue;   /* reap() below */
+            if (!j->used) continue;                 /* ended by a frame above */
             if (pf[k].fd == j->in_fd) { feed(j); continue; }
+            if (j->stream) {
+                if (pf[k].fd == j->out_fd) stream_drain(j, 0);
+                else if (pf[k].fd == j->err_fd) stream_drain(j, 1);
+                continue;
+            }
             if (pf[k].fd == j->out_fd)
                 drain(&j->out_fd, j->out, &j->out_len, cmd->c.stdout_max, &j->out_cut);
             else if (pf[k].fd == j->err_fd)
@@ -1674,10 +2224,20 @@ int hl_exec_broker_main(void)
                 job_kill(j);
                 j->timed_out = 1;
             }
-            if (j->pid == 0 && j->out_fd < 0 && j->err_fd < 0 && !j->queued) {
-                if (j->discard) job_free(j);
+            for (int k = 0; k < 2; k++)
+                if (j->so[k].open_len && now - j->so[k].open_ms >= HL_EXEC_STREAM_COALESCE_MS)
+                    stream_emit(j, k);
+            if (j->in_open && j->in_ret && j->in_fd >= 0) feed(j);   /* credit kept back */
+            if (j->in_closed_tell && !j->discard && !j->fail_msg && !j->queued &&
+                stdin_credit_push(j, HX_STDIN_CLOSED, 0) == 0)
+                j->in_closed_tell = 0;
+            if (job_settled(j) && !j->queued && j->fail_msg && !j->discard) {
+                job_drop_unsent(j);
+                job_reply_frame(j, HX_REFUSED, j->fail_msg, strlen(j->fail_msg));
+            } else if (job_settled(j) && !j->queued) {
+                if (j->discard) { if (j->qn == 0) job_free(j); }
                 else job_reply(j);
-                if (j->used && j->discard && !j->queued) job_free(j);
+                if (j->used && j->discard && j->qn == 0) job_free(j);
             }
         }
         if (flush_out() != 0) break;
@@ -1879,6 +2439,9 @@ static void deliver(uint32_t type, uint32_t id, const uint8_t *p, size_t len)
 #endif
         return;
     }
+    /* A stream's frames (exec_stream.md) have no server side yet: the
+     * server sends no stream RUN, so none can come. */
+    if (type != HX_DONE && type != HX_BUSY && type != HX_REFUSED) return;
     Pending *pd = pend_find(id);
     if (!pd) return;                       /* cancelled meanwhile */
     HlExecReply *r = calloc(1, sizeof *r);
@@ -1979,7 +2542,7 @@ int hl_exec_submit(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
                  (unsigned)HL_EXEC_STDIN_CEIL);
         return -1;
     }
-    size_t total = 4 + name_len + 4;
+    size_t total = 4 + name_len + 4 + in_len + 1;
     for (size_t i = 0; i < n; i++) total += 4 + lens[i];
     uint8_t *buf = malloc(total);
     if (!buf) { snprintf(why, why_size, "exec: out of memory"); return -1; }
@@ -1996,12 +2559,15 @@ int hl_exec_submit(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
         if (lens[i]) memcpy(buf + off, args[i], lens[i]);
         off += lens[i];
     }
-    hl_chan_put32(buf + off, (uint32_t)in_len);   /* the stdin follows, uncopied */
+    hl_chan_put32(buf + off, (uint32_t)in_len);
     off += 4;
+    if (in_len) memcpy(buf + off, in, in_len);
+    off += in_len;
+    buf[off++] = 0;                               /* RUN flags: not a stream */
     uint32_t id = g_next_id++;
     if (g_next_id == 0) g_next_id = 1;
-    int rc = hl_chan_write_frame(g_fd, HX_MAGIC, HX_RUN, id, buf, off,
-                                 in_len ? in : NULL, in_len, hl_chan_mono_ms() + 1000);
+    int rc = hl_chan_write_frame(g_fd, HX_MAGIC, HX_RUN, id, buf, off, NULL, 0,
+                                 hl_chan_mono_ms() + 1000);
     free(buf);
     if (rc != 0) {
         snprintf(why, why_size, "exec: the command broker is not answering");

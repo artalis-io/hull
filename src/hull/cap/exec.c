@@ -11,6 +11,9 @@
  *              u32:stderr_max u8:concurrency u8:flags
  *              [32 bytes: the sha256 pin, if flags has SHA256]
  *              [u32:stdin_max, if flags has STDIN]
+ *              [u32:timeout_ms u64:stdout_max u64:stderr_max u64:stdin_max,
+ *               if flags has STREAM: the streamed call's limits; the u32
+ *               fields above are then hl_exec_stream_base of these]
  *              u16:n_env (str:name str:value)*n_env
  *              u16:n_fs_read str*  u16:n_fs_write str*
  *              u16:n_argv arg*n_argv
@@ -84,6 +87,12 @@ static const char *rd_str(Rd *r, size_t *len)
     return s;
 }
 
+static uint64_t rd_u64(Rd *r)
+{
+    uint64_t lo = rd_u32(r), hi = rd_u32(r);
+    return lo | hi << 32;
+}
+
 static const uint8_t *rd_bytes(Rd *r, size_t n)
 {
     if (!rd_need(r, n)) return NULL;
@@ -155,6 +164,12 @@ static void put_u32(HlExecBuf *b, uint32_t v)
     put(b, x, 4);
 }
 
+static void put_u64(HlExecBuf *b, uint64_t v)
+{
+    put_u32(b, (uint32_t)v);
+    put_u32(b, (uint32_t)(v >> 32));
+}
+
 static void put_str(HlExecBuf *b, const char *s, size_t n)
 {
     if (n > 0xFFFFu) {
@@ -187,6 +202,27 @@ static uint32_t opt_u32(int64_t v, uint32_t dflt)
     return (uint32_t)v;
 }
 
+/* A stream total: -1 = @p dflt; any other negative value is written as one
+ * past HL_EXEC_STREAM_TOTAL_MAX, which validation refuses. */
+static uint64_t opt_u64(int64_t v, uint64_t dflt)
+{
+    if (v == -1) return dflt;
+    if (v < 0) return HL_EXEC_STREAM_TOTAL_MAX + 1;
+    return (uint64_t)v;
+}
+
+HlExecStreamBase hl_exec_stream_base(uint32_t timeout_ms, uint64_t stdout_max,
+                                     uint64_t stderr_max, uint64_t stdin_max)
+{
+    HlExecStreamBase b;
+    b.timeout_ms = (timeout_ms == 0 || timeout_ms > HL_EXEC_TIMEOUT_MAX_MS)
+                   ? HL_EXEC_TIMEOUT_MAX_MS : timeout_ms;
+    b.stdout_max = stdout_max > HL_EXEC_STDOUT_CEIL ? HL_EXEC_STDOUT_CEIL : (uint32_t)stdout_max;
+    b.stderr_max = stderr_max > HL_EXEC_STDERR_CEIL ? HL_EXEC_STDERR_CEIL : (uint32_t)stderr_max;
+    b.stdin_max = stdin_max > HL_EXEC_STDIN_CEIL ? HL_EXEC_STDIN_CEIL : (uint32_t)stdin_max;
+    return b;
+}
+
 static uint16_t opt_u16(int64_t v, uint16_t dflt)
 {
     if (v == -1) return dflt;
@@ -201,11 +237,11 @@ static uint8_t opt_u8(int64_t v, uint8_t dflt)
     return (uint8_t)v;
 }
 
-void hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
-                   const char *path, size_t path_len,
-                   int64_t timeout_ms, int64_t stdout_max, int64_t stderr_max,
-                   int64_t concurrency, int unix_sockets, int64_t stdin_max,
-                   const char *sha256_hex, size_t sha256_len)
+static void b_cmd(HlExecBuf *b, const char *name, size_t name_len,
+                  const char *path, size_t path_len,
+                  int64_t timeout_ms, int64_t stdout_max, int64_t stderr_max,
+                  int64_t concurrency, int unix_sockets, int64_t stdin_max,
+                  const char *sha256_hex, size_t sha256_len, int stream)
 {
     if (b->ncmds == 0xFFFF) { hl_exec_b_fail(b, "exec: too many commands"); return; }
     uint8_t pin[32];
@@ -223,20 +259,66 @@ void hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
             return;
         }
     }
+    /* A stream command's own limits; the u32 fields are derived from them. */
+    uint32_t st_t = 0;
+    uint64_t st_o = 0, st_e = 0, st_i = 0;
+    int has_stdin = stdin_max != -1 && stdin_max != 0;
+    uint32_t t32, o32, e32, i32 = has_stdin ? opt_u32(stdin_max, 0) : 0;
+    if (stream) {
+        st_t = opt_u32(timeout_ms, HL_EXEC_TIMEOUT_DEFAULT_MS);
+        st_o = opt_u64(stdout_max, HL_EXEC_STREAM_NO_CAP);
+        st_e = opt_u64(stderr_max, HL_EXEC_STREAM_NO_CAP);
+        st_i = has_stdin ? opt_u64(stdin_max, 0) : 0;
+        HlExecStreamBase base = hl_exec_stream_base(st_t, st_o, st_e, st_i);
+        t32 = base.timeout_ms;
+        o32 = base.stdout_max;
+        e32 = base.stderr_max;
+        i32 = base.stdin_max;
+    } else {
+        t32 = opt_u32(timeout_ms, HL_EXEC_TIMEOUT_DEFAULT_MS);
+        o32 = opt_u32(stdout_max, HL_EXEC_STDOUT_DEFAULT);
+        e32 = opt_u32(stderr_max, HL_EXEC_STDERR_DEFAULT);
+    }
     b->ncmds++;
     put_str(b, name, name_len);
     put_str(b, path, path_len);
-    put_u32(b, opt_u32(timeout_ms, HL_EXEC_TIMEOUT_DEFAULT_MS));
-    put_u32(b, opt_u32(stdout_max, HL_EXEC_STDOUT_DEFAULT));
-    put_u32(b, opt_u32(stderr_max, HL_EXEC_STDERR_DEFAULT));
+    put_u32(b, t32);
+    put_u32(b, o32);
+    put_u32(b, e32);
     put_u8(b, opt_u8(concurrency, HL_EXEC_CONCURRENCY_DEFAULT));
-    int has_stdin = stdin_max != -1 && stdin_max != 0;
     b->flags_at = b->len;
     put_u8(b, (uint8_t)((unix_sockets ? HL_EXEC_CMD_UNIX_SOCKETS : 0) |
                         (sha256_hex ? HL_EXEC_CMD_SHA256 : 0) |
-                        (has_stdin ? HL_EXEC_CMD_STDIN : 0)));
+                        (has_stdin ? HL_EXEC_CMD_STDIN : 0) |
+                        (stream ? HL_EXEC_CMD_STREAM : 0)));
     if (sha256_hex) put(b, pin, sizeof pin);
-    if (has_stdin) put_u32(b, opt_u32(stdin_max, 0));   /* out of range: kept, refused */
+    if (has_stdin) put_u32(b, i32);   /* out of range: kept, refused */
+    if (stream) {
+        put_u32(b, st_t);
+        put_u64(b, st_o);
+        put_u64(b, st_e);
+        put_u64(b, st_i);
+    }
+}
+
+void hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
+                   const char *path, size_t path_len,
+                   int64_t timeout_ms, int64_t stdout_max, int64_t stderr_max,
+                   int64_t concurrency, int unix_sockets, int64_t stdin_max,
+                   const char *sha256_hex, size_t sha256_len)
+{
+    b_cmd(b, name, name_len, path, path_len, timeout_ms, stdout_max, stderr_max,
+          concurrency, unix_sockets, stdin_max, sha256_hex, sha256_len, 0);
+}
+
+void hl_exec_b_cmd_stream(HlExecBuf *b, const char *name, size_t name_len,
+                          const char *path, size_t path_len,
+                          int64_t timeout_ms, int64_t stdout_max, int64_t stderr_max,
+                          int64_t concurrency, int unix_sockets, int64_t stdin_max,
+                          const char *sha256_hex, size_t sha256_len)
+{
+    b_cmd(b, name, name_len, path, path_len, timeout_ms, stdout_max, stderr_max,
+          concurrency, unix_sockets, stdin_max, sha256_hex, sha256_len, 1);
 }
 
 void hl_exec_b_app_fs(HlExecBuf *b)
@@ -556,15 +638,36 @@ static int v_cmd(Rd *r, const char **names, size_t *name_lens, int ci,
     if (conc < 1 || conc > HL_EXEC_CONCURRENCY_MAX)
         VERR("exec.%s: concurrency must be 1..%d", name, HL_EXEC_CONCURRENCY_MAX);
     if (flags & ~(HL_EXEC_CMD_UNIX_SOCKETS | HL_EXEC_CMD_SHA256 | HL_EXEC_CMD_STDIN |
-                  HL_EXEC_CMD_APP_FS))
+                  HL_EXEC_CMD_APP_FS | HL_EXEC_CMD_STREAM))
         VERR("exec.%s: unknown command flags", name);
     if ((flags & HL_EXEC_CMD_SHA256) && !rd_bytes(r, 32))
         VERR("exec: the policy is truncated");
+    uint32_t sm = 0;
     if (flags & HL_EXEC_CMD_STDIN) {
-        uint32_t sm = rd_u32(r);
+        sm = rd_u32(r);
         if (r->bad) VERR("exec: the policy is truncated");
         if (sm < 1 || sm > HL_EXEC_STDIN_CEIL)
             VERR("exec.%s: stdin_max must be 1..%u", name, (unsigned)HL_EXEC_STDIN_CEIL);
+    }
+    if (flags & HL_EXEC_CMD_STREAM) {
+        uint32_t st = rd_u32(r);
+        uint64_t so64 = rd_u64(r), se64 = rd_u64(r), si64 = rd_u64(r);
+        if (r->bad) VERR("exec: the policy is truncated");
+        if (st != 0 && (st < HL_EXEC_TIMEOUT_MIN_MS || st > HL_EXEC_STREAM_TIMEOUT_MAX_MS))
+            VERR("exec.%s: a stream command's timeout_ms is 0 (none) or %d..%u", name,
+                 HL_EXEC_TIMEOUT_MIN_MS, (unsigned)HL_EXEC_STREAM_TIMEOUT_MAX_MS);
+        if (so64 != HL_EXEC_STREAM_NO_CAP && so64 > HL_EXEC_STREAM_TOTAL_MAX)
+            VERR("exec.%s: stdout_max is out of range", name);
+        if (se64 != HL_EXEC_STREAM_NO_CAP && se64 > HL_EXEC_STREAM_TOTAL_MAX)
+            VERR("exec.%s: stderr_max is out of range", name);
+        if (si64 > HL_EXEC_STREAM_TOTAL_MAX)
+            VERR("exec.%s: stdin_max is out of range", name);
+        /* The u32 fields are what exec.run uses on it: exactly the derived
+         * values, so no policy can give exec.run more than its ceilings. */
+        HlExecStreamBase bs = hl_exec_stream_base(st, so64, se64, si64);
+        if (timeout != bs.timeout_ms || so != bs.stdout_max || se != bs.stderr_max ||
+            ((flags & HL_EXEC_CMD_STDIN) != 0) != (si64 != 0) || sm != bs.stdin_max)
+            VERR("exec.%s: the policy is malformed", name);
     }
 
     /* env */
@@ -691,6 +794,12 @@ static void read_cmd(Rd *r, HlExecCmd *c)
     c->flags = rd_u8(r);
     if (c->flags & HL_EXEC_CMD_SHA256) c->sha256 = rd_bytes(r, 32);
     if (c->flags & HL_EXEC_CMD_STDIN) c->stdin_max = rd_u32(r);
+    if (c->flags & HL_EXEC_CMD_STREAM) {
+        c->stream_timeout_ms = rd_u32(r);
+        c->stream_stdout_max = rd_u64(r);
+        c->stream_stderr_max = rd_u64(r);
+        c->stream_stdin_max = rd_u64(r);
+    }
     c->n_env = rd_u16(r);
     c->env = r->p;
     skip_strs(r, (size_t)c->n_env * 2);

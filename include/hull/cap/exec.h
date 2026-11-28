@@ -59,6 +59,16 @@ void   hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
                      int64_t timeout_ms, int64_t stdout_max, int64_t stderr_max,
                      int64_t concurrency, int unix_sockets, int64_t stdin_max,
                      const char *sha256_hex, size_t sha256_len);
+/* A stream command (docs/design/exec_stream.md §3): the same as
+ * hl_exec_b_cmd, with the stream's own timeout (0 = none) and totals
+ * (-1 = no cap for an output, none for stdin). The u32 fields every command
+ * has are derived from them (hl_exec_stream_base): the limits exec.run uses
+ * on this command. */
+void   hl_exec_b_cmd_stream(HlExecBuf *b, const char *name, size_t name_len,
+                            const char *path, size_t path_len,
+                            int64_t timeout_ms, int64_t stdout_max, int64_t stderr_max,
+                            int64_t concurrency, int unix_sockets, int64_t stdin_max,
+                            const char *sha256_hex, size_t sha256_len);
 /* `stdin_max` -1 or 0 = the command reads /dev/null; otherwise the bytes a
  * call may send it (1..HL_EXEC_STDIN_CEIL, checked by validation).
  * `sha256_hex` NULL = no pin; otherwise exactly 64 hex characters (either
@@ -102,6 +112,8 @@ int hl_exec_policy_validate(const uint8_t *data, size_t len,
 #define HL_EXEC_CMD_SHA256       0x02u   /* 32 digest bytes follow the flags */
 #define HL_EXEC_CMD_STDIN        0x04u   /* u32 stdin_max follows (after the pin) */
 #define HL_EXEC_CMD_APP_FS       0x08u   /* manifest.fs read / write lists follow the argv */
+#define HL_EXEC_CMD_STREAM       0x10u   /* u32 timeout, u64 stdout / stderr / stdin
+                                          * totals follow (after stdin_max) */
 
 #define HL_EXEC_SLOT_ALLOW_DASH  0x01u
 #define HL_EXEC_SLOT_HAS_CHARS   0x02u
@@ -120,6 +132,12 @@ typedef struct HlExecCmd {
     uint8_t        flags;            /* HL_EXEC_CMD_* */
     const uint8_t *sha256;           /* 32 bytes, NULL = no pin */
     uint32_t       stdin_max;        /* bytes a call may send; 0 = /dev/null */
+    /* HL_EXEC_CMD_STREAM: a streamed call's limits (exec.run uses the u32
+     * fields above, derived from these). */
+    uint32_t       stream_timeout_ms;   /* 0 = none */
+    uint64_t       stream_stdout_max;   /* HL_EXEC_STREAM_NO_CAP = none */
+    uint64_t       stream_stderr_max;
+    uint64_t       stream_stdin_max;    /* 0 = /dev/null */
     uint16_t       n_env;
     uint16_t       n_fs_read;
     uint16_t       n_fs_write;
@@ -201,6 +219,15 @@ int hl_exec_check_call(const uint8_t *policy, size_t policy_len,
                        const char *name, size_t name_len,
                        const char *const *args, const size_t *lens, size_t n,
                        HlExecCmd *cmd_out, char *err, size_t err_size);
+
+/* The exec.run limits of a stream command, derived from its stream limits:
+ * the timeout clamped to HL_EXEC_TIMEOUT_MAX_MS (none = the ceiling), each
+ * total clamped to its exec.run ceiling. */
+typedef struct HlExecStreamBase {
+    uint32_t timeout_ms, stdout_max, stderr_max, stdin_max;
+} HlExecStreamBase;
+HlExecStreamBase hl_exec_stream_base(uint32_t timeout_ms, uint64_t stdout_max,
+                                     uint64_t stderr_max, uint64_t stdin_max);
 
 /* Is @p name (n bytes) a valid command name? 1 / 0. */
 int hl_exec_name_valid(const char *name, size_t n);
