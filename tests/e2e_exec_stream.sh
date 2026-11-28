@@ -15,6 +15,14 @@
 #     round trip with no coalescing delay; the total cap; close(); a
 #     client disconnect killing the command; refusal for an ordinary
 #     command.
+#   - the paths phase, plain and with --vm-thread: 8 streams at once,
+#     interleaved; 8 held open and a 9th refused busy, the slots free again
+#     once they are closed; SIGTERM with 3 streams held and one parked in a
+#     request: exit 0 within the drain time, every command and the broker
+#     gone, no sanitizer report;
+#   - hull dev: a reload with streams open ends the old server, its
+#     commands and its broker, and the new one runs streams; stopping hull
+#     dev with streams open leaves no command behind.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -61,7 +69,7 @@ PORT=${PORT:-19962}
 start_server() {  # start_server <dir> <entry file> -> $SPID, $SLOG, $PORT
     PORT=$((PORT + 1))
     SLOG="$1/server.log"
-    (cd "$1" && exec "$HULL" $DEGRADED -p "$PORT" "$2" > "$SLOG" 2>&1) &
+    (cd "$1" && exec "$HULL" $DEGRADED ${EXTRA:-} -p "$PORT" "$2" > "$SLOG" 2>&1) &
     SPID=$!
     PIDS="$PIDS $SPID"
     for i in $(seq 1 100); do
@@ -77,6 +85,30 @@ gone_within() {  # gone_within <pid>: 0 when it is gone within 3 s
     for i in $(seq 1 60); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.05; done
     return 1
 }
+all_gone() {  # all_gone <comma-separated pids>: 0 when every one is gone within 3 s
+    for p in $(printf '%s' "$1" | tr ',' ' '); do gone_within "$p" || return 1; done
+}
+new_silent() {  # new_silent <lines before>: the pid of the next "silent pid=" line in $SLOG
+    for i in $(seq 1 100); do
+        [ "$(grep -c 'silent pid=' "$SLOG")" -gt "$1" ] && break; sleep 0.05
+    done
+    sed -n 's/.*silent pid=\([0-9]*\).*/\1/p' "$SLOG" | tail -1
+}
+clean_log() {
+    ! grep -qiE "AddressSanitizer|LeakSanitizer|runtime error:|Assertion|double free|Segmentation|use-after" "$1"
+}
+# stop_timed -> STOP_RC, STOP_MS: SIGTERM, then the exit status (bounded at 20 s).
+stop_timed() {
+    t0=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    kill -TERM "$SPID" 2>/dev/null || true
+    ( sleep 20; kill -9 "$SPID" 2>/dev/null ) >/dev/null 2>&1 &
+    wd=$!
+    STOP_RC=0
+    wait "$SPID" 2>/dev/null || STOP_RC=$?
+    STOP_MS=$(( $(python3 -c 'import time; print(int(time.time() * 1000))') - t0 ))
+    kill "$wd" 2>/dev/null || true
+    wait "$wd" 2>/dev/null || true
+}
 
 EXEC_LUA="
     pipes = { path = \"$P\", argv = { \"pipes\", { min = 1, max = 5, chars = \"0-9\" } },
@@ -84,10 +116,11 @@ EXEC_LUA="
     early = { path = \"$P\", argv = { \"early\" }, stdin_max = 1048576 },
     tick = { path = \"$P\", argv = { \"tick\" }, stream = true, timeout_ms = 10000 },
     echo = { path = \"$P\", argv = { \"echo\" }, stream = true, timeout_ms = 0,
-             stdin_max = 1073741824 },
+             stdin_max = 1073741824, concurrency = 8 },
     flood = { path = \"$P\", argv = { \"flood\" }, stream = true, timeout_ms = 10000,
               stdout_max = 100000 },
-    silent = { path = \"$P\", argv = { \"silent\" }, stream = true, timeout_ms = 0 },
+    silent = { path = \"$P\", argv = { \"silent\" }, stream = true, timeout_ms = 0,
+               concurrency = 8 },
     deaf = { path = \"$P\", argv = { \"silent\" }, stream = true, timeout_ms = 0,
              stdin_max = 1073741824 },
     one = { path = \"$P\", argv = { \"echo\" }, stream = true, timeout_ms = 0,
@@ -220,6 +253,52 @@ app.get("/m1", function(req, res)
   local ok, e = pcall(s.write, s, string.rep("z", 1048576))
   res:text("ok=" .. tostring(ok) .. " err=" .. tostring(e))
 end)
+-- The paths phase: many streams, SIGTERM with streams open, --vm-thread, hull dev.
+app.get("/ver", function(req, res) res:text("ver-one") end)
+local held = {}
+app.get("/fill", function(req, res)
+  local pids = {}
+  for i = 1, 8 do
+    local s = exec.stream("silent")
+    held[#held + 1] = s
+    pids[#pids + 1] = line(s:read())
+  end
+  local ok, e = pcall(exec.stream, "silent")
+  local code = ok and "opened" or (tostring(e):match("%[hull:([a-z_]+)%]") or tostring(e))
+  log.info("held pids=" .. table.concat(pids, ","))
+  res:text("opened=" .. #held .. " ninth=" .. code)
+end)
+app.get("/fill/close", function(req, res)
+  for _, s in ipairs(held) do s:close() end
+  held = {}
+  res:text("closed")
+end)
+app.get("/hold", function(req, res)
+  local pids = {}
+  for i = 1, 3 do
+    local s = exec.stream("silent")
+    held[#held + 1] = s
+    pids[#pids + 1] = line(s:read())
+  end
+  log.info("held pids=" .. table.concat(pids, ","))
+  res:text("held=" .. #held)
+end)
+app.get("/par", function(req, res)
+  local id = req.query.id or "0"
+  local s = exec.stream("echo", {}, { stdin_open = true })
+  local ok = true
+  for i = 1, 10 do
+    local msg = id .. ":" .. i .. "\n"
+    s:write(msg)
+    local got = ""
+    while not got:find("\n") do got = got .. s:read().data end
+    ok = ok and got == msg
+    hull.sleep(20)
+  end
+  s:close_write()
+  while s:read() do end
+  res:text("ok=" .. tostring(ok) .. " status=" .. s:result().status)
+end)
 EOF
 }
 
@@ -240,9 +319,10 @@ app.manifest({
              stdinMax: 1048576, stderrMax: 524288, timeoutMs: 20000 },
     early: { path: "$P", argv: ["early"], stdinMax: 1048576 },
     tick: { path: "$P", argv: ["tick"], stream: true, timeoutMs: 10000 },
-    echo: { path: "$P", argv: ["echo"], stream: true, timeoutMs: 0, stdinMax: 1073741824 },
+    echo: { path: "$P", argv: ["echo"], stream: true, timeoutMs: 0, stdinMax: 1073741824,
+            concurrency: 8 },
     flood: { path: "$P", argv: ["flood"], stream: true, timeoutMs: 10000, stdoutMax: 100000 },
-    silent: { path: "$P", argv: ["silent"], stream: true, timeoutMs: 0 },
+    silent: { path: "$P", argv: ["silent"], stream: true, timeoutMs: 0, concurrency: 8 },
     deaf: { path: "$P", argv: ["silent"], stream: true, timeoutMs: 0, stdinMax: 1073741824 },
     one: { path: "$P", argv: ["echo"], stream: true, timeoutMs: 0, stdinMax: 1048576,
            concurrency: 1 },
@@ -355,6 +435,52 @@ app.get("/m1", async (req, res) => {
   log.info("m1 pid=" + line(await s.read()));
   try { await s.write("z".repeat(1048576)); res.text("ok=true"); }
   catch (e) { res.text("ok=false err=" + e.name + ": " + e.message); }
+});
+// The paths phase: many streams, SIGTERM with streams open, --vm-thread, hull dev.
+app.get("/ver", (req, res) => res.text("ver-one"));
+let held = [];
+app.get("/fill", async (req, res) => {
+  const pids = [];
+  for (let i = 0; i < 8; i++) {
+    const s = exec.stream("silent");
+    held.push(s);
+    pids.push(line(await s.read()));
+  }
+  let code = "opened";
+  try { exec.stream("silent"); } catch (e) { code = e.code || e.message; }
+  log.info("held pids=" + pids.join(","));
+  res.text("opened=" + held.length + " ninth=" + code);
+});
+app.get("/fill/close", (req, res) => {
+  for (const s of held) s.close();
+  held = [];
+  res.text("closed");
+});
+app.get("/hold", async (req, res) => {
+  const pids = [];
+  for (let i = 0; i < 3; i++) {
+    const s = exec.stream("silent");
+    held.push(s);
+    pids.push(line(await s.read()));
+  }
+  log.info("held pids=" + pids.join(","));
+  res.text("held=" + held.length);
+});
+app.get("/par", async (req, res) => {
+  const id = req.query.id || "0";
+  const s = exec.stream("echo", [], { stdinOpen: true });
+  let ok = true;
+  for (let i = 1; i <= 10; i++) {
+    const msg = id + ":" + i + "\n";
+    await s.write(msg);
+    let got = "";
+    while (!got.includes("\n")) got += text((await s.read()).data);
+    ok = ok && got === msg;
+    await hull.sleep(20);
+  }
+  s.closeWrite();
+  while (await s.read()) {}
+  res.text("ok=" + ok + " status=" + (await s.result()).status);
 });
 EOF
 }
@@ -515,8 +641,148 @@ want: $want"
     stop_server
 }
 
+# ── The paths phase: many streams at once, SIGTERM with streams open; run
+# plain and again with --vm-thread (every entry on the VM thread). ──
+phase_paths() {  # phase_paths <rt> <entry> <label> [extra flags]
+    rt=$1; ENTRY=$2; L="$rt$3"
+    EXTRA="--drain-timeout 300 ${4:-}"
+    start_server "$D" "$ENTRY" || { EXTRA=; return; }
+    EXTRA=
+    if [ -n "${4:-}" ]; then
+        grep -q 'VM thread on' "$SLOG" && pass "$L: the server runs its entries on the VM thread" \
+            || fail "$L: no VM thread" "$(head -20 "$SLOG")"
+        out=$(get /tick)
+        case "$out" in "first=one first_ms="*" rest=two total_ms="*" status=0 len=8")
+            pass "$L: exec.stream output, read on the VM thread" ;; *) fail "$L: tick" "$out" ;; esac
+        out=$(get /echo)
+        case "$out" in "ok=true ms="*" status=0") pass "$L: stdin / stdout round trips" ;;
+            *) fail "$L: echo" "$out" ;; esac
+        out=$(get /close)
+        case "$out" in "pid="*" after=nil signal=SIGKILL")
+            pid=$(printf '%s' "$out" | sed 's/pid=\([0-9]*\).*/\1/')
+            gone_within "$pid" && pass "$L: close() kills the command" || fail "$L: close" "$out" ;;
+            *) fail "$L: close" "$out" ;; esac
+        curl -s -m 1 "http://127.0.0.1:$PORT/hang" > /dev/null 2>&1
+        pid=$(sed -n 's/.*silent pid=\([0-9]*\).*/\1/p' "$SLOG" | tail -1)
+        [ -n "$pid" ] && gone_within "$pid" && pass "$L: a client disconnect kills the command" \
+            || fail "$L: disconnect" "pid=$pid"
+    fi
+
+    # exec_stream_paths.parallel: 8 streams at once, each a 10-step echo
+    # with sleeps between, so they interleave; each sees only its own bytes.
+    cps=""
+    for i in 1 2 3 4 5 6 7 8; do get "/par?id=$i" 30 > "$D/par.$i" & cps="$cps $!"; done
+    for c in $cps; do wait "$c"; done
+    bad=""
+    for i in 1 2 3 4 5 6 7 8; do [ "$(cat "$D/par.$i")" = "ok=true status=0" ] || bad="$bad $i=[$(cat "$D/par.$i")]"; done
+    [ -z "$bad" ] && pass "$L: 8 streams at once, interleaved, each gets only its own output" \
+        || fail "$L: parallel streams" "$bad"
+
+    # exec_stream_paths.ninth_refused: 8 held open, the 9th refused busy;
+    # once they are closed and reaped, streams start again.
+    out=$(get /fill 20)
+    pids=$(sed -n 's/.*held pids=\([0-9,]*\).*/\1/p' "$SLOG" | tail -1)
+    [ "$out" = "opened=8 ninth=busy" ] && pass "$L: 8 streams held open, a 9th is refused busy" \
+        || fail "$L: fill" "$out"
+    get /fill/close > /dev/null
+    all_gone "$pids" && pass "$L: closing them kills all 8 commands" || fail "$L: fill close" "pids=$pids"
+    out=""
+    for i in $(seq 1 20); do
+        out=$(get "/par?id=again" 20)
+        [ "$out" = "ok=true status=0" ] && break
+        sleep 0.1
+    done
+    [ "$out" = "ok=true status=0" ] && pass "$L: streams start again once the slots are free" \
+        || fail "$L: after fill" "$out"
+
+    # exec_stream_paths.sigterm_open_streams: 3 streams held by the app, a
+    # 4th parked in a request. SIGTERM: the server exits 0 within the drain
+    # time and its teardown; every command and the broker are gone.
+    out=$(get /hold 20)
+    pids=$(sed -n 's/.*held pids=\([0-9,]*\).*/\1/p' "$SLOG" | tail -1)
+    n0=$(grep -c 'silent pid=' "$SLOG")
+    curl -s -m 20 "http://127.0.0.1:$PORT/hang" > /dev/null 2>&1 &
+    hang=$!
+    hp=$(new_silent "$n0")
+    broker=$(sed -n 's/.*exec broker pid \([0-9]*\).*/\1/p' "$SLOG" | tail -1)
+    sleep 0.2
+    stop_timed
+    wait "$hang" 2>/dev/null || true
+    if [ "$out" = "held=3" ] && [ "$STOP_RC" -eq 0 ] && [ "$STOP_MS" -lt 5000 ] &&
+       all_gone "$pids,$hp" && { [ -z "$broker" ] || gone_within "$broker"; } && clean_log "$SLOG"; then
+        pass "$L: SIGTERM with 4 streams open exits 0 in ${STOP_MS} ms; every command and the broker gone"
+    else
+        fail "$L: SIGTERM with streams open" "out=$out rc=$STOP_RC ms=$STOP_MS pids=$pids,$hp broker=$broker
+$(tail -8 "$SLOG")"
+    fi
+}
+
+# ── hull dev: a reload (SIGTERM to the served child, then a new one) with a
+# stream open; stopping hull dev with one open. ──
+phase_dev() {  # phase_dev <rt> <entry>
+    rt=$1; ENTRY=$2
+    DD="$FIX/dev-$rt"
+    rm -rf "$DD"; mkdir -p "$DD"
+    cp "$D/$ENTRY" "$DD/$ENTRY"
+    PORT=$((PORT + 1))
+    SLOG="$DD/dev.log"
+    (cd "$DD" && exec "$HULL" dev --no-types $DEGRADED -p "$PORT") > "$SLOG" 2>&1 &
+    SPID=$!
+    PIDS="$PIDS $SPID"
+    up=0
+    for i in $(seq 1 200); do [ "$(get /ver 2)" = ver-one ] && { up=1; break; }; sleep 0.05; done
+    [ "$up" = 1 ] || { fail "$rt dev: hull dev did not start" "$(tail -20 "$SLOG")"; kill -9 "$SPID"; return; }
+    child=$(pgrep -P "$SPID" | head -1)
+
+    curl -s -m 30 "http://127.0.0.1:$PORT/hang" > /dev/null 2>&1 &
+    hang=$!
+    hp=$(new_silent 0)
+    out=$(get /hold 20)
+    pids=$(sed -n 's/.*held pids=\([0-9,]*\).*/\1/p' "$SLOG" | tail -1)
+    broker=$(sed -n 's/.*exec broker pid \([0-9]*\).*/\1/p' "$SLOG" | tail -1)
+
+    sleep 1.1   # hull dev compares whole-second mtimes
+    sed 's/ver-one/ver-two/' "$DD/$ENTRY" > "$DD/$ENTRY.new" && mv "$DD/$ENTRY.new" "$DD/$ENTRY"
+    re=0
+    for i in $(seq 1 300); do [ "$(get /ver 2)" = ver-two ] && { re=1; break; }; sleep 0.05; done
+    wait "$hang" 2>/dev/null || true
+    if [ "$re" = 1 ] && [ "$out" = "held=3" ] && all_gone "$pids,$hp" &&
+       { [ -z "$broker" ] || gone_within "$broker"; } && { [ -z "$child" ] || gone_within "$child"; }; then
+        pass "$rt dev: a reload with 4 streams open ends the old server, its commands and its broker"
+    else
+        fail "$rt dev: reload with streams open" "re=$re out=$out pids=$pids,$hp broker=$broker child=$child
+$(tail -15 "$SLOG")"
+    fi
+    out=$(get /echo)
+    case "$out" in "ok=true ms="*" status=0") pass "$rt dev: the reloaded server runs streams" ;;
+        *) fail "$rt dev: echo after reload" "$out" ;; esac
+
+    out=$(get /hold 20)
+    pids=$(sed -n 's/.*held pids=\([0-9,]*\).*/\1/p' "$SLOG" | tail -1)
+    child=$(pgrep -P "$SPID" | head -1)
+    stop_timed
+    if [ "$out" = "held=3" ] && all_gone "$pids" && { [ -z "$child" ] || gone_within "$child"; } &&
+       clean_log "$SLOG"; then
+        pass "$rt dev: stopping hull dev with 3 streams open leaves no command behind (rc=$STOP_RC)"
+    else
+        fail "$rt dev: stop with streams open" "out=$out rc=$STOP_RC pids=$pids child=$child"
+    fi
+}
+
+run_paths() {  # run_paths <lua|js>
+    rt=$1
+    D="$FIX/$rt"
+    if [ "$rt" = lua ]; then ENTRY=app.lua; else ENTRY=app.js; fi
+    echo "== $rt: paths"
+    phase_paths "$rt" "$ENTRY" ""
+    phase_paths "$rt" "$ENTRY" " vm-thread" "--vm-thread"
+    phase_dev "$rt" "$ENTRY"
+}
+
 run_suite lua
+run_paths lua
 run_suite js
+run_paths js
 
 echo
 echo "e2e_exec_stream: $PASS passed, $FAIL failed"
