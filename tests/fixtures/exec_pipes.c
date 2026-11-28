@@ -11,6 +11,8 @@
  *   exec_pipes tick         print "one", wait 1 s, print "two"
  *   exec_pipes echo         copy each stdin line to stdout at once
  *   exec_pipes flood        write 'x' to stdout until killed
+ *   exec_pipes both         write 'x' to stdout and 'y' to stderr, whichever
+ *                           takes it, until killed
  *   exec_pipes silent       print its pid, then wait 60 s
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -18,6 +20,8 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,6 +96,20 @@ int main(int argc, char **argv)
     if (strcmp(mode, "flood") == 0) {
         memset(buf, 'x', sizeof buf);
         for (;;) if (write_all(1, buf, sizeof buf) != 0) return 0;
+    }
+    if (strcmp(mode, "both") == 0) {
+        memset(buf, 'x', sizeof buf);
+        for (int fd = 1; fd <= 2; fd++) fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+        for (;;) {
+            struct pollfd pf[2] = { { 1, POLLOUT, 0 }, { 2, POLLOUT, 0 } };
+            if (poll(pf, 2, -1) < 0) { if (errno == EINTR) continue; return 2; }
+            for (int k = 0; k < 2; k++) {
+                if (pf[k].revents & (POLLERR | POLLHUP)) return 0;
+                if ((pf[k].revents & POLLOUT) &&
+                    write(pf[k].fd, buf, sizeof buf) < 0 && errno != EAGAIN && errno != EINTR)
+                    return 0;
+            }
+        }
     }
     if (strcmp(mode, "silent") == 0) {
         char out[32];

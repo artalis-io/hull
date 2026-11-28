@@ -183,7 +183,16 @@ HlExecStream *hl_exec_stream_start(HlAsyncBackendCtx *loop, const char *name,
 HlExecStream *hl_exec_stream_stub(int stdin_open, uint64_t stdin_max, size_t in_len,
                                   uint64_t stdout_max, uint64_t stderr_max);
 int  hl_exec_stream_is_stub(const HlExecStream *s);
-/* 0, or -1 (out of memory, or @p fd not 1 / 2). */
+/* Hold what @p s keeps off the VM heap - its queued chunks and a write's
+ * copy waiting for credit - on the VM's off-heap total @p total (HlLua /
+ * HlJS `wasm_buf_bytes`) under @p limit (its heap limit, 0 = none); each is
+ * given back when the app takes the chunk or the copy is sent or dropped.
+ * Past the limit a write is refused `busy` and a chunk from the broker ends
+ * the call (LOST). Set by the binding right after start / stub, on the
+ * loop thread; @p total outlives the stream (the VM's teardown frees every
+ * stream first). */
+void hl_exec_stream_hold_on(HlExecStream *s, size_t *total, size_t limit);
+/* 0, -1 (out of memory, or @p fd not 1 / 2), or -2 (past the hold's limit). */
 int  hl_exec_stream_stub_chunk(HlExecStream *s, int fd, const void *data, size_t len);
 int  hl_exec_stream_stub_finish(HlExecStream *s, int32_t status, const char *signal,
                                 int timed_out, uint32_t duration_ms);

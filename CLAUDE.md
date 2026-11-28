@@ -2768,7 +2768,8 @@ RUN and its 60 s / 16 MiB / 1 MiB limits for every command, §12), its output se
 a 256 KiB credit window per pipe and its stdin taken within STDIN_CREDIT, killed at its totals. On
 the server an `HlExecStream` is refcounted (the binding object and each parked wait; every wake a
 0 ms timer, a wait freed before its wake closes the stream); `live` 0 means no pending slot refers
-to it (`stream_lost` gives the slot up), a parked read owns the queued chunk, and a write that
+to it (`stream_lost` gives the slot up), a parked read owns the queued chunk (its bytes held on
+the VM's off-heap total until taken, `hl_exec_stream_hold_on`), and a write that
 would wait runs the wait gates before anything is queued. Under `hull test` only stubs answer, an
 `exec.stream` stub through a stub stream (`hl_exec_stream_stub`) that never waits. `hull build` /
 `hull check` warn about risky commands, stream commands with no time limit, over 60 s or with no
