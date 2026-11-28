@@ -14,7 +14,8 @@
  *   broker -> server   READY   text: one report line per '\n'
  *                      REFUSED id (0 = the policy); text
  *                      BUSY    id; text
- *                      DONE    id; u32 status, u32 signo, u8 timed_out,
+ *                      DONE    id; u32 status, u32 signo, u8 timed_out
+ *                              (1 its timeout, 2 a stream's idle limit),
  *                              u8 out_cut, u8 err_cut, u8 0, u32 duration_ms,
  *                              u32 out_len, out, u32 err_len, err
  *                              (a stream's DONE: byte 11 is 1 and the two
@@ -609,7 +610,7 @@ typedef struct {
     uint8_t *out;  size_t out_len;  int out_cut;
     uint8_t *err;  size_t err_len;  int err_cut;
     uint64_t start_ms, deadline;   /* deadline UINT64_MAX = none */
-    int      timed_out;
+    int      timed_out;         /* 1 its time limit, 2 its idle limit */
     int      status, signo;
     int      discard;           /* KILLed: no reply */
     JobOut   q[HX_JOBQ];        /* FIFO, q[0] goes out first */
@@ -631,6 +632,13 @@ typedef struct {
     size_t    in_ret;           /* stdin credit to give back */
     uint64_t  in_total;         /* streamed stdin taken so far */
     uint64_t  in_total_max;
+    /* A stream's idle limit (HL_EXEC_CMD_IDLE; exec_stream.md §5a): the
+     * command is ended once it has written nothing for idle_ms while Hull was
+     * ready to read. The clock stands still while a pipe waits on the app's
+     * credit (back pressure is the app's, not the command's silence). */
+    uint32_t  idle_ms;          /* 0 = none */
+    uint64_t  idle_last;        /* the last output, or the end of a wait on credit */
+    int       idle_held;        /* a pipe was waiting on credit at the last look */
 #ifdef HL_EXEC_TEST_HOOKS
     int      probe_sent;
 #endif
@@ -1143,6 +1151,21 @@ static void stream_init(Job *j, const Cmd *cmd, unsigned rflags, size_t in_len, 
     j->in_total = in_len;
     j->in_total_max = cmd->c.stream_stdin_max;
     j->in_granted = (j->in_open && !routed) ? HL_EXEC_STREAM_WINDOW : 0;
+    j->idle_ms = routed ? 0 : cmd->c.stream_idle_ms;   /* a routed one: its broker's */
+}
+
+/* A stream pipe that is open and not read because the app has not given
+ * credit for it (or its part-chunk is full): the command may be blocked on
+ * the app, so its silence does not count against the idle limit. */
+static int idle_held_by_app(const Job *j)
+{
+    for (int k = 0; k < 2; k++) {
+        int fd = k ? j->err_fd : j->out_fd;
+        if (fd < 0 || (k ? j->err_cut : j->out_cut)) continue;
+        if (j->so[k].credit == 0 || j->so[k].open_len == HL_EXEC_STREAM_CHUNK_MAX)
+            return 1;
+    }
+    return 0;
 }
 
 /* Forward an admitted, matched RUN to its command's broker, as one job: it
@@ -1625,6 +1648,7 @@ static void run_call(uint32_t id, const uint8_t *p, size_t len)
     }
     j->start_ms = hl_chan_mono_ms();
     j->deadline = timeout ? j->start_ms + timeout : UINT64_MAX;
+    j->idle_last = j->start_ms;
     j->reserved = reserve;
     g_reserved += reserve;
     cmd->running++;
@@ -1829,6 +1853,7 @@ static void stream_drain(Job *j, int k)
             r = read(*fd, so->open + so->open_len, room);
         }
         if (r > 0) {
+            j->idle_last = hl_chan_mono_ms();
             if (*cut) continue;
             size_t keep = (size_t)r;
             if (so->cap != HL_EXEC_STREAM_NO_CAP && keep > so->cap - so->total) {
@@ -2009,13 +2034,16 @@ static int policy_load(const uint8_t *p, size_t len, char *report, size_t rsz)
             snprintf(report, rsz, "%s", err);
             return -1;
         }
-        char kind[64] = "";
+        char kind[96] = "";
         if (cmd->c.flags & HL_EXEC_CMD_STREAM) {
+            char idle[40] = "";
+            if (cmd->c.stream_idle_ms)
+                snprintf(idle, sizeof idle, ", idle %u ms", (unsigned)cmd->c.stream_idle_ms);
             if (cmd->c.stream_timeout_ms == 0)
-                snprintf(kind, sizeof kind, " (stream, no time limit)");
+                snprintf(kind, sizeof kind, " (stream, no time limit%s)", idle);
             else
-                snprintf(kind, sizeof kind, " (stream, %u ms)",
-                         (unsigned)cmd->c.stream_timeout_ms);
+                snprintf(kind, sizeof kind, " (stream, %u ms%s)",
+                         (unsigned)cmd->c.stream_timeout_ms, idle);
         }
         int w = snprintf(report + at, rsz - at, "exec: %s -> %s%s\n", cmd->c.name,
                          cmd->real, kind);
@@ -2153,6 +2181,12 @@ int hl_exec_broker_main(void)
                     int tk = due > now ? (int)(due - now) : 0;
                     if (t < 0 || tk < t) t = tk;
                 }
+            if (j->idle_ms && j->pid > 0 && !j->timed_out && !idle_held_by_app(j)) {
+                uint64_t due = j->idle_last + j->idle_ms;
+                uint64_t left = due > now ? due - now : 0;
+                int tk = (int)(left > 86400000u ? 86400000u : left);
+                if (t < 0 || tk < t) t = tk;
+            }
             if (t >= 0 && (timeout < 0 || t < timeout)) timeout = t;
         }
         int pr = poll(pf, (nfds_t)np, timeout);
@@ -2239,6 +2273,18 @@ int hl_exec_broker_main(void)
             if (j->pid > 0 && !j->timed_out && now >= j->deadline) {
                 job_kill(j);
                 j->timed_out = 1;
+            }
+            if (j->idle_ms && j->pid > 0 && !j->timed_out) {
+                if (idle_held_by_app(j)) {
+                    j->idle_held = 1;
+                    j->idle_last = now;
+                } else if (j->idle_held) {
+                    j->idle_held = 0;           /* credit came: the clock restarts */
+                    j->idle_last = now;
+                } else if (now - j->idle_last >= j->idle_ms) {
+                    job_kill(j);
+                    j->timed_out = 2;
+                }
             }
             for (int k = 0; k < 2; k++)
                 if (j->so[k].open_len && now - j->so[k].open_ms >= HL_EXEC_STREAM_COALESCE_MS)
@@ -2349,6 +2395,7 @@ static void exec_audit_end(const Pending *pd, const char *outcome, const HlExecR
         if (r->signal[0]) sh_json_write_kv_string(&w, "signal", r->signal);
         else sh_json_write_kv_null(&w, "signal");
         sh_json_write_kv_bool(&w, "timed_out", r->timed_out != 0);
+        if (r->idle_timed_out) sh_json_write_kv_bool(&w, "idle_timed_out", 1);
         sh_json_write_kv_int(&w, "duration_ms", r->duration_ms);
         sh_json_write_kv_int(&w, "stdout_bytes",
                              (int64_t)(r->stream ? r->out_bytes : r->out_len));
@@ -2584,7 +2631,7 @@ static void deliver(uint32_t type, uint32_t id, const uint8_t *p, size_t len)
             char b[16];
             snprintf(r->signal, sizeof r->signal, "%s", sig_name(signo, b, sizeof b));
         }
-        r->timed_out = p[8];
+        r->timed_out = p[8] != 0;
         r->out_cut = p[9];
         r->err_cut = p[10];
         r->duration_ms = hl_chan_get32(p + 12);
@@ -2999,7 +3046,8 @@ static void stream_deliver(Pending *pd, uint32_t type, const uint8_t *p, size_t 
                 char b[16];
                 snprintf(r->signal, sizeof r->signal, "%s", sig_name(signo, b, sizeof b));
             }
-            r->timed_out = p[8];
+            r->timed_out = p[8] != 0;
+            r->idle_timed_out = p[8] == 2;
             r->out_cut = p[9];
             r->err_cut = p[10];
             r->duration_ms = hl_chan_get32(p + 12);
@@ -3131,6 +3179,7 @@ int hl_exec_stream_stub_finish(HlExecStream *s, int32_t status, const char *sign
     r->status = status;
     if (signal) snprintf(r->signal, sizeof r->signal, "%s", signal);
     r->timed_out = (uint8_t)(timed_out != 0);
+    r->idle_timed_out = (uint8_t)(timed_out == 2);
     r->duration_ms = duration_ms;
     r->out_bytes = s->stub_total[0];
     r->err_bytes = s->stub_total[1];

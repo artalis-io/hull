@@ -257,6 +257,16 @@ nearly full.
   frame for 30 s sends `PROBE`, no answer fails the broker as lost - is a follow-up.
 - The run deadline does not apply to the time a read is parked (no run is going), exactly as for
   `http.fetch`.
+- **Idle limit (`idle_ms`, 2026-11-28).** A stream command may declare `idle_ms` (100..2^32-2;
+  `HL_EXEC_CMD_IDLE`, a u32 after the stream totals in the policy). The broker keeps, per job,
+  the time of the last output byte it read (`idle_last`); once `idle_ms` passes with none it
+  kills the command and sends DONE with `timed_out = 2`, which the server reports as
+  `timed_out` and `idle_timed_out`. While any open output pipe is held by the app (no credit,
+  or a full part-chunk) the clock does not run: `idle_last` follows the wall clock, and is set
+  to now again when the hold ends, so back pressure is never read as silence. Writing stdin
+  does not count as activity (it is the app's, not the command's). Under the macOS router the
+  command's own broker enforces it (the router's copy of the job has no idle limit). This ends
+  a hung COMMAND; a broker that is alive but wedged is still the follow-up above.
 
 ## 8. Audit, inspect, tests
 

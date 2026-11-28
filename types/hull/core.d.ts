@@ -357,6 +357,13 @@ declare namespace Hull {
          */
         stream?: boolean;
         /**
+         * A `stream` command only: end the stream once the command has written
+         * nothing for this many ms (100..4294967294; 0 or absent = no idle
+         * limit). Time the app spends not reading does not count. The result
+         * then has `timedOut` and `idleTimedOut` set.
+         */
+        idleMs?: number;
+        /**
          * SHA-256 of the main executable, 64 hex characters. The broker checks it
          * at start and before every call.
          */

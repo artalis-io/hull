@@ -48,8 +48,10 @@ declare module "hull:exec" {
         readonly status: number;
         /** The signal that ended it ("SIGKILL" after close()), or null. */
         readonly signal: string | null;
-        /** It ran past the command's `timeoutMs` and was killed. */
+        /** It ran past the command's `timeoutMs` or `idleMs` and was killed. */
         readonly timedOut: boolean;
+        /** It wrote nothing for the command's `idleMs` and was killed. */
+        readonly idleTimedOut: boolean;
         /** stdout reached the command's `stdoutMax` total and it was killed. */
         readonly stdoutTruncated: boolean;
         /** stderr reached the command's `stderrMax` total and it was killed. */

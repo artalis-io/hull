@@ -129,6 +129,12 @@ EXEC_LUA="
              concurrency = 8 },
     one = { path = \"$P\", argv = { \"echo\" }, stream = true, timeout_ms = 0,
             stdin_max = 1048576, concurrency = 1 },
+    quiet = { path = \"$P\", argv = { \"silent\" }, stream = true, timeout_ms = 0,
+              idle_ms = 400 },
+    ticker = { path = \"$P\", argv = { \"tick\" }, stream = true, timeout_ms = 10000,
+               idle_ms = 1500 },
+    slowread = { path = \"$P\", argv = { \"flood\" }, stream = true, timeout_ms = 20000,
+                 idle_ms = 300, stdout_max = 100000000 },
 "
 
 lua_app() {
@@ -187,6 +193,32 @@ app.get("/flood", function(req, res)
   local r = s:result()
   res:text(string.format("n=%d cut=%s signal=%s len=%d", n, tostring(r.stdout_truncated),
     tostring(r.signal), r.stdout_length))
+end)
+app.get("/idle", function(req, res)
+  local s = exec.stream("quiet")
+  local pid = s:read().data:gsub("\n$", "")
+  local after = s:read()
+  local r = s:result()
+  res:text(string.format("pid=%s after=%s idle=%s timed=%s signal=%s ms=%d", pid,
+    tostring(after), tostring(r.idle_timed_out), tostring(r.timed_out), tostring(r.signal),
+    r.duration_ms))
+end)
+app.get("/idle_tick", function(req, res)
+  local s = exec.stream("ticker")
+  while s:read() do end
+  local r = s:result()
+  res:text(string.format("status=%d idle=%s timed=%s len=%d", r.status,
+    tostring(r.idle_timed_out), tostring(r.timed_out), r.stdout_length))
+end)
+app.get("/idle_held", function(req, res)
+  local s = exec.stream("slowread")
+  local n = #s:read().data
+  hull.sleep(1500)                 -- the window fills: the app's back pressure
+  for i = 1, 10 do local c = s:read(); n = n + (c and #c.data or 0) end
+  s:close()
+  local r = s:result()
+  res:text(string.format("more=%s idle=%s signal=%s", tostring(n > 200000),
+    tostring(r.idle_timed_out), tostring(r.signal)))
 end)
 app.get("/close", function(req, res)
   local s = exec.stream("silent")
@@ -375,6 +407,10 @@ app.manifest({
     silent: { path: "$P", argv: ["silent"], stream: true, timeoutMs: 0, concurrency: 8 },
     deaf: { path: "$P", argv: ["silent"], stream: true, timeoutMs: 0, stdinMax: 1073741824 },
     both: { path: "$P", argv: ["both"], stream: true, timeoutMs: 30000, concurrency: 8 },
+    quiet: { path: "$P", argv: ["silent"], stream: true, timeoutMs: 0, idleMs: 400 },
+    ticker: { path: "$P", argv: ["tick"], stream: true, timeoutMs: 10000, idleMs: 1500 },
+    slowread: { path: "$P", argv: ["flood"], stream: true, timeoutMs: 20000, idleMs: 300,
+                stdoutMax: 100000000 },
     one: { path: "$P", argv: ["echo"], stream: true, timeoutMs: 0, stdinMax: 1048576,
            concurrency: 1 },
   },
@@ -422,6 +458,28 @@ app.get("/flood", async (req, res) => {
   for await (const c of s) n += c.data.length;
   const r = await s.result();
   res.text(\`n=\${n} cut=\${r.stdoutTruncated} signal=\${r.signal} len=\${r.stdoutLength}\`);
+});
+app.get("/idle", async (req, res) => {
+  const s = exec.stream("quiet");
+  const pid = chomp(text((await s.read()).data));
+  const after = await s.read();
+  const r = await s.result();
+  res.text(\`pid=\${pid} after=\${after === null ? "nil" : "chunk"} idle=\${r.idleTimedOut} timed=\${r.timedOut} signal=\${r.signal} ms=\${r.durationMs}\`);
+});
+app.get("/idle_tick", async (req, res) => {
+  const s = exec.stream("ticker");
+  while (await s.read()) {}
+  const r = await s.result();
+  res.text(\`status=\${r.status} idle=\${r.idleTimedOut} timed=\${r.timedOut} len=\${r.stdoutLength}\`);
+});
+app.get("/idle_held", async (req, res) => {
+  const s = exec.stream("slowread");
+  let n = (await s.read()).data.length;
+  await hull.sleep(1500);
+  for (let i = 0; i < 10; i++) { const c = await s.read(); n += c ? c.data.length : 0; }
+  s.close();
+  const r = await s.result();
+  res.text(\`more=\${n > 200000} idle=\${r.idleTimedOut} signal=\${r.signal}\`);
 });
 app.get("/close", async (req, res) => {
   const s = exec.stream("silent");
@@ -650,6 +708,30 @@ want: $want"
     out=$(get /flood)
     [ "$out" = "n=100000 cut=true signal=SIGKILL len=100000" ] \
         && pass "$rt: the stream's total cap: 100000 bytes, then killed" || fail "$rt: flood" "$out"
+
+    # exec_stream.idle: a stream silent for its idle_ms is killed
+    out=$(get /idle)
+    case "$out" in
+        "pid="*" after=nil idle=true timed=true signal=SIGKILL ms="*)
+            pid=$(printf '%s' "$out" | sed 's/pid=\([0-9]*\).*/\1/')
+            ms=$(printf '%s' "$out" | sed 's/.*ms=\([0-9]*\).*/\1/')
+            [ "$ms" -ge 350 ] && [ "$ms" -lt 3000 ] && gone_within "$pid" \
+                && pass "$rt: a stream silent past its idle_ms is killed (${ms} ms)" \
+                || fail "$rt: idle kill timing" "$out" ;;
+        *) fail "$rt: idle kill" "$out" ;;
+    esac
+    out=$(get /idle_tick)
+    [ "$out" = "status=0 idle=false timed=false len=8" ] \
+        && pass "$rt: output within idle_ms keeps the stream alive" || fail "$rt: idle tick" "$out"
+    out=$(get /idle_held 30)
+    [ "$out" = "more=true idle=false signal=SIGKILL" ] \
+        && pass "$rt: time the app spends not reading does not count as idle" \
+        || fail "$rt: idle under back pressure" "$out"
+    if grep -q 'exec: quiet -> .* (stream, no time limit, idle 400 ms)' "$SLOG"; then
+        pass "$rt: the startup report shows the idle limit"
+    else
+        fail "$rt: startup report idle" "$(grep 'exec: quiet -> ' "$SLOG")"
+    fi
 
     # exec_stream.close
     out=$(get /close)

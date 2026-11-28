@@ -94,7 +94,8 @@ typedef struct HlExecReply {
     int      kind;
     int32_t  status;
     char     signal[16];          /* "" when it exited */
-    uint8_t  timed_out;
+    uint8_t  timed_out;          /* killed at a time limit (either) */
+    uint8_t  idle_timed_out;     /* ...a stream's idle limit (idle_ms) */
     uint32_t duration_ms;
     uint8_t *out;   size_t out_len;   uint8_t out_cut;
     uint8_t *err;   size_t err_len;   uint8_t err_cut;
@@ -194,6 +195,7 @@ int  hl_exec_stream_is_stub(const HlExecStream *s);
 void hl_exec_stream_hold_on(HlExecStream *s, size_t *total, size_t limit);
 /* 0, -1 (out of memory, or @p fd not 1 / 2), or -2 (past the hold's limit). */
 int  hl_exec_stream_stub_chunk(HlExecStream *s, int fd, const void *data, size_t len);
+/* @p timed_out: 0, 1 (its time limit) or 2 (its idle limit). */
 int  hl_exec_stream_stub_finish(HlExecStream *s, int32_t status, const char *signal,
                                 int timed_out, uint32_t duration_ms);
 /* 0, or -1 with @p why / @p code as hl_exec_stream_write. */

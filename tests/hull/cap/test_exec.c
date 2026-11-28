@@ -763,6 +763,76 @@ UTEST(exec_stream, a_plain_command_has_no_stream_limits)
     hl_exec_buf_free(&b);
 }
 
+static int build_stream_idle(HlExecBuf *b, int64_t idle)
+{
+    hl_exec_b_init(b, NULL);
+    hl_exec_b_cmd_stream(b, S("unit-log"), S("/usr/bin/journalctl"), 0, -1, -1,
+                         -1, 0, -1, NULL, 0);
+    hl_exec_b_stream_idle(b, idle);
+    for (int k = 0; k < 4; k++) hl_exec_b_count_end(b, hl_exec_b_count_begin(b), 0);
+    return hl_exec_b_finish(b);
+}
+
+UTEST(exec_stream, idle_limit_is_encoded)
+{
+    HlExecBuf b;
+    HlExecCmd c;
+    ASSERT_EQ(0, build_stream_idle(&b, 30000));
+    ASSERT_EQ(0, hl_exec_policy_at(b.data, b.len, 0, &c));
+    EXPECT_TRUE(c.flags & HL_EXEC_CMD_IDLE);
+    EXPECT_EQ(30000u, c.stream_idle_ms);
+    EXPECT_EQ(0u, c.stream_timeout_ms);
+    EXPECT_EQ(0, c.n_argv);               /* the reader is past the idle field */
+    /* every truncation inside it */
+    for (size_t cut = 1; cut < b.len; cut++)
+        EXPECT_EQ(-1, hl_exec_policy_validate(b.data, cut, NULL, 0));
+    hl_exec_buf_free(&b);
+    /* not given, or 0: no idle limit, no field */
+    ASSERT_EQ(0, build_stream_idle(&b, -1));
+    ASSERT_EQ(0, hl_exec_policy_at(b.data, b.len, 0, &c));
+    EXPECT_FALSE(c.flags & HL_EXEC_CMD_IDLE);
+    EXPECT_EQ(0u, c.stream_idle_ms);
+    size_t plain = b.len;
+    hl_exec_buf_free(&b);
+    ASSERT_EQ(0, build_stream_idle(&b, 0));
+    EXPECT_EQ(plain, b.len);
+    hl_exec_buf_free(&b);
+}
+
+UTEST(exec_stream, idle_limit_out_of_range_or_misplaced_is_refused)
+{
+    HlExecBuf b;
+    EXPECT_EQ(-1, build_stream_idle(&b, 50));                 /* under the floor */
+    EXPECT_TRUE(strstr(b.err, "idle_ms") != NULL);
+    EXPECT_EQ(-1, build_stream_idle(&b, (int64_t)1 << 32));
+    EXPECT_TRUE(strstr(b.err, "idle_ms") != NULL);
+    EXPECT_EQ(-1, build_stream_idle(&b, -7));
+    EXPECT_TRUE(strstr(b.err, "idle_ms") != NULL);
+    /* on a plain command, or after the stream command's argv began */
+    hl_exec_b_init(&b, NULL);
+    hl_exec_b_cmd(&b, S("unit-log"), S("/usr/bin/journalctl"), -1, -1, -1, -1, 0, -1,
+                  NULL, 0);
+    hl_exec_b_stream_idle(&b, 1000);
+    EXPECT_TRUE(b.failed);
+    EXPECT_TRUE(strstr(b.err, "stream") != NULL);
+    hl_exec_buf_free(&b);
+    hl_exec_b_init(&b, NULL);
+    hl_exec_b_cmd_stream(&b, S("unit-log"), S("/usr/bin/journalctl"), 0, -1, -1, -1, 0,
+                         -1, NULL, 0);
+    hl_exec_b_count_end(&b, hl_exec_b_count_begin(&b), 0);
+    hl_exec_b_stream_idle(&b, 1000);
+    EXPECT_TRUE(b.failed);
+    hl_exec_buf_free(&b);
+    /* a forged IDLE flag on a plain command */
+    ASSERT_EQ(0, build_stdin(&b, 64, NULL));
+    size_t flags_at = b.flags_at;
+    b.data[flags_at] |= HL_EXEC_CMD_IDLE;
+    char err[256];
+    EXPECT_EQ(-1, hl_exec_policy_validate(b.data, b.len, err, sizeof err));
+    EXPECT_TRUE(strstr(err, "idle_ms") != NULL);
+    hl_exec_buf_free(&b);
+}
+
 /* ── The child manifest (exec.<name>.manifest, §3) ─────────────────── */
 
 /* gpu-query as v0.26.0 encodes it (host fs + unix_sockets, no child

@@ -14,6 +14,7 @@
  *              [u32:timeout_ms u64:stdout_max u64:stderr_max u64:stdin_max,
  *               if flags has STREAM: the streamed call's limits; the u32
  *               fields above are then hl_exec_stream_base of these]
+ *              [u32:idle_ms, if flags has IDLE (only with STREAM)]
  *              u16:n_env (str:name str:value)*n_env
  *              u16:n_fs_read str*  u16:n_fs_write str*
  *              u16:n_argv arg*n_argv
@@ -298,7 +299,23 @@ static void b_cmd(HlExecBuf *b, const char *name, size_t name_len,
         put_u64(b, st_o);
         put_u64(b, st_e);
         put_u64(b, st_i);
+        b->stream_end = b->len;
+    } else {
+        b->stream_end = 0;
     }
+}
+
+void hl_exec_b_stream_idle(HlExecBuf *b, int64_t idle_ms)
+{
+    if (b->failed || idle_ms == -1 || idle_ms == 0) return;   /* 0 = none */
+    if (b->ncmds == 0 || b->stream_end == 0 || b->stream_end != b->len ||
+        b->flags_at >= b->len) {
+        hl_exec_b_fail(b, "exec: idle_ms needs stream = true");
+        return;
+    }
+    b->data[b->flags_at] |= HL_EXEC_CMD_IDLE;
+    put_u32(b, opt_u32(idle_ms, 0));   /* out of range: kept, refused */
+    b->stream_end = 0;
 }
 
 void hl_exec_b_cmd(HlExecBuf *b, const char *name, size_t name_len,
@@ -638,7 +655,7 @@ static int v_cmd(Rd *r, const char **names, size_t *name_lens, int ci,
     if (conc < 1 || conc > HL_EXEC_CONCURRENCY_MAX)
         VERR("exec.%s: concurrency must be 1..%d", name, HL_EXEC_CONCURRENCY_MAX);
     if (flags & ~(HL_EXEC_CMD_UNIX_SOCKETS | HL_EXEC_CMD_SHA256 | HL_EXEC_CMD_STDIN |
-                  HL_EXEC_CMD_APP_FS | HL_EXEC_CMD_STREAM))
+                  HL_EXEC_CMD_APP_FS | HL_EXEC_CMD_STREAM | HL_EXEC_CMD_IDLE))
         VERR("exec.%s: unknown command flags", name);
     if ((flags & HL_EXEC_CMD_SHA256) && !rd_bytes(r, 32))
         VERR("exec: the policy is truncated");
@@ -668,6 +685,15 @@ static int v_cmd(Rd *r, const char **names, size_t *name_lens, int ci,
         if (timeout != bs.timeout_ms || so != bs.stdout_max || se != bs.stderr_max ||
             ((flags & HL_EXEC_CMD_STDIN) != 0) != (si64 != 0) || sm != bs.stdin_max)
             VERR("exec.%s: the policy is malformed", name);
+    }
+    if (flags & HL_EXEC_CMD_IDLE) {
+        if (!(flags & HL_EXEC_CMD_STREAM))
+            VERR("exec.%s: idle_ms needs stream = true", name);
+        uint32_t idle = rd_u32(r);
+        if (r->bad) VERR("exec: the policy is truncated");
+        if (idle < HL_EXEC_STREAM_IDLE_MIN_MS || idle > HL_EXEC_STREAM_IDLE_MAX_MS)
+            VERR("exec.%s: idle_ms must be %u..%u", name,
+                 (unsigned)HL_EXEC_STREAM_IDLE_MIN_MS, (unsigned)HL_EXEC_STREAM_IDLE_MAX_MS);
     }
 
     /* env */
@@ -800,6 +826,7 @@ static void read_cmd(Rd *r, HlExecCmd *c)
         c->stream_stderr_max = rd_u64(r);
         c->stream_stdin_max = rd_u64(r);
     }
+    if (c->flags & HL_EXEC_CMD_IDLE) c->stream_idle_ms = rd_u32(r);
     c->n_env = rd_u16(r);
     c->env = r->p;
     skip_strs(r, (size_t)c->n_env * 2);
