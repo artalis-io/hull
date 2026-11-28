@@ -280,6 +280,191 @@ for rt in lua js; do
     fi
 done
 
+# ── hull test with stream stubs ───────────────────────────────────────
+# test.exec_stub's stream form (docs/design/exec_stream.md §8): chunks in
+# order then the result, a stub function given the args and stdin, on_write
+# answering writes, the stream's totals, and a stub inside a test.get
+# request (which may not wait). Needs a host with the command broker.
+
+case "$(uname -s)" in Linux|Darwin) STREAM_STUBS=1 ;; *) STREAM_STUBS=0 ;; esac
+if [ "$STREAM_STUBS" = 1 ]; then
+mkdir -p "$TMPDIR/lua_s/tests" "$TMPDIR/js_s/tests"
+cat > "$TMPDIR/lua_s/app.lua" <<'EOF'
+app.manifest({
+  modules = { "hull/exec@1", "hull/http-server@1", "hull/db@1" },
+  exec = {
+    follow = { path = "/bin/cat", stream = true, timeout_ms = 0 },
+    repl = { path = "/bin/cat", argv = { { chars = "a-z", max = 8 } }, stream = true,
+             timeout_ms = 0, stdin_max = 8 },
+    capped = { path = "/bin/cat", stream = true, timeout_ms = 1000, stdout_max = 5 },
+    plain = { path = "/bin/cat" },
+  },
+})
+local exec = require("hull.exec")
+app.get("/follow", function(req, res)
+  local s, out = exec.stream("follow"), {}
+  while true do local c = s:read(); if not c then break end; out[#out + 1] = c.data end
+  res:text(table.concat(out) .. " status=" .. s:result().status)
+end)
+EOF
+cat > "$TMPDIR/lua_s/tests/test_stream.lua" <<'EOF'
+local exec = require("hull.exec")
+local function refused(fn, want)
+  local ok, err = pcall(fn)
+  test.eq(ok, false)
+  test.ok(tostring(err):find(want, 1, true) ~= nil, tostring(err))
+end
+test("chunks in order, then the result", function()
+  test.exec_stub("follow", { chunks = {
+    { fd = "stdout", data = "one\n" }, { fd = "stderr", data = "warn" },
+    { fd = "stdout", data = "two\n" } }, status = 3 })
+  local s, got = exec.stream("follow"), {}
+  while true do local c = s:read(); if not c then break end; got[#got + 1] = c.fd .. ":" .. c.data end
+  test.eq(table.concat(got, "|"), "stdout:one\n|stderr:warn|stdout:two\n")
+  local r = s:result()
+  test.eq(r.status, 3)
+  test.eq(r.signal, nil)
+  test.eq(r.stdout_length, 8)
+  test.eq(r.stderr_length, 4)
+end)
+test("a stub function gets the args and stdin; on_write answers each write", function()
+  local seen_args, seen_in
+  test.exec_stub("repl", function(args, name, stdin)
+    seen_args, seen_in = args[1] .. "/" .. name, stdin
+    return { on_write = function(b) return { { fd = "stdout", data = "got:" .. b } } end }
+  end)
+  local s = exec.stream("repl", { "abc" }, { stdin = "hi", stdin_open = true })
+  test.eq(seen_args, "abc/repl")
+  test.eq(seen_in, "hi")
+  test.eq(s:write("ping"), true)
+  test.eq(s:read().data, "got:ping")
+  refused(function() s:write("12345") end, "stdin_too_large")   -- 2 + 4 + 5 > 8
+  s:close_write()
+  refused(function() s:write("x") end, "stdin_closed")
+  test.eq(s:read(), nil)
+end)
+test("the stream's total cuts the output and kills it", function()
+  test.exec_stub("capped", { chunks = { { fd = "stdout", data = "123456789" },
+                                        { fd = "stdout", data = "more" } } })
+  local s = exec.stream("capped")
+  test.eq(s:read().data, "12345")
+  test.eq(s:read(), nil)
+  local r = s:result()
+  test.eq(r.stdout_truncated, true)
+  test.eq(r.signal, "SIGKILL")
+  test.eq(r.stdout_length, 5)
+end)
+test("a stream stub inside a test.get request answers with no wait", function()
+  test.exec_stub("follow", { chunks = { { fd = "stdout", data = "a" }, { fd = "stdout", data = "b" } } })
+  local r = test.get("/follow")
+  test.eq(r.status, 200)
+  test.eq(r.body, "ab status=0")
+end)
+test("no stub, an ordinary command, or a bad chunk is refused", function()
+  test.exec_stub("capped", nil)            -- stubs last for the whole file
+  refused(function() exec.stream("capped") end, "no stub for 'capped'")
+  refused(function() exec.stream("plain") end, "not a stream command")
+  test.exec_stub("follow", { chunks = { { fd = "stdin", data = "x" } } })
+  refused(function() exec.stream("follow") end, 'fd must be "stdout" or "stderr"')
+end)
+EOF
+cat > "$TMPDIR/js_s/app.js" <<'EOF'
+import { app } from "hull:app";
+import { exec } from "hull:exec";
+app.manifest({
+  modules: ["hull/exec@1", "hull/http-server@1", "hull/db@1"],
+  exec: {
+    follow: { path: "/bin/cat", stream: true, timeoutMs: 0 },
+    repl: { path: "/bin/cat", argv: [{ chars: "a-z", max: 8 }], stream: true, timeoutMs: 0,
+            stdinMax: 8 },
+    capped: { path: "/bin/cat", stream: true, timeoutMs: 1000, stdoutMax: 5 },
+    plain: { path: "/bin/cat" },
+  },
+});
+const text = (u8) => { let s = ""; for (const b of u8) s += String.fromCharCode(b); return s; };
+app.get("/follow", async (req, res) => {
+  const s = exec.stream("follow");
+  let out = "";
+  for await (const c of s) out += text(c.data);
+  res.text(out + " status=" + (await s.result()).status);
+});
+EOF
+cat > "$TMPDIR/js_s/tests/test_stream.js" <<'EOF'
+import { exec } from "hull:exec";
+const text = (u8) => { let s = ""; for (const b of u8) s += String.fromCharCode(b); return s; };
+async function refused(fn, want) {
+  let err = null;
+  try { await fn(); } catch (e) { err = e; }
+  test.ok(err !== null, "expected an error with " + want);
+  test.ok(String(err && err.message).includes(want), String(err && err.message));
+}
+test("chunks in order, then the result", async () => {
+  test.execStub("follow", { chunks: [
+    { fd: "stdout", data: "one\n" }, { fd: "stderr", data: "warn" },
+    { fd: "stdout", data: "two\n" }], status: 3 });
+  const s = exec.stream("follow");
+  const got = [];
+  for await (const c of s) got.push(c.fd + ":" + text(c.data));
+  test.eq(got.join("|"), "stdout:one\n|stderr:warn|stdout:two\n");
+  const r = await s.result();
+  test.eq(r.status, 3);
+  test.eq(r.signal, null);
+  test.eq(r.stdoutLength, 8);
+  test.eq(r.stderrLength, 4);
+});
+test("a stub function gets the args and stdin; onWrite answers each write", async () => {
+  let seenArgs, seenIn;
+  test.execStub("repl", (args, name, stdin) => {
+    seenArgs = args[0] + "/" + name;
+    seenIn = text(new Uint8Array(stdin));
+    return { onWrite: (b) => [{ fd: "stdout", data: "got:" + text(b) }] };
+  });
+  const s = exec.stream("repl", ["abc"], { stdin: "hi", stdinOpen: true });
+  test.eq(seenArgs, "abc/repl");
+  test.eq(seenIn, "hi");
+  await s.write("ping");
+  test.eq(text((await s.read()).data), "got:ping");
+  await refused(() => s.write("12345"), "stdin_too_large");
+  s.closeWrite();
+  await refused(() => s.write("x"), "stdin_closed");
+  test.eq(await s.read(), null);
+});
+test("the stream's total cuts the output and kills it", async () => {
+  test.execStub("capped", { chunks: [{ fd: "stdout", data: "123456789" },
+                                     { fd: "stdout", data: "more" }] });
+  const s = exec.stream("capped");
+  test.eq(text((await s.read()).data), "12345");
+  test.eq(await s.read(), null);
+  const r = await s.result();
+  test.eq(r.stdoutTruncated, true);
+  test.eq(r.signal, "SIGKILL");
+  test.eq(r.stdoutLength, 5);
+});
+test("a stream stub inside a test.get request answers with no wait", async () => {
+  test.execStub("follow", { chunks: [{ fd: "stdout", data: "a" }, { fd: "stdout", data: "b" }] });
+  const r = await test.get("/follow");
+  test.eq(r.status, 200);
+  test.eq(r.body, "ab status=0");
+});
+test("no stub, an ordinary command, or a bad chunk is refused", async () => {
+  test.execStub("capped", null);            // stubs last for the whole file
+  await refused(() => exec.stream("capped"), "no stub for 'capped'");
+  await refused(() => exec.stream("plain"), "not a stream command");
+  test.execStub("follow", { chunks: [{ fd: "stdin", data: "x" }] });
+  await refused(() => exec.stream("follow"), 'fd must be "stdout" or "stderr"');
+});
+EOF
+for rt in lua js; do
+    echo "== hull test, stream stubs ($rt) =="
+    out=$(cd "$TMPDIR/${rt}_s" && "$HULL" test . 2>&1) && rc=0 || rc=$?
+    if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q "5/5 tests passed"; then
+        pass "$rt: stream stubs: chunks, args and stdin, on_write, totals, test.get, refusals (5 cases)"
+    else
+        fail "$rt: hull test stream stubs" "$out"
+    fi
+done
+fi
+
 # ── Load-time refusals ────────────────────────────────────────────────
 
 # refuse <label> <expected text> <lua exec section> <js exec section>
@@ -494,6 +679,22 @@ else
     fail "exec_inspect_audit53.non_string (rc=$rc)" "$out"
 fi
 
+# exec_stream_inspect: a stream command shows its own limits, flagged where
+# unbounded, and the exec.run limits derived from them.
+d="$TMPDIR/inspect_stream"
+rm -rf "$d"; mkdir -p "$d"
+cat > "$d/package.sig" <<'SIG'
+{"manifest":{"modules":["hull/exec@1"],"exec":{"follow":{"path":"/usr/bin/journalctl","stream":true,"timeout_ms":0,"stdin_max":4096},"tail":{"path":"/usr/bin/tail","stream":true,"timeoutMs":120000,"stdoutMax":33554432,"stderrMax":4096,"concurrency":1}}}}
+SIG
+out=$("$HULL" inspect "$d" 2>&1) || true
+for want in "stream: [!] no time limit, stdout [!] no cap, stderr [!] no cap, 2 at once" \
+            "exec.run on it: 60000 ms, stdout 16777216, stderr 1048576" \
+            "stdin: up to 4096 bytes from the app over the stream's life (write())" \
+            "stream: 120000 ms, stdout 33554432, stderr 4096, 1 at once"; do
+    if printf '%s\n' "$out" | grep -qF -- "$want"; then pass "exec_stream_inspect: $want"
+    else fail "exec_stream_inspect: $want" "$out"; fi
+done
+
 echo "== the hull check lint =="
 # hull check (and hull build) warn about risky declared commands; a warning
 # never fails the step. The import step must also resolve an app that
@@ -508,6 +709,11 @@ app.manifest({ modules = { "hull/exec@1" }, exec = {
   loose = { path = "/home/x/tool", argv = { "show", { allow_dash = true } } },
   ok = { path = "/usr/bin/systemctl", argv = { "show", "--", { chars = "a-z" } },
          sha256 = string.rep("ab", 32) },
+  follow = { path = "/usr/bin/journalctl", argv = { "-f" }, stream = true, timeout_ms = 0 },
+  slow = { path = "/usr/bin/journalctl", stream = true, timeout_ms = 120000,
+           stdout_max = 1048576 },
+  okstream = { path = "/usr/bin/journalctl", stream = true, timeout_ms = 30000,
+               stdout_max = 1048576, stderr_max = 65536 },
 } })
 local exec = require("hull.exec")
 app.main(function() return 0 end)
@@ -522,6 +728,10 @@ app.manifest({ modules: ["hull/exec@1"], exec: {
   loose: { path: "/home/x/tool", argv: ["show", { allowDash: true }] },
   ok: { path: "/usr/bin/systemctl", argv: ["show", "--", { chars: "a-z" }],
         sha256: "ab".repeat(32) },
+  follow: { path: "/usr/bin/journalctl", argv: ["-f"], stream: true, timeoutMs: 0 },
+  slow: { path: "/usr/bin/journalctl", stream: true, timeoutMs: 120000, stdoutMax: 1048576 },
+  okstream: { path: "/usr/bin/journalctl", stream: true, timeoutMs: 30000,
+              stdoutMax: 1048576, stderrMax: 65536 },
 } });
 app.main(() => 0);
 APP
@@ -537,15 +747,19 @@ for rt in lua js; do
              "WARN exec.loose: /home/x/tool is outside" \
              "WARN exec.loose: argv 2 may start with '-'" \
              "WARN exec.loose: argv 2 has no chars or enum" \
-             "WARN exec.sh-run: argv 2 follows fixed arguments with no \"--\""; do
+             "WARN exec.sh-run: argv 2 follows fixed arguments with no \"--\"" \
+             "WARN exec.follow: stream command with no time limit" \
+             "WARN exec.follow: stream command with no total on stdout or stderr" \
+             "WARN exec.slow: stream command with a time limit of 120 s" \
+             "WARN exec.slow: stream command with no total on stderr: it may write without bound; declare stderr_max"; do
         printf '%s\n' "$out" | grep -qF -- "$w" || { want_ok=0; break; }
     done
     if [ $want_ok = 1 ]; then pass "$rt: hull check warns about risky commands"
     else fail "$rt: hull check warns about risky commands (missing: $w)" "$out"; fi
     if printf '%s\n' "$out" | grep -q "WARN exec.ok"; then
-        fail "$rt: a narrow pinned command gets no warning" "$out"
+        fail "$rt: a narrow pinned command (and a bounded stream) gets no warning" "$out"
     else
-        pass "$rt: a narrow pinned command gets no warning"
+        pass "$rt: a narrow pinned command (and a bounded stream) gets no warning"
     fi
     if printf '%s\n' "$out" | grep -q "import analysis failed\|requires an \`exec\` section"; then
         fail "$rt: the import step resolves an app with commands" "$out"

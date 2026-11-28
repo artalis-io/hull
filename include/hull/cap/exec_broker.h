@@ -173,6 +173,23 @@ HlExecStream *hl_exec_stream_start(HlAsyncBackendCtx *loop, const char *name,
                                    const size_t *lens, size_t n,
                                    const void *in, size_t in_len, int stdin_open,
                                    uint64_t stdin_max, char *why, size_t why_size);
+/* A hull test stub stream (test.exec_stub): no broker and no slot. The
+ * binding queues the stub's chunks (hl_exec_stream_stub_chunk: cut at the
+ * stream's totals, which kill it as the broker does) and then its result
+ * (hl_exec_stream_stub_finish); reads and result() then never wait. A write
+ * is the binding's (hl_exec_stream_stub_write checks it and counts it
+ * against stdin_max; the stub's on_write may queue more chunks). NULL on a
+ * host with no command broker, or out of memory. */
+HlExecStream *hl_exec_stream_stub(int stdin_open, uint64_t stdin_max, size_t in_len,
+                                  uint64_t stdout_max, uint64_t stderr_max);
+int  hl_exec_stream_is_stub(const HlExecStream *s);
+/* 0, or -1 (out of memory, or @p fd not 1 / 2). */
+int  hl_exec_stream_stub_chunk(HlExecStream *s, int fd, const void *data, size_t len);
+int  hl_exec_stream_stub_finish(HlExecStream *s, int32_t status, const char *signal,
+                                int timed_out, uint32_t duration_ms);
+/* 0, or -1 with @p why / @p code as hl_exec_stream_write. */
+int  hl_exec_stream_stub_write(HlExecStream *s, size_t n, char *why, size_t why_size,
+                               const char **code);
 void hl_exec_stream_retain(HlExecStream *s);
 /* Drop a reference; the last one closes the call (KILL) and frees it. */
 void hl_exec_stream_release(HlExecStream *s);

@@ -17,6 +17,8 @@
  * test.exec_stub(name, result) registers the answer; the call is still
  * matched in full first, so a test catches a bad argument, and the output
  * is cut to the command's stdout_max / stderr_max as the broker cuts it.
+ * For exec.stream the stub carries `chunks` (and `on_write`), queued on a
+ * stub stream at once (hl_exec_stream_stub), so nothing waits.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -355,7 +357,34 @@ static int lua_exec_run(lua_State *L)
 
 typedef struct {
     HlExecStream *s;           /* one reference; NULL once collected */
-} LuaExecStream;
+} LuaExecStream;               /* user value 1: a stub's on_write (hull test) */
+
+/* Queue a stub's chunks, the array at @p idx ({ fd = "stdout" | "stderr",
+ * data = string }, in order). Raises on a malformed one. */
+static void stub_push_chunks(lua_State *L, HlExecStream *s, int idx, const char *name)
+{
+    idx = lua_absindex(L, idx);
+    lua_Integer n = (lua_Integer)lua_rawlen(L, idx);
+    for (lua_Integer i = 1; i <= n; i++) {
+        lua_rawgeti(L, idx, i);
+        if (!lua_istable(L, -1))
+            luaL_error(L, "exec stub for '%s': chunk %d is not a table", name, (int)i);
+        lua_getfield(L, -1, "fd");
+        const char *fd = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+        int f = fd && strcmp(fd, "stdout") == 0 ? 1 : fd && strcmp(fd, "stderr") == 0 ? 2 : 0;
+        lua_pop(L, 1);
+        if (!f)
+            luaL_error(L, "exec stub for '%s': chunk %d fd must be \"stdout\" or "
+                       "\"stderr\"", name, (int)i);
+        lua_getfield(L, -1, "data");
+        size_t len = 0;
+        const char *data = lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &len) : NULL;
+        if (!data) luaL_error(L, "exec stub for '%s': chunk %d data must be a string", name, (int)i);
+        if (hl_exec_stream_stub_chunk(s, f, data, len) != 0)
+            luaL_error(L, "exec.stream: out of memory");
+        lua_pop(L, 2);
+    }
+}
 
 static LuaExecStream *check_stream(lua_State *L)
 {
@@ -475,6 +504,22 @@ static int lua_stream_write(lua_State *L)
     lua_hlwork(L, 64 + n / 8, 0);
     char why[192];
     const char *code = NULL;
+    if (hl_exec_stream_is_stub(o->s)) {
+        /* hull test: the stub's on_write(bytes) may return more chunks. */
+        if (hl_exec_stream_stub_write(o->s, n, why, sizeof why, &code) != 0)
+            return luaL_error(L, "%s (%s)", why, code);
+        lua_getiuservalue(L, 1, 1);
+        if (lua_isfunction(L, -1)) {
+            lua_pushvalue(L, 2);
+            lua_call(L, 1, 1);
+            if (lua_istable(L, -1)) stub_push_chunks(L, o->s, -1, "on_write");
+            else if (!lua_isnil(L, -1))
+                return luaL_error(L, "exec stub on_write must return an array of chunks or nil");
+        }
+        if (!o->s) return luaL_error(L, "exec.stream: the stream is gone");
+        lua_pushboolean(L, 1);
+        return 1;
+    }
     /* A write that will have to wait is refused before anything is queued:
      * refused after, its bytes still went out (review of PR 2, L1). */
     if (hl_exec_stream_write_would_wait(o->s, n) && !hl_lua_can_wait(L)) {
@@ -574,6 +619,82 @@ static const luaL_Reg stream_methods[] = {
     {"result", lua_stream_result},
     {NULL, NULL}
 };
+
+/* Under hull test: the stream test.exec_stub registered for @p name (the
+ * stubs table at @p stubs), after the same match. Its chunks and result are
+ * queued at once, so nothing waits (a request test.get dispatches may not).
+ * Frees @p block. */
+static int stub_stream(lua_State *L, int stubs, const char *name, size_t n, char *block,
+                       const char *in, size_t in_len, int stdin_open, const HlExecCmd *cmd)
+{
+    if (in_len) lua_pushlstring(L, in, in_len); else lua_pushnil(L);
+    int stub_in = lua_gettop(L);
+    free(block);
+#ifdef HL_ENABLE_DB
+    HlLua *lua = get_hl_lua(L);
+    const char *txn = lua->base.db_registry ? hl_db_registry_open_txn(lua->base.db_registry)
+                                            : NULL;
+    if (txn)
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "exec.stream cannot wait while a "
+                             "transaction is open on database connection '%s': commit "
+                             "or roll back first", txn);
+#endif
+    lua_pushvalue(L, 1);
+    lua_rawget(L, stubs);
+    int t = lua_type(L, -1);
+    if (t == LUA_TNIL)
+        return luaL_error(L, "exec.stream: no stub for '%s' in hull test (register one "
+                          "with test.exec_stub)", name);
+    if (t == LUA_TFUNCTION) {
+        /* stub(args, name, stdin): a fresh copy of the arguments */
+        lua_createtable(L, (int)n, 0);
+        for (size_t i = 1; i <= n; i++) {
+            lua_rawgeti(L, 2, (lua_Integer)i);
+            lua_rawseti(L, -2, (lua_Integer)i);
+        }
+        lua_pushvalue(L, 1);
+        lua_pushvalue(L, stub_in);
+        lua_call(L, 3, 1);
+    }
+    if (!lua_istable(L, -1))
+        return luaL_error(L, "exec stub for '%s' must be (or return) a result table", name);
+    int stub = lua_gettop(L);
+
+    LuaExecStream *o = lua_newuserdatauv(L, sizeof *o, 1);
+    o->s = NULL;
+    luaL_setmetatable(L, HL_LUA_EXEC_STREAM_MT);
+    int ud = lua_gettop(L);
+    o->s = hl_exec_stream_stub(stdin_open, cmd->stream_stdin_max, in_len,
+                               cmd->stream_stdout_max, cmd->stream_stderr_max);
+    if (!o->s)
+        return luaL_error(L, "exec.stream('%s'): stream stubs need a host with the "
+                          "command broker (Linux, macOS)", name);
+    lua_getfield(L, stub, "chunks");
+    if (!lua_isnil(L, -1)) {
+        if (!lua_istable(L, -1))
+            return luaL_error(L, "exec stub for '%s': chunks must be an array", name);
+        stub_push_chunks(L, o->s, -1, name);
+    }
+    lua_pop(L, 1);
+    lua_getfield(L, stub, "status");
+    lua_Integer status = lua_isnil(L, -1) ? 0 : luaL_checkinteger(L, -1);
+    lua_getfield(L, stub, "signal");
+    const char *sig = lua_isnil(L, -1) ? NULL : luaL_checkstring(L, -1);
+    lua_getfield(L, stub, "timed_out");
+    int timed_out = lua_toboolean(L, -1);
+    lua_getfield(L, stub, "duration_ms");
+    lua_Integer ms = lua_isnil(L, -1) ? 0 : luaL_checkinteger(L, -1);
+    if (hl_exec_stream_stub_finish(o->s, (int32_t)status, sig, timed_out,
+                                   (uint32_t)(ms < 0 ? 0 : ms)) != 0)
+        return luaL_error(L, "exec.stream: out of memory");
+    lua_pop(L, 4);
+    lua_getfield(L, stub, "on_write");
+    if (!lua_isnil(L, -1) && !lua_isfunction(L, -1))
+        return luaL_error(L, "exec stub for '%s': on_write must be a function", name);
+    lua_setiuservalue(L, ud, 1);
+    lua_settop(L, ud);
+    return 1;
+}
 
 /* exec.stream(name, args?, opts?) -> stream; opts = { stdin, stdin_open } */
 static int lua_exec_stream(lua_State *L)
@@ -678,13 +799,9 @@ static int lua_exec_stream(lua_State *L)
     if (fail) { free(block); return luaL_error(L, "%s", fail); }
 
     lua_getfield(L, LUA_REGISTRYINDEX, EXEC_STUBS_KEY);
-    int under_test = lua_istable(L, -1);
+    if (lua_istable(L, -1))
+        return stub_stream(L, lua_gettop(L), name, n, block, in, in_len, stdin_open, &cmd);
     lua_pop(L, 1);
-    if (under_test) {
-        free(block);
-        return luaL_error(L, "exec.stream: hull test has no stream stubs yet; "
-                          "test the command through exec.run");
-    }
     if (!hl_exec_broker_running() || !lua->base.async_ctx) {
         free(block);
         return luaL_error(L, "exec.stream('%s'): the command broker is not running "
@@ -703,7 +820,7 @@ static int lua_exec_stream(lua_State *L)
         hl_lua_check_can_wait(L, "exec.stream");
         return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "exec.stream cannot wait here");
     }
-    LuaExecStream *o = lua_newuserdatauv(L, sizeof *o, 0);
+    LuaExecStream *o = lua_newuserdatauv(L, sizeof *o, 1);
     o->s = NULL;
     luaL_setmetatable(L, HL_LUA_EXEC_STREAM_MT);
     char why[256];

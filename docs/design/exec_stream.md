@@ -1,8 +1,9 @@
 # Streamed, long-running declared commands (`exec.stream`)
 
-- **Status:** reviewed (2026-11-27, decisions in §11). PR 1 (policy, broker, router) and PR 2
-  (`exec.stream` in both runtimes) implemented; PR 3 (test stubs, inspect, lint, docs) is not.
-  §12 records why `exec.run` keeps its own path.
+- **Status:** reviewed (2026-11-27, decisions in §11). Implemented: PR 1 (policy, broker,
+  router), PR 2 (`exec.stream` in both runtimes) and PR 3 (test stubs, inspect, lint, docs).
+  Open: the liveness probe (§7), audit records (§8), the off-heap hold (§5). §12 records why
+  `exec.run` keeps its own path.
 - **Parent design:** [exec_broker.md](exec_broker.md) (§2 API, §3 manifest, §5 broker, §7 lifetime,
   §12 audit) and [exec_broker_macos_isolation.md](exec_broker_macos_isolation.md) (the router).
 - **Scope:** a second way to call a declared command, opted into per command. The sandbox, the
@@ -260,8 +261,12 @@ nearly full.
 - `hull inspect` and the startup report show `stream` and the timeout for each stream command.
 - `hull test`: `test.exec_stub(name, result_or_fn)` gains a stream form: a stub result may carry
   `chunks = { { fd = "stdout", data = "..." }, ... }`, delivered in order, one per read, then the
-  result; a stub function also receives what the app wrote to stdin. A stub function may return the same. `exec.stream` with no stub refuses, as `exec.run`
-  does.
+  result. A stub function receives the args and the call's initial `stdin` and may return the
+  same; what the app writes later goes to the result's `on_write(bytes)` (JS `onWrite`), which
+  may return more chunks. The chunks are queued on a stub stream (`hl_exec_stream_stub`: no
+  broker, no slot) with the result, cut at the command's totals, so nothing waits (a request
+  `test.get` dispatches may not). `exec.stream` with no stub refuses, as `exec.run` does. Stub
+  streams exist only where the broker's server side is compiled (Linux, macOS).
 - Types: `types/hull` gains `exec.stream`, `ExecStream`, `ExecChunk`; `make check-types`' drift
   check covers it.
 

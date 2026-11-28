@@ -240,11 +240,33 @@ local function main()
                 end
                 if #argv > 0 then print("    argv: " .. table.concat(argv, " ")) end
                 local function num(v, d) return math.tointeger(v) or d end
-                local t = num(c.timeout_ms or c.timeoutMs, 5000)
-                local so = num(c.stdout_max or c.stdoutMax, 65536)
-                local se = num(c.stderr_max or c.stderrMax, 16384)
-                print(string.format("    limits: %d ms, stdout %d, stderr %d, %d at once",
-                                    t, so, se, num(c.concurrency, 2)))
+                local function pick(snake, camel)
+                    local v = c[snake]
+                    if v == nil then v = c[camel] end
+                    return v
+                end
+                if c.stream == true then
+                    -- A stream command (docs/design/exec_stream.md §3): its
+                    -- own limits, and the exec.run limits derived from them.
+                    local t = num(pick("timeout_ms", "timeoutMs"), 5000)
+                    local so = num(pick("stdout_max", "stdoutMax"), nil)
+                    local se = num(pick("stderr_max", "stderrMax"), nil)
+                    local function total(v) return v and tostring(v) or "no cap" end
+                    print(string.format("    stream: %s, stdout %s, stderr %s, %d at once",
+                        t == 0 and "[!] no time limit" or (t .. " ms"),
+                        so and total(so) or "[!] no cap", se and total(se) or "[!] no cap",
+                        num(c.concurrency, 2)))
+                    local function clamp(v, ceil) return (v and v < ceil) and v or ceil end
+                    print(string.format("    exec.run on it: %d ms, stdout %d, stderr %d",
+                        (t == 0 or t > 60000) and 60000 or t,
+                        clamp(so, 16777216), clamp(se, 1048576)))
+                else
+                    local t = num(pick("timeout_ms", "timeoutMs"), 5000)
+                    local so = num(pick("stdout_max", "stdoutMax"), 65536)
+                    local se = num(pick("stderr_max", "stderrMax"), 16384)
+                    print(string.format("    limits: %d ms, stdout %d, stderr %d, %d at once",
+                                        t, so, se, num(c.concurrency, 2)))
+                end
                 -- Its whole authority: the host grants (absolute paths) and
                 -- its child manifest (the app's own fs vocabulary).
                 local host = host_of(c)
@@ -259,7 +281,10 @@ local function main()
                     print("    manifest.fs.write: " .. list(cfs.write) .. "  (under the app dir / @state)")
                 end
                 local smax = num(c.stdin_max or c.stdinMax, 0)
-                if smax ~= 0 then
+                if smax ~= 0 and c.stream == true then
+                    print(string.format("    stdin: up to %d bytes from the app over the "
+                                        .. "stream's life (write())", smax))
+                elseif smax ~= 0 then
                     print(string.format("    stdin: up to %d bytes from the app", smax))
                 end
                 if unix_of(c) then
