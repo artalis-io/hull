@@ -59,6 +59,9 @@ static inline uint64_t hl_work_bulk_units(uint64_t bytes)
 #define HL_WORK_WS_FRAME_UNITS        320u
 #define HL_WORK_SSE_EVENT_UNITS       320u
 #define HL_WORK_SSE_LINE_UNITS         32u
+/* An exec.stream chunk handed to the app: a run's wake-up, priced as a WS
+ * frame (docs/design/exec_stream.md §4), plus 1 unit per 8 bytes. */
+#define HL_WORK_EXEC_CHUNK_UNITS      320u
 #define HL_WORK_MIME_UNITS             64u
 #define HL_WORK_MIME_WINDOW          4096u   /* == HL_MIME_SNIFF_WINDOW */
 

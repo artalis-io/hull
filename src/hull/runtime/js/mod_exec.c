@@ -31,6 +31,9 @@
 #include "hull/cap/exec_broker.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
+#include "hull/shared/work_charge.h"
+
+#include <stdlib.h>
 #ifdef HL_ENABLE_DB
 #include "db_wait.h"    /* hl_js_db_refuse_wait */
 #endif
@@ -325,13 +328,17 @@ static JSValue exec_run_broker(JSContext *ctx, HlJS *js, const char *name,
  * by later app code). `stdin` is the only key: a typo is never a silent
  * no-op. 0 with *out / *len set (NULL / 0 when absent), or -1 with an
  * exception pending. */
-static int read_opts(JSContext *ctx, JSValueConst opts, uint8_t **out, size_t *len)
+static int read_opts_ex(JSContext *ctx, JSValueConst opts, uint8_t **out, size_t *len,
+                        int *stdin_open)
 {
     *out = NULL;
     *len = 0;
+    if (stdin_open) *stdin_open = 0;
+    const char *what = stdin_open ? "exec.stream" : "exec.run";
     if (JS_IsUndefined(opts) || JS_IsNull(opts)) return 0;
     if (!JS_IsObject(opts) || JS_IsArray(ctx, opts) != 0 || JS_IsFunction(ctx, opts)) {
-        JS_ThrowTypeError(ctx, "exec.run: options must be an object ({ stdin })");
+        JS_ThrowTypeError(ctx, "%s: options must be an object ({ stdin%s })", what,
+                          stdin_open ? ", stdinOpen" : "");
         return -1;
     }
     JSPropertyEnum *tab = NULL;
@@ -342,13 +349,26 @@ static int read_opts(JSContext *ctx, JSValueConst opts, uint8_t **out, size_t *l
     int bad = 0;
     for (uint32_t i = 0; i < np; i++) {
         const char *k = JS_AtomToCString(ctx, tab[i].atom);
-        if (!k || strcmp(k, "stdin") != 0) bad = 1;
+        if (!k || (strcmp(k, "stdin") != 0 &&
+                   !(stdin_open && strcmp(k, "stdinOpen") == 0))) bad = 1;
         if (k) JS_FreeCString(ctx, k);
     }
     JS_FreePropertyEnum(ctx, tab, np);
     if (bad) {
-        JS_ThrowTypeError(ctx, "exec.run: unknown option (the only one is stdin)");
+        JS_ThrowTypeError(ctx, stdin_open ? "exec.stream: unknown option (stdin, stdinOpen)"
+                                          : "exec.run: unknown option (the only one is stdin)");
         return -1;
+    }
+    if (stdin_open) {
+        JSValue o = JS_GetPropertyStr(ctx, opts, "stdinOpen");
+        if (JS_IsException(o)) return -1;
+        if (!JS_IsUndefined(o) && !JS_IsBool(o)) {
+            JS_FreeValue(ctx, o);
+            JS_ThrowTypeError(ctx, "exec.stream: stdinOpen must be a boolean");
+            return -1;
+        }
+        *stdin_open = JS_ToBool(ctx, o) > 0;
+        JS_FreeValue(ctx, o);
     }
     JSValue v = JS_GetPropertyStr(ctx, opts, "stdin");
     if (JS_IsException(v)) return -1;
@@ -390,6 +410,11 @@ static int read_opts(JSContext *ctx, JSValueConst opts, uint8_t **out, size_t *l
 done:
     JS_FreeValue(ctx, v);
     return rc;
+}
+
+static int read_opts(JSContext *ctx, JSValueConst opts, uint8_t **out, size_t *len)
+{
+    return read_opts_ex(ctx, opts, out, len, NULL);
 }
 
 /* exec.run(name, args?, opts?) -> Promise<result> */
@@ -569,11 +594,549 @@ out:
     return ret;
 }
 
+/* ── exec.stream (docs/design/exec_stream.md §4) ───────────────────── *
+ *
+ * exec.stream(name, args?, { stdin, stdinOpen }) returns a stream object at
+ * once: read() -> Promise<{ fd, data: Uint8Array } | null>, write(bytes),
+ * closeWrite(), close(), result(), and for-await over the chunks (breaking
+ * out closes it). A parked wait pins the object (as hull:http-client's
+ * stream does), so `await exec.stream(...).read()` does not lose it, and
+ * its command, to the collector mid-wait. */
+
+static JSClassID hl_js_exec_stream_class_id;
+
+typedef struct {
+    HlExecStream *s;             /* one reference, released by the finalizer */
+} JsExecStream;
+
+enum { JS_W_READ = 1, JS_W_NEXT, JS_W_WRITE, JS_W_RESULT };
+
+typedef struct {
+    JSRuntime *rt;
+    JSValue    self;             /* the pin */
+    int        kind;             /* JS_W_* */
+} JsExecPin;
+
+static void pin_free(void *ud)
+{
+    JsExecPin *p = ud;
+    JS_FreeValueRT(p->rt, p->self);
+    free(p);
+}
+
+static JsExecStream *stream_this(JSContext *ctx, JSValueConst this_val)
+{
+    JsExecStream *o = JS_GetOpaque(this_val, hl_js_exec_stream_class_id);
+    if (!o || !o->s) JS_ThrowTypeError(ctx, "exec.stream: not a stream");
+    return o;
+}
+
+static JSValue iter_result(JSContext *ctx, JSValue value, int done)
+{
+    if (JS_IsException(value)) return value;
+    JSValue r = JS_NewObject(ctx);
+    if (JS_IsException(r)) { JS_FreeValue(ctx, value); return r; }
+    if (JS_DefinePropertyValueStr(ctx, r, "value", value, JS_PROP_C_W_E) < 0 ||
+        JS_DefinePropertyValueStr(ctx, r, "done", JS_NewBool(ctx, done), JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, r);
+        return JS_EXCEPTION;
+    }
+    return r;
+}
+
+/* The next chunk as { fd, data }, charged before it is taken; null when
+ * none is queued (*none set). */
+static JSValue take_chunk(JSContext *ctx, HlExecStream *s, int *none)
+{
+    *none = 0;
+    size_t len = hl_exec_stream_peek(s);
+    if (len == (size_t)-1) { *none = 1; return JS_NULL; }
+    if (hl_js_budget_charge(ctx, HL_WORK_EXEC_CHUNK_UNITS + len / 8)) return JS_EXCEPTION;
+    HlExecChunk *c = hl_exec_stream_take(s);
+    JSValue ab = JS_NewArrayBufferCopy(ctx, c->data, c->len);
+    int fd = c->fd;
+    free(c);
+    if (JS_IsException(ab)) return ab;
+    /* All three arguments: the constructor reads argv[1] / argv[2]
+     * whatever argc says. */
+    JSValue targs[3] = { ab, JS_NewInt32(ctx, 0), JS_UNDEFINED };
+    JSValue u8 = JS_NewTypedArray(ctx, 3, targs, JS_TYPED_ARRAY_UINT8);
+    JS_FreeValue(ctx, ab);
+    if (JS_IsException(u8)) return u8;
+    JSValue o = JS_NewObject(ctx);
+    if (JS_IsException(o)) { JS_FreeValue(ctx, u8); return o; }
+    if (JS_DefinePropertyValueStr(ctx, o, "fd", JS_NewString(ctx, fd == 2 ? "stderr" : "stdout"),
+                                  JS_PROP_C_W_E) < 0 ||
+        JS_DefinePropertyValueStr(ctx, o, "data", u8, JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, o);
+        return JS_EXCEPTION;
+    }
+    return o;
+}
+
+static JSValue stream_result_value(JSContext *ctx, const HlExecReply *r)
+{
+    if (!r) return JS_ThrowTypeError(ctx, "exec.stream: no result from the command broker");
+    if (r->kind == HL_EXEC_R_BUSY)
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowTypeError(ctx, "%s", r->msg));
+    if (r->kind != HL_EXEC_R_DONE) return JS_ThrowTypeError(ctx, "%s", r->msg);
+    JSValue res = JS_NewObject(ctx);
+    JSValue sig = r->signal[0] ? JS_NewString(ctx, r->signal) : JS_NULL;
+    if (JS_IsException(res) || JS_IsException(sig)) {
+        JS_FreeValue(ctx, res);
+        JS_FreeValue(ctx, sig);
+        return JS_EXCEPTION;
+    }
+    JS_DefinePropertyValueStr(ctx, res, "status", JS_NewInt32(ctx, r->status), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "signal", sig, JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "timedOut", JS_NewBool(ctx, r->timed_out), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "stdoutTruncated", JS_NewBool(ctx, r->out_cut), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "stderrTruncated", JS_NewBool(ctx, r->err_cut), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "stdoutLength", JS_NewInt64(ctx, (int64_t)r->out_bytes), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "stderrLength", JS_NewInt64(ctx, (int64_t)r->err_bytes), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "durationMs", JS_NewInt64(ctx, r->duration_ms), JS_PROP_C_W_E);
+    return res;
+}
+
+/* What a call of @p kind gives now, when nothing would wait. *wait set
+ * (and JS_UNDEFINED returned) when it must park. */
+static JSValue stream_now(JSContext *ctx, HlExecStream *s, int kind, int *wait)
+{
+    *wait = 0;
+    if (kind == JS_W_READ || kind == JS_W_NEXT) {
+        int none = 0;
+        JSValue c = take_chunk(ctx, s, &none);
+        if (!none) return kind == JS_W_NEXT ? iter_result(ctx, c, 0) : c;
+        if (hl_exec_stream_drained(s))
+            return kind == JS_W_NEXT ? iter_result(ctx, JS_UNDEFINED, 1) : JS_NULL;
+        *wait = 1;
+        return JS_UNDEFINED;
+    }
+    if (kind == JS_W_WRITE) {
+        if (hl_exec_stream_writing(s)) { *wait = 1; return JS_UNDEFINED; }
+        if (!hl_exec_stream_write_ok(s))
+            return JS_ThrowTypeError(ctx, "exec.stream write: the command's stdin closed "
+                                     "before the bytes were written (stdin_closed)");
+        return JS_UNDEFINED;
+    }
+    const HlExecReply *r = hl_exec_stream_result(s);
+    if (!r) { *wait = 1; return JS_UNDEFINED; }
+    return stream_result_value(ctx, r);
+}
+
+// cppcheck-suppress constParameterCallback
+static JSValue stream_push(JSContext *ctx, void *driver)
+{
+    const JsExecPin *p = hl_exec_stream_wait_ud(driver);
+    HlExecStream *s = hl_exec_stream_of_wait(driver);
+    if (!p || !s) return JS_ThrowInternalError(ctx, "exec.stream: lost its wait");
+    int wait = 0;
+    JSValue v = stream_now(ctx, s, p->kind, &wait);
+    if (wait) return JS_ThrowInternalError(ctx, "exec.stream: woken with nothing ready");
+    return v;
+}
+
+/* A promise already settled with @p v (taken), or rejected with the
+ * pending exception when v is JS_EXCEPTION. */
+static JSValue settled(JSContext *ctx, JSValue v)
+{
+    JSValue rf[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, rf);
+    if (JS_IsException(promise)) { JS_FreeValue(ctx, v); return promise; }
+    JSValue arg = v, ret;
+    if (JS_IsException(v)) {
+        arg = JS_GetException(ctx);
+        ret = JS_Call(ctx, rf[1], JS_UNDEFINED, 1, &arg);
+    } else {
+        ret = JS_Call(ctx, rf[0], JS_UNDEFINED, 1, &arg);
+    }
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, arg);
+    JS_FreeValue(ctx, rf[0]);
+    JS_FreeValue(ctx, rf[1]);
+    return promise;
+}
+
+/* The wait gates, with the exception set when they refuse (-1). */
+static int stream_gate(JSContext *ctx, const char *what)
+{
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.async_ctx) {
+        JS_ThrowInternalError(ctx, "%s: cannot wait", what);
+        return -1;
+    }
+    if (hl_js_async_gate(ctx, js, what) != 0) return -1;
+#ifdef HL_ENABLE_DB
+    if (hl_js_db_refuse_wait(ctx, what) != 0) return -1;
+#endif
+    return 0;
+}
+
+static JSValue stream_park(JSContext *ctx, HlExecStream *s, JSValueConst self, int kind,
+                           const char *what)
+{
+    if (stream_gate(ctx, what) != 0) return JS_EXCEPTION;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    int ckind = kind == JS_W_WRITE ? HL_EXEC_WAIT_WRITE
+              : kind == JS_W_RESULT ? HL_EXEC_WAIT_RESULT : HL_EXEC_WAIT_READ;
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx, js->base.alloc);
+    if (!actx) return JS_ThrowOutOfMemory(ctx);
+    JSValue fns[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, fns);
+    if (JS_IsException(promise)) { hl_async_ctx_free(actx); return promise; }
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
+        JSValue resolve, JSValue reject, HlAllocator *alloc,
+        JSValue (*push_result)(JSContext *, void *));
+    HlAsyncCont *cont = hl_js_async_cont_create(js, fns[0], fns[1], js->base.alloc,
+                                                stream_push);
+    if (!cont) {
+        JS_FreeValue(ctx, fns[0]);
+        JS_FreeValue(ctx, fns[1]);
+        JS_FreeValue(ctx, promise);
+        hl_async_ctx_free(actx);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    actx->cont = cont;
+    actx->detached = (hl_js_cont_suspend_conn(cont) == NULL);
+    JsExecPin *pin = malloc(sizeof *pin);
+    if (!pin) {
+        actx->cont = NULL;
+        cont->destroy(cont);
+        hl_async_ctx_free(actx);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    pin->rt = JS_GetRuntime(ctx);
+    pin->self = JS_DupValue(ctx, self);
+    pin->kind = kind;
+    if (hl_exec_stream_wait_ex(actx, s, ckind, pin_free, pin) != 0) {
+        pin_free(pin);
+        actx->cont = NULL;
+        cont->destroy(cont);
+        hl_async_ctx_free(actx);
+        JS_FreeValue(ctx, promise);
+        JS_ThrowTypeError(ctx, "%s: another one is already waiting on this stream", what);
+        return hl_js_refusal_tag(ctx, HL_REFUSAL_BUSY);
+    }
+    if (!actx->detached) {
+        if (hl_js_op_suspend(js, (HlSuspendOp *)&actx->op) < 0) {
+            actx->cont->destroy(actx->cont);
+            actx->cont = NULL;
+            hl_async_ctx_cancel(actx);     /* the wait's free closes the stream */
+            JS_FreeValue(ctx, promise);
+            return JS_ThrowInternalError(ctx, "%s: failed to suspend", what);
+        }
+    } else {
+        hl_async_ctx_track(actx, &js->base.async_live);
+    }
+    return promise;
+}
+
+static JSValue stream_call(JSContext *ctx, JSValueConst this_val, int kind, const char *what)
+{
+    JsExecStream *o = stream_this(ctx, this_val);
+    if (!o) return JS_EXCEPTION;
+    int wait = 0;
+    JSValue v = stream_now(ctx, o->s, kind, &wait);
+    if (!wait) return settled(ctx, v);
+    return stream_park(ctx, o->s, this_val, kind, what);
+}
+
+static JSValue js_stream_read(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    return stream_call(ctx, this_val, JS_W_READ, "exec.stream read()");
+}
+
+static JSValue js_stream_next(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    return stream_call(ctx, this_val, JS_W_NEXT, "exec.stream iterator");
+}
+
+static JSValue js_stream_result(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    return stream_call(ctx, this_val, JS_W_RESULT, "exec.stream result()");
+}
+
+/* write(bytes): a string (UTF-8), an ArrayBuffer or a typed array. */
+static JSValue js_stream_write(JSContext *ctx, JSValueConst this_val, int argc,
+                               JSValueConst *argv)
+{
+    JsExecStream *o = stream_this(ctx, this_val);
+    if (!o) return JS_EXCEPTION;
+    JSValueConst v = argc > 0 ? argv[0] : JS_UNDEFINED;
+    const uint8_t *p = NULL;
+    size_t n = 0;
+    const char *str = NULL;
+    if (JS_IsString(v)) {
+        str = JS_ToCStringLen(ctx, &n, v);
+        if (!str) return JS_EXCEPTION;
+        p = (const uint8_t *)str;
+    } else {
+        p = hl_js_bytes_view(ctx, &n, v);
+        /* NULL for anything that is not a buffer (cppcheck reads the inline
+         * view as always NULL). */
+        // cppcheck-suppress knownConditionTrueFalse
+        if (!p) return JS_ThrowTypeError(ctx, "exec.stream write: a string, an "
+                                         "ArrayBuffer or a typed array");
+    }
+    if (hl_js_budget_charge(ctx, 64 + n / 8)) {
+        if (str) JS_FreeCString(ctx, str);
+        return JS_EXCEPTION;
+    }
+    char why[192];
+    const char *code = NULL;
+    /* A write that will have to wait is refused before anything is queued:
+     * refused after, its bytes still went out (review of PR 2, L1). */
+    if (hl_exec_stream_write_would_wait(o->s, n) && stream_gate(ctx, "exec.stream write()") != 0) {
+        if (str) JS_FreeCString(ctx, str);
+        return JS_EXCEPTION;
+    }
+    /* No app code ran since the view was taken; the bytes are copied here. */
+    int rc = hl_exec_stream_write(o->s, p, n, why, sizeof why, &code);
+    if (str) JS_FreeCString(ctx, str);
+    if (rc < 0) {
+        JSValue e = JS_ThrowTypeError(ctx, "%s (%s)", why, code);
+        if (strcmp(code, "busy") == 0) e = hl_js_refusal_tag(ctx, HL_REFUSAL_BUSY);
+        return settled(ctx, e);
+    }
+    if (rc == 1) return settled(ctx, JS_UNDEFINED);
+    return stream_park(ctx, o->s, this_val, JS_W_WRITE, "exec.stream write()");
+}
+
+static JSValue js_stream_close_write(JSContext *ctx, JSValueConst this_val, int argc,
+                                     JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    JsExecStream *o = stream_this(ctx, this_val);
+    if (!o) return JS_EXCEPTION;
+    char why[192];
+    if (hl_exec_stream_close_write(o->s, why, sizeof why) != 0)
+        return JS_ThrowTypeError(ctx, "%s", why);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_stream_close(JSContext *ctx, JSValueConst this_val, int argc,
+                               JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    JsExecStream *o = stream_this(ctx, this_val);
+    if (!o) return JS_EXCEPTION;
+    hl_exec_stream_close(o->s);
+    return JS_UNDEFINED;
+}
+
+/* The iterator's return(): a for-await that breaks out closes the stream. */
+static JSValue js_stream_return(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv)
+{
+    JSValue r = js_stream_close(ctx, this_val, argc, argv);
+    if (JS_IsException(r)) return settled(ctx, r);
+    return settled(ctx, iter_result(ctx, JS_UNDEFINED, 1));
+}
+
+static JSValue js_stream_async_iterator(JSContext *ctx, JSValueConst this_val, int argc,
+                                        JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    return JS_DupValue(ctx, this_val);
+}
+
+static void js_stream_finalizer(JSRuntime *rt, JSValue val)
+{
+    (void)rt;
+    JsExecStream *o = JS_GetOpaque(val, hl_js_exec_stream_class_id);
+    if (!o) return;
+    /* A parked wait pins the object, so no wait is parked here. */
+    if (o->s) {
+        hl_exec_stream_close(o->s);
+        hl_exec_stream_release(o->s);
+    }
+    free(o);
+}
+
+static const JSClassDef js_exec_stream_class = {
+    "ExecStream", .finalizer = js_stream_finalizer,
+};
+
+static const JSCFunctionListEntry js_stream_methods[] = {
+    JS_CFUNC_DEF("read", 0, js_stream_read),
+    JS_CFUNC_DEF("write", 1, js_stream_write),
+    JS_CFUNC_DEF("closeWrite", 0, js_stream_close_write),
+    JS_CFUNC_DEF("close", 0, js_stream_close),
+    JS_CFUNC_DEF("result", 0, js_stream_result),
+    JS_CFUNC_DEF("next", 0, js_stream_next),
+    JS_CFUNC_DEF("return", 0, js_stream_return),
+};
+
+static int stream_register_class(JSContext *ctx)
+{
+    JS_NewClassID(&hl_js_exec_stream_class_id);
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    if (JS_IsRegisteredClass(rt, hl_js_exec_stream_class_id)) return 0;
+    if (JS_NewClass(rt, hl_js_exec_stream_class_id, &js_exec_stream_class) < 0) return -1;
+    JSValue proto = JS_NewObject(ctx);
+    if (JS_IsException(proto)) return -1;
+    hl_js_set_function_list(ctx, proto, js_stream_methods,
+        (int)(sizeof js_stream_methods / sizeof js_stream_methods[0]));
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue sym = JS_GetPropertyStr(ctx, global, "Symbol");
+    JSValue ai = JS_GetPropertyStr(ctx, sym, "asyncIterator");
+    if (JS_IsSymbol(ai)) {
+        JSAtom atom = JS_ValueToAtom(ctx, ai);
+        JS_DefinePropertyValue(ctx, proto, atom,
+            JS_NewCFunction(ctx, js_stream_async_iterator, "[Symbol.asyncIterator]", 0),
+            JS_PROP_C_W_E);
+        JS_FreeAtom(ctx, atom);
+    }
+    JS_FreeValue(ctx, ai);
+    JS_FreeValue(ctx, sym);
+    JS_FreeValue(ctx, global);
+    hl_js_set_class_proto_frozen(ctx, hl_js_exec_stream_class_id, proto);
+    return 0;
+}
+
+/* exec.stream(name, args?, opts?) -> stream (at once) */
+static JSValue js_exec_stream(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (argc < 1 || !JS_IsString(argv[0]))
+        return JS_ThrowTypeError(ctx, "exec.stream(name, args?): name must be a string");
+    char *bufs[HL_EXEC_MAX_CALL_ARGS];
+    const char *args[HL_EXEC_MAX_CALL_ARGS];
+    size_t lens[HL_EXEC_MAX_CALL_ARGS];
+    size_t n = 0, total = 0;
+    JSValue ret = JS_EXCEPTION;
+    const char *name = NULL;
+    size_t name_len = 0;
+    uint8_t *in = NULL;
+    size_t in_len = 0;
+    int stdin_open = 0;
+
+    if (argc > 1 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) {
+        if (JS_IsArray(ctx, argv[1]) <= 0)
+            return JS_ThrowTypeError(ctx, "exec.stream: args must be an array of strings");
+        int32_t len = 0;
+        if (hl_js_get_length32(ctx, argv[1], &len) != 0) return JS_EXCEPTION;
+        if (len > HL_EXEC_MAX_CALL_ARGS)
+            return JS_ThrowRangeError(ctx, "exec.stream: more than %d arguments",
+                                      HL_EXEC_MAX_CALL_ARGS);
+        for (int32_t i = 0; i < len; i++) {
+            JSValue e = JS_GetPropertyUint32(ctx, argv[1], (uint32_t)i);
+            if (JS_IsException(e)) goto out;
+            if (!JS_IsString(e)) {
+                JS_FreeValue(ctx, e);
+                JS_ThrowTypeError(ctx, "exec.stream: argument %d must be a string", (int)i + 1);
+                goto out;
+            }
+            size_t sl = 0;
+            const char *str = JS_ToCStringLen(ctx, &sl, e);
+            JS_FreeValue(ctx, e);
+            if (!str) goto out;
+            bufs[n] = js_malloc(ctx, sl + 1);
+            if (!bufs[n]) { JS_FreeCString(ctx, str); goto out; }
+            memcpy(bufs[n], str, sl + 1);
+            JS_FreeCString(ctx, str);
+            args[n] = bufs[n];
+            lens[n] = sl;
+            total += sl;
+            n++;
+        }
+    }
+    if (argc > 2 && read_opts_ex(ctx, argv[2], &in, &in_len, &stdin_open) != 0) goto out;
+    name = JS_ToCStringLen(ctx, &name_len, argv[0]);
+    if (!name) goto out;
+    if (hl_js_budget_charge(ctx, 64 + (total + in_len) / 8)) goto out;
+
+    HlExecCmd cmd;
+    char err[256];
+    int rc = js && js->base.exec_policy
+           ? hl_exec_check_call(js->base.exec_policy, js->base.exec_policy_len,
+                                name, name_len, args, lens, n, &cmd, err, sizeof err)
+           : HL_EXEC_E_UNKNOWN;
+    if (rc == HL_EXEC_E_UNKNOWN) {
+        JS_ThrowTypeError(ctx, "exec.stream: '%s' is not declared in the manifest's "
+                          "exec section", name);
+        goto out;
+    }
+    if (rc != HL_EXEC_OK) { JS_ThrowTypeError(ctx, "exec.stream('%s'): %s", name, err); goto out; }
+    if (!(cmd.flags & HL_EXEC_CMD_STREAM)) {
+        JS_ThrowTypeError(ctx, "exec.stream('%s'): not a stream command (declare "
+                          "stream: true; exec.run runs it)", name);
+        goto out;
+    }
+    if ((in_len || stdin_open) && cmd.stream_stdin_max == 0) {
+        JS_ThrowTypeError(ctx, "exec.stream('%s'): the command takes no stdin "
+                          "(declare stdinMax)", name);
+        goto out;
+    }
+    if (in_len > cmd.stream_stdin_max) {
+        JS_ThrowTypeError(ctx, "exec.stream('%s'): stdin is longer than its stdinMax", name);
+        goto out;
+    }
+    JSValue stubs = exec_stubs(ctx);
+    int under_test = JS_IsObject(stubs);
+    JS_FreeValue(ctx, stubs);
+    if (under_test) {
+        JS_ThrowTypeError(ctx, "exec.stream: hull test has no stream stubs yet; test "
+                          "the command through exec.run");
+        goto out;
+    }
+    /* Its reads will wait: refused where a wait is. */
+    if (js && (js->in_middleware || js->in_load)) {
+        JS_ThrowTypeError(ctx, "exec.stream cannot wait %s", js->in_middleware
+                          ? "in middleware (it is synchronous)" : "at the module top level");
+        hl_js_refusal_tag(ctx, HL_REFUSAL_WAIT);
+        goto out;
+    }
+#ifdef HL_ENABLE_DB
+    if (hl_js_db_refuse_wait(ctx, "exec.stream") != 0) goto out;
+#endif
+    if (!js || !hl_exec_broker_running() || !js->base.async_ctx) {
+        JS_ThrowTypeError(ctx, "exec.stream('%s'): the command broker is not running "
+                          "(this host has none, or it was lost)", name);
+        goto out;
+    }
+    if (hl_exec_inflight() >= HL_EXEC_MAX_INFLIGHT ||
+        hl_exec_inflight_cmd(name, name_len) >= cmd.concurrency) {
+        hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowTypeError(ctx, "exec.stream('%s'): "
+                     "too many calls in flight", name));
+        goto out;
+    }
+    if (stream_register_class(ctx) != 0) goto out;
+    JsExecStream *o = calloc(1, sizeof *o);
+    if (!o) { JS_ThrowOutOfMemory(ctx); goto out; }
+    JSValue obj = JS_NewObjectClass(ctx, (int)hl_js_exec_stream_class_id);
+    if (JS_IsException(obj)) { free(o); goto out; }
+    JS_SetOpaque(obj, o);              /* the finalizer frees o from here on */
+    char why[256];
+    o->s = hl_exec_stream_start(js->base.async_ctx, name, name_len, args, lens, n,
+                                in, in_len, stdin_open, cmd.stream_stdin_max,
+                                why, sizeof why);
+    if (!o->s) {
+        JS_FreeValue(ctx, obj);
+        JS_ThrowTypeError(ctx, "exec.stream('%s'): %s", name, why);
+        goto out;
+    }
+    ret = obj;
+out:
+    if (name) JS_FreeCString(ctx, name);
+    js_free(ctx, in);
+    for (size_t i = 0; i < n; i++) js_free(ctx, bufs[i]);
+    return ret;
+}
+
 static int js_exec_module_init(JSContext *ctx, JSModuleDef *m)
 {
     if (hl_js_check_module_declared(ctx, "hull/exec", "hull:exec") != 0) return -1;
     JSValue exec = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, exec, "run", JS_NewCFunction(ctx, js_exec_run, "run", 2));
+    JS_SetPropertyStr(ctx, exec, "stream", JS_NewCFunction(ctx, js_exec_stream, "stream", 2));
     hl_js_export_frozen(ctx, m, "exec", exec);
     return 0;
 }

@@ -1337,6 +1337,19 @@ fuzz/fuzz_exec_policy: fuzz/fuzz_exec_policy.c $(SRCDIR)/hull/cap/exec.c fuzz/fu
 fuzz/fuzz_exec_slot: fuzz/fuzz_exec_slot.c $(SRCDIR)/hull/cap/exec.c fuzz/fuzz_exec_stubs.c
 	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -o $@ $^
 
+# The broker's handling of the frames the server sends (RUN / KILL / CREDIT /
+# STDIN), driving a real broker: HULL_FUZZ_HULL names the hull to run (an ASan
+# build finds more). Not in `fuzz` / `fuzz-run`: it needs a built hull and a
+# host where the broker runs; the exec-broker CI jobs run fuzz-exec-frames.
+fuzz/fuzz_exec_frames: fuzz/fuzz_exec_frames.c $(SRCDIR)/hull/cap/exec.c fuzz/fuzz_exec_stubs.c
+	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -o $@ $^
+
+FUZZ_EXEC_HULL ?= $(BUILDDIR)/hull
+.PHONY: fuzz-exec-frames
+fuzz-exec-frames: fuzz/fuzz_exec_frames
+	HULL_FUZZ_HULL=$(FUZZ_EXEC_HULL) ./fuzz/fuzz_exec_frames \
+	    fuzz/corpus_exec_frames/ -max_total_time=$(FUZZ_TIME) -timeout=60
+
 # Host-allowlist matcher: glob + CIDR parsing over attacker-influenced patterns
 # and hosts (roadmap §2.2 dynamic DB connections).
 fuzz/fuzz_host_match: fuzz/fuzz_host_match.c $(SRCDIR)/hull/utils/host_match.c
@@ -1690,6 +1703,12 @@ e2e-exec-broker: $(BUILDDIR)/hull
 .PHONY: e2e-exec-broker-macos
 e2e-exec-broker-macos: $(BUILDDIR)/hull
 	sh tests/e2e_exec_broker_macos.sh
+
+# exec.run's pipe handling and exec.stream, both runtimes, through the real
+# broker (tests/e2e_exec_stream.sh): needs `make HL_EXEC_TEST_HOOKS=1`.
+.PHONY: e2e-exec-stream
+e2e-exec-stream: $(BUILDDIR)/hull
+	sh tests/e2e_exec_stream.sh
 
 # http-client's async.stream + hull/sse-client, both runtimes: a response
 # handed over as it arrives, its timeouts, buffer and size caps, close, a

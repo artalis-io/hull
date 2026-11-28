@@ -26,6 +26,7 @@ Hull's source, so the two trees don't overlap).
 | `fuzz_plain_value` | `hl_pv_check` + the reader (shared/plain_value.c) | The build plugin channel's value encoding: the bytes a plugin process sends its host (docs/buildcontext_design.md §9.1). Oracles: no read outside the buffer, an accepted value is canonical (walked and re-written byte for byte), and a truncated one is refused. |
 | `fuzz_exec_policy` | `hl_exec_policy_validate` + the readers (cap/exec.c) | The encoded `exec` manifest section, which the command broker (PR 2) reads from the app process it no longer trusts. Oracles: no read outside the buffer, and every reader stays inside a policy the validator accepted. |
 | `fuzz_exec_slot` | `hl_exec_slot_match` via `hl_exec_check_call`, and the builder's `chars` parser | Every `exec.run` argument reaches the matcher. Oracles: no read outside a value, and an admitted value is never empty, never holds a NUL, and never starts with `-` unless the slot allows a dash. |
+| `fuzz_exec_frames` | the command broker's handling of the frames the server sends (RUN / KILL / CREDIT / STDIN), driving a real broker process (`HULL_FUZZ_HULL`, an ASan build finds more) | A compromised app process can write any frame payload. Oracles: the broker never exits or stops answering, a stream never sends past its 256 KiB window, no frame reaches an id after its final frame, and a plain call still completes after every input. Not in `make fuzz`: run by the Linux exec-broker CI job and `make fuzz-exec-frames`. |
 | `fuzz_migrate_name` | `hl_migrate_embedded_name` | Only top-level `migrations/<name>.sql` may run in a built binary (audits 25 / 27). Oracle: an independent reference. The rest of `migrate.c` is stubbed in `fuzz_migrate_name_stubs.c`. |
 
 ## Build & run
@@ -45,6 +46,7 @@ make fuzz CC=/opt/homebrew/opt/llvm@18/bin/clang
 ./fuzz/fuzz_mime_sniff fuzz/corpus_mime_sniff/ -max_total_time=60
 ./fuzz/fuzz_exec_policy fuzz/corpus_exec_policy/ -max_total_time=60
 ./fuzz/fuzz_exec_slot fuzz/corpus_exec_slot/ -max_total_time=60
+HULL_FUZZ_HULL=build/hull ./fuzz/fuzz_exec_frames fuzz/corpus_exec_frames/ -max_total_time=60 -timeout=60
 
 # Or the time-boxed pass CI runs (FUZZ_TIME overrides the per-target seconds):
 make fuzz-run CC=clang FUZZ_TIME=60

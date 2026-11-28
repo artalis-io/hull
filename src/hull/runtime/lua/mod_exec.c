@@ -28,6 +28,7 @@
 #include "hull/cap/exec_broker.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
+#include "hull/shared/work_charge.h"
 #include "internal.h"   /* hl_lua_check_can_wait, hl_lua_can_wait, hl_lua_async_k_ok */
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_registry.h"   /* hl_db_registry_open_txn */
@@ -348,13 +349,393 @@ static int lua_exec_run(lua_State *L)
     return lua_yieldk(L, 0, (lua_KContext)op, lua_exec_k);
 }
 
+/* ── exec.stream (docs/design/exec_stream.md §4) ───────────────────── */
+
+#define HL_LUA_EXEC_STREAM_MT "hull.exec.stream"
+
+typedef struct {
+    HlExecStream *s;           /* one reference; NULL once collected */
+} LuaExecStream;
+
+static LuaExecStream *check_stream(lua_State *L)
+{
+    LuaExecStream *o = luaL_checkudata(L, 1, HL_LUA_EXEC_STREAM_MT);
+    if (!o->s) luaL_error(L, "exec.stream: the stream is gone");
+    return o;
+}
+
+/* The push of a parked stream wait: nothing (the continuation reads the
+ * stream again, with the error checks a push may not make). */
+// cppcheck-suppress constParameterCallback
+static void lua_stream_push(lua_State *L, void *driver)
+{
+    (void)driver;
+    lua_pushnil(L);
+}
+
+/* Park the running coroutine on @p s until @p kind is ready, continuing in
+ * @p k. Raises (never returns) when the wait is refused. */
+static int stream_park(lua_State *L, HlExecStream *s, int kind, const char *what,
+                       lua_KFunction k)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!hl_lua_can_wait(L)) {
+        hl_lua_check_can_wait(L, what);
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "%s cannot wait here", what);
+    }
+    HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.net_ctx,
+                                          lua->base.alloc);
+    if (!ctx) return luaL_error(L, "%s: out of memory", what);
+    ctx->detached = (lua->active_conn == NULL);
+    if (hl_exec_stream_wait(ctx, s, kind) != 0) {
+        hl_async_ctx_free(ctx);
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "%s: another %s of this stream "
+                             "is already waiting", what, what);
+    }
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *, HlAllocator *,
+                                                   HlLuaPushResultFn);
+    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc, lua_stream_push);
+    if (!cont) {
+        hl_async_ctx_cancel(ctx);   /* the wait's free closes the stream */
+        return luaL_error(L, "%s: out of memory", what);
+    }
+    ctx->cont = cont;
+    if (!ctx->detached) {
+        if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn,
+                              (HlSuspendOp *)&ctx->op) < 0) {
+            ctx->cont->destroy(ctx->cont);
+            ctx->cont = NULL;
+            hl_async_ctx_cancel(ctx);
+            return luaL_error(L, "%s: failed to suspend connection", what);
+        }
+    } else {
+        hl_async_ctx_track(ctx, &lua->base.async_live);
+    }
+    return lua_yieldk(L, 0, 0, k);
+}
+
+/* The next chunk as { fd = "stdout" | "stderr", data = string }, charged
+ * before it is taken (a raise then leaves it queued), or 0 pushed when none
+ * is queued. */
+static int take_chunk(lua_State *L, HlExecStream *s)
+{
+    size_t len = hl_exec_stream_peek(s);
+    if (len == (size_t)-1) return 0;
+    lua_hlwork(L, HL_WORK_EXEC_CHUNK_UNITS + len / 8, 0);
+    HlExecChunk *c = hl_exec_stream_take(s);
+    lua_createtable(L, 0, 2);
+    lua_pushstring(L, c->fd == 2 ? "stderr" : "stdout");
+    lua_setfield(L, -2, "fd");
+    lua_pushlstring(L, (const char *)c->data, c->len);
+    free(c);                    /* after the copy; a raise above leaks nothing */
+    lua_setfield(L, -2, "data");
+    return 1;
+}
+
+static int lua_stream_read_k(lua_State *L, int status, lua_KContext kctx);
+
+/* s:read() -> { fd, data } | nil once both pipes are closed */
+static int lua_stream_read(lua_State *L)
+{
+    LuaExecStream *o = check_stream(L);
+    if (take_chunk(L, o->s)) return 1;
+    if (hl_exec_stream_drained(o->s)) { lua_pushnil(L); return 1; }
+    lua_settop(L, 1);
+    return stream_park(L, o->s, HL_EXEC_WAIT_READ, "exec.stream read", lua_stream_read_k);
+}
+
+static int lua_stream_read_k(lua_State *L, int status, lua_KContext kctx)
+{
+    (void)status; (void)kctx;
+    if (!hl_lua_async_k_ok(L)) return luaL_error(L, "exec.stream: this wait was abandoned");
+    LuaExecStream *o = check_stream(L);
+    if (take_chunk(L, o->s)) return 1;
+    lua_pushnil(L);
+    return 1;
+}
+
+static int lua_stream_write_k(lua_State *L, int status, lua_KContext kctx)
+{
+    (void)status; (void)kctx;
+    if (!hl_lua_async_k_ok(L)) return luaL_error(L, "exec.stream: this wait was abandoned");
+    LuaExecStream *o = check_stream(L);
+    if (!hl_exec_stream_write_ok(o->s))
+        return luaL_error(L, "exec.stream write: the command's stdin closed before "
+                          "the bytes were written (stdin_closed)");
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+/* s:write(bytes) -> true once the broker has them (parks for credit) */
+static int lua_stream_write(lua_State *L)
+{
+    LuaExecStream *o = check_stream(L);
+    size_t n = 0;
+    const char *p = luaL_checklstring(L, 2, &n);
+    lua_hlwork(L, 64 + n / 8, 0);
+    char why[192];
+    const char *code = NULL;
+    /* A write that will have to wait is refused before anything is queued:
+     * refused after, its bytes still went out (review of PR 2, L1). */
+    if (hl_exec_stream_write_would_wait(o->s, n) && !hl_lua_can_wait(L)) {
+        hl_lua_check_can_wait(L, "exec.stream write");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "exec.stream write cannot wait here");
+    }
+    int rc = hl_exec_stream_write(o->s, p, n, why, sizeof why, &code);
+    if (rc < 0) {
+        if (strcmp(code, "busy") == 0) return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "%s", why);
+        return luaL_error(L, "%s (%s)", why, code);
+    }
+    if (rc == 1) { lua_pushboolean(L, 1); return 1; }
+    lua_settop(L, 1);
+    return stream_park(L, o->s, HL_EXEC_WAIT_WRITE, "exec.stream write", lua_stream_write_k);
+}
+
+/* s:close_write(): EOF on the command's stdin once queued bytes are out */
+static int lua_stream_close_write(lua_State *L)
+{
+    LuaExecStream *o = check_stream(L);
+    char why[192];
+    if (hl_exec_stream_close_write(o->s, why, sizeof why) != 0)
+        return luaL_error(L, "%s", why);
+    return 0;
+}
+
+/* s:close(): kill the command; later reads return nil. Idempotent. */
+static int lua_stream_close(lua_State *L)
+{
+    LuaExecStream *o = luaL_checkudata(L, 1, HL_LUA_EXEC_STREAM_MT);
+    if (o->s) hl_exec_stream_close(o->s);
+    return 0;
+}
+
+static int push_stream_result(lua_State *L, const HlExecReply *r)
+{
+    if (r->kind == HL_EXEC_R_BUSY) return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "%s", r->msg);
+    if (r->kind != HL_EXEC_R_DONE) return luaL_error(L, "%s", r->msg);
+    lua_createtable(L, 0, 8);
+    lua_pushinteger(L, r->status);
+    lua_setfield(L, -2, "status");
+    if (r->signal[0]) lua_pushstring(L, r->signal); else lua_pushnil(L);
+    lua_setfield(L, -2, "signal");
+    lua_pushboolean(L, r->timed_out);
+    lua_setfield(L, -2, "timed_out");
+    lua_pushboolean(L, r->out_cut);
+    lua_setfield(L, -2, "stdout_truncated");
+    lua_pushboolean(L, r->err_cut);
+    lua_setfield(L, -2, "stderr_truncated");
+    lua_pushinteger(L, (lua_Integer)r->out_bytes);
+    lua_setfield(L, -2, "stdout_length");
+    lua_pushinteger(L, (lua_Integer)r->err_bytes);
+    lua_setfield(L, -2, "stderr_length");
+    lua_pushinteger(L, r->duration_ms);
+    lua_setfield(L, -2, "duration_ms");
+    return 1;
+}
+
+static int lua_stream_result_k(lua_State *L, int status, lua_KContext kctx)
+{
+    (void)status; (void)kctx;
+    if (!hl_lua_async_k_ok(L)) return luaL_error(L, "exec.stream: this wait was abandoned");
+    LuaExecStream *o = check_stream(L);
+    const HlExecReply *r = hl_exec_stream_result(o->s);
+    if (!r) return luaL_error(L, "exec.stream: no result from the command broker");
+    return push_stream_result(L, r);
+}
+
+/* s:result() -> the result once the command has ended (parks) */
+static int lua_stream_result(lua_State *L)
+{
+    LuaExecStream *o = check_stream(L);
+    const HlExecReply *r = hl_exec_stream_result(o->s);
+    if (r) return push_stream_result(L, r);
+    lua_settop(L, 1);
+    return stream_park(L, o->s, HL_EXEC_WAIT_RESULT, "exec.stream result",
+                       lua_stream_result_k);
+}
+
+/* __gc / __close: an abandoned stream never holds its slot. */
+static int lua_stream_gc(lua_State *L)
+{
+    LuaExecStream *o = luaL_checkudata(L, 1, HL_LUA_EXEC_STREAM_MT);
+    if (o->s) {
+        hl_exec_stream_close(o->s);
+        hl_exec_stream_release(o->s);
+        o->s = NULL;
+    }
+    return 0;
+}
+
+static const luaL_Reg stream_methods[] = {
+    {"read", lua_stream_read},
+    {"write", lua_stream_write},
+    {"close_write", lua_stream_close_write},
+    {"close", lua_stream_close},
+    {"result", lua_stream_result},
+    {NULL, NULL}
+};
+
+/* exec.stream(name, args?, opts?) -> stream; opts = { stdin, stdin_open } */
+static int lua_exec_stream(lua_State *L)
+{
+    size_t name_len = 0;
+    const char *name = luaL_checklstring(L, 1, &name_len);
+    int has_args = !lua_isnoneornil(L, 2);
+    if (has_args) luaL_checktype(L, 2, LUA_TTABLE);
+    if (!lua_isnoneornil(L, 3)) luaL_checktype(L, 3, LUA_TTABLE);
+    lua_settop(L, 3);
+
+    const char *in = NULL;
+    size_t in_len = 0;
+    int stdin_open = 0;
+    if (lua_istable(L, 3)) {
+        lua_pushnil(L);
+        while (lua_next(L, 3) != 0) {
+            const char *k = lua_type(L, -2) == LUA_TSTRING ? lua_tostring(L, -2) : NULL;
+            if (!k || (strcmp(k, "stdin") != 0 && strcmp(k, "stdin_open") != 0))
+                return luaL_error(L, "exec.stream: unknown option (stdin, stdin_open)");
+            lua_pop(L, 1);
+        }
+        lua_pushliteral(L, "stdin");
+        lua_rawget(L, 3);
+        if (!lua_isnil(L, -1)) {
+            if (lua_type(L, -1) != LUA_TSTRING)
+                return luaL_error(L, "exec.stream: stdin must be a string");
+            in = lua_tolstring(L, -1, &in_len);
+        }
+        lua_pop(L, 1);
+        lua_pushliteral(L, "stdin_open");
+        lua_rawget(L, 3);
+        if (!lua_isnil(L, -1) && !lua_isboolean(L, -1))
+            return luaL_error(L, "exec.stream: stdin_open must be a boolean");
+        stdin_open = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+        if (in_len > HL_EXEC_STDIN_CEIL)
+            return luaL_error(L, "exec.stream: stdin is longer than %d bytes (write "
+                              "the rest)", (int)HL_EXEC_STDIN_CEIL);
+    }
+    const char *args[HL_EXEC_MAX_CALL_ARGS];
+    size_t lens[HL_EXEC_MAX_CALL_ARGS];
+    size_t n = 0, total = 0;
+    if (has_args) {
+        lua_Unsigned len = lua_rawlen(L, 2);
+        if (len > HL_EXEC_MAX_CALL_ARGS)
+            return luaL_error(L, "exec.stream: more than %d arguments", HL_EXEC_MAX_CALL_ARGS);
+        for (lua_Unsigned i = 1; i <= len; i++) {
+            lua_rawgeti(L, 2, (lua_Integer)i);
+            if (lua_type(L, -1) != LUA_TSTRING)
+                return luaL_error(L, "exec.stream: argument %d must be a string", (int)i);
+            args[n] = lua_tolstring(L, -1, &lens[n]);
+            total += lens[n];
+            n++;
+            lua_pop(L, 1);
+        }
+    }
+    if (total > HL_EXEC_MAX_ARG_BYTES)
+        return luaL_error(L, "exec.stream: the arguments are longer than %d bytes "
+                          "together", (int)HL_EXEC_MAX_ARG_BYTES);
+    /* Copied at once into one C block, as exec.run does (a later allocation
+     * may run a __gc that changes the tables). */
+    char *block = malloc((total + in_len) ? total + in_len : 1);
+    if (!block) return luaL_error(L, "exec.stream: out of memory");
+    for (size_t i = 0, off = 0; i < n; i++) {
+        memcpy(block + off, args[i], lens[i]);
+        args[i] = block + off;
+        off += lens[i];
+    }
+    if (in_len) { memcpy(block + total, in, in_len); in = block + total; }
+    lua_hlwork(L, 64 + (total + in_len) / 8, 0);
+
+    HlLua *lua = get_hl_lua(L);
+    HlExecCmd cmd;
+    char err[256];
+    int rc = lua && lua->base.exec_policy
+           ? hl_exec_check_call(lua->base.exec_policy, lua->base.exec_policy_len,
+                                name, name_len, args, lens, n, &cmd, err, sizeof err)
+           : HL_EXEC_E_UNKNOWN;
+    const char *fail = NULL;
+    char msg[320];
+    if (rc == HL_EXEC_E_UNKNOWN) {
+        snprintf(msg, sizeof msg, "exec.stream: '%s' is not declared in the manifest's "
+                 "exec section", name);
+        fail = msg;
+    } else if (rc != HL_EXEC_OK) {
+        snprintf(msg, sizeof msg, "exec.stream('%s'): %s", name, err);
+        fail = msg;
+    } else if (!(cmd.flags & HL_EXEC_CMD_STREAM)) {
+        snprintf(msg, sizeof msg, "exec.stream('%s'): not a stream command (declare "
+                 "stream = true; exec.run runs it)", name);
+        fail = msg;
+    } else if ((in_len || stdin_open) && cmd.stream_stdin_max == 0) {
+        snprintf(msg, sizeof msg, "exec.stream('%s'): the command takes no stdin "
+                 "(declare stdin_max)", name);
+        fail = msg;
+    } else if (in_len > cmd.stream_stdin_max) {
+        snprintf(msg, sizeof msg, "exec.stream('%s'): stdin is longer than its "
+                 "stdin_max", name);
+        fail = msg;
+    }
+    if (fail) { free(block); return luaL_error(L, "%s", fail); }
+
+    lua_getfield(L, LUA_REGISTRYINDEX, EXEC_STUBS_KEY);
+    int under_test = lua_istable(L, -1);
+    lua_pop(L, 1);
+    if (under_test) {
+        free(block);
+        return luaL_error(L, "exec.stream: hull test has no stream stubs yet; "
+                          "test the command through exec.run");
+    }
+    if (!hl_exec_broker_running() || !lua->base.async_ctx) {
+        free(block);
+        return luaL_error(L, "exec.stream('%s'): the command broker is not running "
+                          "(this host has none, or it was lost)", name);
+    }
+    if (hl_exec_inflight() >= HL_EXEC_MAX_INFLIGHT ||
+        hl_exec_inflight_cmd(name, name_len) >= cmd.concurrency) {
+        free(block);
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "exec.stream('%s'): too many "
+                             "calls in flight", name);
+    }
+    /* Its reads will wait: refused where a wait is (a transaction open, the
+     * top level, middleware). */
+    if (!hl_lua_can_wait(L)) {
+        free(block);
+        hl_lua_check_can_wait(L, "exec.stream");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "exec.stream cannot wait here");
+    }
+    LuaExecStream *o = lua_newuserdatauv(L, sizeof *o, 0);
+    o->s = NULL;
+    luaL_setmetatable(L, HL_LUA_EXEC_STREAM_MT);
+    char why[256];
+    o->s = hl_exec_stream_start(lua->base.async_ctx, name, name_len, args, lens, n,
+                                in, in_len, stdin_open, cmd.stream_stdin_max,
+                                why, sizeof why);
+    free(block);
+    if (!o->s) return luaL_error(L, "exec.stream('%s'): %s", name, why);
+    return 1;
+}
+
 static const luaL_Reg exec_funcs[] = {
     {"run", lua_exec_run},
+    {"stream", lua_exec_stream},
     {NULL, NULL}
 };
 
 int luaopen_hull_exec(lua_State *L)
 {
+    /* The stream metatable: methods through the dispatcher, a finalizer
+     * that closes an abandoned stream, locked (with __gc reachable a stream
+     * could be freed under a parked read). */
+    luaL_newmetatable(L, HL_LUA_EXEC_STREAM_MT);
+    lua_pushcfunction(L, lua_stream_gc);
+    lua_setfield(L, -2, "__gc");
+    lua_pushcfunction(L, lua_stream_gc);
+    lua_setfield(L, -2, "__close");
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
+    hl_lua_newlib(L, stream_methods);
+    lua_setfield(L, -2, "__index");
+    lua_pop(L, 1);
     hl_lua_newlib(L, exec_funcs);
     return 1;
 }
