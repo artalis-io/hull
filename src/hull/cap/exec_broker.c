@@ -11,6 +11,9 @@
  *                      KILL    id
  *                      CREDIT  id; u8 fd (1 stdout, 2 stderr), u32 bytes
  *                      STDIN   id; u8 flags (0x1 EOF after), bytes
+ *                      PING    0; u32 silence_ms, u32 wait_ms (the heartbeat
+ *                              the sender keeps; the router holds its
+ *                              brokers to the same)
  *   broker -> server   READY   text: one report line per '\n'
  *                      REFUSED id (0 = the policy); text
  *                      BUSY    id; text
@@ -25,6 +28,7 @@
  *                      STDIN_CREDIT id; u8 flags (0x1 the child closed its
  *                              stdin), u32 bytes
  *                      PROBE   id; u32 pid            (test builds only)
+ *                      PONG    0                      (the answer to PING)
  *
  * The broker trusts nothing the server sends after READY: every RUN is
  * matched again, admission (in-flight calls, per-command concurrency, live
@@ -85,6 +89,8 @@
 #define HX_CREDIT 10u
 #define HX_STDIN  11u
 #define HX_STDIN_CREDIT 12u
+#define HX_PING   13u
+#define HX_PONG   14u
 
 #define HX_RUN_STREAM     0x1u
 #define HX_RUN_STDIN_OPEN 0x2u
@@ -679,9 +685,15 @@ typedef struct {
     SubOut      q[HX_SUBQ];     /* FIFO, q[0] goes out first */
     int         qn;
     uint64_t    progress_ms;    /* when its queue last moved (or filled) */
+    uint64_t    rx_ms;          /* when it last sent a frame (or was last idle) */
+    uint64_t    ping_ms;        /* its unanswered PING, 0 = none */
 } Sub;
 static int    g_router;
 static Sub    g_subs[HL_EXEC_MAX_COMMANDS];
+/* The heartbeat the server keeps on this broker (its PING says), which the
+ * router keeps on its own brokers. */
+static uint32_t g_hb_ms = HL_EXEC_HEARTBEAT_MS;
+static uint32_t g_hb_wait_ms = HL_EXEC_HEARTBEAT_WAIT_MS;
 
 /* Small frames (BUSY / REFUSED / PROBE) waiting to go out. */
 typedef struct { uint8_t *buf; size_t len, off; } Out;
@@ -735,6 +747,19 @@ static void queue_frame(uint32_t type, uint32_t id, const void *data, size_t dle
 static void queue_small(uint32_t type, uint32_t id, const char *text)
 {
     queue_frame(type, id, text, text ? strlen(text) : 0);
+}
+
+/* PING from the server (or the router): answer from this loop, which is
+ * what the heartbeat checks, and keep the sender's timing for our own
+ * brokers (a router's). */
+static void hb_answer(const uint8_t *p, size_t len)
+{
+    if (len == 8) {
+        uint32_t ms = hl_chan_get32(p), wait = hl_chan_get32(p + 4);
+        if (ms >= 50 && ms <= HL_EXEC_HEARTBEAT_MS) g_hb_ms = ms;
+        if (wait >= 50 && wait <= HL_EXEC_HEARTBEAT_WAIT_MS) g_hb_wait_ms = wait;
+    }
+    queue_frame(HX_PONG, 0, NULL, 0);
 }
 
 static void job_free(Job *j);
@@ -999,6 +1024,40 @@ static void sub_lost(int ci)
     }
 }
 
+static int sub_queue(int ci, uint32_t type, uint32_t id, const void *p, size_t len);
+static int sub_flush(int ci);
+
+/* Command @p ci's broker has a call of this router in flight. */
+static int sub_busy(int ci)
+{
+    if (g_subs[ci].fd < 0) return 0;
+    for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++)
+        if (g_jobs[i].used && g_jobs[i].routed && g_jobs[i].ci == ci && !g_jobs[i].queued)
+            return 1;
+    return 0;
+}
+
+/* The router's heartbeat on command @p ci's broker: PING after g_hb_ms of
+ * silence while it has calls, lost when nothing comes g_hb_wait_ms after. An
+ * idle broker is not pinged (its clock restarts with its next call). */
+static void sub_heartbeat(int ci, uint64_t now)
+{
+    Sub *s = &g_subs[ci];
+    if (!sub_busy(ci)) { s->rx_ms = now; s->ping_ms = 0; return; }
+    if (s->ping_ms) {
+        if (now - s->ping_ms >= g_hb_wait_ms) sub_lost(ci);   /* wedged */
+        return;
+    }
+    if (now - s->rx_ms < g_hb_ms) return;
+    uint8_t pl[8];
+    hl_chan_put32(pl, g_hb_ms);
+    hl_chan_put32(pl + 4, g_hb_wait_ms);
+    /* A full queue is the stall check's (HX_SUB_STALL_MS), not ours. */
+    if (sub_queue(ci, HX_PING, 0, pl, sizeof pl) != 0) return;
+    s->ping_ms = now;
+    if (sub_flush(ci) != 0) sub_lost(ci);
+}
+
 /* Queue a frame for command @p ci's broker, with room for @p cap payload
  * bytes. -1 when its queue is full or memory is short (neither happens with
  * the admission caps and the windows: see HX_SUBQ). */
@@ -1100,6 +1159,9 @@ static int sub_flush(int ci)
  * windows the router holds it to, a test probe goes straight on. */
 static void sub_frame(int ci, uint32_t type, uint32_t id, const uint8_t *p, size_t len)
 {
+    g_subs[ci].rx_ms = hl_chan_mono_ms();
+    g_subs[ci].ping_ms = 0;               /* any frame answers a PING */
+    if (type == HX_PONG) { if (id != 0 || len != 0) sub_lost(ci); return; }
 #ifdef HL_EXEC_TEST_HOOKS
     if (type == HX_PROBE) { queue_frame(HX_PROBE, id, p, len); return; }
 #endif
@@ -2142,6 +2204,10 @@ int hl_exec_broker_main(void)
                     ev |= POLLOUT;
                     timeout = 1000;              /* look for a wedged broker */
                 }
+                if (sub_busy(i)) {               /* its heartbeat */
+                    int tk = (int)(g_hb_ms / 2 < 1000 ? g_hb_ms / 2 : 1000);
+                    if (timeout < 0 || tk < timeout) timeout = tk;
+                }
                 pf[np] = (struct pollfd){ g_subs[i].fd, ev, 0 };
                 map[np++] = -3 - i;
             }
@@ -2202,6 +2268,7 @@ int hl_exec_broker_main(void)
                 else if (rd.type == HX_KILL) kill_call(rd.id);
                 else if (rd.type == HX_CREDIT || rd.type == HX_STDIN)
                     stream_frame(rd.type, rd.id, rd.buf, rd.len);
+                else if (rd.type == HX_PING) hb_answer(rd.buf, rd.len);
                 else { hl_chan_frame_reset(&rd); goto out; }   /* a second POLICY ends it */
                 hl_chan_frame_reset(&rd);
                 if (g_outq_n >= HX_OUTQ - 2) break;
@@ -2267,6 +2334,7 @@ int hl_exec_broker_main(void)
             if (g_subs[i].fd >= 0 && g_subs[i].qn > 0 &&
                 now - g_subs[i].progress_ms >= HX_SUB_STALL_MS)
                 sub_lost(i);                     /* took nothing for a minute */
+            else if (g_subs[i].fd >= 0) sub_heartbeat(i, now);
         for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
             Job *j = &g_jobs[i];
             if (!j->used || j->routed) continue;   /* replied to by sub_frame */
@@ -2334,6 +2402,12 @@ static int       g_ready;
 static HlAsyncBackendCtx *g_loop;
 static HlChanFrame g_rd = { .magic = HX_MAGIC, .max = HX_REPLY_MAX };
 static Pending   g_pend[HL_EXEC_MAX_INFLIGHT];
+/* The heartbeat (HL_EXEC_HEARTBEAT_MS): a timer on g_loop while a call is
+ * in flight, the time of the broker's last frame, and an unanswered PING. */
+static uint64_t  g_hb_timer;
+static uint64_t  g_rx_ms;
+static uint64_t  g_ping_ms;
+static pid_t     g_dropped_pid = -1;   /* a broker the heartbeat dropped, unreaped */
 
 /* ── --audit (docs/design/exec_broker.md §12) ──────────────────────────
  * Two records per call: "start" once the broker has the RUN (name, id, the
@@ -2495,6 +2569,13 @@ static void fail_all(const char *why)
 
 void hl_exec_broker_stop(void)
 {
+    if (g_loop && g_hb_timer) hl_async_backend()->timer_cancel(g_loop, g_hb_timer);
+    g_hb_timer = 0;
+    g_ping_ms = 0;
+    if (g_dropped_pid > 0) {               /* reaped if it has gone; never waited for */
+        (void)waitpid(g_dropped_pid, NULL, WNOHANG);
+        g_dropped_pid = -1;
+    }
     if (g_loop && g_fd >= 0) hl_async_backend()->watcher_del(g_loop, g_fd);
     g_loop = NULL;
     if (g_fd >= 0) { close(g_fd); g_fd = -1; }
@@ -2683,9 +2764,81 @@ static void on_readable(int fd, unsigned ready, void *user)
             hl_exec_broker_stop();
             return;
         }
-        deliver(g_rd.type, g_rd.id, g_rd.buf, g_rd.len);
+        g_rx_ms = hl_chan_mono_ms();
+        g_ping_ms = 0;                     /* any frame answers a PING */
+        if (g_rd.type != HX_PONG) deliver(g_rd.type, g_rd.id, g_rd.buf, g_rd.len);
         hl_chan_frame_reset(&g_rd);
     }
+}
+
+#ifdef HL_EXEC_TEST_HOOKS
+/* HULL_TEST_EXEC_HEARTBEAT_MS=N: both heartbeat times N ms (50..), so a test
+ * can see a wedged broker found in seconds. */
+static uint32_t hb_test_ms(void)
+{
+    const char *v = getenv("HULL_TEST_EXEC_HEARTBEAT_MS");
+    unsigned long n = v ? strtoul(v, NULL, 10) : 0;
+    return n >= 50 && n <= HL_EXEC_HEARTBEAT_MS ? (uint32_t)n : 0;
+}
+#else
+#define hb_test_ms() 0u
+#endif
+static uint32_t hb_ms(void) { return hb_test_ms() ? hb_test_ms() : HL_EXEC_HEARTBEAT_MS; }
+static uint32_t hb_wait_ms(void)
+{
+    return hb_test_ms() ? hb_test_ms() : HL_EXEC_HEARTBEAT_WAIT_MS;
+}
+
+static void hb_fire(void *user);
+
+static void hb_arm(void)
+{
+    if (!g_loop || g_hb_timer || g_fd < 0) return;
+    uint32_t tick = hb_ms() / 2 < 1000 ? hb_ms() / 2 : 1000;
+    g_hb_timer = hl_async_backend()->timer_add(g_loop, tick, hb_fire, NULL);
+}
+
+/* The broker has sent nothing for hb_ms() while calls are in flight: PING
+ * it; nothing for hb_wait_ms() after that and it is wedged (alive, its loop
+ * stuck): kill it and fail every call, as for a broker that died. It
+ * enforces each command's limits itself, so silence past these is never a
+ * command's doing. */
+static void hb_fire(void *user)
+{
+    (void)user;
+    g_hb_timer = 0;
+    if (g_fd < 0 || !g_loop || hl_exec_inflight() == 0) return;
+    uint64_t now = hl_chan_mono_ms();
+    if (g_ping_ms && now - g_ping_ms >= hb_wait_ms()) {
+        /* Dropped, not killed: the sandbox gives the server no kill(2) of
+         * another process (Linux pledge allows only kill of itself, with a
+         * kill-the-process penalty). With its channel closed, a broker that
+         * moves again reads EOF, kills its commands and exits; one that never
+         * does dies with the server (its death-with-the-server setup), as do
+         * its commands. It is not reaped either (that waits, then kills). */
+        log_error("[hull:c] exec: the command broker stopped answering; it is "
+                  "dropped and exec.run fails from now on");
+        hl_async_backend()->watcher_del(g_loop, g_fd);
+        g_loop = NULL;
+        close(g_fd);                       /* first: nothing new reaches it */
+        g_fd = -1;
+        g_ready = 0;
+        g_dropped_pid = g_pid;
+        g_pid = -1;
+        g_ping_ms = 0;
+        hl_chan_frame_reset(&g_rd);
+        fail_all("exec: the command broker stopped answering");
+        return;
+    }
+    if (!g_ping_ms && now - g_rx_ms >= hb_ms()) {
+        uint8_t pl[8];
+        hl_chan_put32(pl, hb_ms());
+        hl_chan_put32(pl + 4, hb_wait_ms());
+        g_ping_ms = now;   /* a write that does not go through is not an answer */
+        (void)hl_chan_write_frame(g_fd, HX_MAGIC, HX_PING, 0, pl, sizeof pl, NULL, 0,
+                                  now + 200);
+    }
+    hb_arm();
 }
 
 static int submit_ex(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
@@ -2765,6 +2918,10 @@ static int submit_ex(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
         snprintf(why, why_size, "exec: the command broker is not answering");
         return -1;
     }
+    if (hl_exec_inflight() == 0) {                /* idle time is not silence */
+        g_rx_ms = hl_chan_mono_ms();
+        g_ping_ms = 0;
+    }
     slot->used = 1;
     slot->id = id;
     memcpy(slot->name, name, name_len);
@@ -2776,6 +2933,7 @@ static int submit_ex(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
     slot->t0_ms = hl_chan_mono_ms();
     *id_out = id;
     exec_audit_start(slot, args, lens, n, in_len);
+    hb_arm();
     return 0;
 }
 

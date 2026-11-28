@@ -251,10 +251,23 @@ nearly full.
   the declared authority; `hull build` / `hull check` warn about a stream command with no time
   limit or one over 60 s, and about one with no output cap (`hull/exec_lint.lua`), naming them.
 - The server's wedged-broker backstop (`exec_op_deadline`) cannot be the command's timeout plus a
-  grace when there is none. PR 2 has no backstop for a stream: a broker that dies ends every
-  stream (its channel's EOF, `LOST`), and one alive but wedged leaves a parked read waiting until
-  the app closes the stream or its request goes. The planned liveness check - a stream with no
-  frame for 30 s sends `PROBE`, no answer fails the broker as lost - is a follow-up.
+  grace when there is none, and a detached `exec.run` (a timer, `app.main`) has none at all. A
+  broker that dies ends every stream (its channel's EOF, `LOST`). One alive but wedged is found
+  by the **heartbeat** (2026-11-28): while any call is in flight and the broker has sent no
+  frame for `HL_EXEC_HEARTBEAT_MS` (15 s), the server sends `PING` (payload: those two times);
+  the broker answers `PONG` from its main loop - the loop the heartbeat checks. Any frame
+  counts as an answer. With nothing `HL_EXEC_HEARTBEAT_WAIT_MS` (45 s; a broker starting all 8
+  calls at once can take ~32 s) after the PING, the broker is **dropped**: its channel closed,
+  every call failed as lost (`exec: the command broker stopped answering`; a stream's reads end
+  and `result()` raises it), `exec.*` refused from then on. It is not killed: the sandbox gives
+  the server no `kill(2)` of another process (Linux pledge allows only kill of itself, under a
+  kill-the-process penalty), and it is not waited for. A broker that moves again reads EOF,
+  kills its commands and exits (reaped at teardown, never waited for); one that never does
+  dies with the server, with its commands. The macOS router keeps the same heartbeat on each
+  command broker that has a call of its in flight, at the times the server's PING carries, and
+  drops a silent one through `sub_lost` (its calls fail `exec.<name>: the command broker is
+  gone`; the other commands keep working). The timer runs only while calls are in flight; an
+  idle broker is not pinged. `HULL_TEST_EXEC_HEARTBEAT_MS` (test builds only) sets both times.
 - The run deadline does not apply to the time a read is parked (no run is going), exactly as for
   `http.fetch`.
 - **Idle limit (`idle_ms`, 2026-11-28).** A stream command may declare `idle_ms` (100..2^32-2;
