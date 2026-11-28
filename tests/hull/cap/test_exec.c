@@ -1268,4 +1268,78 @@ UTEST(exec_policy_slice, out_of_range_and_bad_input)
     hl_exec_buf_free(&b);
 }
 
+/* ── exec.stream's off-heap hold (docs/design/exec_stream.md §5.1) ──
+ * A stream's queued chunks are held on the VM's off-heap total until the
+ * app takes them; past the limit a chunk is refused and nothing is taken;
+ * close and release give every byte back. Driven through stub streams (no
+ * broker: the queue and the hold are the same code). */
+#if HL_EXEC_BROKER_SUPPORTED
+static char g_bytes[200000];
+
+UTEST(exec_stream_hold, chunks_are_held_until_taken)
+{
+    HlExecStream *s = hl_exec_stream_stub(0, 0, 0, UINT64_MAX, UINT64_MAX);
+    ASSERT_TRUE(s != NULL);
+    size_t total = 0;
+    hl_exec_stream_hold_on(s, &total, 1000);
+    ASSERT_EQ(0, hl_exec_stream_stub_chunk(s, 1, g_bytes, 300));
+    ASSERT_EQ((size_t)300, total);
+    ASSERT_EQ(0, hl_exec_stream_stub_chunk(s, 2, g_bytes, 600));
+    ASSERT_EQ((size_t)900, total);
+    /* 200 more would pass 1000: refused, nothing taken or queued. */
+    ASSERT_EQ(-2, hl_exec_stream_stub_chunk(s, 1, g_bytes, 200));
+    ASSERT_EQ((size_t)900, total);
+    ASSERT_EQ(0, hl_exec_stream_stub_chunk(s, 1, g_bytes, 100));
+    ASSERT_EQ((size_t)1000, total);
+    HlExecChunk *c = hl_exec_stream_take(s);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ((size_t)300, c->len);
+    ASSERT_EQ((size_t)700, total);   /* the taker holds it now, on the VM heap */
+    free(c);
+    hl_exec_stream_release(s);       /* two chunks still queued */
+    ASSERT_EQ((size_t)0, total);
+}
+
+UTEST(exec_stream_hold, close_gives_everything_back)
+{
+    HlExecStream *s = hl_exec_stream_stub(0, 0, 0, UINT64_MAX, UINT64_MAX);
+    ASSERT_TRUE(s != NULL);
+    size_t total = 5;                /* another copy the VM holds */
+    hl_exec_stream_hold_on(s, &total, 0);   /* 0 = no limit */
+    ASSERT_EQ(0, hl_exec_stream_stub_chunk(s, 1, g_bytes, sizeof g_bytes));
+    /* cut into CHUNK_MAX pieces, every one held */
+    ASSERT_EQ((size_t)5 + sizeof g_bytes, total);
+    hl_exec_stream_close(s);
+    ASSERT_EQ((size_t)5, total);
+    ASSERT_TRUE(hl_exec_stream_take(s) == NULL);
+    hl_exec_stream_release(s);
+    ASSERT_EQ((size_t)5, total);
+}
+
+UTEST(exec_stream_hold, a_cut_chunk_holds_only_what_is_queued)
+{
+    /* stdout total 100: 250 bytes queue 100 (the rest is cut, as the
+     * broker cuts it) and only those are held. */
+    HlExecStream *s = hl_exec_stream_stub(0, 0, 0, 100, UINT64_MAX);
+    ASSERT_TRUE(s != NULL);
+    size_t total = 0;
+    hl_exec_stream_hold_on(s, &total, 1000);
+    ASSERT_EQ(0, hl_exec_stream_stub_chunk(s, 1, g_bytes, 250));
+    ASSERT_EQ((size_t)100, total);
+    hl_exec_stream_release(s);
+    ASSERT_EQ((size_t)0, total);
+}
+
+UTEST(exec_stream_hold, no_total_holds_nothing)
+{
+    HlExecStream *s = hl_exec_stream_stub(0, 0, 0, UINT64_MAX, UINT64_MAX);
+    ASSERT_TRUE(s != NULL);
+    ASSERT_EQ(0, hl_exec_stream_stub_chunk(s, 1, g_bytes, 1000));
+    HlExecChunk *c = hl_exec_stream_take(s);
+    ASSERT_TRUE(c != NULL);
+    free(c);
+    hl_exec_stream_release(s);
+}
+#endif
+
 UTEST_MAIN()

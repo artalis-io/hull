@@ -14,6 +14,10 @@ release-artifact layout).
   (command name, escaped arguments, stdin length) and an `end` record (outcome `done` / `busy`
   / `refused` / `lost` / `cancelled`; for `done` the status, signal, `timed_out`, duration and
   output byte counts; a stream's stdin bytes written). Output and stdin are never logged.
+- **`exec.stream` output queued for the app counts against the heap limit**, as other
+  off-heap copies do. A chunk counts until the app reads it, and a write's copy until it is sent.
+  Past the limit a write is refused `busy`, and a chunk that arrives ends its stream with the
+  reason in `result()`. The windows already bound this to 4 MiB for 8 streams.
 - **`hull/exec`: the broker side of streamed, long-running commands** (docs/design/exec_stream.md,
   PR 1 of 3). A declared command can be marked `stream = true` in the encoded policy, with its own
   timeout (any length, or none) and output and stdin totals (any size). The command broker and the

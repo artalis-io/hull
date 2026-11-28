@@ -2,7 +2,7 @@
 
 - **Status:** reviewed (2026-11-27, decisions in §11). Implemented: PR 1 (policy, broker,
   router), PR 2 (`exec.stream` in both runtimes) and PR 3 (test stubs, inspect, lint, docs).
-  Audit records (§8) followed. Open: the liveness probe (§7), the off-heap hold (§5). §12 records why
+  Audit records (§8) and the off-heap hold (§5.1) followed. Open: the liveness probe (§7). §12 records why
   `exec.run` keeps its own path.
 - **Parent design:** [exec_broker.md](exec_broker.md) (§2 API, §3 manifest, §5 broker, §7 lifetime,
   §12 audit) and [exec_broker_macos_isolation.md](exec_broker_macos_isolation.md) (the router).
@@ -198,10 +198,15 @@ granted credit, or past `stdin_max`, is a protocol error: the broker kills the c
 (`EPIPE`) makes the broker drop what it holds and report it in the next `STDIN_CREDIT` (flag
 `closed`), which fails the app's pending and later writes with `stdin_closed`.
 
-Off-heap accounting in the server (not in PR 2): a chunk waiting for the app is not yet held on
-the VM's off-heap total. What it holds is bounded by the windows (two per stream, eight streams,
-4 MiB in all), not by the heap limit; holding it there as `http.fetch` bodies are is a
-follow-up.
+Off-heap accounting in the server: a chunk waiting for the app, and a write's copy waiting
+for credit, are held on the VM's off-heap total (HlLua / HlJS `wasm_buf_bytes`, the counter
+owned WasmBuffers and async copies share) under the heap limit (`hl_exec_stream_hold_on`, set
+by the binding right after start / stub). A chunk is given back when the app takes it (the
+binding copies it onto the VM heap), a write's copy when it is sent, dropped or its stdin ends,
+everything on close and free. Past the limit a write is refused `busy`; a chunk from the broker
+cannot be refused, so it ends the call (`LOST`, the reason in the result) with what is already
+queued still readable. Stub streams hold their chunks the same way (a stub's chunks past the
+limit fail the call that made it).
 
 ## 6. Protocol
 

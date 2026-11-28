@@ -3362,6 +3362,14 @@ allows and waits for the rest (at most 1 MiB per call); a write while another is
 refused `busy`, as is a second read while one waits. The output is charged to the run as it is
 read (320 units a chunk + 1 per 8 bytes).
 
+**Off-heap bytes count against the heap limit.** Output queued for the app, and a write's copy
+waiting for credit, sit outside the VM heap. They count on the VM's off-heap total with its
+owned buffers and async copies, under the heap limit (`-m`). Each is given back when the app
+reads the chunk or the write is sent. Past the limit a write is refused `busy`, and a chunk
+that arrives ends its stream: `read()` returns what was queued, then nil, and `result()`
+raises the reason. With 8 streams the windows add up to at most 4 MiB, so this matters only
+when other off-heap copies fill most of the limit.
+
 **It ends with its owner.** `close()` (and Lua `<close>` / `__gc`, a JS stream collected) kills
 the command; so does a client disconnect or a cancelled run while a read waits, the broker's
 loss (every stream fails, a parked write as `stdin_closed`) and Hull's shutdown. After `close()`

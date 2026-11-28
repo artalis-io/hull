@@ -56,6 +56,7 @@
 #include "hull/net_backend.h"
 #include "hull/shared/child_channel.h"
 #include "hull/shared/host.h"     /* hl_host_is_windows */
+#include "hull/shared/offheap.h"  /* a stream's queued bytes on the VM's total */
 #include "hull/cap/audit.h"        /* --audit records for exec.run / exec.stream */
 #include "hull/shared/cli_log.h"   /* hl_log_escape_line */
 #include "log.h"
@@ -2800,6 +2801,12 @@ struct HlExecStream {
     size_t       wlen, woff;
     int          wfail;          /* a write's bytes were dropped unsent */
     ExecWait    *w[3];
+    /* What it holds off the VM heap (its queued chunks, a write's copy
+     * waiting for credit) on the VM's off-heap total (hl_exec_stream_hold_on;
+     * exec_stream.md §5.1). */
+    HlOffheapHold hold;
+    size_t      *hold_total;
+    size_t       hold_limit;
     /* A hull test stub (hl_exec_stream_stub): no broker, no slot. */
     int          stub, stub_killed;
     uint64_t     stub_cap[2], stub_total[2];
@@ -2807,6 +2814,30 @@ struct HlExecStream {
 };
 
 static uint64_t stream_audit_stdin(const HlExecStream *s) { return s->stdin_sent; }
+
+/* Take @p n bytes on the VM's off-heap total; -1 (nothing taken) past its
+ * ceiling. A stream with no total set holds nothing. */
+static int stream_hold(HlExecStream *s, size_t n)
+{
+    return s->hold_total ? hl_offheap_take(&s->hold, s->hold_total, s->hold_limit, n) : 0;
+}
+
+static void stream_unhold(HlExecStream *s, size_t n) { hl_offheap_give(&s->hold, n); }
+
+static void chunk_free(HlExecStream *s, HlExecChunk *c)
+{
+    stream_unhold(s, c->len);
+    free(c);
+}
+
+/* The write copy is gone (sent, dropped or the stdin ended). */
+static void stream_wbuf_free(HlExecStream *s)
+{
+    if (s->wbuf) stream_unhold(s, s->wlen);
+    free(s->wbuf);
+    s->wbuf = NULL;
+    s->wlen = s->woff = 0;
+}
 
 static void wait_fire(void *user)
 {
@@ -2845,13 +2876,11 @@ static void stream_drop_queue(HlExecStream *s)
     while (s->head) {
         HlExecChunk *c = s->head;
         s->head = c->next;
-        free(c);
+        chunk_free(s, c);
     }
     s->tail = NULL;
     if (s->woff < s->wlen) s->wfail = 1;
-    free(s->wbuf);
-    s->wbuf = NULL;
-    s->wlen = s->woff = 0;
+    stream_wbuf_free(s);
 }
 
 /* Stdin is over: a write still pending fails, and nothing is pending any
@@ -2861,9 +2890,7 @@ static void stream_stdin_end(HlExecStream *s)
 {
     s->stdin_closed = 1;
     if (s->woff < s->wlen) s->wfail = 1;
-    free(s->wbuf);
-    s->wbuf = NULL;
-    s->wlen = s->woff = 0;
+    stream_wbuf_free(s);
 }
 
 /* The call ended without a DONE (the broker lost, stopped or not answering).
@@ -2905,9 +2932,7 @@ static void stdin_flush(HlExecStream *s)
         if (fl) s->stdin_eof_sent = 1;
     }
     if (s->woff >= s->wlen) {
-        free(s->wbuf);
-        s->wbuf = NULL;
-        s->wlen = s->woff = 0;
+        stream_wbuf_free(s);
         if (s->live && s->stdin_eof_want && !s->stdin_eof_sent) {
             uint8_t fl = HX_STDIN_EOF;
             if (hl_chan_write_frame(g_fd, HX_MAGIC, HX_STDIN, s->id, &fl, 1, NULL, 0,
@@ -2931,6 +2956,14 @@ static void stream_deliver(Pending *pd, uint32_t type, const uint8_t *p, size_t 
         if (len < 2 || (p[0] != 1 && p[0] != 2)) return;
         HlExecChunk *c = malloc(sizeof *c + len - 1);
         if (!c) { hl_exec_stream_close(s); return; }   /* better than a silent gap */
+        if (stream_hold(s, len - 1) != 0) {
+            /* Past the VM's off-heap ceiling (other copies hold the rest of
+             * it): the call ends, said so, rather than a silent gap. */
+            free(c);
+            stream_lost(s, "exec.stream: its queued output would take the VM's off-heap "
+                        "copies past its heap limit", 1);
+            return;
+        }
         c->next = NULL;
         c->fd = p[0];
         c->len = len - 1;
@@ -3033,6 +3066,13 @@ HlExecStream *hl_exec_stream_stub(int stdin_open, uint64_t stdin_max, size_t in_
 
 int hl_exec_stream_is_stub(const HlExecStream *s) { return s && s->stub; }
 
+void hl_exec_stream_hold_on(HlExecStream *s, size_t *total, size_t limit)
+{
+    if (!s) return;
+    s->hold_total = total;
+    s->hold_limit = limit;
+}
+
 static void stub_mark_killed(HlExecStream *s)
 {
     s->stub_killed = 1;
@@ -3054,8 +3094,9 @@ int hl_exec_stream_stub_chunk(HlExecStream *s, int fd, const void *data, size_t 
     const uint8_t *p = data;
     while (len) {
         size_t n = len < HL_EXEC_STREAM_CHUNK_MAX ? len : HL_EXEC_STREAM_CHUNK_MAX;
+        if (stream_hold(s, n) != 0) return -2;
         HlExecChunk *c = malloc(sizeof *c + n);
-        if (!c) return -1;
+        if (!c) { stream_unhold(s, n); return -1; }
         c->next = NULL;
         c->fd = (uint8_t)fd;
         c->len = n;
@@ -3133,6 +3174,7 @@ void hl_exec_stream_release(HlExecStream *s)
     Pending *pd = pend_find(s->id);       /* never left pointing at freed memory */
     if (pd && pd->stream == s) { pd->used = 0; pd->stream = NULL; }
     stream_drop_queue(s);
+    hl_offheap_drop(&s->hold);
     hl_exec_reply_free(s->result);
     free(s);
 }
@@ -3148,6 +3190,7 @@ HlExecChunk *hl_exec_stream_take(HlExecStream *s)
     s->head = c->next;
     if (!s->head) s->tail = NULL;
     c->next = NULL;
+    stream_unhold(s, c->len);   /* the caller copies it onto the VM heap and frees it */
     /* The app has it now: the broker may read that much more. */
     if (s->live) {
         uint8_t pl[5];
@@ -3209,8 +3252,19 @@ int hl_exec_stream_write(HlExecStream *s, const void *p, size_t n,
         return -1;
     }
     if (n == 0) return 1;
+    if (stream_hold(s, n) != 0) {
+        *code = "busy";
+        snprintf(why, why_size, "exec.stream: the VM's off-heap copies are at its heap "
+                 "limit");
+        return -1;
+    }
     s->wbuf = malloc(n);
-    if (!s->wbuf) { *code = "busy"; snprintf(why, why_size, "exec.stream: out of memory"); return -1; }
+    if (!s->wbuf) {
+        stream_unhold(s, n);
+        *code = "busy";
+        snprintf(why, why_size, "exec.stream: out of memory");
+        return -1;
+    }
     memcpy(s->wbuf, p, n);
     s->wlen = n;
     s->woff = 0;
@@ -3430,6 +3484,10 @@ HlExecStream *hl_exec_stream_stub(int stdin_open, uint64_t stdin_max, size_t in_
     return NULL;
 }
 int hl_exec_stream_is_stub(const HlExecStream *s) { (void)s; return 0; }
+void hl_exec_stream_hold_on(HlExecStream *s, size_t *total, size_t limit)
+{
+    (void)s; (void)total; (void)limit;
+}
 int hl_exec_stream_stub_chunk(HlExecStream *s, int fd, const void *data, size_t len)
 {
     (void)s; (void)fd; (void)data; (void)len;

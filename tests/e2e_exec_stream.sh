@@ -24,6 +24,8 @@
 #     commands and its broker, and the new one runs streams; stopping hull
 #     dev with streams open leaves no command behind.
 #
+# E2E_ONLY=paths|dev|audit|offheap runs that phase alone (both runtimes).
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -u
@@ -123,6 +125,8 @@ EXEC_LUA="
                concurrency = 8 },
     deaf = { path = \"$P\", argv = { \"silent\" }, stream = true, timeout_ms = 0,
              stdin_max = 1073741824 },
+    both = { path = \"$P\", argv = { \"both\" }, stream = true, timeout_ms = 30000,
+             concurrency = 8 },
     one = { path = \"$P\", argv = { \"echo\" }, stream = true, timeout_ms = 0,
             stdin_max = 1048576, concurrency = 1 },
 "
@@ -253,6 +257,52 @@ app.get("/m1", function(req, res)
   local ok, e = pcall(s.write, s, string.rep("z", 1048576))
   res:text("ok=" .. tostring(ok) .. " err=" .. tostring(e))
 end)
+-- The off-heap hold (exec_stream.md §5.1): 8 unread streams of 512 KiB
+-- each under a 3 MiB heap limit; those past it end, the rest keep going.
+-- A stream the broker took: the last round's killed commands may not be
+-- reaped yet (busy from the broker), so retry those.
+local function open_live(name)
+  for _ = 1, 50 do
+    local s = exec.stream(name)
+    local c = s:read()
+    if c then return s, #c.data end
+    local ok, e = pcall(s.result, s)
+    s:close()
+    if ok or not tostring(e):find("busy", 1, true) then return s, 0 end
+    hull.sleep(100)
+  end
+  error("the broker stayed busy")
+end
+app.get("/both", function(req, res)
+  local k = tonumber(req.query.n or "8")
+  local ss, got = {}, {}
+  for i = 1, k do ss[i], got[i] = open_live("both") end
+  hull.sleep(1000)
+  local ended, live, msg = 0, 0, "none"
+  for i = 1, k do
+    local s, n = ss[i], got[i]
+    while n < 1100000 do
+      local c = s:read()
+      if not c then break end
+      n = n + #c.data
+    end
+    if n >= 1100000 then
+      live = live + 1
+    else
+      ended = ended + 1
+      local ok, e = pcall(s.result, s)
+      if not ok then msg = tostring(e) end
+    end
+    s:close()
+  end
+  res:text(string.format("ended=%d live=%d msg=%s", ended, live, msg))
+end)
+app.get("/both1", function(req, res)
+  local s, n = open_live("both")
+  while n < 2500000 do local c = s:read(); if not c then break end; n = n + #c.data end
+  s:close()
+  res:text("n_ok=" .. tostring(n >= 2500000))
+end)
 -- The paths phase: many streams, SIGTERM with streams open, --vm-thread, hull dev.
 app.get("/ver", function(req, res) res:text("ver-one") end)
 local held = {}
@@ -324,6 +374,7 @@ app.manifest({
     flood: { path: "$P", argv: ["flood"], stream: true, timeoutMs: 10000, stdoutMax: 100000 },
     silent: { path: "$P", argv: ["silent"], stream: true, timeoutMs: 0, concurrency: 8 },
     deaf: { path: "$P", argv: ["silent"], stream: true, timeoutMs: 0, stdinMax: 1073741824 },
+    both: { path: "$P", argv: ["both"], stream: true, timeoutMs: 30000, concurrency: 8 },
     one: { path: "$P", argv: ["echo"], stream: true, timeoutMs: 0, stdinMax: 1048576,
            concurrency: 1 },
   },
@@ -436,6 +487,52 @@ app.get("/m1", async (req, res) => {
   try { await s.write("z".repeat(1048576)); res.text("ok=true"); }
   catch (e) { res.text("ok=false err=" + e.name + ": " + e.message); }
 });
+// The off-heap hold (exec_stream.md §5.1): 8 unread streams of 512 KiB
+// each under a 3 MiB heap limit; those past it end, the rest keep going.
+// A stream the broker took: the last round's killed commands may not be
+// reaped yet (busy from the broker), so retry those.
+async function openLive(name) {
+  for (let i = 0; i < 50; i++) {
+    const s = exec.stream(name);
+    const c = await s.read();
+    if (c) return [s, c.data.length];
+    let busy = false;
+    try { await s.result(); } catch (e) { busy = e.code === "busy" || /busy/.test(e.message); }
+    s.close();
+    if (!busy) return [s, 0];
+    await hull.sleep(100);
+  }
+  throw new Error("the broker stayed busy");
+}
+app.get("/both", async (req, res) => {
+  const k = Number(req.query.n || "8");
+  const ss = [];
+  for (let i = 0; i < k; i++) ss.push(await openLive("both"));
+  await hull.sleep(1000);
+  let ended = 0, live = 0, msg = "none";
+  for (const [s, got] of ss) {
+    let n = got;
+    while (n < 1100000) {
+      const c = await s.read();
+      if (!c) break;
+      n += c.data.length;
+    }
+    if (n >= 1100000) live++;
+    else {
+      ended++;
+      try { await s.result(); } catch (e) { msg = e.message; }
+    }
+    s.close();
+  }
+  res.text("ended=" + ended + " live=" + live + " msg=" + msg);
+});
+app.get("/both1", async (req, res) => {
+  const [s, got] = await openLive("both");
+  let n = got;
+  while (n < 2500000) { const c = await s.read(); if (!c) break; n += c.data.length; }
+  s.close();
+  res.text("n_ok=" + (n >= 2500000));
+});
 // The paths phase: many streams, SIGTERM with streams open, --vm-thread, hull dev.
 app.get("/ver", (req, res) => res.text("ver-one"));
 let held = [];
@@ -490,6 +587,7 @@ run_suite() {  # run_suite <lua|js>
     D="$FIX/$rt"
     mkdir -p "$D"
     if [ "$rt" = lua ]; then lua_app "$D"; ENTRY=app.lua; else js_app "$D"; ENTRY=app.js; fi
+    [ -n "${E2E_ONLY:-}" ] && return   # E2E_ONLY=<phase>: that phase alone
     echo "== $rt"
     start_server "$D" "$ENTRY" || return
 
@@ -823,15 +921,49 @@ PYCHK
     esac
 }
 
+# ── The off-heap hold: a stream's queued chunks count against the VM's
+# heap limit with its other off-heap copies (exec_stream.md §5.1). ──
+phase_offheap() {  # phase_offheap <rt> <entry>
+    rt=$1; ENTRY=$2
+    EXTRA="-m 3m"
+    start_server "$D" "$ENTRY" || { EXTRA=; return; }
+    EXTRA=
+    f1=$(get "/both?n=5" 60)
+    a=$(get /both 60)
+    b=$(get /both 60)
+    f2=$(get "/both?n=5" 60)
+    c=$(get /both1 60)
+    # 8 unread streams queue 4 MiB: past the 3 MiB ceiling at least 2 end,
+    # with the reason, and the others keep going. 5 (2.5 MiB) all fit, before
+    # the over-limit rounds and after them: bytes left held would end one.
+    ok=1
+    for r in "$a" "$b"; do
+        case "$r" in
+            "ended=0 "*|"ended=1 "*|*" live=0 "*) ok=0 ;;
+            "ended="*" live="*" msg="*"off-heap copies past its heap limit"*) ;;
+            *) ok=0 ;;
+        esac
+    done
+    [ "$ok" = 1 ] && [ "$f1" = "ended=0 live=5 msg=none" ] && [ "$f2" = "$f1" ] &&
+        [ "$c" = "n_ok=true" ] \
+        && pass "$rt: queued output counts against the heap limit: past it a stream ends, said so; nothing is left held" \
+        || fail "$rt: off-heap hold" "five: $f1 / $f2
+eight: $a / $b
+one: $c"
+    stop_server
+}
+
 run_paths() {  # run_paths <lua|js>
     rt=$1
     D="$FIX/$rt"
     if [ "$rt" = lua ]; then ENTRY=app.lua; else ENTRY=app.js; fi
     echo "== $rt: paths"
+    if [ -n "${E2E_ONLY:-}" ]; then "phase_$E2E_ONLY" "$rt" "$ENTRY"; return; fi
     phase_paths "$rt" "$ENTRY" ""
     phase_paths "$rt" "$ENTRY" " vm-thread" "--vm-thread"
     phase_dev "$rt" "$ENTRY"
     phase_audit "$rt" "$ENTRY"
+    phase_offheap "$rt" "$ENTRY"
 }
 
 run_suite lua

@@ -380,8 +380,11 @@ static void stub_push_chunks(lua_State *L, HlExecStream *s, int idx, const char 
         size_t len = 0;
         const char *data = lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &len) : NULL;
         if (!data) luaL_error(L, "exec stub for '%s': chunk %d data must be a string", name, (int)i);
-        if (hl_exec_stream_stub_chunk(s, f, data, len) != 0)
-            luaL_error(L, "exec.stream: out of memory");
+        int rc = hl_exec_stream_stub_chunk(s, f, data, len);
+        if (rc == -2)
+            luaL_error(L, "exec stub for '%s': its chunks would take the VM's off-heap "
+                       "copies past its heap limit", name);
+        if (rc != 0) luaL_error(L, "exec.stream: out of memory");
         lua_pop(L, 2);
     }
 }
@@ -669,6 +672,10 @@ static int stub_stream(lua_State *L, int stubs, const char *name, size_t n, char
     if (!o->s)
         return luaL_error(L, "exec.stream('%s'): stream stubs need a host with the "
                           "command broker (Linux, macOS)", name);
+    {
+        HlLua *hl = get_hl_lua(L);
+        hl_exec_stream_hold_on(o->s, &hl->wasm_buf_bytes, hl->mem_limit);
+    }
     lua_getfield(L, stub, "chunks");
     if (!lua_isnil(L, -1)) {
         if (!lua_istable(L, -1))
@@ -829,6 +836,7 @@ static int lua_exec_stream(lua_State *L)
                                 why, sizeof why);
     free(block);
     if (!o->s) return luaL_error(L, "exec.stream('%s'): %s", name, why);
+    hl_exec_stream_hold_on(o->s, &lua->wasm_buf_bytes, lua->mem_limit);
     return 1;
 }
 

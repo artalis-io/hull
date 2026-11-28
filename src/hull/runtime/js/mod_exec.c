@@ -667,6 +667,11 @@ static int stub_push_chunks(JSContext *ctx, HlExecStream *s, JSValueConst arr,
             rc = hl_exec_stream_stub_chunk(s, f, p, n);
         }
         JS_FreeValue(ctx, dv);
+        if (rc == -2) {
+            JS_ThrowRangeError(ctx, "exec stub for '%s': its chunks would take the VM's "
+                               "off-heap copies past its heap limit", name);
+            return -1;
+        }
         if (rc != 0) { JS_ThrowOutOfMemory(ctx); return -1; }
     }
     return 0;
@@ -1153,6 +1158,10 @@ static JSValue stub_stream(JSContext *ctx, JSValueConst stubs, JSValueConst name
                                  "the command broker (Linux, macOS)", name);
         goto bad;
     }
+    {
+        HlJS *hj = (HlJS *)JS_GetContextOpaque(ctx);
+        hl_exec_stream_hold_on(o->s, &hj->wasm_buf_bytes, hj->max_heap_bytes);
+    }
     JSValue chunks = JS_GetPropertyStr(ctx, stub, "chunks");
     if (JS_IsException(chunks)) goto bad_exc;
     int rc = JS_IsUndefined(chunks) ? 0 : stub_push_chunks(ctx, o->s, chunks, name);
@@ -1327,6 +1336,7 @@ static JSValue js_exec_stream(JSContext *ctx, JSValueConst this_val,
         JS_ThrowTypeError(ctx, "exec.stream('%s'): %s", name, why);
         goto out;
     }
+    hl_exec_stream_hold_on(o->s, &js->wasm_buf_bytes, js->max_heap_bytes);
     ret = obj;
 out:
     if (name) JS_FreeCString(ctx, name);
