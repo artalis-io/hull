@@ -24,7 +24,7 @@
 #     commands and its broker, and the new one runs streams; stopping hull
 #     dev with streams open leaves no command behind.
 #
-# E2E_ONLY=paths|dev|audit|offheap runs that phase alone (both runtimes).
+# E2E_ONLY=paths|dev|audit|offheap|wedge runs that phase alone (both runtimes).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -232,6 +232,23 @@ app.get("/hang", function(req, res)
   log.info("silent pid=" .. s:read().data:gsub("\n$", ""))
   s:read()                               -- waits; the client goes
   res:text("never")
+end)
+app.get("/hb_ok", function(req, res)
+  local s = exec.stream("silent")
+  s:read()
+  hull.sleep(1500)                        -- silent, in flight: pinged, answered
+  s:close()
+  local ok = pcall(exec.run, "early", {}, { stdin = "x" })
+  res:text(string.format("signal=%s run=%s", tostring(s:result().signal), tostring(ok)))
+end)
+app.get("/wedge", function(req, res)
+  local s = exec.stream("silent")
+  log.info("silent pid=" .. s:read().data:gsub("\n$", ""))
+  local after = s:read()                 -- ends (nil) once the broker is dropped
+  local ok, err = pcall(function() return s:result() end)
+  local ok2 = pcall(exec.run, "early", {}, { stdin = "x" })
+  res:text(string.format("after=%s result=%s err=%s run=%s", tostring(after), tostring(ok),
+    tostring(err), tostring(ok2)))
 end)
 app.get("/ordinary", function(req, res)
   local ok, err = pcall(exec.stream, "early")
@@ -493,6 +510,24 @@ app.get("/hang", async (req, res) => {
   log.info("silent pid=" + chomp(text((await s.read()).data)));
   await s.read();
   res.text("never");
+});
+app.get("/hb_ok", async (req, res) => {
+  const s = exec.stream("silent");
+  await s.read();
+  await hull.sleep(1500);
+  s.close();
+  let run = "true";
+  try { await exec.run("early", [], { stdin: "x" }); } catch (e) { run = "false"; }
+  res.text(\`signal=\${(await s.result()).signal} run=\${run}\`);
+});
+app.get("/wedge", async (req, res) => {
+  const s = exec.stream("silent");
+  log.info("silent pid=" + chomp(text((await s.read()).data)));
+  const after = await s.read();
+  let rd = "true", err = "none", run = "true";
+  try { await s.result(); } catch (e) { rd = "false"; err = e.message; }
+  try { await exec.run("early", [], { stdin: "x" }); } catch (e) { run = "false"; }
+  res.text(\`after=\${after === null ? "nil" : "chunk"} result=\${rd} err=\${err} run=\${run}\`);
 });
 app.get("/ordinary", (req, res) => {
   try { exec.stream("early"); res.text("true"); } catch (e) { res.text("false " + e.message); }
@@ -1035,6 +1070,82 @@ one: $c"
     stop_server
 }
 
+ppid_of() { ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '; }
+ended_within() {  # ended_within <pid>: gone or a zombie (exited, unreaped) within 3 s
+    for i in $(seq 1 60); do
+        st=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')
+        case "$st" in ""|Z*) return 0 ;; esac
+        sleep 0.05
+    done
+    return 1
+}
+# wedge_case <rt> <label> <which: broker|sub> <want glob>: a broker SIGSTOPped
+# with a stream parked on it is found by the heartbeat; its read ends and
+# result() raises why.
+wedge_case() {
+    rt=$1; label=$2; which=$3; want=$4
+    HULL_TEST_EXEC_HEARTBEAT_MS=300; export HULL_TEST_EXEC_HEARTBEAT_MS
+    start_server "$D" "$ENTRY" || { unset HULL_TEST_EXEC_HEARTBEAT_MS; return; }
+    unset HULL_TEST_EXEC_HEARTBEAT_MS
+    bpid=$(sed -n 's/.*exec broker pid \([0-9]*\).*/\1/p' "$SLOG" | head -1)
+    before=$(grep -c 'silent pid=' "$SLOG")
+    get /wedge 30 > "$D/wedge.out" &
+    cpid=$!
+    spid=$(new_silent "$before")
+    target=$bpid
+    if [ "$which" = sub ]; then           # the command's own broker: the router's child
+        target=$spid
+        while [ -n "$target" ] && [ "$(ppid_of "$target")" != "$bpid" ]; do
+            target=$(ppid_of "$target")
+            [ "$target" = 1 ] && target= && break
+        done
+    fi
+    if [ -z "$bpid" ] || [ -z "$spid" ] || [ -z "$target" ]; then
+        fail "$rt: $label: no broker / command pid" "bpid=$bpid spid=$spid target=$target"
+        kill "$cpid" 2>/dev/null; stop_server; return
+    fi
+    PIDS="$PIDS $target"
+    sleep 0.2
+    t0=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    kill -STOP "$target"
+    wait "$cpid"
+    ms=$(( $(python3 -c 'import time; print(int(time.time() * 1000))') - t0 ))
+    out=$(cat "$D/wedge.out")
+    ping=$(get /ping 5)
+    # A broker that moves again reads EOF, kills its command and exits; a
+    # command broker the router dropped is the test's to end.
+    if [ "$which" = sub ]; then kill -9 "$target" 2>/dev/null; else kill -CONT "$target"; fi
+    case "$out" in
+        $want)
+            [ "$ms" -lt 5000 ] && [ "$ping" = pong ] && ended_within "$spid" && ended_within "$target" \
+                && pass "$rt: $label: found in ${ms} ms, its stream fails, the server serves on" \
+                || fail "$rt: $label" "out=$out ms=$ms ping=$ping spid=$spid target=$target
+$(ps -o pid,ppid,stat,command -p "$spid,$target" 2>/dev/null)" ;;
+        *) fail "$rt: $label" "got: $out (want $want, ${ms} ms)" ;;
+    esac
+    stop_server
+}
+
+phase_wedge() {  # phase_wedge <rt> <entry>
+    rt=$1; ENTRY=$2
+    HULL_TEST_EXEC_HEARTBEAT_MS=300; export HULL_TEST_EXEC_HEARTBEAT_MS
+    start_server "$D" "$ENTRY" && {
+        unset HULL_TEST_EXEC_HEARTBEAT_MS
+        out=$(get /hb_ok 20)
+        [ "$out" = "signal=SIGKILL run=true" ] && ! grep -q "stopped answering" "$SLOG" \
+            && pass "$rt: a silent stream on a healthy broker outlives several heartbeats" \
+            || fail "$rt: healthy heartbeat" "$out
+$(grep 'exec' "$SLOG" | tail -5)"
+        stop_server
+    }
+    unset HULL_TEST_EXEC_HEARTBEAT_MS
+    wedge_case "$rt" "a wedged broker" broker "after=nil result=false err=*stopped answering* run=false"
+    if [ "$(uname -s)" = Darwin ]; then
+        wedge_case "$rt" "a wedged command broker (router)" sub \
+            "after=nil result=false err=*broker is gone* run=true"
+    fi
+}
+
 run_paths() {  # run_paths <lua|js>
     rt=$1
     D="$FIX/$rt"
@@ -1046,6 +1157,7 @@ run_paths() {  # run_paths <lua|js>
     phase_dev "$rt" "$ENTRY"
     phase_audit "$rt" "$ENTRY"
     phase_offheap "$rt" "$ENTRY"
+    phase_wedge "$rt" "$ENTRY"
 }
 
 run_suite lua

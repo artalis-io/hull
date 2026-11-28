@@ -3355,7 +3355,11 @@ broker kills it and the result has `timed_out` and `idle_timed_out` set. Unlike 
 the idle clock stands still while a pipe waits on the app (its 256 KiB window is full): a slow
 reader never makes a busy command look idle, and the clock starts again when the app reads. So
 `idle_ms` is the bound for a long-lived stream whose reader has no client behind it - a timer, a
-task, `app.main` - where nothing else would end a command that has hung. A stream command still answers `exec.run`, with `exec.run`'s limits (at most 60 s, 16 MiB,
+task, `app.main` - where nothing else would end a command that has hung. A command BROKER that
+hangs (alive, not answering) is found by Hull's heartbeat whatever the command declares: after
+15 s of silence while calls are in flight and 45 s more with no answer, every call on it fails
+(`exec: the command broker stopped answering`; a stream's reads end and `result()` raises it)
+and `exec.*` is refused until the app restarts. A stream command still answers `exec.run`, with `exec.run`'s limits (at most 60 s, 16 MiB,
 1 MiB; a command with no time limit runs 60 s under `exec.run`) and `exec.run`'s semantics: its
 output is cut at the cap and the command runs on, where a stream is KILLED at its total
 (`stdout_truncated = true`, `signal = "SIGKILL"`). `exec.stream` of a command without

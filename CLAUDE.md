@@ -2761,7 +2761,11 @@ broker's pid exits - so a broker, a command broker or a router killed with SIGKI
 calls. Its limit, logged at start as `exec: limit:`: a KEEPER killed with SIGKILL leaves its one
 job running until it exits. OpenBSD has no backend. `exec.run` parks like `hull.sleep` (attached or detached `HlAsyncCtx`, `hl_exec_op_start`);
 the op's free sends `KILL`, so every cancel path stops the child; a broker lost while serving fails
-the waiting calls, and teardown stops it in step (1) while the loop is alive. A command declared
+the waiting calls, and teardown stops it in step (1) while the loop is alive. A broker alive but wedged
+is found by a heartbeat (`HL_EXEC_HEARTBEAT_MS` / `_WAIT_MS`, 15 s + 45 s, only while calls are in
+flight: PING, answered PONG from the broker's loop) and DROPPED - channel closed, calls failed as lost,
+never killed (the server's sandbox has no kill(2) of another process) - and the macOS router holds each
+command broker to the same through `sub_lost`. A command declared
 `stream = true` may also be run by `exec.stream` (docs/design/exec_stream.md): a stream RUN the
 broker admits only for such a command (that check is the authorization; `exec.run` keeps the plain
 RUN and its 60 s / 16 MiB / 1 MiB limits for every command, §12), its output sent in CHUNKs within

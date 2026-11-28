@@ -18,6 +18,14 @@ release-artifact layout).
   `app.main`). `idle_ms` on a command without `stream = true` is refused at load. The startup
   report, `hull inspect`, the `--audit` end record, the `hull check` lint and `test.exec_stub`
   (`idle_timed_out` / `idleTimedOut`) all carry it.
+- **`hull/exec`: a broker heartbeat.** While a call is in flight and the command broker has sent
+  nothing for 15 s, the server pings it; with no answer 45 s later the broker is taken as wedged
+  and dropped: every call fails as lost (`exec: the command broker stopped answering`) and
+  `exec.*` is refused from then on, where a parked stream read, or a detached `exec.run`, used to
+  wait for ever. The broker is not killed (the sandbox gives the server no `kill(2)` of another
+  process): if it moves again it reads EOF and kills its commands; otherwise they die with the
+  server. On macOS the router holds each command broker to the same, so one wedged command
+  fails its own calls and the others keep working.
 
 ## [0.29.0] - 2026-11-28
 

@@ -69,6 +69,15 @@
 /* Small writes wait this long for more before a CHUNK goes out. */
 #define HL_EXEC_STREAM_COALESCE_MS  20u
 
+/* The broker heartbeat (docs/design/exec_stream.md §7): while a call is in
+ * flight and the broker has sent nothing for HEARTBEAT_MS, the server sends
+ * PING; no frame within HEARTBEAT_WAIT_MS after it and the broker is taken as
+ * wedged - killed, every call failed as lost. The macOS router holds its
+ * per-command brokers to the same. The wait covers a broker starting all of
+ * its calls at once (~4 s each). */
+#define HL_EXEC_HEARTBEAT_MS        15000u
+#define HL_EXEC_HEARTBEAT_WAIT_MS   45000u
+
 /* Admission, held by the broker (PR 2) and mirrored by the binding. */
 #define HL_EXEC_MAX_INFLIGHT        8
 #define HL_EXEC_MAX_BUFFERED        (32u * 1024u * 1024u)
