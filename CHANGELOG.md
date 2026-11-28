@@ -8,6 +8,14 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-11-28
+
+`hull/exec` gains `exec.stream`: a command declared `stream = true` is read as it writes and
+fed stdin while it runs, held to a 256 KiB window per pipe, with `hull test` stubs, lint and
+`hull inspect` support. `--audit` now records every `exec.run` and `exec.stream` call, a
+stream's queued output counts against the heap limit, and on macOS one slow command broker no
+longer stalls the others.
+
 ### Added
 
 - **`--audit` records for `exec.run` and `exec.stream`.** Each call writes a `start` record
