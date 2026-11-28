@@ -2583,11 +2583,15 @@ void hl_exec_broker_stop(void)
     hl_chan_frame_reset(&g_rd);
     if (g_pid > 0) {
         int st;
-        /* It exits on the EOF, killing its children first. */
-        if (!hl_chan_reap(g_pid, &st, 500, NULL)) {
-            kill(g_pid, SIGKILL);
-            (void)hl_chan_reap(g_pid, &st, 500, NULL);
-        }
+        /* It exits on the EOF, killing its children first. One that does not
+         * within the wait is left, never killed: by now (the policy is sent
+         * after sandbox phase 1, a teardown runs after phase 2) the sandbox
+         * gives the server no kill(2) of another process - on Linux pledge
+         * allows only a kill of itself and kills the SERVER for any other.
+         * It dies with the server (PDEATHSIG on Linux, the exit watch on
+         * macOS), with its commands; until then it is a broker with no
+         * channel, which serves nothing. */
+        (void)hl_chan_reap(g_pid, &st, 500, NULL);
         g_pid = -1;
     }
     /* A stop is a teardown: every pending call is cancelled by its own path
