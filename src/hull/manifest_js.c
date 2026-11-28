@@ -213,7 +213,7 @@ static int read_js_port_array(JSContext *ctx, JSValueConst obj, int *out)
 static const char *const MX_CMD_KEYS[] = {
     "path", "argv", "timeoutMs", "timeout_ms", "stdoutMax", "stdout_max",
     "stderrMax", "stderr_max", "env", "concurrency", "host", "manifest",
-    "stdinMax", "stdin_max", "sha256", "stream", NULL };
+    "stdinMax", "stdin_max", "sha256", "stream", "idleMs", "idle_ms", NULL };
 /* The v0.26.0 spellings of host's fields, refused since 0.28.0: pairs of
  * (removed key, replacement), named in the error. */
 static const char *const MX_CMD_REMOVED[] = {
@@ -574,12 +574,16 @@ static void mx_cmd(JSContext *ctx, JSValueConst t, const char *name, HlExecBuf *
     const char *pin = mx_str(ctx, t, "sha256", &hl, b, where);
     /* stream: true - exec.stream may run it (docs/design/exec_stream.md §3). */
     int stream = mx_bool(ctx, t, "stream", NULL, b, where);
+    int64_t idle = mx_int(ctx, t, "idleMs", "idle_ms", b, where);
     if (stream)
         hl_exec_b_cmd_stream(b, name, strlen(name), path, pl, timeout, so, se, conc,
                              unix_sockets, stdin_max, pin, hl);
     else
         hl_exec_b_cmd(b, name, strlen(name), path, pl, timeout, so, se, conc,
                       unix_sockets, stdin_max, pin, hl);
+    if (idle != -1 && !stream && !b->failed)
+        hl_exec_b_fail(b, "%s: idleMs needs stream: true", where);
+    hl_exec_b_stream_idle(b, idle);   /* ends a stream silent for idleMs */
     if (pin) JS_FreeCString(ctx, pin);
     if (path) JS_FreeCString(ctx, path);
 

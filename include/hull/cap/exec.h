@@ -40,6 +40,7 @@ typedef struct HlExecBuf {
     HlAllocator *alloc;
     uint16_t     ncmds;
     size_t       flags_at;          /* the last command's flags byte */
+    size_t       stream_end;        /* just past the last stream command's limits */
     int          failed;
     char         err[192];
 } HlExecBuf;
@@ -69,6 +70,10 @@ void   hl_exec_b_cmd_stream(HlExecBuf *b, const char *name, size_t name_len,
                             int64_t timeout_ms, int64_t stdout_max, int64_t stderr_max,
                             int64_t concurrency, int unix_sockets, int64_t stdin_max,
                             const char *sha256_hex, size_t sha256_len);
+/* The stream command just added (no other builder call between) ends a
+ * stream that writes nothing for @p idle_ms (-1 = not given, 0 = none).
+ * Sets HL_EXEC_CMD_IDLE; the value is checked by validation. */
+void   hl_exec_b_stream_idle(HlExecBuf *b, int64_t idle_ms);
 /* `stdin_max` -1 or 0 = the command reads /dev/null; otherwise the bytes a
  * call may send it (1..HL_EXEC_STDIN_CEIL, checked by validation).
  * `sha256_hex` NULL = no pin; otherwise exactly 64 hex characters (either
@@ -114,6 +119,8 @@ int hl_exec_policy_validate(const uint8_t *data, size_t len,
 #define HL_EXEC_CMD_APP_FS       0x08u   /* manifest.fs read / write lists follow the argv */
 #define HL_EXEC_CMD_STREAM       0x10u   /* u32 timeout, u64 stdout / stderr / stdin
                                           * totals follow (after stdin_max) */
+#define HL_EXEC_CMD_IDLE         0x20u   /* u32 idle_ms follows the stream totals
+                                          * (STREAM commands only) */
 
 #define HL_EXEC_SLOT_ALLOW_DASH  0x01u
 #define HL_EXEC_SLOT_HAS_CHARS   0x02u
@@ -138,6 +145,7 @@ typedef struct HlExecCmd {
     uint64_t       stream_stdout_max;   /* HL_EXEC_STREAM_NO_CAP = none */
     uint64_t       stream_stderr_max;
     uint64_t       stream_stdin_max;    /* 0 = /dev/null */
+    uint32_t       stream_idle_ms;      /* HL_EXEC_CMD_IDLE; 0 = none */
     uint16_t       n_env;
     uint16_t       n_fs_read;
     uint16_t       n_fs_write;

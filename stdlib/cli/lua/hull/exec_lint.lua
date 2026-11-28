@@ -63,9 +63,17 @@ end
 -- at all, and write any total: the declaration is the bound, so say so.
 local function lint_stream(c, warn)
     local t = field(c, "timeout_ms", "timeoutMs")
+    local idle = field(c, "idle_ms", "idleMs")
     if t == 0 then
-        warn("stream command with no time limit (timeout_ms = 0): it runs until the "
-             .. "app closes it, its request goes, or Hull stops")
+        if type(idle) == "number" and idle > 0 then
+            warn(string.format("stream command with no time limit (timeout_ms = 0): it "
+                 .. "runs until the app closes it, its request goes, Hull stops, or it "
+                 .. "writes nothing for its idle_ms (%d ms)", idle))
+        else
+            warn("stream command with no time limit (timeout_ms = 0): it runs until the "
+                 .. "app closes it, its request goes, or Hull stops; declare idle_ms to "
+                 .. "end one that goes silent")
+        end
     elseif type(t) == "number" and t > 60000 then
         warn(string.format("stream command with a time limit of %d s, past exec.run's "
              .. "60 s", t // 1000))

@@ -758,6 +758,7 @@ static JSValue stream_result_value(JSContext *ctx, const HlExecReply *r)
     JS_DefinePropertyValueStr(ctx, res, "status", JS_NewInt32(ctx, r->status), JS_PROP_C_W_E);
     JS_DefinePropertyValueStr(ctx, res, "signal", sig, JS_PROP_C_W_E);
     JS_DefinePropertyValueStr(ctx, res, "timedOut", JS_NewBool(ctx, r->timed_out), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, res, "idleTimedOut", JS_NewBool(ctx, r->idle_timed_out), JS_PROP_C_W_E);
     JS_DefinePropertyValueStr(ctx, res, "stdoutTruncated", JS_NewBool(ctx, r->out_cut), JS_PROP_C_W_E);
     JS_DefinePropertyValueStr(ctx, res, "stderrTruncated", JS_NewBool(ctx, r->err_cut), JS_PROP_C_W_E);
     JS_DefinePropertyValueStr(ctx, res, "stdoutLength", JS_NewInt64(ctx, (int64_t)r->out_bytes), JS_PROP_C_W_E);
@@ -1183,6 +1184,10 @@ static JSValue stub_stream(JSContext *ctx, JSValueConst stubs, JSValueConst name
     v = JS_GetPropertyStr(ctx, stub, "timedOut");
     if (JS_IsException(v)) goto bad_exc;
     int timed_out = JS_ToBool(ctx, v) > 0;
+    JS_FreeValue(ctx, v);
+    v = JS_GetPropertyStr(ctx, stub, "idleTimedOut");
+    if (JS_IsException(v)) goto bad_exc;
+    if (JS_ToBool(ctx, v) > 0) timed_out = 2;   /* ended by its idle limit */
     JS_FreeValue(ctx, v);
     v = JS_GetPropertyStr(ctx, stub, "signal");
     if (JS_IsException(v)) goto bad_exc;

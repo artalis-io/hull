@@ -568,6 +568,8 @@ static int push_stream_result(lua_State *L, const HlExecReply *r)
     lua_setfield(L, -2, "signal");
     lua_pushboolean(L, r->timed_out);
     lua_setfield(L, -2, "timed_out");
+    lua_pushboolean(L, r->idle_timed_out);
+    lua_setfield(L, -2, "idle_timed_out");
     lua_pushboolean(L, r->out_cut);
     lua_setfield(L, -2, "stdout_truncated");
     lua_pushboolean(L, r->err_cut);
@@ -689,12 +691,14 @@ static int stub_stream(lua_State *L, int stubs, const char *name, size_t n, char
     const char *sig = lua_isnil(L, -1) ? NULL : luaL_checkstring(L, -1);
     lua_getfield(L, stub, "timed_out");
     int timed_out = lua_toboolean(L, -1);
+    lua_getfield(L, stub, "idle_timed_out");
+    if (lua_toboolean(L, -1)) timed_out = 2;   /* ended by its idle limit */
     lua_getfield(L, stub, "duration_ms");
     lua_Integer ms = lua_isnil(L, -1) ? 0 : luaL_checkinteger(L, -1);
     if (hl_exec_stream_stub_finish(o->s, (int32_t)status, sig, timed_out,
                                    (uint32_t)(ms < 0 ? 0 : ms)) != 0)
         return luaL_error(L, "exec.stream: out of memory");
-    lua_pop(L, 4);
+    lua_pop(L, 5);
     lua_getfield(L, stub, "on_write");
     if (!lua_isnil(L, -1) && !lua_isfunction(L, -1))
         return luaL_error(L, "exec stub for '%s': on_write must be a function", name);

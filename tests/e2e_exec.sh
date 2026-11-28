@@ -354,6 +354,16 @@ test("the stream's total cuts the output and kills it", function()
   test.eq(r.signal, "SIGKILL")
   test.eq(r.stdout_length, 5)
 end)
+test("a stub can end a stream at its idle limit", function()
+  test.exec_stub("capped", { chunks = { { fd = "stdout", data = "x" } }, signal = "SIGKILL",
+                             idle_timed_out = true })
+  local s = exec.stream("capped")
+  test.eq(s:read().data, "x")
+  test.eq(s:read(), nil)
+  local r = s:result()
+  test.eq(r.idle_timed_out, true)
+  test.eq(r.timed_out, true)
+end)
 test("a stream stub inside a test.get request answers with no wait", function()
   test.exec_stub("follow", { chunks = { { fd = "stdout", data = "a" }, { fd = "stdout", data = "b" } } })
   local r = test.get("/follow")
@@ -440,6 +450,16 @@ test("the stream's total cuts the output and kills it", async () => {
   test.eq(r.signal, "SIGKILL");
   test.eq(r.stdoutLength, 5);
 });
+test("a stub can end a stream at its idle limit", async () => {
+  test.execStub("capped", { chunks: [{ fd: "stdout", data: "x" }], signal: "SIGKILL",
+                            idleTimedOut: true });
+  const s = exec.stream("capped");
+  test.eq(text((await s.read()).data), "x");
+  test.eq(await s.read(), null);
+  const r = await s.result();
+  test.eq(r.idleTimedOut, true);
+  test.eq(r.timedOut, true);
+});
 test("a stream stub inside a test.get request answers with no wait", async () => {
   test.execStub("follow", { chunks: [{ fd: "stdout", data: "a" }, { fd: "stdout", data: "b" }] });
   const r = await test.get("/follow");
@@ -457,8 +477,8 @@ EOF
 for rt in lua js; do
     echo "== hull test, stream stubs ($rt) =="
     out=$(cd "$TMPDIR/${rt}_s" && "$HULL" test . 2>&1) && rc=0 || rc=$?
-    if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q "5/5 tests passed"; then
-        pass "$rt: stream stubs: chunks, args and stdin, on_write, totals, test.get, refusals (5 cases)"
+    if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q "6/6 tests passed"; then
+        pass "$rt: stream stubs: chunks, args and stdin, on_write, totals, idle, test.get, refusals (6 cases)"
     else
         fail "$rt: hull test stream stubs" "$out"
     fi
@@ -684,13 +704,13 @@ fi
 d="$TMPDIR/inspect_stream"
 rm -rf "$d"; mkdir -p "$d"
 cat > "$d/package.sig" <<'SIG'
-{"manifest":{"modules":["hull/exec@1"],"exec":{"follow":{"path":"/usr/bin/journalctl","stream":true,"timeout_ms":0,"stdin_max":4096},"tail":{"path":"/usr/bin/tail","stream":true,"timeoutMs":120000,"stdoutMax":33554432,"stderrMax":4096,"concurrency":1}}}}
+{"manifest":{"modules":["hull/exec@1"],"exec":{"follow":{"path":"/usr/bin/journalctl","stream":true,"timeout_ms":0,"stdin_max":4096},"tail":{"path":"/usr/bin/tail","stream":true,"timeoutMs":120000,"idleMs":30000,"stdoutMax":33554432,"stderrMax":4096,"concurrency":1}}}}
 SIG
 out=$("$HULL" inspect "$d" 2>&1) || true
 for want in "stream: [!] no time limit, stdout [!] no cap, stderr [!] no cap, 2 at once" \
             "exec.run on it: 60000 ms, stdout 16777216, stderr 1048576" \
             "stdin: up to 4096 bytes from the app over the stream's life (write())" \
-            "stream: 120000 ms, stdout 33554432, stderr 4096, 1 at once"; do
+            "stream: 120000 ms, idle 30000 ms, stdout 33554432, stderr 4096, 1 at once"; do
     if printf '%s\n' "$out" | grep -qF -- "$want"; then pass "exec_stream_inspect: $want"
     else fail "exec_stream_inspect: $want" "$out"; fi
 done
@@ -749,6 +769,7 @@ for rt in lua js; do
              "WARN exec.loose: argv 2 has no chars or enum" \
              "WARN exec.sh-run: argv 2 follows fixed arguments with no \"--\"" \
              "WARN exec.follow: stream command with no time limit" \
+             "declare idle_ms to end one that goes silent" \
              "WARN exec.follow: stream command with no total on stdout or stderr" \
              "WARN exec.slow: stream command with a time limit of 120 s" \
              "WARN exec.slow: stream command with no total on stderr: it may write without bound; declare stderr_max"; do

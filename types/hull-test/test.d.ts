@@ -43,6 +43,8 @@ declare namespace Hull {
         stdout?: string | ArrayBuffer;
         stderr?: string | ArrayBuffer;
         timedOut?: boolean;
+        /** A stream command: it ended at its `idleMs` (sets `timedOut` too). */
+        idleTimedOut?: boolean;
         durationMs?: number;
         /**
          * A stream command (`exec.stream`): its output, delivered in order,

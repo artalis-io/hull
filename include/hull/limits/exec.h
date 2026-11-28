@@ -55,6 +55,11 @@
 #define HL_EXEC_STREAM_TIMEOUT_MAX_MS 0xFFFFFFFEu
 #define HL_EXEC_STREAM_NO_CAP       UINT64_MAX    /* an output total not declared */
 #define HL_EXEC_STREAM_TOTAL_MAX    (UINT64_C(1) << 63)
+/* A stream command's idle limit (`idle_ms`): the stream is ended once its
+ * command has written nothing for this long while Hull was ready to read
+ * (docs/design/exec_stream.md §5a). Off unless declared. */
+#define HL_EXEC_STREAM_IDLE_MIN_MS  100u
+#define HL_EXEC_STREAM_IDLE_MAX_MS  HL_EXEC_STREAM_TIMEOUT_MAX_MS
 /* What one stream may hold in flight per pipe (stdout, stderr, stdin), and
  * the largest CHUNK / STDIN frame. */
 #define HL_EXEC_STREAM_WINDOW       (256u * 1024u)

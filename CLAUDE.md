@@ -2765,7 +2765,9 @@ the waiting calls, and teardown stops it in step (1) while the loop is alive. A 
 `stream = true` may also be run by `exec.stream` (docs/design/exec_stream.md): a stream RUN the
 broker admits only for such a command (that check is the authorization; `exec.run` keeps the plain
 RUN and its 60 s / 16 MiB / 1 MiB limits for every command, §12), its output sent in CHUNKs within
-a 256 KiB credit window per pipe and its stdin taken within STDIN_CREDIT, killed at its totals. On
+a 256 KiB credit window per pipe and its stdin taken within STDIN_CREDIT, killed at its totals
+or once it has written nothing for its `idle_ms` (`HL_EXEC_CMD_IDLE`; the clock stands still while
+a pipe waits on the app's credit; DONE `timed_out` 2 = `idle_timed_out`). On
 the server an `HlExecStream` is refcounted (the binding object and each parked wait; every wake a
 0 ms timer, a wait freed before its wake closes the stream); `live` 0 means no pending slot refers
 to it (`stream_lost` gives the slot up), a parked read owns the queued chunk (its bytes held on

@@ -3307,6 +3307,7 @@ app.manifest({
   exec = {
     follow = { path = "/usr/bin/journalctl", argv = { "-f", "-u", "hs-api.service" },
                stream = true, timeout_ms = 0,              -- no time limit
+               idle_ms = 300000,                           -- but ended after 5 min of silence
                stdout_max = 1073741824, stderr_max = 65536 },
     helper = { path = "/usr/local/libexec/hs-helper", stream = true,
                timeout_ms = 600000, stdout_max = 16777216, stderr_max = 65536,
@@ -3320,8 +3321,8 @@ while true do
   if not c then break end
   -- ...
 end
-local r = s:result()   -- { status, signal, timed_out, stdout_truncated, stderr_truncated,
-                       --   stdout_length, stderr_length, duration_ms }
+local r = s:result()   -- { status, signal, timed_out, idle_timed_out, stdout_truncated,
+                       --   stderr_truncated, stdout_length, stderr_length, duration_ms }
 
 local h <close> = exec.stream("helper", {}, { stdin_open = true })
 h:write("ping\n")                           -- waits only for the broker's credit
@@ -3333,7 +3334,8 @@ JS: `exec.stream(name, args?, { stdin, stdinOpen })` returns the stream at once;
 resolves to `{ fd, data: Uint8Array }` or `null` once both pipes are closed, `for await (const c
 of s)` reads every chunk (breaking out closes the stream), `write(bytes)` resolves once the
 broker has them, `closeWrite()`, `close()`, and `result()` resolves to `{ status, signal,
-timedOut, stdoutTruncated, stderrTruncated, stdoutLength, stderrLength, durationMs }`.
+timedOut, idleTimedOut, stdoutTruncated, stderrTruncated, stdoutLength, stderrLength,
+durationMs }`.
 
 **The declaration.** `stream = true` keeps every rule of a command (path, argv slots, `host`,
 `manifest`, `sha256`, `concurrency`) and changes three limits:
@@ -3343,11 +3345,17 @@ timedOut, stdoutTruncated, stderrTruncated, stdoutLength, stderrLength, duration
 | `timeout_ms` | 100..60000 (default 5000) | `0` (no time limit) or 100..2^32-2 (default 5000) |
 | `stdout_max` / `stderr_max` | up to 16 MiB / 1 MiB, buffered | any total (Lua up to 2^63, JS 2^53 - 1), or omitted for none; never buffered whole |
 | `stdin_max` | up to 1 MiB, one buffer | any total the app may write over the stream's life |
+| `idle_ms` (JS `idleMs`) | refused | `0` / omitted (none) or 100..2^32-2: end the stream once the command has written nothing for this long |
 
 The time a command waits because the app is not reading COUNTS toward its timeout: a reader
 that stops makes it time out, never keeps it alive. With `timeout_ms = 0` the command runs
 until it exits, the app closes the stream, its request goes, the stream is collected, or Hull
-stops. A stream command still answers `exec.run`, with `exec.run`'s limits (at most 60 s, 16 MiB,
+stops - or, with `idle_ms`, once it has written nothing to stdout or stderr for that long: the
+broker kills it and the result has `timed_out` and `idle_timed_out` set. Unlike `timeout_ms`,
+the idle clock stands still while a pipe waits on the app (its 256 KiB window is full): a slow
+reader never makes a busy command look idle, and the clock starts again when the app reads. So
+`idle_ms` is the bound for a long-lived stream whose reader has no client behind it - a timer, a
+task, `app.main` - where nothing else would end a command that has hung. A stream command still answers `exec.run`, with `exec.run`'s limits (at most 60 s, 16 MiB,
 1 MiB; a command with no time limit runs 60 s under `exec.run`) and `exec.run`'s semantics: its
 output is cut at the cap and the command runs on, where a stream is KILLED at its total
 (`stdout_truncated = true`, `signal = "SIGKILL"`). `exec.stream` of a command without

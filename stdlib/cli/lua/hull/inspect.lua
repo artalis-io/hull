@@ -252,8 +252,10 @@ local function main()
                     local so = num(pick("stdout_max", "stdoutMax"), nil)
                     local se = num(pick("stderr_max", "stderrMax"), nil)
                     local function total(v) return v and tostring(v) or "no cap" end
-                    print(string.format("    stream: %s, stdout %s, stderr %s, %d at once",
+                    local idle = num(pick("idle_ms", "idleMs"), 0)
+                    print(string.format("    stream: %s%s, stdout %s, stderr %s, %d at once",
                         t == 0 and "[!] no time limit" or (t .. " ms"),
+                        idle > 0 and (", idle " .. idle .. " ms") or "",
                         so and total(so) or "[!] no cap", se and total(se) or "[!] no cap",
                         num(c.concurrency, 2)))
                     local function clamp(v, ceil) return (v and v < ceil) and v or ceil end

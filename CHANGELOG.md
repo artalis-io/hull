@@ -8,6 +8,17 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- **`hull/exec`: an idle limit for stream commands.** A command declared `stream = true` may set
+  `idle_ms` (JS `idleMs`, 100..2^32-2). The broker kills a stream once its command has written
+  nothing for that long, and `result()` reports `timed_out` and the new `idle_timed_out` /
+  `idleTimedOut`. Time the app spends not reading (a full window) does not count. It bounds a
+  stream with no time limit whose reader has no request behind it (a timer, a task,
+  `app.main`). `idle_ms` on a command without `stream = true` is refused at load. The startup
+  report, `hull inspect`, the `--audit` end record, the `hull check` lint and `test.exec_stub`
+  (`idle_timed_out` / `idleTimedOut`) all carry it.
+
 ## [0.29.0] - 2026-11-28
 
 `hull/exec` gains `exec.stream`: a command declared `stream = true` is read as it writes and
