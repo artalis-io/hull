@@ -56,6 +56,8 @@
 #include "hull/net_backend.h"
 #include "hull/shared/child_channel.h"
 #include "hull/shared/host.h"     /* hl_host_is_windows */
+#include "hull/cap/audit.h"        /* --audit records for exec.run / exec.stream */
+#include "hull/shared/cli_log.h"   /* hl_log_escape_line */
 #include "log.h"
 
 #include <errno.h>
@@ -2271,6 +2273,8 @@ typedef struct {
     HlExecDoneFn fn;
     void        *ud;
     HlExecStream *stream;        /* a streamed call (fn unused) */
+    int          is_stream;      /* for the audit record: exec.stream */
+    uint64_t     t0_ms;          /* when it was submitted */
 } Pending;
 
 static void stream_lost(HlExecStream *s, const char *why, int wake);
@@ -2283,6 +2287,99 @@ static int       g_ready;
 static HlAsyncBackendCtx *g_loop;
 static HlChanFrame g_rd = { .magic = HX_MAGIC, .max = HX_REPLY_MAX };
 static Pending   g_pend[HL_EXEC_MAX_INFLIGHT];
+
+/* ── --audit (docs/design/exec_broker.md §12) ──────────────────────────
+ * Two records per call: "start" once the broker has the RUN (name, id, the
+ * call's arguments escaped, the stdin bytes it carries) and "end" when its
+ * slot goes (the outcome; for "done" the status, signal, timed_out,
+ * duration and output byte counts; else the reason). Output and stdin are
+ * never logged. Written on the loop thread only. */
+
+#define EXEC_AUDIT_ARG_MAX 1024u   /* bytes of one argument logged */
+
+static uint64_t stream_audit_stdin(const HlExecStream *s);
+
+static const char *exec_audit_cap(const Pending *pd)
+{
+    return pd->is_stream ? "exec.stream" : "exec.run";
+}
+
+static void exec_audit_start(const Pending *pd, const char *const *args,
+                             const size_t *lens, size_t n, size_t in_len)
+{
+    if (!hl_audit_enabled) return;
+    ShJsonWriter w = hl_audit_begin(exec_audit_cap(pd));
+    sh_json_write_kv_string(&w, "event", "start");
+    sh_json_write_kv_int(&w, "id", pd->id);
+    sh_json_write_kv_string(&w, "name", pd->name);
+    sh_json_write_key(&w, "args");
+    sh_json_write_array_start(&w);
+    int cut = 0;
+    for (size_t i = 0; i < n; i++) {
+        char raw[EXEC_AUDIT_ARG_MAX + 1];
+        char esc[EXEC_AUDIT_ARG_MAX * 4 + 1];
+        size_t k = lens[i] < EXEC_AUDIT_ARG_MAX ? lens[i] : EXEC_AUDIT_ARG_MAX;
+        if (lens[i] > k) cut = 1;
+        if (k) memcpy(raw, args[i], k);
+        raw[k] = '\0';                    /* the matcher refused any NUL */
+        hl_log_escape_line(raw, esc, sizeof esc);
+        sh_json_write_string(&w, esc);
+    }
+    sh_json_write_array_end(&w);
+    if (cut) sh_json_write_kv_bool(&w, "args_cut", 1);
+    sh_json_write_kv_int(&w, "stdin_bytes", (int64_t)in_len);
+    hl_audit_end(&w);
+}
+
+/* @p outcome: "done" (with @p r), "busy" / "refused" / "lost" (with
+ * @p why), or "cancelled" (the app closed the stream, or the request or
+ * op that waited for it went). */
+static void exec_audit_end(const Pending *pd, const char *outcome, const HlExecReply *r,
+                           const char *why)
+{
+    if (!hl_audit_enabled) return;
+    ShJsonWriter w = hl_audit_begin(exec_audit_cap(pd));
+    sh_json_write_kv_string(&w, "event", "end");
+    sh_json_write_kv_int(&w, "id", pd->id);
+    sh_json_write_kv_string(&w, "name", pd->name);
+    sh_json_write_kv_string(&w, "outcome", outcome);
+    if (r && r->kind == HL_EXEC_R_DONE) {
+        sh_json_write_kv_int(&w, "status", r->status);
+        if (r->signal[0]) sh_json_write_kv_string(&w, "signal", r->signal);
+        else sh_json_write_kv_null(&w, "signal");
+        sh_json_write_kv_bool(&w, "timed_out", r->timed_out != 0);
+        sh_json_write_kv_int(&w, "duration_ms", r->duration_ms);
+        sh_json_write_kv_int(&w, "stdout_bytes",
+                             (int64_t)(r->stream ? r->out_bytes : r->out_len));
+        sh_json_write_kv_int(&w, "stderr_bytes",
+                             (int64_t)(r->stream ? r->err_bytes : r->err_len));
+        sh_json_write_kv_bool(&w, "stdout_truncated", r->out_cut != 0);
+        sh_json_write_kv_bool(&w, "stderr_truncated", r->err_cut != 0);
+    } else {
+        uint64_t now = hl_chan_mono_ms();
+        sh_json_write_kv_int(&w, "duration_ms",
+                             (int64_t)(now > pd->t0_ms ? now - pd->t0_ms : 0));
+        const char *m = why ? why : (r ? r->msg : NULL);
+        if (m && *m) {
+            char esc[sizeof r->msg * 4 + 1];
+            hl_log_escape_line(m, esc, sizeof esc);
+            sh_json_write_kv_string(&w, "reason", esc);
+        }
+    }
+    if (pd->stream) sh_json_write_kv_int(&w, "stdin_bytes",
+                                         (int64_t)stream_audit_stdin(pd->stream));
+    hl_audit_end(&w);
+}
+
+static const char *exec_audit_outcome(const HlExecReply *r)
+{
+    switch (r ? r->kind : HL_EXEC_R_LOST) {
+    case HL_EXEC_R_DONE:    return "done";
+    case HL_EXEC_R_BUSY:    return "busy";
+    case HL_EXEC_R_REFUSED: return "refused";
+    default:                return "lost";
+    }
+}
 
 static int env_allowed(const char *kv)
 {
@@ -2329,6 +2426,7 @@ static void fail_all(const char *why)
     for (int i = 0; i < HL_EXEC_MAX_INFLIGHT; i++) {
         Pending *p = &g_pend[i];
         if (!p->used) continue;
+        exec_audit_end(p, "lost", NULL, why);
         if (p->stream) {
             HlExecStream *st = p->stream;
             p->used = 0;
@@ -2476,7 +2574,7 @@ static void deliver(uint32_t type, uint32_t id, const uint8_t *p, size_t len)
     HlExecDoneFn fn = pd->fn;
     void *ud = pd->ud;
     pd->used = 0;
-    if (!r) return;
+    if (!r) { exec_audit_end(pd, "lost", NULL, "exec: out of memory"); return; }
     if (type == HX_DONE && len >= 24) {
         r->kind = HL_EXEC_R_DONE;
         r->status = (int32_t)hl_chan_get32(p);
@@ -2500,6 +2598,7 @@ static void deliver(uint32_t type, uint32_t id, const uint8_t *p, size_t len)
                     if (el) memcpy(r->err, p + 24 + ol, el);
                     r->out_len = ol;
                     r->err_len = el;
+                    exec_audit_end(pd, "done", r, NULL);
                     fn(ud, r);
                     return;
                 }
@@ -2515,6 +2614,7 @@ static void deliver(uint32_t type, uint32_t id, const uint8_t *p, size_t len)
         if (n) memcpy(r->msg, p, n);
         r->msg[n] = '\0';
     }
+    exec_audit_end(pd, exec_audit_outcome(r), r, NULL);
     fn(ud, r);
 }
 
@@ -2624,20 +2724,26 @@ static int submit_ex(HlAsyncBackendCtx *loop, const char *name, size_t name_len,
     slot->fn = fn;
     slot->ud = ud;
     slot->stream = stream;
+    slot->is_stream = stream != NULL;
+    slot->t0_ms = hl_chan_mono_ms();
     *id_out = id;
+    exec_audit_start(slot, args, lens, n, in_len);
     return 0;
 }
 
-void hl_exec_cancel(uint32_t id)
+static void exec_cancel_ex(uint32_t id, const char *outcome, const char *why)
 {
     Pending *p = pend_find(id);
     if (!p) return;
+    exec_audit_end(p, outcome, NULL, why);
     p->used = 0;
     p->stream = NULL;
     if (g_fd >= 0)
         (void)hl_chan_write_frame(g_fd, HX_MAGIC, HX_KILL, id, NULL, 0, NULL, 0,
                                   hl_chan_mono_ms() + 200);
 }
+
+void hl_exec_cancel(uint32_t id) { exec_cancel_ex(id, "cancelled", NULL); }
 
 /* ── One exec.stream (docs/design/exec_stream.md) ──────────────────── */
 
@@ -2699,6 +2805,8 @@ struct HlExecStream {
     uint64_t     stub_cap[2], stub_total[2];
     uint8_t      stub_cut[2];
 };
+
+static uint64_t stream_audit_stdin(const HlExecStream *s) { return s->stdin_sent; }
 
 static void wait_fire(void *user)
 {
@@ -2767,7 +2875,7 @@ static void stream_stdin_end(HlExecStream *s)
 static void stream_lost(HlExecStream *s, const char *why, int wake)
 {
     Pending *pd = pend_find(s->id);
-    if (pd && pd->stream == s) hl_exec_cancel(s->id);
+    if (pd && pd->stream == s) exec_cancel_ex(s->id, "lost", why);
     s->live = 0;
     stream_stdin_end(s);
     if (!s->result && (s->result = calloc(1, sizeof *s->result)) != NULL) {
@@ -2845,7 +2953,6 @@ static void stream_deliver(Pending *pd, uint32_t type, const uint8_t *p, size_t 
     }
     if (type != HX_DONE && type != HX_BUSY && type != HX_REFUSED) return;
     pd->used = 0;
-    pd->stream = NULL;
     s->live = 0;
     stream_stdin_end(s);
     HlExecReply *r = calloc(1, sizeof *r);
@@ -2875,6 +2982,8 @@ static void stream_deliver(Pending *pd, uint32_t type, const uint8_t *p, size_t 
             r->msg[n] = '\0';
         }
     }
+    exec_audit_end(pd, exec_audit_outcome(r), r, r ? NULL : "exec: out of memory");
+    pd->stream = NULL;
     hl_exec_reply_free(s->result);
     s->result = r;
     stream_wake(s);
@@ -3220,7 +3329,7 @@ static void exec_op_deadline(KlAsyncOp *kop, void *user_data)
     HlAsyncCtx *ctx = user_data;
     HlExecOp *op = ctx->driver;
     if (op && op->pending) {
-        hl_exec_cancel(op->id);
+        exec_cancel_ex(op->id, "lost", "exec: the command broker did not answer");
         op->pending = 0;
         op->reply = calloc(1, sizeof *op->reply);
         if (op->reply) {

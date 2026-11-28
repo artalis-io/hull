@@ -10,6 +10,10 @@ release-artifact layout).
 
 ### Added
 
+- **`--audit` records for `exec.run` and `exec.stream`.** Each call writes a `start` record
+  (command name, escaped arguments, stdin length) and an `end` record (outcome `done` / `busy`
+  / `refused` / `lost` / `cancelled`; for `done` the status, signal, `timed_out`, duration and
+  output byte counts; a stream's stdin bytes written). Output and stdin are never logged.
 - **`hull/exec`: the broker side of streamed, long-running commands** (docs/design/exec_stream.md,
   PR 1 of 3). A declared command can be marked `stream = true` in the encoded policy, with its own
   timeout (any length, or none) and output and stdin totals (any size). The command broker and the
@@ -24,8 +28,8 @@ release-artifact layout).
   end), `write()`, `close_write()` / `closeWrite()`, `close()`, `result()`, and `for await` in
   JS. An app that stops reading stops the command. A stream that is closed, collected, or whose
   request goes away kills its command. A chunk goes out as soon as the app has caught up, so a
-  request / reply over stdin and stdout waits for no coalescing delay. Not in this release: an
-  audit record, and a liveness check for a wedged broker on a stream with no time limit.
+  request / reply over stdin and stdout waits for no coalescing delay. Not in this release: a
+  liveness check for a wedged broker on a stream with no time limit.
 - **`test.exec_stub` answers `exec.stream`** (JS `test.execStub`): a stub's `chunks` are read in
   order, then its result; `on_write` (JS `onWrite`) answers each write with more chunks; the
   chunks are cut at the command's totals as the broker cuts them. Nothing waits, so a stream stub

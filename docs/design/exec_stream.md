@@ -2,7 +2,7 @@
 
 - **Status:** reviewed (2026-11-27, decisions in §11). Implemented: PR 1 (policy, broker,
   router), PR 2 (`exec.stream` in both runtimes) and PR 3 (test stubs, inspect, lint, docs).
-  Open: the liveness probe (§7), audit records (§8), the off-heap hold (§5). §12 records why
+  Audit records (§8) followed. Open: the liveness probe (§7), the off-heap hold (§5). §12 records why
   `exec.run` keeps its own path.
 - **Parent design:** [exec_broker.md](exec_broker.md) (§2 API, §3 manifest, §5 broker, §7 lifetime,
   §12 audit) and [exec_broker_macos_isolation.md](exec_broker_macos_isolation.md) (the router).
@@ -255,9 +255,9 @@ nearly full.
 
 ## 8. Audit, inspect, tests
 
-- `--audit`: `exec.run` writes no audit record today, so neither does `exec.stream`; an
-  `exec.run` / `exec.stream` start and end record is a follow-up for both. Chunks would not be
-  logged.
+- `--audit`: `exec.run` and `exec.stream` each write a start and an end record
+  ([exec_broker.md](exec_broker.md) §12). A stream's end record also carries the stdin bytes
+  written. Chunks are not logged.
 - `hull inspect` and the startup report show `stream` and the timeout for each stream command.
 - `hull test`: `test.exec_stub(name, result_or_fn)` gains a stream form: a stub result may carry
   `chunks = { { fd = "stdout", data = "..." }, ... }`, delivered in order, one per read, then the

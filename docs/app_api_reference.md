@@ -3269,6 +3269,23 @@ refused (inside a database transaction, in JS middleware, at the module top leve
 `test.get` dispatches), and with code `busy` past 8 calls in flight or the command's
 `concurrency`. The command's output is charged to the run (1 unit per 8 bytes) when it arrives.
 
+**`--audit`.** Every `exec.run` and `exec.stream` call writes two JSON records (`cap`
+`exec.run` / `exec.stream`, the same `id` in both):
+- `"event": "start"`, once the broker has the call: `name`, `args` (each escaped as log
+  lines are, at most 1 KiB of each, `args_cut` when one was longer) and `stdin_bytes`.
+- `"event": "end"`, when it is over:
+  - `outcome` is `done`, `busy`, `refused` (the broker refused it), `lost` (the broker went or
+    did not answer) or `cancelled` (the app closed the stream, or the request or task waiting
+    for it went);
+  - for `done`: `status`, `signal` (null when it exited), `timed_out`, `duration_ms`,
+    `stdout_bytes` / `stderr_bytes` and `stdout_truncated` / `stderr_truncated`;
+  - otherwise: `duration_ms` and a `reason`;
+  - a stream's end record also carries the `stdin_bytes` the app wrote.
+
+Output and stdin bytes are never logged. A call refused before it reaches the broker (an
+argument a slot does not admit, `busy` in the binding, a refused wait) writes nothing, and nor
+does a `hull test` stub.
+
 **Tests.** `test.exec_stub(name, result)` (JS `test.execStub`) answers `exec.run(name, ...)`
 in that test file: a result table (omitted fields default: status 0, empty output) or a
 function `(args, name) -> result` that gets a copy of the arguments; `nil` / `null` removes

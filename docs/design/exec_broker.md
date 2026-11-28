@@ -941,8 +941,15 @@ and fixtures in the same PR:
 
 ## 12. Audit and observability
 
-`--audit` gets one record per call: command name, argument count, each argument escaped
-(`hl_log_escape_line`), status / signal, `timed_out`, duration and output byte counts.
+`--audit` gets two records per call, written by the server's side of the channel
+(`exec_audit_start` / `exec_audit_end` in `cap/exec_broker.c`, the same `id` in both):
+- `start`, once the broker has the RUN: the command name, each argument escaped
+  (`hl_log_escape_line`, at most 1 KiB of each), the stdin length;
+- `end`, when the call's slot goes: the outcome (`done`, `busy`, `refused`, `lost`,
+  `cancelled`). `done` carries status / signal, `timed_out`, duration and output byte counts;
+  the others carry a duration and a reason. A stream's `end` also carries the stdin bytes
+  written.
+
 stdout / stderr and stdin are never logged (stdin by its length only). Startup logs one line per command with its resolved path,
 and `exec: degraded` when it applies.
 

@@ -769,6 +769,60 @@ $(tail -15 "$SLOG")"
     fi
 }
 
+# ── --audit: a start and an end record per exec.run / exec.stream call,
+# never the bytes (docs/design/exec_broker.md §12). ──
+phase_audit() {  # phase_audit <rt> <entry>
+    rt=$1; ENTRY=$2
+    EXTRA="--audit"
+    start_server "$D" "$ENTRY" || { EXTRA=; return; }
+    EXTRA=
+    get /tick > /dev/null
+    get /pipes > /dev/null
+    get /echo > /dev/null
+    get /close > /dev/null
+    stop_server
+    out=$(python3 -I - "$SLOG" "$WANT_PIPES" <<'PYCHK'
+import json, sys
+recs = []
+for line in open(sys.argv[1], errors="replace"):
+    line = line.strip()
+    if line.startswith("{") and '"cap":"exec.' in line:
+        recs.append(json.loads(line))
+bad = []
+def one(cap, name, event):
+    m = [r for r in recs if r["cap"] == cap and r["name"] == name and r["event"] == event]
+    if len(m) != 1: bad.append("%s %s %s: %d records" % (cap, name, event, len(m)))
+    return m[0] if m else {}
+s, e = one("exec.stream", "tick", "start"), one("exec.stream", "tick", "end")
+if s.get("args") != [] or s.get("stdin_bytes") != 0: bad.append("tick start %r" % s)
+if (e.get("outcome"), e.get("status"), e.get("signal"), e.get("stdout_bytes"),
+        e.get("timed_out"), e.get("id")) != ("done", 0, None, 8, False, s.get("id")) or \
+        e.get("duration_ms", 0) < 900:
+    bad.append("tick end %r" % e)
+s, e = one("exec.run", "pipes", "start"), one("exec.run", "pipes", "end")
+if s.get("args") != ["0"] or s.get("stdin_bytes") != 900000: bad.append("pipes start %r" % s)
+if (e.get("outcome"), e.get("status"), e.get("stderr_bytes"), e.get("stdout_truncated")) != \
+        ("done", 7, 300000, False) or e.get("stdout_bytes") != len(sys.argv[2]) + 1:
+    bad.append("pipes end %r" % e)
+e = one("exec.stream", "echo", "end")
+if (e.get("outcome"), e.get("status"), e.get("stdin_bytes"), e.get("stdout_bytes")) != \
+        ("done", 0, 141, 141):
+    bad.append("echo end %r" % e)
+e = one("exec.stream", "silent", "end")
+if e.get("outcome") != "cancelled" or "status" in e: bad.append("close end %r" % e)
+text = open(sys.argv[1], errors="replace").read()
+for r in recs:
+    j = json.dumps(r)
+    if "IIIIIIII" in j or "EEEEEEEE" in j or sys.argv[2] in j: bad.append("bytes logged: %s" % j[:120])
+print("ok %d" % len(recs) if not bad else "; ".join(bad))
+PYCHK
+)
+    case "$out" in
+        "ok 8") pass "$rt: --audit writes a start and an end record per call, with no output or stdin bytes" ;;
+        *) fail "$rt: audit records" "$out" ;;
+    esac
+}
+
 run_paths() {  # run_paths <lua|js>
     rt=$1
     D="$FIX/$rt"
@@ -777,6 +831,7 @@ run_paths() {  # run_paths <lua|js>
     phase_paths "$rt" "$ENTRY" ""
     phase_paths "$rt" "$ENTRY" " vm-thread" "--vm-thread"
     phase_dev "$rt" "$ENTRY"
+    phase_audit "$rt" "$ENTRY"
 }
 
 run_suite lua
