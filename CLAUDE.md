@@ -2772,7 +2772,9 @@ to it (`stream_lost` gives the slot up), a parked read owns the queued chunk, an
 would wait runs the wait gates before anything is queued. Under `hull test` only stubs answer, an
 `exec.stream` stub through a stub stream (`hl_exec_stream_stub`) that never waits. `hull build` /
 `hull check` warn about risky commands, stream commands with no time limit, over 60 s or with no
-output total included (`hull/exec_lint.lua`; never a failure). Windows is refused at start; a host with no broker is refused unless
+output total included (`hull/exec_lint.lua`; never a failure). `--audit` gets a start and an end
+record per call, written where the server takes and gives up the call's slot (`exec_audit_start`
+/ `exec_audit_end`): arguments escaped, byte counts, never the output or stdin. Windows is refused at start; a host with no broker is refused unless
 `--allow-degraded-sandbox` (exec.run then fails). **A new process-creating call site (`fork`,
 `exec*`, `posix_spawn*`, `system`, `popen`, or a raw syscall number of one) must be in a file that
 already spawns, else reviewed (INV-16); a new path that starts a declared command must match it
