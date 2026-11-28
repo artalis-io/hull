@@ -6,8 +6,10 @@
 -- says. It points at the declarations most likely to give back what the
 -- sandbox took away - a general-purpose program, a slot whose shape admits
 -- almost anything, a slot that may start with '-', a binary outside the
--- system directories - so the author sees them at `hull build` /
--- `hull check` time rather than in a review.
+-- system directories, a stream command (docs/design/exec_stream.md §7)
+-- with no time limit or one past exec.run's 60 s, or with no total on an
+-- output - so the author sees them at `hull build` / `hull check` time
+-- rather than in a review.
 --
 -- lint(manifest) -> list of { cmd = name, msg = text }, sorted by command.
 -- report(manifest, prefix) prints them to stderr and returns the count.
@@ -50,6 +52,34 @@ end
 
 local function is_slot(a) return type(a) == "table" end
 
+-- A manifest field in either runtime's spelling (Lua snake_case, JS camelCase).
+local function field(c, snake, camel)
+    local v = c[snake]
+    if v == nil then v = c[camel] end
+    return v
+end
+
+-- A stream command may run as long as it declares, or with no time limit
+-- at all, and write any total: the declaration is the bound, so say so.
+local function lint_stream(c, warn)
+    local t = field(c, "timeout_ms", "timeoutMs")
+    if t == 0 then
+        warn("stream command with no time limit (timeout_ms = 0): it runs until the "
+             .. "app closes it, its request goes, or Hull stops")
+    elseif type(t) == "number" and t > 60000 then
+        warn(string.format("stream command with a time limit of %d s, past exec.run's "
+             .. "60 s", t // 1000))
+    end
+    local open = {}
+    if field(c, "stdout_max", "stdoutMax") == nil then open[#open + 1] = "stdout" end
+    if field(c, "stderr_max", "stderrMax") == nil then open[#open + 1] = "stderr" end
+    if #open > 0 then
+        warn("stream command with no total on " .. table.concat(open, " or ")
+             .. ": it may write without bound; declare "
+             .. (#open == 2 and "stdout_max and stderr_max" or open[1] .. "_max"))
+    end
+end
+
 function M.lint(m)
     local out = {}
     local exec = type(m) == "table" and m.exec or nil
@@ -72,6 +102,7 @@ function M.lint(m)
             if path ~= "" and not in_system_dir(path) then
                 warn(path .. " is outside /usr, /bin, /sbin and /opt")
             end
+            if c.stream == true then lint_stream(c, warn) end
             local argv = type(c.argv) == "table" and c.argv or {}
             local seen_fixed, seen_dashdash, suggested = false, false, false
             for i, a in ipairs(argv) do

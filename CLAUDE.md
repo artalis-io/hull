@@ -2761,17 +2761,27 @@ broker's pid exits - so a broker, a command broker or a router killed with SIGKI
 calls. Its limit, logged at start as `exec: limit:`: a KEEPER killed with SIGKILL leaves its one
 job running until it exits. OpenBSD has no backend. `exec.run` parks like `hull.sleep` (attached or detached `HlAsyncCtx`, `hl_exec_op_start`);
 the op's free sends `KILL`, so every cancel path stops the child; a broker lost while serving fails
-the waiting calls, and teardown stops it in step (1) while the loop is alive. Under `hull test` only
-stubs answer. `hull build` / `hull check` warn about risky commands (`hull/exec_lint.lua`; never a
-failure). Windows is refused at start; a host with no broker is refused unless
+the waiting calls, and teardown stops it in step (1) while the loop is alive. A command declared
+`stream = true` may also be run by `exec.stream` (docs/design/exec_stream.md): a stream RUN the
+broker admits only for such a command (that check is the authorization; `exec.run` keeps the plain
+RUN and its 60 s / 16 MiB / 1 MiB limits for every command, §12), its output sent in CHUNKs within
+a 256 KiB credit window per pipe and its stdin taken within STDIN_CREDIT, killed at its totals. On
+the server an `HlExecStream` is refcounted (the binding object and each parked wait; every wake a
+0 ms timer, a wait freed before its wake closes the stream); `live` 0 means no pending slot refers
+to it (`stream_lost` gives the slot up), a parked read owns the queued chunk, and a write that
+would wait runs the wait gates before anything is queued. Under `hull test` only stubs answer, an
+`exec.stream` stub through a stub stream (`hl_exec_stream_stub`) that never waits. `hull build` /
+`hull check` warn about risky commands, stream commands with no time limit, over 60 s or with no
+output total included (`hull/exec_lint.lua`; never a failure). Windows is refused at start; a host with no broker is refused unless
 `--allow-degraded-sandbox` (exec.run then fails). **A new process-creating call site (`fork`,
 `exec*`, `posix_spawn*`, `system`, `popen`, or a raw syscall number of one) must be in a file that
 already spawns, else reviewed (INV-16); a new path that starts a declared command must match it
 through `hl_exec_check_call` first, and nothing else calls `hl_exec_slot_match` (INV-17).** Tests:
 `tests/e2e_exec.sh` (`make e2e-exec`), `tests/e2e_exec_broker.sh` and
-`tests/e2e_exec_broker_macos.sh` (need `make HL_EXEC_TEST_HOOKS=1`, CI jobs `exec-broker` /
-`exec-broker-macos`), `test_exec`, `test_exec_broker_linux`, `test_exec_broker_macos`,
-`fuzz_exec_policy`, `fuzz_exec_slot`.
+`tests/e2e_exec_broker_macos.sh` and `tests/e2e_exec_stream.sh` (need `make HL_EXEC_TEST_HOOKS=1`,
+CI jobs `exec-broker` / `exec-broker-macos`), `test_exec`, `test_exec_broker_linux`,
+`test_exec_broker_macos`, `fuzz_exec_policy`, `fuzz_exec_slot`, `fuzz_exec_frames` (drives a real
+broker; `make fuzz-exec-frames`).
 
 **A cosmo APE only gets a kernel sandbox on Linux and OpenBSD.** Cosmopolitan's
 `pledge()`/`unveil()` enforce where the host gives them a mechanism (seccomp-bpf

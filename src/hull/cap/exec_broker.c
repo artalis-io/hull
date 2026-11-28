@@ -2006,8 +2006,16 @@ static int policy_load(const uint8_t *p, size_t len, char *report, size_t rsz)
             snprintf(report, rsz, "%s", err);
             return -1;
         }
-        int w = snprintf(report + at, rsz - at, "exec: %s -> %s\n", cmd->c.name,
-                         cmd->real);
+        char kind[64] = "";
+        if (cmd->c.flags & HL_EXEC_CMD_STREAM) {
+            if (cmd->c.stream_timeout_ms == 0)
+                snprintf(kind, sizeof kind, " (stream, no time limit)");
+            else
+                snprintf(kind, sizeof kind, " (stream, %u ms)",
+                         (unsigned)cmd->c.stream_timeout_ms);
+        }
+        int w = snprintf(report + at, rsz - at, "exec: %s -> %s%s\n", cmd->c.name,
+                         cmd->real, kind);
         if (w > 0 && (size_t)w < rsz - at) at += (size_t)w;
     }
 
@@ -2686,6 +2694,10 @@ struct HlExecStream {
     size_t       wlen, woff;
     int          wfail;          /* a write's bytes were dropped unsent */
     ExecWait    *w[3];
+    /* A hull test stub (hl_exec_stream_stub): no broker, no slot. */
+    int          stub, stub_killed;
+    uint64_t     stub_cap[2], stub_total[2];
+    uint8_t      stub_cut[2];
 };
 
 static void wait_fire(void *user)
@@ -2890,6 +2902,117 @@ HlExecStream *hl_exec_stream_start(HlAsyncBackendCtx *loop, const char *name,
     s->live = 1;
     s->loop = g_loop;
     return s;
+}
+
+/* ── hull test stub streams ─────────────────────────────────────────── */
+
+HlExecStream *hl_exec_stream_stub(int stdin_open, uint64_t stdin_max, size_t in_len,
+                                  uint64_t stdout_max, uint64_t stderr_max)
+{
+    HlExecStream *s = calloc(1, sizeof *s);
+    if (!s) return NULL;
+    s->refs = 1;
+    s->stub = 1;
+    s->stdin_open = stdin_open;
+    s->stdin_max = stdin_max;
+    s->stdin_sent = in_len;
+    if (!stdin_open) s->stdin_closed = 1;
+    s->stub_cap[0] = stdout_max;
+    s->stub_cap[1] = stderr_max;
+    return s;
+}
+
+int hl_exec_stream_is_stub(const HlExecStream *s) { return s && s->stub; }
+
+static void stub_mark_killed(HlExecStream *s)
+{
+    s->stub_killed = 1;
+    if (s->result) {
+        s->result->status = 0;
+        snprintf(s->result->signal, sizeof s->result->signal, "SIGKILL");
+    }
+}
+
+int hl_exec_stream_stub_chunk(HlExecStream *s, int fd, const void *data, size_t len)
+{
+    if (!s->stub || (fd != 1 && fd != 2)) return -1;
+    if (s->stub_killed || s->closed) return 0;     /* the command is gone */
+    int k = fd - 1;
+    uint64_t room = s->stub_cap[k] - s->stub_total[k];
+    int cut = 0;
+    if ((uint64_t)len > room) { len = (size_t)room; cut = 1; }
+    /* Into chunks of at most CHUNK_MAX, as the broker sends them. */
+    const uint8_t *p = data;
+    while (len) {
+        size_t n = len < HL_EXEC_STREAM_CHUNK_MAX ? len : HL_EXEC_STREAM_CHUNK_MAX;
+        HlExecChunk *c = malloc(sizeof *c + n);
+        if (!c) return -1;
+        c->next = NULL;
+        c->fd = (uint8_t)fd;
+        c->len = n;
+        memcpy(c->data, p, n);
+        if (s->tail) s->tail->next = c; else s->head = c;
+        s->tail = c;
+        s->stub_total[k] += n;
+        p += n;
+        len -= n;
+    }
+    if (s->result) {
+        s->result->out_bytes = s->stub_total[0];
+        s->result->err_bytes = s->stub_total[1];
+    }
+    if (cut) {
+        /* The broker kills a stream at its total (§5). */
+        s->stub_cut[k] = 1;
+        if (s->result) { s->result->out_cut = s->stub_cut[0]; s->result->err_cut = s->stub_cut[1]; }
+        stub_mark_killed(s);
+    }
+    return 0;
+}
+
+int hl_exec_stream_stub_finish(HlExecStream *s, int32_t status, const char *signal,
+                               int timed_out, uint32_t duration_ms)
+{
+    if (!s->stub || s->result) return -1;
+    HlExecReply *r = calloc(1, sizeof *r);
+    if (!r) return -1;
+    r->kind = HL_EXEC_R_DONE;
+    r->stream = 1;
+    r->status = status;
+    if (signal) snprintf(r->signal, sizeof r->signal, "%s", signal);
+    r->timed_out = (uint8_t)(timed_out != 0);
+    r->duration_ms = duration_ms;
+    r->out_bytes = s->stub_total[0];
+    r->err_bytes = s->stub_total[1];
+    r->out_cut = s->stub_cut[0];
+    r->err_cut = s->stub_cut[1];
+    s->result = r;
+    if (s->stub_killed) stub_mark_killed(s);
+    return 0;
+}
+
+int hl_exec_stream_stub_write(HlExecStream *s, size_t n, char *why, size_t why_size,
+                              const char **code)
+{
+    *code = "stdin_closed";
+    if (!s->stdin_open) {
+        snprintf(why, why_size, "exec.stream: stdin is not open (pass stdin_open)");
+        return -1;
+    }
+    if (s->stdin_eof_want || s->closed || s->stub_killed) {
+        snprintf(why, why_size, "exec.stream: the command's stdin is closed");
+        return -1;
+    }
+    if (n > HL_EXEC_STREAM_WRITE_MAX || n > s->stdin_max - s->stdin_sent) {
+        *code = "stdin_too_large";
+        snprintf(why, why_size, n > HL_EXEC_STREAM_WRITE_MAX
+                 ? "exec.stream: a write is at most %u bytes"
+                 : "exec.stream: stdin past the command's stdin_max",
+                 (unsigned)HL_EXEC_STREAM_WRITE_MAX);
+        return -1;
+    }
+    s->stdin_sent += n;
+    return 0;
 }
 
 void hl_exec_stream_retain(HlExecStream *s) { if (s) s->refs++; }
@@ -3191,6 +3314,32 @@ HlExecStream *hl_exec_stream_start(HlAsyncBackendCtx *loop, const char *name,
 void hl_exec_stream_retain(HlExecStream *s) { (void)s; }
 void hl_exec_stream_release(HlExecStream *s) { (void)s; }
 HlExecChunk *hl_exec_stream_take(HlExecStream *s) { (void)s; return NULL; }
+HlExecStream *hl_exec_stream_stub(int stdin_open, uint64_t stdin_max, size_t in_len,
+                                  uint64_t stdout_max, uint64_t stderr_max)
+{
+    (void)stdin_open; (void)stdin_max; (void)in_len; (void)stdout_max; (void)stderr_max;
+    return NULL;
+}
+int hl_exec_stream_is_stub(const HlExecStream *s) { (void)s; return 0; }
+int hl_exec_stream_stub_chunk(HlExecStream *s, int fd, const void *data, size_t len)
+{
+    (void)s; (void)fd; (void)data; (void)len;
+    return -1;
+}
+int hl_exec_stream_stub_finish(HlExecStream *s, int32_t status, const char *signal,
+                               int timed_out, uint32_t duration_ms)
+{
+    (void)s; (void)status; (void)signal; (void)timed_out; (void)duration_ms;
+    return -1;
+}
+int hl_exec_stream_stub_write(HlExecStream *s, size_t n, char *why, size_t why_size,
+                              const char **code)
+{
+    (void)s; (void)n;
+    *code = "stdin_closed";
+    snprintf(why, why_size, "exec.stream: this host has no command broker");
+    return -1;
+}
 size_t hl_exec_stream_peek(const HlExecStream *s) { (void)s; return (size_t)-1; }
 int hl_exec_stream_drained(const HlExecStream *s) { (void)s; return 1; }
 const HlExecReply *hl_exec_stream_result(const HlExecStream *s) { (void)s; return NULL; }

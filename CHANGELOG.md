@@ -24,9 +24,18 @@ release-artifact layout).
   end), `write()`, `close_write()` / `closeWrite()`, `close()`, `result()`, and `for await` in
   JS. An app that stops reading stops the command. A stream that is closed, collected, or whose
   request goes away kills its command. A chunk goes out as soon as the app has caught up, so a
-  request / reply over stdin and stdout waits for no coalescing delay. Not in this release: a
-  `hull test` stub form, an audit record, and a liveness check for a wedged broker on a stream
-  with no time limit.
+  request / reply over stdin and stdout waits for no coalescing delay. Not in this release: an
+  audit record, and a liveness check for a wedged broker on a stream with no time limit.
+- **`test.exec_stub` answers `exec.stream`** (JS `test.execStub`): a stub's `chunks` are read in
+  order, then its result; `on_write` (JS `onWrite`) answers each write with more chunks; the
+  chunks are cut at the command's totals as the broker cuts them. Nothing waits, so a stream stub
+  works inside a `test.get` request. Needs a host with the command broker (Linux, macOS).
+- **Stream commands in `hull build` / `hull check`, `hull inspect` and the startup report.** The
+  lint WARNs about a stream command with no time limit, one over 60 s, or no total on an output;
+  `hull inspect` shows a stream command's own limits and the `exec.run` limits derived from them;
+  the startup report marks each stream command and its time limit.
+- **`fuzz/fuzz_exec_frames`**: drives a real command broker with fuzzed RUN / KILL / CREDIT /
+  STDIN frames (`make fuzz-exec-frames`, 60 s in the Linux exec-broker CI job).
 
 ### Fixed
 

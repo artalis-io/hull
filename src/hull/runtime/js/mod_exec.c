@@ -18,7 +18,9 @@
  *
  * The command broker runs the call (cap/exec_broker.c). Under `hull test`,
  * test.execStub(name, result) registers the answer, given after the full
- * match and cut to stdout_max / stderr_max.
+ * match and cut to stdout_max / stderr_max. For exec.stream the stub
+ * carries `chunks` (and `onWrite`), queued on a stub stream at once
+ * (hl_exec_stream_stub), so nothing waits.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -607,7 +609,68 @@ static JSClassID hl_js_exec_stream_class_id;
 
 typedef struct {
     HlExecStream *s;             /* one reference, released by the finalizer */
+    JSValue       on_write;      /* a hull test stub's onWrite, or undefined */
 } JsExecStream;
+
+/* Queue a stub's chunks (an array of { fd: "stdout" | "stderr", data:
+ * string | ArrayBuffer | typed array }, in order). -1 with an exception. */
+static int stub_push_chunks(JSContext *ctx, HlExecStream *s, JSValueConst arr,
+                            const char *name)
+{
+    if (JS_IsArray(ctx, arr) <= 0) {
+        JS_ThrowTypeError(ctx, "exec stub for '%s': chunks must be an array", name);
+        return -1;
+    }
+    int32_t len = 0;
+    if (hl_js_get_length32(ctx, arr, &len) != 0) return -1;
+    for (int32_t i = 0; i < len; i++) {
+        JSValue c = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+        if (JS_IsException(c)) return -1;
+        if (!JS_IsObject(c)) {
+            JS_FreeValue(ctx, c);
+            JS_ThrowTypeError(ctx, "exec stub for '%s': chunk %d is not an object", name, (int)i);
+            return -1;
+        }
+        JSValue fdv = JS_GetPropertyStr(ctx, c, "fd");
+        JSValue dv = JS_IsException(fdv) ? JS_EXCEPTION : JS_GetPropertyStr(ctx, c, "data");
+        JS_FreeValue(ctx, c);
+        if (JS_IsException(dv)) { JS_FreeValue(ctx, fdv); return -1; }
+        const char *fd = JS_IsString(fdv) ? JS_ToCString(ctx, fdv) : NULL;
+        int f = fd && strcmp(fd, "stdout") == 0 ? 1 : fd && strcmp(fd, "stderr") == 0 ? 2 : 0;
+        if (fd) JS_FreeCString(ctx, fd);
+        JS_FreeValue(ctx, fdv);
+        if (!f) {
+            JS_FreeValue(ctx, dv);
+            JS_ThrowTypeError(ctx, "exec stub for '%s': chunk %d fd must be \"stdout\" "
+                              "or \"stderr\"", name, (int)i);
+            return -1;
+        }
+        int rc;
+        if (JS_IsString(dv)) {
+            size_t n = 0;
+            const char *str = JS_ToCStringLen(ctx, &n, dv);
+            if (!str) { JS_FreeValue(ctx, dv); return -1; }
+            rc = hl_exec_stream_stub_chunk(s, f, str, n);
+            JS_FreeCString(ctx, str);
+        } else {
+            size_t n = 0;
+            const uint8_t *p = hl_js_bytes_view(ctx, &n, dv);
+            /* NULL for anything that is not a buffer (cppcheck reads the
+             * inline view as always NULL). */
+            // cppcheck-suppress knownConditionTrueFalse
+            if (!p) {
+                JS_FreeValue(ctx, dv);
+                JS_ThrowTypeError(ctx, "exec stub for '%s': chunk %d data must be a "
+                                  "string, an ArrayBuffer or a typed array", name, (int)i);
+                return -1;
+            }
+            rc = hl_exec_stream_stub_chunk(s, f, p, n);
+        }
+        JS_FreeValue(ctx, dv);
+        if (rc != 0) { JS_ThrowOutOfMemory(ctx); return -1; }
+    }
+    return 0;
+}
 
 enum { JS_W_READ = 1, JS_W_NEXT, JS_W_WRITE, JS_W_RESULT };
 
@@ -889,6 +952,31 @@ static JSValue js_stream_write(JSContext *ctx, JSValueConst this_val, int argc,
     }
     char why[192];
     const char *code = NULL;
+    if (hl_exec_stream_is_stub(o->s)) {
+        /* hull test: the stub's onWrite(bytes) may give more chunks. The
+         * bytes are copied before any app code runs. */
+        int rc = hl_exec_stream_stub_write(o->s, n, why, sizeof why, &code);
+        JSValue copy = rc == 0 && JS_IsFunction(ctx, o->on_write)
+                     ? JS_NewArrayBufferCopy(ctx, p, n) : JS_UNDEFINED;
+        if (str) JS_FreeCString(ctx, str);
+        if (rc != 0) return settled(ctx, JS_ThrowTypeError(ctx, "%s (%s)", why, code));
+        if (JS_IsException(copy)) return settled(ctx, copy);
+        if (JS_IsUndefined(copy)) return settled(ctx, JS_UNDEFINED);
+        JSValue targs[3] = { copy, JS_NewInt32(ctx, 0), JS_UNDEFINED };
+        JSValue u8 = JS_NewTypedArray(ctx, 3, targs, JS_TYPED_ARRAY_UINT8);
+        JS_FreeValue(ctx, copy);
+        if (JS_IsException(u8)) return settled(ctx, u8);
+        JSValue fn = JS_DupValue(ctx, o->on_write);
+        JSValue more = JS_Call(ctx, fn, JS_UNDEFINED, 1, (JSValueConst *)&u8);
+        JS_FreeValue(ctx, fn);
+        JS_FreeValue(ctx, u8);
+        if (JS_IsException(more)) return settled(ctx, more);
+        /* The app code may have closed it; o itself lives while this_val does. */
+        int prc = JS_IsUndefined(more) || JS_IsNull(more) || !o->s ? 0
+                : stub_push_chunks(ctx, o->s, more, "onWrite");
+        JS_FreeValue(ctx, more);
+        return settled(ctx, prc != 0 ? JS_EXCEPTION : JS_UNDEFINED);
+    }
     /* A write that will have to wait is refused before anything is queued:
      * refused after, its bytes still went out (review of PR 2, L1). */
     if (hl_exec_stream_write_would_wait(o->s, n) && stream_gate(ctx, "exec.stream write()") != 0) {
@@ -947,7 +1035,6 @@ static JSValue js_stream_async_iterator(JSContext *ctx, JSValueConst this_val, i
 
 static void js_stream_finalizer(JSRuntime *rt, JSValue val)
 {
-    (void)rt;
     JsExecStream *o = JS_GetOpaque(val, hl_js_exec_stream_class_id);
     if (!o) return;
     /* A parked wait pins the object, so no wait is parked here. */
@@ -955,11 +1042,20 @@ static void js_stream_finalizer(JSRuntime *rt, JSValue val)
         hl_exec_stream_close(o->s);
         hl_exec_stream_release(o->s);
     }
+    JS_FreeValueRT(rt, o->on_write);
     free(o);
 }
 
+/* A stub's onWrite may capture its own stream: reported so the pair can be
+ * collected. */
+static void js_stream_mark(JSRuntime *rt, JSValueConst val, JS_MarkFunc *mark_func)
+{
+    JsExecStream *o = JS_GetOpaque(val, hl_js_exec_stream_class_id);
+    if (o) JS_MarkValue(rt, o->on_write, mark_func);
+}
+
 static const JSClassDef js_exec_stream_class = {
-    "ExecStream", .finalizer = js_stream_finalizer,
+    "ExecStream", .finalizer = js_stream_finalizer, .gc_mark = js_stream_mark,
 };
 
 static const JSCFunctionListEntry js_stream_methods[] = {
@@ -997,6 +1093,113 @@ static int stream_register_class(JSContext *ctx)
     JS_FreeValue(ctx, global);
     hl_js_set_class_proto_frozen(ctx, hl_js_exec_stream_class_id, proto);
     return 0;
+}
+
+/* Under hull test: the stream test.execStub registered for @p name, after
+ * the same match. Its chunks and result are queued at once, so nothing
+ * waits (a request test.get dispatches may not). */
+static JSValue stub_stream(JSContext *ctx, JSValueConst stubs, JSValueConst name_v,
+                           const char *name, const char *const *args, const size_t *lens,
+                           size_t n, const uint8_t *in, size_t in_len, int stdin_open,
+                           const HlExecCmd *cmd)
+{
+    JSValue stub = JS_GetPropertyStr(ctx, stubs, name);
+    if (JS_IsException(stub)) return stub;
+    if (JS_IsUndefined(stub))
+        return JS_ThrowTypeError(ctx, "exec.stream: no stub for '%s' in hull test "
+                                 "(register one with test.execStub)", name);
+    if (JS_IsFunction(ctx, stub)) {
+        /* stub(args, name, stdin): stdin as an ArrayBuffer, or undefined */
+        JSValue copy = JS_NewArray(ctx), stub_in = JS_UNDEFINED;
+        int bad = JS_IsException(copy);
+        for (size_t i = 0; !bad && i < n; i++) {
+            JSValue sv = JS_NewStringLen(ctx, args[i], lens[i]);
+            bad = JS_IsException(sv) ||
+                  JS_DefinePropertyValueUint32(ctx, copy, (uint32_t)i, sv, JS_PROP_C_W_E) < 0;
+        }
+        if (!bad && in_len) {
+            stub_in = JS_NewArrayBufferCopy(ctx, in, in_len);
+            bad = JS_IsException(stub_in);
+        }
+        JSValue r = JS_EXCEPTION;
+        if (!bad) {
+            JSValue cargs[3] = { copy, JS_DupValue(ctx, name_v), stub_in };
+            r = JS_Call(ctx, stub, JS_UNDEFINED, 3, cargs);
+            JS_FreeValue(ctx, cargs[1]);
+        }
+        JS_FreeValue(ctx, copy);
+        JS_FreeValue(ctx, stub_in);
+        JS_FreeValue(ctx, stub);
+        if (JS_IsException(r)) return r;
+        stub = r;
+    }
+    if (!JS_IsObject(stub) || JS_IsFunction(ctx, stub)) {
+        JS_FreeValue(ctx, stub);
+        return JS_ThrowTypeError(ctx, "exec stub for '%s' must be (or give) a result "
+                                 "object", name);
+    }
+    if (stream_register_class(ctx) != 0) { JS_FreeValue(ctx, stub); return JS_EXCEPTION; }
+    JsExecStream *o = calloc(1, sizeof *o);
+    if (!o) { JS_FreeValue(ctx, stub); return JS_ThrowOutOfMemory(ctx); }
+    o->on_write = JS_UNDEFINED;
+    JSValue obj = JS_NewObjectClass(ctx, (int)hl_js_exec_stream_class_id);
+    if (JS_IsException(obj)) { free(o); JS_FreeValue(ctx, stub); return obj; }
+    JS_SetOpaque(obj, o);              /* the finalizer frees o from here on */
+    o->s = hl_exec_stream_stub(stdin_open, cmd->stream_stdin_max, in_len,
+                               cmd->stream_stdout_max, cmd->stream_stderr_max);
+    JSValue fail = JS_UNDEFINED;
+    if (!o->s) {
+        fail = JS_ThrowTypeError(ctx, "exec.stream('%s'): stream stubs need a host with "
+                                 "the command broker (Linux, macOS)", name);
+        goto bad;
+    }
+    JSValue chunks = JS_GetPropertyStr(ctx, stub, "chunks");
+    if (JS_IsException(chunks)) goto bad_exc;
+    int rc = JS_IsUndefined(chunks) ? 0 : stub_push_chunks(ctx, o->s, chunks, name);
+    JS_FreeValue(ctx, chunks);
+    if (rc != 0) goto bad_exc;
+    int32_t status = 0, ms = 0;
+    JSValue v = JS_GetPropertyStr(ctx, stub, "status");
+    if (JS_IsException(v) || (!JS_IsUndefined(v) && JS_ToInt32(ctx, &status, v) != 0)) {
+        JS_FreeValue(ctx, v);
+        goto bad_exc;
+    }
+    JS_FreeValue(ctx, v);
+    v = JS_GetPropertyStr(ctx, stub, "durationMs");
+    if (JS_IsException(v) || (!JS_IsUndefined(v) && JS_ToInt32(ctx, &ms, v) != 0)) {
+        JS_FreeValue(ctx, v);
+        goto bad_exc;
+    }
+    JS_FreeValue(ctx, v);
+    v = JS_GetPropertyStr(ctx, stub, "timedOut");
+    if (JS_IsException(v)) goto bad_exc;
+    int timed_out = JS_ToBool(ctx, v) > 0;
+    JS_FreeValue(ctx, v);
+    v = JS_GetPropertyStr(ctx, stub, "signal");
+    if (JS_IsException(v)) goto bad_exc;
+    int has_sig = !(JS_IsUndefined(v) || JS_IsNull(v));
+    const char *sig = has_sig ? JS_ToCString(ctx, v) : NULL;
+    JS_FreeValue(ctx, v);
+    if (has_sig && !sig) goto bad_exc;
+    rc = hl_exec_stream_stub_finish(o->s, status, sig, timed_out, (uint32_t)(ms < 0 ? 0 : ms));
+    if (sig) JS_FreeCString(ctx, sig);
+    if (rc != 0) { fail = JS_ThrowOutOfMemory(ctx); goto bad; }
+    v = JS_GetPropertyStr(ctx, stub, "onWrite");
+    if (JS_IsException(v)) goto bad_exc;
+    if (!JS_IsUndefined(v) && !JS_IsFunction(ctx, v)) {
+        JS_FreeValue(ctx, v);
+        fail = JS_ThrowTypeError(ctx, "exec stub for '%s': onWrite must be a function", name);
+        goto bad;
+    }
+    o->on_write = v;
+    JS_FreeValue(ctx, stub);
+    return obj;
+bad_exc:
+    fail = JS_EXCEPTION;
+bad:
+    JS_FreeValue(ctx, stub);
+    JS_FreeValue(ctx, obj);
+    return fail;
 }
 
 /* exec.stream(name, args?, opts?) -> stream (at once) */
@@ -1079,14 +1282,6 @@ static JSValue js_exec_stream(JSContext *ctx, JSValueConst this_val,
         JS_ThrowTypeError(ctx, "exec.stream('%s'): stdin is longer than its stdinMax", name);
         goto out;
     }
-    JSValue stubs = exec_stubs(ctx);
-    int under_test = JS_IsObject(stubs);
-    JS_FreeValue(ctx, stubs);
-    if (under_test) {
-        JS_ThrowTypeError(ctx, "exec.stream: hull test has no stream stubs yet; test "
-                          "the command through exec.run");
-        goto out;
-    }
     /* Its reads will wait: refused where a wait is. */
     if (js && (js->in_middleware || js->in_load)) {
         JS_ThrowTypeError(ctx, "exec.stream cannot wait %s", js->in_middleware
@@ -1097,6 +1292,14 @@ static JSValue js_exec_stream(JSContext *ctx, JSValueConst this_val,
 #ifdef HL_ENABLE_DB
     if (hl_js_db_refuse_wait(ctx, "exec.stream") != 0) goto out;
 #endif
+    JSValue stubs = exec_stubs(ctx);
+    if (JS_IsObject(stubs)) {           /* hull test: the stub answers */
+        ret = stub_stream(ctx, stubs, argv[0], name, args, lens, n, in, in_len,
+                          stdin_open, &cmd);
+        JS_FreeValue(ctx, stubs);
+        goto out;
+    }
+    JS_FreeValue(ctx, stubs);
     if (!js || !hl_exec_broker_running() || !js->base.async_ctx) {
         JS_ThrowTypeError(ctx, "exec.stream('%s'): the command broker is not running "
                           "(this host has none, or it was lost)", name);
@@ -1111,6 +1314,7 @@ static JSValue js_exec_stream(JSContext *ctx, JSValueConst this_val,
     if (stream_register_class(ctx) != 0) goto out;
     JsExecStream *o = calloc(1, sizeof *o);
     if (!o) { JS_ThrowOutOfMemory(ctx); goto out; }
+    o->on_write = JS_UNDEFINED;
     JSValue obj = JS_NewObjectClass(ctx, (int)hl_js_exec_stream_class_id);
     if (JS_IsException(obj)) { free(o); goto out; }
     JS_SetOpaque(obj, o);              /* the finalizer frees o from here on */

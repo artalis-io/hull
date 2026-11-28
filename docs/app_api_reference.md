@@ -3257,7 +3257,8 @@ section is refused by the resolver. The section is part of the signed manifest.
 binary is a general-purpose program (a shell, an interpreter, `env`, `find`, `xargs`, `ssh`,
 `curl`, `sudo`, `systemd-run`, `git`, `tar`, ...), whose path is outside `/usr`, `/bin`,
 `/sbin` and `/opt`, or that has a slot with no `chars` or `enum`, a slot with `allow_dash`, a
-slot after fixed arguments with no `--` before it.
+slot after fixed arguments with no `--` before it, and a stream command with no time limit,
+one over 60 s, or no total on an output (below).
 `hull inspect` shows each command's pin and its whole authority: `host.read`, `host.write`,
 `manifest.fs.read`, `manifest.fs.write` and the scope of `host.unix_sockets`.
 
@@ -3275,6 +3276,100 @@ it. The call is matched in full before the stub answers, and the output is cut t
 command's `stdout_max` / `stderr_max`, so a test sees what the broker will return. JS stub
 output is a byte string (code units 0..255) or an ArrayBuffer. Stubs reset between test
 files. With no stub the call fails naming the command.
+
+#### Streamed commands (`exec.stream`)
+
+A command declared with `stream = true` may also be run as a **stream**: a live handle to the
+running command, whose output is read as it comes and whose stdin can be written while it runs
+(a log follower, a progress bar, a long job, a line-oriented helper). Design:
+[docs/design/exec_stream.md](design/exec_stream.md).
+
+```lua
+app.manifest({
+  modules = { "hull/exec@1" },
+  exec = {
+    follow = { path = "/usr/bin/journalctl", argv = { "-f", "-u", "hs-api.service" },
+               stream = true, timeout_ms = 0,              -- no time limit
+               stdout_max = 1073741824, stderr_max = 65536 },
+    helper = { path = "/usr/local/libexec/hs-helper", stream = true,
+               timeout_ms = 600000, stdout_max = 16777216, stderr_max = 65536,
+               stdin_max = 16777216 },                     -- the total over the stream's life
+  },
+})
+local exec = require("hull.exec")
+local s = exec.stream("follow")              -- at once; the command starts
+while true do
+  local c = s:read()                          -- waits; { fd = "stdout" | "stderr", data } or nil
+  if not c then break end
+  -- ...
+end
+local r = s:result()   -- { status, signal, timed_out, stdout_truncated, stderr_truncated,
+                       --   stdout_length, stderr_length, duration_ms }
+
+local h <close> = exec.stream("helper", {}, { stdin_open = true })
+h:write("ping\n")                           -- waits only for the broker's credit
+local reply = h:read()
+h:close_write()                               -- EOF on its stdin
+```
+
+JS: `exec.stream(name, args?, { stdin, stdinOpen })` returns the stream at once; `read()`
+resolves to `{ fd, data: Uint8Array }` or `null` once both pipes are closed, `for await (const c
+of s)` reads every chunk (breaking out closes the stream), `write(bytes)` resolves once the
+broker has them, `closeWrite()`, `close()`, and `result()` resolves to `{ status, signal,
+timedOut, stdoutTruncated, stderrTruncated, stdoutLength, stderrLength, durationMs }`.
+
+**The declaration.** `stream = true` keeps every rule of a command (path, argv slots, `host`,
+`manifest`, `sha256`, `concurrency`) and changes three limits:
+
+| Field | `exec.run` command | `stream = true` command |
+|---|---|---|
+| `timeout_ms` | 100..60000 (default 5000) | `0` (no time limit) or 100..2^32-2 (default 5000) |
+| `stdout_max` / `stderr_max` | up to 16 MiB / 1 MiB, buffered | any total (Lua up to 2^63, JS 2^53 - 1), or omitted for none; never buffered whole |
+| `stdin_max` | up to 1 MiB, one buffer | any total the app may write over the stream's life |
+
+The time a command waits because the app is not reading COUNTS toward its timeout: a reader
+that stops makes it time out, never keeps it alive. With `timeout_ms = 0` the command runs
+until it exits, the app closes the stream, its request goes, the stream is collected, or Hull
+stops. A stream command still answers `exec.run`, with `exec.run`'s limits (at most 60 s, 16 MiB,
+1 MiB; a command with no time limit runs 60 s under `exec.run`) and `exec.run`'s semantics: its
+output is cut at the cap and the command runs on, where a stream is KILLED at its total
+(`stdout_truncated = true`, `signal = "SIGKILL"`). `exec.stream` of a command without
+`stream = true` is refused: the broker checks that too, so a compromised app process cannot
+read an ordinary command's output as it comes.
+
+**Back pressure, not buffering.** The broker reads each pipe only while the app has room: at
+most 256 KiB per pipe is in flight, in chunks of at most 64 KiB. A chunk goes to the app at once
+when the app has caught up, and is coalesced for up to 20 ms only while it lags, so a request /
+reply exchange over stdin and stdout is not delayed. `write` sends what the broker's credit
+allows and waits for the rest (at most 1 MiB per call); a write while another is waiting is
+refused `busy`, as is a second read while one waits. The output is charged to the run as it is
+read (320 units a chunk + 1 per 8 bytes).
+
+**It ends with its owner.** `close()` (and Lua `<close>` / `__gc`, a JS stream collected) kills
+the command; so does a client disconnect or a cancelled run while a read waits, the broker's
+loss (every stream fails, a parked write as `stdin_closed`) and Hull's shutdown. After `close()`
+reads return nil / null and `result()` reports `SIGKILL` (unless the command had ended).
+
+**Errors and refusals.** As for `exec.run`, an undeclared name or a bad argument raises at
+once. A read, write or result that would wait is refused `wait_refused` where a wait is refused
+(in a database transaction, in JS middleware, at the module top level); `exec.stream` itself
+is refused there too, and `busy` past 8 calls in flight or the command's `concurrency`. A write
+that would wait is refused BEFORE anything is sent. A write past `stdin_max` fails with
+`stdin_too_large`, a write after `close_write` or once the command closed its stdin with
+`stdin_closed`.
+
+**Tests.** `test.exec_stub(name, result)` answers `exec.stream` too: the result carries `chunks
+= { { fd = "stdout" | "stderr", data = ... }, ... }`, read in order, one per read, then the
+result fields (`status`, `signal`, `timed_out`, `duration_ms`), and an optional `on_write(bytes)`
+(JS `onWrite`) that returns more chunks for each write. A stub function `(args, name, stdin)`
+may return the same. The chunks are cut at the command's totals and the stream is then
+"killed", as the broker does, and nothing waits, so a stream stub works inside a request
+`test.get` dispatches. Stream stubs need a host with the command broker (Linux, macOS).
+
+**Lint and inspect.** `hull build` / `hull check` also WARN about a stream command with no time
+limit, one over 60 s, and one with no total on stdout or stderr. `hull inspect` shows a stream
+command's own limits (an unbounded one flagged `[!]`) and the `exec.run` limits derived from
+them, and the startup report marks each stream command and its time limit.
 
 ### Test harness (`hull test`)
 

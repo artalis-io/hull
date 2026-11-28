@@ -367,6 +367,15 @@ run_suite() {  # run_suite <lua|js>
     echo "== $rt"
     start_server "$D" "$ENTRY" || return
 
+    # exec_stream.startup_report: stream commands are marked, with their time
+    if grep -q 'exec: tick -> .* (stream, 10000 ms)' "$SLOG" &&
+       grep -q 'exec: echo -> .* (stream, no time limit)' "$SLOG" &&
+       grep 'exec: pipes -> ' "$SLOG" | grep -vq '(stream'; then
+        pass "$rt: the startup report marks stream commands and their time limit"
+    else
+        fail "$rt: startup report" "$(grep 'exec: [a-z]* -> ' "$SLOG")"
+    fi
+
     # exec_run_pipes.stderr_before_stdin
     out=$(get /pipes)
     want="status=7 stdout=$WANT_PIPES stderr=300000 allE=true cut=false/false"

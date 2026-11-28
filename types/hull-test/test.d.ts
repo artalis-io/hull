@@ -44,6 +44,24 @@ declare namespace Hull {
         stderr?: string | ArrayBuffer;
         timedOut?: boolean;
         durationMs?: number;
+        /**
+         * A stream command (`exec.stream`): its output, delivered in order,
+         * one per read, then the result (cut and killed at the command's
+         * totals, as the broker does). `stdout` / `stderr` are not used.
+         */
+        chunks?: TestExecStubChunk[];
+        /**
+         * A stream command opened with `stdinOpen`: called with the bytes of
+         * each write; the chunks it returns are read next.
+         */
+        onWrite?: (bytes: Uint8Array) => TestExecStubChunk[] | undefined | null | void;
+    }
+
+    /** One chunk of a stream stub's output. */
+    interface TestExecStubChunk {
+        fd: "stdout" | "stderr";
+        /** A string (UTF-8) or bytes. */
+        data: string | ArrayBuffer | ArrayBufferView;
     }
 
     /** The result of `test.runMain`. */
@@ -131,10 +149,12 @@ declare namespace Hull {
         /** Run `app.main` once with captured stdio. */
         runMain(args?: string[], opts?: TestRunMainOptions): TestRunMainResult;
         /**
-         * Answer `exec.run(name, ...)` in this file's tests: a result object, or
-         * a function `(args, name, stdin) => result` (`stdin` the call's stdin
-         * as an ArrayBuffer, or undefined); null removes the stub. The call is
-         * still matched against the declared command first.
+         * Answer `exec.run(name, ...)` / `exec.stream(name, ...)` in this
+         * file's tests: a result object, or a function `(args, name, stdin) =>
+         * result` (`stdin` the call's stdin as an ArrayBuffer, or undefined);
+         * null removes the stub. The call is still matched against the
+         * declared command first. For `exec.stream` the result carries
+         * `chunks` (and `onWrite`); nothing waits.
          */
         execStub(name: string,
                  result: TestExecStubResult
