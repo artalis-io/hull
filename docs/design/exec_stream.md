@@ -2,7 +2,8 @@
 
 - **Status:** reviewed (2026-11-27, decisions in §11). Implemented: PR 1 (policy, broker,
   router), PR 2 (`exec.stream` in both runtimes) and PR 3 (test stubs, inspect, lint, docs).
-  Audit records (§8) and the off-heap hold (§5.1) followed. Open: the liveness probe (§7). §12 records why
+  Audit records (§8) and the off-heap hold (§5.1) followed, then the liveness probe (§7): the
+  per-command idle limit and the broker heartbeat. §12 records why
   `exec.run` keeps its own path.
 - **Parent design:** [exec_broker.md](exec_broker.md) (§2 API, §3 manifest, §5 broker, §7 lifetime,
   §12 audit) and [exec_broker_macos_isolation.md](exec_broker_macos_isolation.md) (the router).
@@ -279,7 +280,7 @@ nearly full.
   to now again when the hold ends, so back pressure is never read as silence. Writing stdin
   does not count as activity (it is the app's, not the command's). Under the macOS router the
   command's own broker enforces it (the router's copy of the job has no idle limit). This ends
-  a hung COMMAND; a broker that is alive but wedged is still the follow-up above.
+  a hung COMMAND; a broker that is alive but wedged is the heartbeat's (above).
 
 ## 8. Audit, inspect, tests
 

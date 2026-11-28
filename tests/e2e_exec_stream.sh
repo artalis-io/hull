@@ -1144,6 +1144,37 @@ $(grep 'exec' "$SLOG" | tail -5)"
         wedge_case "$rt" "a wedged command broker (router)" sub \
             "after=nil result=false err=*broker is gone* run=true"
     fi
+    stop_wedged "$rt"
+}
+
+# stop_wedged <rt>: a broker that does not exit on the channel's EOF (here
+# SIGSTOPped) is left at teardown, never killed - the sandboxed server has no
+# kill(2) of another process, and on Linux trying one kills the SERVER. The
+# server exits as it always does; the broker dies with it.
+stop_wedged() {
+    rt=$1
+    start_server "$D" "$ENTRY" || return
+    bpid=$(sed -n 's/.*exec broker pid \([0-9]*\).*/\1/p' "$SLOG" | head -1)
+    [ -n "$bpid" ] || { fail "$rt: wedged broker at stop: no broker pid" "$(cat "$SLOG")"; stop_server; return; }
+    PIDS="$PIDS $bpid"
+    kill -STOP "$bpid"
+    t0=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    kill -TERM "$SPID"
+    st=0; wait "$SPID" || st=$?
+    ms=$(( $(python3 -c 'import time; print(int(time.time() * 1000))') - t0 ))
+    # macOS: nothing ends a stopped broker until it runs again (its exit
+    # watch), so it is still there iff the server did not kill it. Linux:
+    # PDEATHSIG's SIGKILL has already ended it.
+    left=1
+    [ "$(uname -s)" = Darwin ] && ! kill -0 "$bpid" 2>/dev/null && left=0
+    kill -CONT "$bpid" 2>/dev/null
+    if [ "$st" = 0 ] && [ "$ms" -lt 5000 ] && [ "$left" = 1 ] && gone_within "$bpid"; then
+        pass "$rt: a broker wedged at shutdown is left, not killed: the server exits 0 in ${ms} ms, the broker goes with it"
+    else
+        fail "$rt: wedged broker at stop" "status=$st ms=$ms left=$left
+$(ps -o pid,ppid,stat,command -p "$bpid" 2>/dev/null)
+$(tail -5 "$SLOG")"
+    fi
 }
 
 run_paths() {  # run_paths <lua|js>

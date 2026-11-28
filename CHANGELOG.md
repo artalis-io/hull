@@ -27,6 +27,15 @@ release-artifact layout).
   server. On macOS the router holds each command broker to the same, so one wedged command
   fails its own calls and the others keep working.
 
+### Fixed
+
+- **`hull/exec`: a broker slow to exit no longer kills the server at shutdown.** If the command
+  broker had not exited 500 ms after its channel closed, teardown sent it `SIGKILL`. Under the
+  Linux sandbox a `kill(2)` of another process is refused by killing the caller, so the server
+  died with `SIGKILL` instead of exiting with its own status. The broker is now left: it exits on
+  the channel's EOF once it runs again, and otherwise dies with the server (`PR_SET_PDEATHSIG` on
+  Linux, its exit watch on macOS), with its commands.
+
 ## [0.29.0] - 2026-11-28
 
 `hull/exec` gains `exec.stream`: a command declared `stream = true` is read as it writes and

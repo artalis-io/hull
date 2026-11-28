@@ -785,7 +785,10 @@ The broker in turn dies with the app in three ways:
   exists, and the main thread lives as long as the process, so the per-thread trigger of
   PDEATHSIG fires only when the app exits;
 - EOF on the channel, everywhere;
-- `hl_exec_broker_stop()` in teardown.
+- `hl_exec_broker_stop()` in teardown: it closes the channel and waits up to 500 ms for the
+  broker to exit on the EOF. One that does not is left, never killed: every stop runs after
+  sandbox phase 1, and the server has no `kill(2)` of another process (on Linux pledge kills the
+  CALLER for one). It dies with the server, by the first fact (Linux) or its exit watch (macOS).
 
 On EOF or a stop the broker also SIGKILLs every live child's process group before it exits;
 on its own abrupt death the children's PDEATHSIG does the same. Teardown order: the broker
