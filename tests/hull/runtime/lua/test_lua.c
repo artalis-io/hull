@@ -1359,6 +1359,11 @@ UTEST(lua_runtime, instruction_limit_catches_infinite_loop)
     rc = luaL_dostring(limited_lua.L, "return 1 + 1");
     ASSERT_NE(rc, LUA_OK);
     lua_pop(limited_lua.L, 1);
+    /* The collector's work is charged to the run (Lua patch 0004): with a
+     * 1000-unit budget one incremental step during the next chunk's
+     * compile could trip it, depending on how big the VM's heap happens to
+     * be (a build flavor, one more module). Collect first, unarmed. */
+    lua_gc(limited_lua.L, LUA_GCCOLLECT);
     HL_LUA_ARM(&limited_lua, limited_lua.L);
 
     /* VM should still be functional after the error */
