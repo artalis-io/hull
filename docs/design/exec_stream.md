@@ -77,6 +77,10 @@ exec = {
 | `stdin_max` | ..1 MiB, one buffer | any size up to 2^63: the total the app may write over the call's life; omitted = `/dev/null` (stdin always needs a declared total) |
 | `concurrency` | 1..8 | 1..8; the process-wide `HL_EXEC_MAX_INFLIGHT` (8) still counts both kinds |
 
+A JS manifest gives the totals as numbers, so there they are integers up to 2^53 - 1 (a larger
+value is refused at load, never rounded); Lua takes integers up to 2^63. Either is far past any
+total a call can reach.
+
 Validation lives in `cap/exec.c` next to the existing checks; both extractors read the key (JS
 `stream: true`). The flag is a command flag bit in the encoded policy (`HL_EXEC_CMD_STREAM`), so
 it is signed with the manifest and seen by the broker and by every command broker.

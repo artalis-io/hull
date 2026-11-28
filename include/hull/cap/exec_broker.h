@@ -194,6 +194,10 @@ int  hl_exec_stream_write(HlExecStream *s, const void *p, size_t n,
                           char *why, size_t why_size, const char **code);
 /* Is a write still waiting for credit? */
 int  hl_exec_stream_writing(const HlExecStream *s);
+/* Would a write of @p n bytes have to wait (more than the credit, or a
+ * write already pending)? A binding runs its wait gates first when so, so
+ * a refused wait sends nothing. */
+int  hl_exec_stream_write_would_wait(const HlExecStream *s, size_t n);
 /* After a write waited: 1 when its bytes all went out, 0 when the stdin
  * closed first (the child closed it, or the call ended). */
 int  hl_exec_stream_write_ok(const HlExecStream *s);

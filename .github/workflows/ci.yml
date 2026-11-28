@@ -2920,6 +2920,22 @@ jobs:
       - name: exec.run pipes and exec.stream E2E (both runtimes)
         timeout-minutes: 5
         run: HULL_REQUIRE_EXEC_BROKER=1 sh tests/e2e_exec_stream.sh
+      # The broker's frame handling, driven with fuzzed RUN / KILL / CREDIT /
+      # STDIN frames (fuzz/fuzz_exec_frames.c). Below Landlock ABI 6 the
+      # broker runs degraded, as the e2e does.
+      - name: Fuzz the broker's frames (60 s)
+        timeout-minutes: 5
+        run: |
+          sh .github/scripts/apt-fallback-mirrors.sh && sudo apt-get update && sudo apt-get install -y clang
+          # Not through make: CC=clang would change the build config and
+          # clean build/, taking the hull this drives with it.
+          clang -std=c11 -g -O1 -fsanitize=fuzzer,address,undefined -D_DEFAULT_SOURCE \
+              -Iinclude -Ivendor/keel/include -o fuzz/fuzz_exec_frames \
+              fuzz/fuzz_exec_frames.c src/hull/cap/exec.c fuzz/fuzz_exec_stubs.c
+          ABI=$(python3 -c 'import ctypes; print(ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1))' 2>/dev/null || echo 0)
+          if [ "$ABI" -lt 6 ] 2>/dev/null; then export HULL_FUZZ_DEGRADED=1; fi
+          HULL_FUZZ_HULL=build/hull ./fuzz/fuzz_exec_frames fuzz/corpus_exec_frames/ \
+              -max_total_time=60 -timeout=60
 
   exec-broker-macos:
     needs: [classify]

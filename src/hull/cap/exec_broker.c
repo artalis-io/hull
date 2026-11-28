@@ -2643,6 +2643,34 @@ typedef struct ExecWait {
     void         *ud;
 } ExecWait;
 
+#ifdef HL_EXEC_TEST_HOOKS
+/* Test hooks (tests/e2e_exec_stream.sh): HULL_TEST_EXEC_FAIL_WRITE names a
+ * file; each time a new one appears there (by inode and mtime: the sandbox
+ * lets the app stat it, not remove it) the next stream write to the broker
+ * fails. HULL_TEST_EXEC_WAKE_DELAY_MS delays every stream wake, widening
+ * the window between a wait's wake and its resume. */
+static int stream_test_fail_write(void)
+{
+    static ino_t last_ino;
+    static time_t last_mtime;
+    const char *f = getenv("HULL_TEST_EXEC_FAIL_WRITE");
+    struct stat st;
+    if (!f || !*f || stat(f, &st) != 0) return 0;
+    if (st.st_ino == last_ino && st.st_mtime == last_mtime) return 0;
+    last_ino = st.st_ino;
+    last_mtime = st.st_mtime;
+    return 1;
+}
+static uint32_t stream_test_wake_ms(void)
+{
+    const char *v = getenv("HULL_TEST_EXEC_WAKE_DELAY_MS");
+    return v ? (uint32_t)strtoul(v, NULL, 10) : 0;
+}
+#else
+#define stream_test_fail_write() 0
+#define stream_test_wake_ms() 0u
+#endif
+
 struct HlExecStream {
     int          refs;
     uint32_t     id;
@@ -2688,7 +2716,7 @@ static void stream_wake(HlExecStream *s)
     for (int k = 0; k < 3; k++) {
         ExecWait *w = s->w[k];
         if (!w || w->done || w->timer || !wait_ready(s, k) || !s->loop) continue;
-        w->timer = hl_async_backend()->timer_add(s->loop, 0, wait_fire, w);
+        w->timer = hl_async_backend()->timer_add(s->loop, stream_test_wake_ms(), wait_fire, w);
     }
 }
 
@@ -2706,12 +2734,30 @@ static void stream_drop_queue(HlExecStream *s)
     s->wlen = s->woff = 0;
 }
 
-/* The call ended without a DONE (the broker lost or stopped). */
-static void stream_lost(HlExecStream *s, const char *why, int wake)
+/* Stdin is over: a write still pending fails, and nothing is pending any
+ * more (hl_exec_stream_writing() reads 0, so a parked write sees the
+ * failure; review of PR 2, M1). */
+static void stream_stdin_end(HlExecStream *s)
 {
-    s->live = 0;
     s->stdin_closed = 1;
     if (s->woff < s->wlen) s->wfail = 1;
+    free(s->wbuf);
+    s->wbuf = NULL;
+    s->wlen = s->woff = 0;
+}
+
+/* The call ended without a DONE (the broker lost, stopped or not answering).
+ * The call's pending slot goes too, with a KILL sent if the channel takes
+ * it: `live` 0 means no slot refers to the stream, so nothing reaches it
+ * once it is freed (review of PR 2, H1: a failed CREDIT / STDIN write left
+ * the slot, close() then sent no cancel, and a later frame or the lost-
+ * broker sweep wrote into the freed stream). */
+static void stream_lost(HlExecStream *s, const char *why, int wake)
+{
+    Pending *pd = pend_find(s->id);
+    if (pd && pd->stream == s) hl_exec_cancel(s->id);
+    s->live = 0;
+    stream_stdin_end(s);
     if (!s->result && (s->result = calloc(1, sizeof *s->result)) != NULL) {
         s->result->kind = HL_EXEC_R_LOST;
         s->result->stream = 1;
@@ -2728,9 +2774,10 @@ static void stdin_flush(HlExecStream *s)
         if (n > s->credit) n = s->credit;
         if (n > HL_EXEC_STREAM_CHUNK_MAX) n = HL_EXEC_STREAM_CHUNK_MAX;
         uint8_t fl = (s->stdin_eof_want && s->woff + n == s->wlen) ? HX_STDIN_EOF : 0;
-        if (hl_chan_write_frame(g_fd, HX_MAGIC, HX_STDIN, s->id, &fl, 1, s->wbuf + s->woff,
+        if (stream_test_fail_write() ||
+            hl_chan_write_frame(g_fd, HX_MAGIC, HX_STDIN, s->id, &fl, 1, s->wbuf + s->woff,
                                 n, hl_chan_mono_ms() + 1000) != 0) {
-            stream_lost(s, "exec: the command broker is not answering", 0);
+            stream_lost(s, "exec: the command broker is not answering", 1);
             return;
         }
         s->woff += n;
@@ -2745,7 +2792,7 @@ static void stdin_flush(HlExecStream *s)
             uint8_t fl = HX_STDIN_EOF;
             if (hl_chan_write_frame(g_fd, HX_MAGIC, HX_STDIN, s->id, &fl, 1, NULL, 0,
                                     hl_chan_mono_ms() + 1000) != 0)
-                stream_lost(s, "exec: the command broker is not answering", 0);
+                stream_lost(s, "exec: the command broker is not answering", 1);
             s->stdin_eof_sent = 1;
         }
     }
@@ -2777,11 +2824,7 @@ static void stream_deliver(Pending *pd, uint32_t type, const uint8_t *p, size_t 
         if (len != 5) return;
         s->credit += hl_chan_get32(p + 1);
         if (p[0] & HX_STDIN_CLOSED) {
-            s->stdin_closed = 1;
-            if (s->woff < s->wlen) s->wfail = 1;
-            free(s->wbuf);
-            s->wbuf = NULL;
-            s->wlen = s->woff = 0;
+            stream_stdin_end(s);
         } else {
             stdin_flush(s);
         }
@@ -2792,8 +2835,7 @@ static void stream_deliver(Pending *pd, uint32_t type, const uint8_t *p, size_t 
     pd->used = 0;
     pd->stream = NULL;
     s->live = 0;
-    s->stdin_closed = 1;
-    if (s->woff < s->wlen) s->wfail = 1;
+    stream_stdin_end(s);
     HlExecReply *r = calloc(1, sizeof *r);
     if (r) {
         r->stream = 1;
@@ -2856,6 +2898,8 @@ void hl_exec_stream_release(HlExecStream *s)
 {
     if (!s || --s->refs > 0) return;
     hl_exec_stream_close(s);
+    Pending *pd = pend_find(s->id);       /* never left pointing at freed memory */
+    if (pd && pd->stream == s) { pd->used = 0; pd->stream = NULL; }
     stream_drop_queue(s);
     hl_exec_reply_free(s->result);
     free(s);
@@ -2863,6 +2907,10 @@ void hl_exec_stream_release(HlExecStream *s)
 
 HlExecChunk *hl_exec_stream_take(HlExecStream *s)
 {
+    /* A read is parked (or woken and not yet resumed): what is queued is
+     * its. A second reader gets nothing and is then refused as busy when
+     * it tries to wait (review of PR 2, M2). */
+    if (s->w[HL_EXEC_WAIT_READ]) return NULL;
     HlExecChunk *c = s->head;
     if (!c) return NULL;
     s->head = c->next;
@@ -2873,7 +2921,8 @@ HlExecChunk *hl_exec_stream_take(HlExecStream *s)
         uint8_t pl[5];
         pl[0] = c->fd;
         hl_chan_put32(pl + 1, (uint32_t)c->len);
-        if (hl_chan_write_frame(g_fd, HX_MAGIC, HX_CREDIT, s->id, pl, 5, NULL, 0,
+        if (stream_test_fail_write() ||
+            hl_chan_write_frame(g_fd, HX_MAGIC, HX_CREDIT, s->id, pl, 5, NULL, 0,
                                 hl_chan_mono_ms() + 1000) != 0)
             stream_lost(s, "exec: the command broker is not answering", 1);
     }
@@ -2882,6 +2931,7 @@ HlExecChunk *hl_exec_stream_take(HlExecStream *s)
 
 size_t hl_exec_stream_peek(const HlExecStream *s)
 {
+    if (s->w[HL_EXEC_WAIT_READ]) return (size_t)-1;   /* a parked read's (take) */
     return s->head ? s->head->len : (size_t)-1;
 }
 
@@ -2893,6 +2943,10 @@ int hl_exec_stream_drained(const HlExecStream *s)
 const HlExecReply *hl_exec_stream_result(const HlExecStream *s) { return s->result; }
 int hl_exec_stream_closed(const HlExecStream *s) { return s->closed; }
 int hl_exec_stream_writing(const HlExecStream *s) { return s->woff < s->wlen; }
+int hl_exec_stream_write_would_wait(const HlExecStream *s, size_t n)
+{
+    return n > s->credit || s->w[HL_EXEC_WAIT_WRITE] != NULL || s->woff < s->wlen;
+}
 int hl_exec_stream_write_ok(const HlExecStream *s) { return !s->wfail && s->woff >= s->wlen; }
 
 int hl_exec_stream_write(HlExecStream *s, const void *p, size_t n,
@@ -2907,7 +2961,7 @@ int hl_exec_stream_write(HlExecStream *s, const void *p, size_t n,
         snprintf(why, why_size, "exec.stream: the command's stdin is closed");
         return -1;
     }
-    if (s->woff < s->wlen) {
+    if (s->woff < s->wlen || s->w[HL_EXEC_WAIT_WRITE]) {
         *code = "busy";
         snprintf(why, why_size, "exec.stream: a write is already waiting");
         return -1;
@@ -3149,6 +3203,7 @@ int hl_exec_stream_write(HlExecStream *s, const void *p, size_t n,
     return -1;
 }
 int hl_exec_stream_writing(const HlExecStream *s) { (void)s; return 0; }
+int hl_exec_stream_write_would_wait(const HlExecStream *s, size_t n) { (void)s; (void)n; return 0; }
 int hl_exec_stream_write_ok(const HlExecStream *s) { (void)s; return 0; }
 int hl_exec_stream_close_write(HlExecStream *s, char *why, size_t why_size)
 {

@@ -757,15 +757,26 @@ static JSValue settled(JSContext *ctx, JSValue v)
     return promise;
 }
 
+/* The wait gates, with the exception set when they refuse (-1). */
+static int stream_gate(JSContext *ctx, const char *what)
+{
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.async_ctx) {
+        JS_ThrowInternalError(ctx, "%s: cannot wait", what);
+        return -1;
+    }
+    if (hl_js_async_gate(ctx, js, what) != 0) return -1;
+#ifdef HL_ENABLE_DB
+    if (hl_js_db_refuse_wait(ctx, what) != 0) return -1;
+#endif
+    return 0;
+}
+
 static JSValue stream_park(JSContext *ctx, HlExecStream *s, JSValueConst self, int kind,
                            const char *what)
 {
+    if (stream_gate(ctx, what) != 0) return JS_EXCEPTION;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.async_ctx) return JS_ThrowInternalError(ctx, "%s: cannot wait", what);
-    if (hl_js_async_gate(ctx, js, what) != 0) return JS_EXCEPTION;
-#ifdef HL_ENABLE_DB
-    if (hl_js_db_refuse_wait(ctx, what) != 0) return JS_EXCEPTION;
-#endif
     int ckind = kind == JS_W_WRITE ? HL_EXEC_WAIT_WRITE
               : kind == JS_W_RESULT ? HL_EXEC_WAIT_RESULT : HL_EXEC_WAIT_READ;
     HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx, js->base.alloc);
@@ -878,6 +889,12 @@ static JSValue js_stream_write(JSContext *ctx, JSValueConst this_val, int argc,
     }
     char why[192];
     const char *code = NULL;
+    /* A write that will have to wait is refused before anything is queued:
+     * refused after, its bytes still went out (review of PR 2, L1). */
+    if (hl_exec_stream_write_would_wait(o->s, n) && stream_gate(ctx, "exec.stream write()") != 0) {
+        if (str) JS_FreeCString(ctx, str);
+        return JS_EXCEPTION;
+    }
     /* No app code ran since the view was taken; the bytes are copied here. */
     int rc = hl_exec_stream_write(o->s, p, n, why, sizeof why, &code);
     if (str) JS_FreeCString(ctx, str);

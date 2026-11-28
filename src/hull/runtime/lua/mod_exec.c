@@ -475,6 +475,12 @@ static int lua_stream_write(lua_State *L)
     lua_hlwork(L, 64 + n / 8, 0);
     char why[192];
     const char *code = NULL;
+    /* A write that will have to wait is refused before anything is queued:
+     * refused after, its bytes still went out (review of PR 2, L1). */
+    if (hl_exec_stream_write_would_wait(o->s, n) && !hl_lua_can_wait(L)) {
+        hl_lua_check_can_wait(L, "exec.stream write");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "exec.stream write cannot wait here");
+    }
     int rc = hl_exec_stream_write(o->s, p, n, why, sizeof why, &code);
     if (rc < 0) {
         if (strcmp(code, "busy") == 0) return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "%s", why);

@@ -88,14 +88,19 @@ EXEC_LUA="
     flood = { path = \"$P\", argv = { \"flood\" }, stream = true, timeout_ms = 10000,
               stdout_max = 100000 },
     silent = { path = \"$P\", argv = { \"silent\" }, stream = true, timeout_ms = 0 },
+    deaf = { path = \"$P\", argv = { \"silent\" }, stream = true, timeout_ms = 0,
+             stdin_max = 1073741824 },
+    one = { path = \"$P\", argv = { \"echo\" }, stream = true, timeout_ms = 0,
+            stdin_max = 1048576, concurrency = 1 },
 "
 
 lua_app() {
 cat > "$1/app.lua" <<EOF
 app.manifest({
-  modules = { "hull/exec@1", "hull/http-server@1", "hull/time@1", "hull/log@1" },
+  modules = { "hull/exec@1", "hull/http-server@1", "hull/time@1", "hull/log@1", "hull/db@1" },
   exec = { $EXEC_LUA },
 })
+local db = require("hull.db")
 local exec = require("hull.exec")
 local time = require("hull.time")
 local log = require("hull.log")
@@ -163,6 +168,58 @@ app.get("/ordinary", function(req, res)
   local ok, err = pcall(exec.stream, "early")
   res:text(tostring(ok) .. " " .. tostring(err))
 end)
+-- Review of PR 2 (the hooks server: HULL_TEST_EXEC_WAKE_DELAY_MS, _FAIL_WRITE).
+local function line(c) return c and (c.data:gsub("\n$", "")) or "nil" end
+local S, H
+app.get("/share/start", function(req, res) S = exec.stream("echo", {}, { stdin_open = true }); res:text("ok") end)
+app.get("/share/a", function(req, res) res:text("a=" .. line(S:read())) end)
+app.get("/share/write", function(req, res) S:write("x\n"); res:text("w") end)
+app.get("/share/b", function(req, res)
+  local ok, c = pcall(S.read, S)
+  res:text(ok and ("b=" .. line(c)) or ("b-err=" .. tostring(c)))
+end)
+app.get("/share/close", function(req, res) S:close(); S = nil; res:text("closed") end)
+app.get("/h1/start", function(req, res)
+  H = exec.stream("one", {}, { stdin_open = true }); H:write("q\n"); res:text("ok")
+end)
+app.get("/h1/go", function(req, res)
+  local got = line(H:read())          -- its CREDIT write fails (the hook)
+  H:close(); H = nil
+  collectgarbage(); collectgarbage()
+  local again = "busy"
+  for i = 1, 30 do
+    -- Refused (busy) until the killed call is reaped: the server's own
+    -- check, or the broker's BUSY, which ends the new stream.
+    local ok, c = pcall(function()
+      local s2 = exec.stream("one", {}, { stdin_open = true })
+      s2:write("r\n")
+      local r = s2:read()
+      s2:close()
+      return r
+    end)
+    if ok and c and c.data == "r\n" then again = "ok"; break end
+    hull.sleep(100)
+  end
+  res:text("got=" .. got .. " again=" .. again)
+end)
+app.get("/l1", function(req, res)
+  local s = exec.stream("echo", {}, { stdin_open = true })
+  local d = db.default()
+  d.exec("BEGIN")
+  local ok, e = pcall(s.write, s, string.rep("z", 1048576))
+  d.exec("COMMIT")
+  local code = ok and "none" or (tostring(e):match("%[hull:([a-z_]+)%]") or tostring(e))
+  local ok2, e2 = pcall(s.write, s, "hello\n")
+  local first = ok2 and s:read().data:sub(1, 5) or ("err:" .. tostring(e2))
+  s:close()
+  res:text("refused=" .. code .. " first=" .. first)
+end)
+app.get("/m1", function(req, res)
+  local s = exec.stream("deaf", {}, { stdin_open = true })
+  log.info("m1 pid=" .. line(s:read()))
+  local ok, e = pcall(s.write, s, string.rep("z", 1048576))
+  res:text("ok=" .. tostring(ok) .. " err=" .. tostring(e))
+end)
 EOF
 }
 
@@ -175,8 +232,9 @@ import { app } from "hull:app";
 import { exec } from "hull:exec";
 import { time } from "hull:time";
 import { log } from "hull:log";
+import { db as dbModule } from "hull:db";
 app.manifest({
-  modules: ["hull/exec@1", "hull/http-server@1", "hull/time@1", "hull/log@1"],
+  modules: ["hull/exec@1", "hull/http-server@1", "hull/time@1", "hull/log@1", "hull/db@1"],
   exec: {
     pipes: { path: "$P", argv: ["pipes", { min: 1, max: 5, chars: "0-9" }],
              stdinMax: 1048576, stderrMax: 524288, timeoutMs: 20000 },
@@ -185,6 +243,9 @@ app.manifest({
     echo: { path: "$P", argv: ["echo"], stream: true, timeoutMs: 0, stdinMax: 1073741824 },
     flood: { path: "$P", argv: ["flood"], stream: true, timeoutMs: 10000, stdoutMax: 100000 },
     silent: { path: "$P", argv: ["silent"], stream: true, timeoutMs: 0 },
+    deaf: { path: "$P", argv: ["silent"], stream: true, timeoutMs: 0, stdinMax: 1073741824 },
+    one: { path: "$P", argv: ["echo"], stream: true, timeoutMs: 0, stdinMax: 1048576,
+           concurrency: 1 },
   },
 });
 const text = (u8) => { let s = ""; for (const b of u8) s += String.fromCharCode(b); return s; };
@@ -246,6 +307,54 @@ app.get("/hang", async (req, res) => {
 });
 app.get("/ordinary", (req, res) => {
   try { exec.stream("early"); res.text("true"); } catch (e) { res.text("false " + e.message); }
+});
+// Review of PR 2 (the hooks server: HULL_TEST_EXEC_WAKE_DELAY_MS, _FAIL_WRITE).
+const line = (c) => (c ? chomp(text(c.data)) : "nil");
+let S, H;
+app.get("/share/start", (req, res) => { S = exec.stream("echo", [], { stdinOpen: true }); res.text("ok"); });
+app.get("/share/a", async (req, res) => { res.text("a=" + line(await S.read())); });
+app.get("/share/write", async (req, res) => { await S.write("x\n"); res.text("w"); });
+app.get("/share/b", async (req, res) => {
+  try { res.text("b=" + line(await S.read())); } catch (e) { res.text("b-err=" + e.message + " code=" + e.code); }
+});
+app.get("/share/close", (req, res) => { S.close(); S = null; res.text("closed"); });
+app.get("/h1/start", async (req, res) => {
+  H = exec.stream("one", [], { stdinOpen: true }); await H.write("q\n"); res.text("ok");
+});
+app.get("/h1/go", async (req, res) => {
+  const got = line(await H.read());   // its CREDIT write fails (the hook)
+  H.close(); H = null;
+  let again = "busy";
+  for (let i = 0; i < 30; i++) {
+    try {
+      const s2 = exec.stream("one", [], { stdinOpen: true });
+      await s2.write("r\n");
+      const c = await s2.read();
+      s2.close();
+      if (c && text(c.data) === "r\n") { again = "ok"; break; }
+    } catch (e) { /* busy: retry */ }
+    await hull.sleep(100);
+  }
+  res.text("got=" + got + " again=" + again);
+});
+app.get("/l1", async (req, res) => {
+  const s = exec.stream("echo", [], { stdinOpen: true });
+  const d = dbModule.default();
+  d.exec("BEGIN");
+  let code = "none";
+  try { await s.write("z".repeat(1048576)); } catch (e) { code = e.code || e.message; }
+  d.exec("COMMIT");
+  let first;
+  try { await s.write("hello\n"); first = text((await s.read()).data).slice(0, 5); }
+  catch (e) { first = "err:" + e.message; }
+  s.close();
+  res.text("refused=" + code + " first=" + first);
+});
+app.get("/m1", async (req, res) => {
+  const s = exec.stream("deaf", [], { stdinOpen: true });
+  log.info("m1 pid=" + line(await s.read()));
+  try { await s.write("z".repeat(1048576)); res.text("ok=true"); }
+  catch (e) { res.text("ok=false err=" + e.name + ": " + e.message); }
 });
 EOF
 }
@@ -336,6 +445,64 @@ want: $want"
     # After all of it the server still runs commands.
     out=$(get /pipes)
     [ "$out" = "$want" ] && pass "$rt: exec.run still works afterwards" || fail "$rt: afterwards" "$out"
+    stop_server
+
+    # ── Review of PR 2: a server with the stream test hooks ──
+    rm -f "$D/failwrite"
+    export HULL_TEST_EXEC_WAKE_DELAY_MS=300 HULL_TEST_EXEC_FAIL_WRITE="$D/failwrite"
+    start_server "$D" "$ENTRY"
+    rc=$?
+    unset HULL_TEST_EXEC_WAKE_DELAY_MS HULL_TEST_EXEC_FAIL_WRITE
+    [ "$rc" -eq 0 ] || return
+
+    # exec_stream_review.m2_parked_read_keeps_its_chunk: a second reader
+    # while a read is parked is refused, even once the chunk is in.
+    get /share/start > /dev/null
+    get /share/a 10 > "$D/a.out" &
+    apid=$!
+    sleep 0.2
+    get /share/write > /dev/null
+    sleep 0.1                        # the chunk is in; A's wake is 300 ms off
+    b=$(get /share/b 5)
+    wait "$apid"
+    a=$(cat "$D/a.out")
+    get /share/close > /dev/null
+    case "$a|$b" in
+        "a=x|b-err="*busy*) pass "$rt: a parked read keeps its chunk; a second reader is refused busy" ;;
+        *) fail "$rt: shared stream, two readers" "a=[$a] b=[$b]" ;;
+    esac
+
+    # exec_stream_review.h1_failed_credit_frees_the_call: a failed write to
+    # the broker ends the call and frees its slot (concurrency 1 again).
+    get /h1/start > /dev/null
+    sleep 0.3
+    : > "$D/failwrite"
+    out=$(get /h1/go 10)
+    [ "$out" = "got=q again=ok" ] \
+        && pass "$rt: a stream whose write to the broker failed gives its slot back" \
+        || fail "$rt: failed CREDIT write" "$out $(grep ERROR "$SLOG" | tail -3)"
+
+    # exec_stream_review.l1_refused_write_sends_nothing: a write that would
+    # wait inside a transaction is refused before anything is queued.
+    out=$(get /l1 10)
+    [ "$out" = "refused=wait_refused first=hello" ] \
+        && pass "$rt: a write refused inside a transaction sends nothing" \
+        || fail "$rt: write inside a transaction" "$out"
+
+    # exec_stream_review.m1_write_parked_when_broker_lost (last: it kills
+    # the broker): the parked write fails as stdin_closed in both runtimes.
+    get /m1 10 > "$D/m1.out" &
+    mpid=$!
+    for i in $(seq 1 60); do grep -q 'm1 pid=' "$SLOG" && break; sleep 0.05; done
+    sleep 0.3
+    broker=$(sed -n 's/.*exec broker pid \([0-9]*\).*/\1/p' "$SLOG" | tail -1)
+    [ -n "$broker" ] && kill -9 "$broker" 2>/dev/null
+    wait "$mpid"
+    out=$(cat "$D/m1.out")
+    case "$out" in
+        "ok=false err="*stdin_closed*) pass "$rt: a write parked when the broker is lost fails as stdin_closed" ;;
+        *) fail "$rt: write parked, broker lost" "broker=$broker $out" ;;
+    esac
     stop_server
 }
 
