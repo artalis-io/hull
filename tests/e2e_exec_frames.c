@@ -358,7 +358,8 @@ static void stream_cmd(HlExecBuf *b, const char *name, const char *path,
     hl_exec_b_count_end(b, m, (size_t)nfixed);
 }
 
-/* The stream suite's commands: "y" yes (no limits), "yt" yes (1 s), "yc"
+/* The stream suite's commands: "y" yes (no limits), "yt" yes (1 s), "yr" yes
+ * (5 s: room to reach exec.run's 16 MiB on a loaded runner), "yc"
  * yes (stdout_max 100000), "b" bash reading one line, "c" cat (stdin up to
  * 1 MiB), and "e", echo, which is not a stream command. */
 static HlExecBuf policy_streams(void)
@@ -367,6 +368,7 @@ static HlExecBuf policy_streams(void)
     hl_exec_b_init(&b, NULL);
     stream_cmd(&b, "y", "/usr/bin/yes", NULL, 0, 0, -1, -1);
     stream_cmd(&b, "yt", "/usr/bin/yes", NULL, 0, 1000, -1, -1);
+    stream_cmd(&b, "yr", "/usr/bin/yes", NULL, 0, 5000, -1, -1);
     stream_cmd(&b, "yc", "/usr/bin/yes", NULL, 0, 10000, 100000, -1);
     static const char *const bash_argv[] = { "-c", "echo a; read x; echo \"got $x\"" };
     stream_cmd(&b, "b", "/bin/bash", bash_argv, 2, 10000, -1, 1024 * 1024);
@@ -512,15 +514,21 @@ static void stream_cases(const char *mode)
     run_flags(b.fd, 2, "c", NULL, NULL, RUN_STDIN_OPEN);
     r = expect(b.fd, 2, &t, msg, sizeof msg, 3000);
     CHECK(r == 1 && t == REFUSED, "an open stdin without a stream is refused (%s)", msg);
-    /* exec.run of a stream command still runs, under exec.run's limits. */
-    run_flags(b.fd, 3, "yt", NULL, NULL, 0);
+    /* exec.run of a stream command still runs, under exec.run's limits: the
+     * output is cut at 16 MiB and the command runs on to its timeout (a
+     * stream would be killed at its total). 5 s, not yt's 1 s: on a loaded
+     * macOS runner `yes` wrote only 14-15.8 MB in 1 s, so the timeout came
+     * before the cut. */
+    run_flags(b.fd, 3, "yr", NULL, NULL, 0);
     {
         Got g = { 0 };
-        collect(b.fd, 3, &g, 5000, 0, 0);
+        collect(b.fd, 3, &g, 10000, 0, 0);
         CHECK(g.last == DONE && g.done_len >= 20 && get32(g.done + 16) == 16u << 20 &&
-              g.done[9], "exec.run of a stream command with no output cap buffers up "
-              "to exec.run's 16 MiB ceiling (%u bytes, cut %d)", g.done_len >= 20 ? get32(g.done + 16) : 0,
-              g.done_len >= 20 ? g.done[9] : -1);
+              g.done[9] && g.done[8], "exec.run of a stream command with no output cap "
+              "buffers up to exec.run's 16 MiB ceiling, then runs to its timeout (%u bytes, "
+              "cut %d, timed out %d)",
+              g.done_len >= 20 ? get32(g.done + 16) : 0, g.done_len >= 20 ? g.done[9] : -1,
+              g.done_len >= 20 ? g.done[8] : -1);
     }
 
     /* exec_frames_stream.window: no credit back -> exactly one window, then
